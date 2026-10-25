@@ -4,7 +4,7 @@
       "name": "count-by-layer",
       "icon": "layers",
       "version": "1.0.0",
-      "description": "Counts entities per layer. The safest read-only tool — a good first run.",
+      "description": "Counts entities per layer. The safest read-only tool, and a good first run.",
       "kind": "script",
       "engine_op": "count_by_layer",
       "params": { "type": "object", "properties": {}, "required": [] },
@@ -81,7 +81,7 @@
     {
       "name": "list-linked-service-items",
       "version": "1.0.0",
-      "description": "Placeholder fixture for a tool projected from a connected MCP service (standardization slice 8c); not runnable until upstream tool projection ships.",
+      "description": "Lists items from a service linked to your workspace. Runs once a service is linked.",
       "kind": "script",
       "engine_op": "list_linked_service_items",
       "params": { "type": "object", "properties": {}, "required": [] },
