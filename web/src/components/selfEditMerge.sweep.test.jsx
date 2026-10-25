@@ -85,6 +85,36 @@ describe('self-edit confirmations and stale responses', () => {
     expect(mergePlatformChange).not.toHaveBeenCalled()
   })
 
+  it('blocks both refresh entry points while a proposal is pending and remembers its result', async () => {
+    const proposed = { ...second, change_id: '33333333-3333-3333-3333-333333333333', title: 'New proposal' }
+    const pending = deferred()
+    proposePlatformChange.mockReturnValue(pending.promise)
+    render(<CustomizePanel tenant="test" />)
+    await select(first)
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: proposed.title } })
+    fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Propose' }))
+    expect(proposePlatformChange).toHaveBeenCalledTimes(1)
+    const refreshButton = screen.getByRole('button', { name: 'Refresh status' })
+    expect(refreshButton.disabled).toBe(true)
+    fireEvent.click(refreshButton)
+    const recent = within(screen.getByRole('region', { name: 'Recent changes' }))
+    for (const button of recent.getAllByRole('button')) {
+      expect(button.disabled).toBe(true)
+      fireEvent.click(button)
+    }
+    expect(getPlatformChange).toHaveBeenCalledTimes(1)
+    expect(recordSection().queryByText(first.title)).not.toBeNull()
+    await act(async () => { pending.resolve(proposed) })
+    expect(recordSection().queryByText(proposed.title)).not.toBeNull()
+    expect(recent.getByRole('button', { name: `${proposed.change_id.slice(0, 8)} · ${proposed.title}` }).disabled).toBe(false)
+    expect(JSON.parse(localStorage.getItem('leaf.customize.recent.test'))[0]).toEqual({
+      change_id: proposed.change_id,
+      title: proposed.title,
+    })
+    expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(false)
+  })
+
   for (const action of ['Land', 'Merge']) {
     it(`keeps a newer ${action} busy when an older request settles first`, async () => {
       const original = { ...first, state: action === 'Land' ? 'approved' : 'landed' }

@@ -194,7 +194,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   }, [title, edits])
 
   const refresh = useCallback(async (changeId) => {
-    if (merging || landing) return
+    if (submitting || merging || landing) return
     const id = changeId || record?.change_id
     if (!id) return
     const version = ++selectionVersion.current
@@ -207,7 +207,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     } finally {
       setRefreshing(false)
     }
-  }, [record, merging, landing])
+  }, [record, submitting, merging, landing])
 
   const land = useCallback(async () => {
     if (!record?.change_id || !record?.commit_sha || landConfirming !== recordKey || refreshing || submitting || landing) return
@@ -403,7 +403,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
             )}
 
             <div className="cst-actions">
-              <button className="chip-neutral" onClick={() => refresh()} disabled={refreshing || merging || landing}>
+              <button className="chip-neutral" onClick={() => refresh()} disabled={refreshing || submitting || merging || landing}>
                 {refreshing ? 'Refreshing…' : 'Refresh status'}
               </button>
               {state === 'approved' && (
@@ -451,7 +451,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
             <ul className="cst-recent">
               {recent.map((r) => (
                 <li key={r.change_id}>
-                  <button className="chip-neutral" onClick={() => refresh(r.change_id)} disabled={refreshing}>
+                  <button className="chip-neutral" onClick={() => refresh(r.change_id)} disabled={refreshing || submitting}>
                     <span className="cst-mono">{r.change_id.slice(0, 8)}</span> · {r.title || 'untitled'}
                   </button>
                 </li>
