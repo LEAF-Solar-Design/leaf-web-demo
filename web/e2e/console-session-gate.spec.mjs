@@ -71,7 +71,7 @@ test('a session 401 on an unconfigured build auto-falls back to the demo', async
   await page.goto('/app')
   await expect(page.getByRole('note', { name: 'Guided demo' })).toBeVisible({ timeout: 20_000 })
   await expect(page.locator('.viewer-title')).not.toHaveText('—', { timeout: 20_000 })
-  await expect(page.locator('footer.foot-bar')).toContainText('mock (no cloud)')
+  await expect(page.locator('footer.foot-bar')).toContainText('Demo (sample data)')
   // The gate is for builds where sign-in is possible; this one has no Auth0.
   await expect(page.getByText('You’re not signed in')).toHaveCount(0)
   await expect(page.locator('.overlay-msg')).toHaveCount(0)
@@ -84,8 +84,8 @@ test('a signed-in session passes straight through with no gate and no demo', asy
 
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 20_000 })
-  await expect(page.locator('footer.foot-bar')).not.toContainText('sign-in required')
-  await expect(page.locator('footer.foot-bar')).not.toContainText('mock (no cloud)')
+  await expect(page.locator('footer.foot-bar')).not.toContainText('Sign-in required')
+  await expect(page.locator('footer.foot-bar')).not.toContainText('Demo (sample data)')
   await expect(page.getByRole('note', { name: 'Guided demo' })).toHaveCount(0)
   await expect(page.locator('.overlay-msg')).toHaveCount(0)
   await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.jwt'))).toBe('fixture-token')
@@ -107,19 +107,19 @@ test('a 401 on a live authed request latches the console gate and keeps it latch
 
   await page.goto('/app')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 20_000 })
-  await expect(page.locator('footer.foot-bar')).not.toContainText('sign-in required')
+  await expect(page.locator('footer.foot-bar')).not.toContainText('Sign-in required')
 
   expired = true
   // The footer flips to the ONE honest unauthenticated signal, and the viewer
   // pane says how to get out. Both read `signedOut`, which now reads the shared
   // controller's `required` status.
-  await expect(page.locator('footer.foot-bar')).toContainText('sign-in required', { timeout: 30_000 })
+  await expect(page.locator('footer.foot-bar')).toContainText('Sign-in required', { timeout: 30_000 })
   await expect(page.locator('.overlay-msg')).toContainText('Sign in or explore the demo to load a drawing.')
   await expect.poll(() => page.evaluate(() => localStorage.getItem('leaf.jwt'))).toBeNull()
 
   // Latched: it does not flap back on its own once the refusal has landed.
   await page.waitForTimeout(3_000)
-  await expect(page.locator('footer.foot-bar')).toContainText('sign-in required')
+  await expect(page.locator('footer.foot-bar')).toContainText('Sign-in required')
 })
 
 test('an Auth0 callback on /app defers every /api call until the exchange resolves', async ({ page }) => {

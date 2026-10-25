@@ -392,15 +392,18 @@ it.each(['missing', 'hidden', 'no bounds', 'viewer not ready', "scene not showin
   selectThree(h); find('2A')
   const pose = { ...h.viewer.getPose(), target: [...h.viewer.getPose().target] }
   h.viewer.frame.mockClear(); h.viewer.setFocusMarker.mockClear()
-  let query = '2B', message = reason
+  let query = '2B', message = 'The drawing could not zoom to this object. Try again.'
   if (reason === 'missing') { query = 'absent object'; message = 'No matching object in this drawing.' }
   if (reason === 'hidden') { act(() => h.probe.setVisibleLayers({ Panels: false })); message = 'This object is hidden by its layers.' }
-  if (reason === 'no bounds') query = '63'
-  if (reason === 'viewer not ready') h.scene.ready = false
+  if (reason === 'no bounds') { query = '63'; message = 'This object has no visible geometry to frame.' }
+  if (reason === 'viewer not ready') { h.scene.ready = false; message = 'The drawing is still loading. Wait a moment, then try again.' }
   if (reason === "scene not showing this index's drawing") h.scene.intake = {}
   if (reason === 'frame refused') h.viewer.frame.mockReturnValue(false)
   find(query)
   expect(screen.getByText(message)).toBeTruthy()
+  if (['no bounds', 'viewer not ready', "scene not showing this index's drawing", 'frame refused'].includes(reason)) {
+    expect(screen.queryByText(reason)).toBeNull()
+  }
   expect(h.probe.objects.focusId).toBe('h:2A')
   expect(h.probe.engine.session.selectedIds).toEqual(['42', '43', '44'])
   expect(h.history.size()).toBe(1)

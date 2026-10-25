@@ -3,6 +3,7 @@ import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
+import { humanizeError } from '../errorHumanize.js'
 import './leafPlatform.css'
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -23,7 +24,7 @@ function versionLabel(version, drawings) {
 }
 
 function StudioRecovery() {
-  return <p><a href="/app">Open Leaf Automation Studio</a>{' '}Then run LEAFPLATFORM again in AutoCAD to come back.</p>
+  return <p><a href="/app">Open Leaf Automation Studio</a>. Then run LEAFPLATFORM again in AutoCAD to come back.</p>
 }
 
 function commandMessage(outcome) {
@@ -59,6 +60,7 @@ export default function LeafPlatformScene() {
   const [binding, setBinding] = useState(false)
   const [grantFailed, setGrantFailed] = useState(false)
   const [awaitingReady, setAwaitingReady] = useState(false)
+  const [readyTimedOut, setReadyTimedOut] = useState(false)
   const [, refreshAuth] = useState(0)
   const grantRequest = useRef(null)
   const grantAttempt = useRef(false)
@@ -182,7 +184,7 @@ export default function LeafPlatformScene() {
   }, [boundIdentity])
 
   useEffect(() => {
-    if (state.ready) setAwaitingReady(false)
+    if (state.ready) { setAwaitingReady(false); setReadyTimedOut(false) }
     setGrantFailed(false)
     if (bindingPending.current && state.status === 'connected') headingRef.current?.focus()
     bindingPending.current = false
@@ -219,9 +221,11 @@ export default function LeafPlatformScene() {
   }, [state.lastCommand])
 
   useEffect(() => {
-    if (state.bindingResult) setActionMessage(grantAttempt.current && state.bindingResult === 'Waiting for confirmation in AutoCAD.'
-      ? 'Confirm in AutoCAD' : state.bindingResult)
-    if (grantAttempt.current && state.bindingResult === 'DWG connected. Starting the signed cross-probe session.') setAwaitingReady(true)
+    if (state.bindingResult) setActionMessage(state.bindingResult === 'DWG connected. Starting the signed cross-probe session.'
+      ? 'Waiting for AutoCAD to confirm the drawing connection.'
+      : grantAttempt.current && state.bindingResult === 'Waiting for confirmation in AutoCAD.'
+        ? 'Confirm in AutoCAD' : state.bindingResult)
+    if (state.status === 'unbound' && grantAttempt.current && state.bindingResult === 'DWG connected. Starting the signed cross-probe session.') setAwaitingReady(true)
     if (state.status !== 'unbound' || (state.bindingResult && state.bindingResult !== 'Waiting for confirmation in AutoCAD.')) {
       if (state.bindingResult !== 'DWG connected. Starting the signed cross-probe session.') {
         if (bindingPending.current && state.status === 'unbound') setFocusConnect(true)
@@ -248,6 +252,17 @@ export default function LeafPlatformScene() {
     }, 60_000)
     return () => clearTimeout(timer)
   }, [binding, bridge])
+
+  useEffect(() => {
+    if (!awaitingReady) return undefined
+    setReadyTimedOut(false)
+    const timer = setTimeout(() => {
+      setAwaitingReady(false)
+      setReadyTimedOut(true)
+      setActionMessage(humanizeError('AutoCAD has not confirmed the drawing connection. Check its status or reopen the palette.'))
+    }, 10_000)
+    return () => clearTimeout(timer)
+  }, [awaitingReady, helloAttempt])
 
   useEffect(() => {
     if (!focusConnect || binding) return
@@ -331,6 +346,14 @@ export default function LeafPlatformScene() {
         <h1 id="leaf-platform-title" ref={headingRef} tabIndex={-1}>Drawing connection</h1>
       </header>
       <p role="status" aria-live="polite" className="leaf-platform-status">{actionMessage}</p>
+      {readyTimedOut && <section>
+        <button type="button" onClick={() => {
+          setReadyTimedOut(false)
+          bridge.retryHello()
+          setHelloAttempt((attempt) => attempt + 1)
+        }}>Check connection status</button>
+        <StudioRecovery />
+      </section>}
       <div role="status" aria-live="polite" aria-atomic="true" aria-label="Selection" style={{ position: 'absolute', width: 1, height: 1, padding: 0, margin: -1, overflow: 'hidden', clip: 'rect(0, 0, 0, 0)', whiteSpace: 'nowrap', border: 0 }}>{selectionMessage}</div>
       {state.status === 'unavailable' && <section>
         <p>This page connects an AutoCAD drawing to a drawing version in your Leaf Automation Studio workspace.</p>
@@ -379,7 +402,8 @@ export default function LeafPlatformScene() {
           <button type="button" disabled={working} onClick={() => runAction(() => login())}>Sign in</button>
         </> : !isUuid(orgId) ? <><p>Choose a workspace in Studio, then reopen this palette.</p><StudioRecovery /></>
           : otherWorkspace ? <><p>This DWG belongs to another workspace. Open that workspace in Studio to use this connection.</p><StudioRecovery /></> : <>
-          <p>Connected to {boundProject?.name || state.ready.drawingId.slice(0, 8)}.</p>
+          <p>{boundProject?.name ? `Connected to ${boundProject.name}.` : 'Drawing connected; project name unavailable.'}</p>
+          {!boundProject?.name && <button type="button" onClick={() => setProjectsAttempt((attempt) => attempt + 1)}>Retry project name</button>}
           {boundDetail?.identity === boundIdentity && boundDetail.label && <p>{boundDetail.label}</p>}
           <p>{selectedLabel ? <>Selected object: <span>{selectedLabel}</span></> : state.selectedHandles?.length
             ? selectionMessage

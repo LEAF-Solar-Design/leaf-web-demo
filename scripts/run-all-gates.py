@@ -1140,7 +1140,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_repository_source.py"), 8),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py") +
-              ["tests/test_solar_worker_coverage.py"], 20),
+              ["tests/test_solar_worker_coverage.py", "tests/test_leaf_cloud_grants_m2m.py"], 20),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 14),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,

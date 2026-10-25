@@ -119,7 +119,7 @@ function expectYielded(event) {
 }
 
 async function credentialComposition(marks) {
-  const onLink = vi.fn().mockResolvedValue(null)
+  const onLink = vi.fn().mockResolvedValue({ linked: true })
   panel({ grant: { linked: false }, onLink })
   fireEvent.click(screen.getByRole('radio', { name: 'Anthropic API key' }))
   const input = screen.getByLabelText('Anthropic API key')
