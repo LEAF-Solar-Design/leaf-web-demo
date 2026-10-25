@@ -98,7 +98,9 @@ def test_tool_node_flag_and_value_event(rig, monkeypatch, enabled):
             assert tenant == rig.tenant and run_id == "run"
             self.cancelled = cancelled
 
-        def __call__(self, block_id, trusted, manifest, inputs, settings):
+        def __call__(self, block_id, trusted, manifest, inputs, settings, *, deadline_s=None):
+            if deadline_s is not None:
+                assert isinstance(deadline_s, (int, float)) and deadline_s > 0
             calls.append(block_id)
             return {"outputs": {"result": 7}}
 

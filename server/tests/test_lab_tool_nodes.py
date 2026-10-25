@@ -1,5 +1,6 @@
 """Fail-closed tool admission, durable dispatch and remote result boundaries."""
 import ast
+from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -10,7 +11,7 @@ import pytest
 import jobs
 import lab_registry
 import lab_tool_nodes as nodes
-from lab_evaluate import Budget, GraphRefused, RunCancelled, evaluate_graph, runtime_value
+from lab_evaluate import Budget, GraphRefused, RunBudgetExceeded, RunCancelled, evaluate_graph, runtime_value
 from test_lab_evaluate import case
 
 NOW = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
@@ -65,7 +66,8 @@ def rig(monkeypatch):
     def call(**kwargs):
         return nodes.ToolNodeAdapter("tenant", "run", **result.options)(
             "node", kwargs.get("trusted", result.trusted), kwargs.get("manifest", result.manifest),
-            kwargs.get("inputs", {}), kwargs.get("settings", {"drawing": dict(DRAWING)}))
+            kwargs.get("inputs", {}), kwargs.get("settings", {"drawing": dict(DRAWING)}),
+            deadline_s=kwargs.get("deadline_s"))
     result.call = call
     return result
 
@@ -218,6 +220,95 @@ def test_timeout(rig):
     rig.options.update(monotonic=lambda: clock[0], get_job=lambda job: None,
                        sleep=lambda seconds: clock.__setitem__(0, clock[0] + 301))
     assert rig.call() == {"error": "lab_tool_timeout"}
+
+
+@pytest.mark.parametrize("deadline_s", [1, 300])
+def test_run_deadline_expires(rig, deadline_s):
+    clock = [0]
+    sleeps = []
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock[0] += seconds
+    rig.options.update(monotonic=lambda: clock[0], get_job=lambda job: None, sleep=sleep)
+    with pytest.raises(RunBudgetExceeded):
+        rig.call(deadline_s=deadline_s)
+    assert clock[0] == deadline_s
+    assert all(0 < seconds <= 0.5 for seconds in sleeps)
+
+
+def test_tool_timeout_before_run_deadline(rig):
+    clock = [0]
+    rig.options.update(monotonic=lambda: clock[0], get_job=lambda job: None,
+                       sleep=lambda seconds: clock.__setitem__(0, clock[0] + seconds))
+    assert rig.call(deadline_s=600) == {"error": "lab_tool_timeout"}
+    assert clock[0] == 300
+
+
+def test_run_deadline_includes_submission(rig):
+    clock = [0]
+    polls = []
+    def submit(*args, **kwargs):
+        clock[0] = 2
+        return "job"
+    rig.options.update(monotonic=lambda: clock[0], submit=submit,
+                       get_job=lambda job: polls.append(job))
+    with pytest.raises(RunBudgetExceeded):
+        rig.call(deadline_s=1)
+    assert not polls
+
+
+def test_run_deadline_refuses_late_result(rig):
+    clock = [0]
+    def get(job):
+        clock[0] = 1
+        return {"status": "complete", "result": {"result": 7}}
+    rig.options.update(monotonic=lambda: clock[0], get_job=get)
+    with pytest.raises(RunBudgetExceeded):
+        rig.call(deadline_s=1)
+
+
+def test_sequential_adapter_blocks_stay_within_run_budget(rig):
+    clock = [0]
+    deadlines, published = [], []
+    rig.manifest["inputs"]["value"] = deepcopy(rig.manifest["outputs"]["result"])
+    first = rig.graph["blocks"][0]
+    rig.graph["blocks"] = [dict(deepcopy(first), id=f"block-{i}") for i in range(3)]
+    rig.graph["pipes"] = [
+        {"from": {"node": f"block-{i}", "port": "result"},
+         "to": {"node": f"block-{i + 1}", "port": "value"}} for i in range(2)]
+    rig.graph["outputs"]["result"]["node"] = "block-2"
+    class Adapter:
+        admissible = staticmethod(nodes.tool_block_admissible)
+
+        def __call__(self, block_id, trusted, manifest, inputs, settings, *, deadline_s):
+            deadlines.append(deadline_s)
+            if block_id != "block-0":
+                assert inputs["value"].data == 7
+            clock[0] += 299
+            return {"outputs": {"result": 7}}
+
+    with pytest.raises(RunBudgetExceeded):
+        evaluate_graph(rig.graph, rig.registry, tool_adapter=Adapter(), clock=lambda: clock[0],
+                       on_block=lambda block_id, outputs: published.append((block_id, outputs)))
+    assert deadlines == [600, 301, 2]
+    assert [block_id for block_id, _ in published] == ["block-0", "block-1"]
+    assert all(outputs["result"].data == 7 for _, outputs in published)
+
+
+@pytest.mark.parametrize("elapsed", [600, 601])
+def test_exhausted_run_budget_does_not_call_adapter(rig, elapsed):
+    clock = iter([0, 0, 0, elapsed]).__next__
+    class Adapter:
+        admissible = staticmethod(nodes.tool_block_admissible)
+
+        def __call__(self, *args, **kwargs):
+            pytest.fail("adapter called after run budget exhausted")
+
+    published = []
+    with pytest.raises(RunBudgetExceeded):
+        evaluate_graph(rig.graph, rig.registry, tool_adapter=Adapter(), clock=clock,
+                       on_block=lambda *args: published.append(args))
+    assert not published
 
 
 def test_failed(rig):

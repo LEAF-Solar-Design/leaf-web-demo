@@ -10,7 +10,7 @@ import uuid
 import catalog
 import entitlements
 import lab_registry
-from lab_evaluate import RunCancelled
+from lab_evaluate import RunBudgetExceeded, RunCancelled
 
 
 def enabled():
@@ -83,15 +83,16 @@ class ToolNodeAdapter:
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.sleep, self.monotonic = sleep, monotonic
 
-    def __call__(self, block_id, trusted, manifest, inputs, settings):
+    def __call__(self, block_id, trusted, manifest, inputs, settings, *, deadline_s=None):
+        run_deadline = None if deadline_s is None else self.monotonic() + deadline_s
         try:
-            return self._call(block_id, trusted, manifest, inputs, settings)
-        except RunCancelled:
+            return self._call(block_id, trusted, manifest, inputs, settings, run_deadline)
+        except (RunCancelled, RunBudgetExceeded):
             raise
         except Exception:
             return {"error": "lab_tool_submit_unavailable"}
 
-    def _call(self, block_id, trusted, manifest, inputs, settings):
+    def _call(self, block_id, trusted, manifest, inputs, settings, run_deadline):
         def refuse(code):
             return {"error": "lab_tool_" + code}
 
@@ -154,6 +155,8 @@ class ToolNodeAdapter:
             timeout = _limit("LEAF_LAB_TOOL_TIMEOUT_S", 300, 600)
         except Exception:
             return refuse("budget_unreadable")
+        if run_deadline is not None and self.monotonic() >= run_deadline:
+            raise RunBudgetExceeded()
         try:
             job_id = (self.submit or jobs.submit_job)(
                 self.tenant, dict(tool, lab_execution={"run_id": self.run_id,
@@ -168,12 +171,24 @@ class ToolNodeAdapter:
         except Exception:
             return refuse("submit_unavailable")
         started = self.monotonic()
+        run_limited = run_deadline is not None and run_deadline <= started + timeout
+        deadline = run_deadline if run_limited else started + timeout
+
+        def expired():
+            if self.monotonic() >= deadline:
+                if run_limited:
+                    raise RunBudgetExceeded()
+                return True
+            return False
+
         while True:
             if self.cancelled():
                 raise RunCancelled()
-            if self.monotonic() - started > timeout:
+            if expired():
                 return refuse("timeout")
             row = (self.get_job or jobs.get_job)(job_id)
+            if expired():
+                return refuse("timeout")
             if row is not None and row["status"] in jobs.TERMINAL:
                 if row["status"] == "failed":
                     return refuse("failed")
@@ -187,4 +202,4 @@ class ToolNodeAdapter:
                 if not isinstance(data, dict):
                     return refuse("output_invalid")
                 return {"outputs": {port: data.get(port) for port in ports}}
-            self.sleep(0.5)
+            self.sleep(max(0, min(0.5, deadline - self.monotonic())))

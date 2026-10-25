@@ -449,7 +449,13 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
         metadata = inherited(inputs.values())
         remote = block_id in tool_blocks
         if remote:
-            adapted = tool_adapter(block_id, tool_blocks[block_id], manifest, inputs, block["settings"])
+            remaining_s = budget.run_wall_s - (clock() - started)
+            if remaining_s <= 0:
+                raise RunBudgetExceeded()
+            adapted = tool_adapter(block_id, tool_blocks[block_id], manifest, inputs, block["settings"],
+                                   deadline_s=remaining_s)
+            if clock() - started >= budget.run_wall_s:
+                raise RunBudgetExceeded()
         elif manifest["kind"] == "builtin" and has_operator(manifest["id"]):
             result = evaluate_operation(manifest["id"], inputs, block["settings"],
                                         output_mode=next(iter(manifest["outputs"].values()))["mode"])

@@ -2951,8 +2951,14 @@ def broker_run(req: BrokerRunRequest) -> JSONResponse:
             return _lab_refused("lab_execution_invalid", 422, req.tool)
         if req.aps_live:
             return _lab_refused("lab_aps_refused", 403, req.tool)
-        capabilities = list(req.tool.get("capabilities") or [])
-        capabilities.append(req.tool.get("capability"))
+        capabilities = req.tool.get("capabilities")
+        capability = req.tool.get("capability")
+        if ((capabilities is not None and (not isinstance(capabilities, list)
+                                         or any(not isinstance(item, str) for item in capabilities)))
+                or (capability is not None and not isinstance(capability, str))):
+            return _lab_refused("lab_write_refused", 403, req.tool)
+        capabilities = list(capabilities or [])
+        capabilities.append(capability)
         if write_loop.is_write_tool(req.tool) or any(
                 isinstance(capability, str) and any(
                     capability == prefix or capability.startswith(prefix + ".")

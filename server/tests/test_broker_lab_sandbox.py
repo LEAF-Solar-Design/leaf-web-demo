@@ -77,6 +77,49 @@ def test_write_refused(client, capability):
     assert not calls
 
 
+@pytest.mark.parametrize("field,value", [
+    ("capabilities", "solve"), ("capabilities", {"x": 1}),
+    ("capabilities", ["drawing.read", 3]), ("capabilities", 0),
+    ("capability", ["drawing.read"]), ("capability", {"x": 1}),
+    ("capability", 0), ("capability", False)])
+def test_capability_shape_refused_before_sandbox(client, monkeypatch, field, value):
+    sandbox_calls = []
+    def sandbox():
+        sandbox_calls.append(True)
+        return "microvm"
+    monkeypatch.setattr(tool_loader, "_sandbox_tier", sandbox)
+    http, calls = client
+    request = body()
+    request["tool"][field] = value
+    response = http.post("/broker/run", json=request)
+    assert response.status_code == 403
+    assert response.json()["error"]["reason_code"] == "lab_write_refused"
+    assert not sandbox_calls
+    assert not calls
+
+
+@pytest.mark.parametrize("capabilities", [[], ["drawing.read"], ["drawing.read", "read.value"], None])
+@pytest.mark.parametrize("capability", [None, "read.value"])
+def test_valid_capability_shapes_dispatch(client, monkeypatch, capabilities, capability):
+    monkeypatch.setattr(tool_loader, "_sandbox_tier", lambda: "microvm")
+    http, calls = client
+    request = body()
+    request["tool"].update(capabilities=capabilities, capability=capability)
+    response = http.post("/broker/run", json=request)
+    assert response.status_code == 200
+    assert len(calls) == 1
+
+
+def test_absent_capabilities_dispatch(client, monkeypatch):
+    monkeypatch.setattr(tool_loader, "_sandbox_tier", lambda: "microvm")
+    http, calls = client
+    request = body()
+    del request["tool"]["capabilities"]
+    response = http.post("/broker/run", json=request)
+    assert response.status_code == 200
+    assert len(calls) == 1
+
+
 @pytest.mark.parametrize("marker", [None, "run", {}, {"run_id": 1, "block_id": "node", "attempt": 1},
                                   {"run_id": "run", "block_id": None, "attempt": 1},
                                   {"run_id": "run", "block_id": "node", "attempt": True}])
