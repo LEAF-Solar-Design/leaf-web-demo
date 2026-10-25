@@ -43,7 +43,7 @@ def run_program(tmp_path):
     return run
 
 
-def fail_suite(suite_id="web-vitest", failed_ids=None, note="failed"):
+def fail_suite(suite_id="web-vitest-1", failed_ids=None, note="failed"):
     return {"id": suite_id, "status": "FAIL", "attempts": 2, "note": note,
             "test_report": {"failed_test_ids": failed_ids or []}}
 
@@ -61,24 +61,25 @@ def test_block_present_and_fail_open():
     assert not re.search(r"\bgate_status\s*=", block)
 
 
-def test_names_failed_ids_and_log_lines(run_program):
+@pytest.mark.parametrize("suite_id", ["web-vitest-1", "web-vitest-2", "web-vitest-3"])
+def test_names_failed_ids_and_log_lines(run_program, suite_id):
     passed = {"id": "server-tool-publication-policy", "status": "PASS", "got": "13",
               "executed": 13, "expected": 13, "attempts": 1, "seconds": 1.4,
               "note": "", "test_report": {"failed_test_ids": [], "test_ids": [],
               "collection_ids_sha256": None, "test_report_complete": False,
               "test_report_refs": [], "test_report_renamed_ids": 0,
               "test_id_granularity": "test"}}
-    test_id = ("web-vitest::src/cadedit/drawingObjectList.test.jsx > "
+    test_id = (f"{suite_id}::src/cadedit/drawingObjectList.test.jsx > "
                "keeps all 2,345 rooftop rows and their native controls reachable")
     note = "FAIL after 2 attempts (suite FAILED: 1 failed 27 skipped)"
-    proc = run_program([passed, fail_suite(failed_ids=[test_id], note=note)], {
-        "web-vitest.log": "first attempt FAIL x\n",
-        "web-vitest.retry1.log": (" FAIL  src/cadedit/drawingObjectList.test.jsx > "
+    proc = run_program([passed, fail_suite(suite_id, failed_ids=[test_id], note=note)], {
+        f"{suite_id}.log": "first attempt FAIL x\n",
+        f"{suite_id}.retry1.log": (" FAIL  src/cadedit/drawingObjectList.test.jsx > "
                                   "keeps all 2,345 rooftop rows\n"
                                   "Error: Test timed out in 5000ms.\n"),
     })
     assert proc.returncode == 0
-    assert f"GATE FAIL web-vitest: {note}" in proc.stdout
+    assert f"GATE FAIL {suite_id}: {note}" in proc.stdout
     assert f"  failed test: {test_id}" in proc.stdout
     assert "  log:  FAIL  src/cadedit/drawingObjectList.test.jsx" in proc.stdout
     assert "  log: Error: Test timed out in 5000ms." in proc.stdout

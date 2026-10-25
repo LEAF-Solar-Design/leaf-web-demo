@@ -337,7 +337,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
                          ["suite_status_not_final:1:other-skip", "test_report_incomplete:1:other-skip"])
 
     def test_incomplete_vitest_reports_name_suites_and_pack_reasons(self):
-        suite_ids = ["web-vitest", "harness-vitest"]
+        suite_ids = ["web-vitest-1", "web-vitest-2", "web-vitest-3", "harness-vitest"]
         reports = {sid: {"schema": "leaf.ci.test-report.v1", "suite_id": sid, "attempt": 1,
                          "test_ids": [sid + "::case.test.js::pending"], "failed_test_ids": [],
                          "complete": False, "incomplete_reasons": ["task_without_result:1"]}
@@ -346,7 +346,7 @@ class TestCodebuildCiReadsets(unittest.TestCase):
             extra_attempts=[(sid, "vitest", "PASS", "") for sid in suite_ids], vitest_reports=reports)
         self.assertFalse(final["full_run_complete"])
         self.assertEqual(final["completeness_reasons"],
-                         ["test_report_incomplete:2:harness-vitest,web-vitest"])
+                         ["test_report_incomplete:4:harness-vitest,web-vitest-1,web-vitest-2,web-vitest-3"])
         with tarfile.open(fileobj=io.BytesIO(archive), mode="r:gz") as packed:
             for sid in suite_ids:
                 member = f"reports/{RUNNER.encoded_suite_id(sid)}/1/tests-vitest-123.json"

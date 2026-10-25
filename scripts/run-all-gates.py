@@ -3324,8 +3324,11 @@ def build_suites() -> List[Suite]:
         # executes them instead.
         # PR 2131 probes 2144 to 2147 (2026-10-22) measured worker RPC stalls
         # from oversubscription: four gate jobs share eight CPUs. Cap workers.
-        Suite("web-vitest", "web npm run test:unit (vitest)", "vitest", WEB,
-              [_npm(), "run", "test:unit", "--", "--maxWorkers=2"], 752,
+        # The historical 752-test floor above covered the whole suite. Vitest
+        # shards files, not test counts; require nonempty execution until CI
+        # supplies measured per-shard floors (752 / 3 is not a safe floor).
+        *(Suite(f"web-vitest-{shard}", f"web npm run test:unit (vitest {shard}/3)", "vitest", WEB,
+              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -3348,7 +3351,7 @@ def build_suites() -> List[Suite]:
                   # numbers on PRs #1036, #1107 and #1140; W4g-7c-2d adds the
                   # handle-retention row (nine tests).
                   ("src/cad/engineBatchAtomic.test.js", 12),
-              )),
+              )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
         Suite("harness-tsc-build", "harness npx tsc -p tsconfig.build.json", "tsc", HARNESS,
@@ -5019,7 +5022,9 @@ _MEASURED_EST_S = {
     "scripts-solar-w1-studio-string-multi-add": 211.7,
     "scripts-solar-w1-studio-solve": 121.0,
     # Refreshed 2026-09-23 from build leaf-ci-leaf-web-demo:ab6b3982 (BUILD_GENERAL1_XLARGE, jobs auto=8).
-    "web-vitest": 31.0,
+    "web-vitest-1": 140.0,
+    "web-vitest-2": 140.0,
+    "web-vitest-3": 140.0,
     "web-link-service-flow": 17.0,
     "harness-vitest": 13.7,
     "server-sessions-e2e": 12.1,
