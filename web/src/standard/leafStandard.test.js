@@ -6,17 +6,20 @@ const read = (path) => readFileSync(`${process.cwd()}/${path}`, 'utf8')
 const manifest = JSON.parse(read('src/standard/SOURCES.json'))
 const fontFiles = [400, 500, 600, 700].map((weight) => `inter-tight-${weight}-latin.woff2`)
 const expectedFonts = [...fontFiles, 'OFL-inter-tight.txt']
+const expectedBrand = ['leaf-automation-horizontal-on-dark.svg', 'leaf-automation-horizontal-on-light.svg']
 
 describe('vendored Leaf standard v1', () => {
-  it('lists exactly the six pinned assets and no extra Inter Tight files', () => {
+  it('lists exactly the eight pinned assets and no extra Inter Tight or brand files', () => {
     expect(manifest.schema).toBe('leaf.vendored-sources.v1')
     expect(manifest.files.map(({ path }) => path).sort()).toEqual([
       'src/standard/leaf-standard.css',
       ...expectedFonts.map((name) => `public/fonts/${name}`),
+      ...expectedBrand.map((name) => `public/brand/${name}`),
     ].sort())
     const actualFonts = readdirSync(`${process.cwd()}/public/fonts`)
       .filter((name) => name.startsWith('inter-tight') || name.startsWith('OFL-inter-tight'))
     expect(actualFonts.sort()).toEqual([...expectedFonts].sort())
+    expect(readdirSync(`${process.cwd()}/public/brand`).sort()).toEqual([...expectedBrand].sort())
   })
 
   for (const entry of manifest.files) {

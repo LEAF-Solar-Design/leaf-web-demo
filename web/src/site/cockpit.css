@@ -150,8 +150,10 @@
   background: transparent; backdrop-filter: none;
   border-bottom: 0; color: var(--ck-ink); box-shadow: inset 0 1px 0 var(--ck-recess);
 }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark { font-size: 0; gap: 0; margin-right: 2px; }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark .diamond { width: 9px; height: 9px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark { gap: 0; margin-right: 8px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark .mark-lockup { height: 18px; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark .mark-lockup-light { display: none; }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .mark .mark-lockup-dark { display: block; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .proj { display: none; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .spacer { flex: 1; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .who { gap: 4px; flex: 0 0 auto; }

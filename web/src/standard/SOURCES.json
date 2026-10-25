@@ -2,6 +2,24 @@
   "schema": "leaf.vendored-sources.v1",
   "files": [
     {
+      "path": "public/brand/leaf-automation-horizontal-on-dark.svg",
+      "source_repo": "LEAF-Solar-Design/leaf-design-system",
+      "ref": "leaf-standard-v1.0.0@124a05012a9f3304f738ac345e01d87fd0b7ed02",
+      "upstream_path": "docs/brand/logo/horizontal-on-dark.svg",
+      "sha256": "ec712514f5d0c06eb83672add4a8a5ba768d975e604408fc60b7ba043aee3907",
+      "bytes": 6878,
+      "license": "internal"
+    },
+    {
+      "path": "public/brand/leaf-automation-horizontal-on-light.svg",
+      "source_repo": "LEAF-Solar-Design/leaf-design-system",
+      "ref": "leaf-standard-v1.0.0@124a05012a9f3304f738ac345e01d87fd0b7ed02",
+      "upstream_path": "docs/brand/logo/horizontal-on-light.svg",
+      "sha256": "d8c66ca53a54345461d178892af078c131a0d6197d5e3abd665cb1396451896d",
+      "bytes": 6878,
+      "license": "internal"
+    },
+    {
       "path": "src/standard/leaf-standard.css",
       "source_repo": "LEAF-Solar-Design/leaf-design-system",
       "ref": "leaf-standard-v1.0.0@124a05012a9f3304f738ac345e01d87fd0b7ed02",

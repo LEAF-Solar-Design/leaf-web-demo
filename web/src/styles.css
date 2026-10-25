@@ -252,20 +252,9 @@ header.top {
 .mark {
   display: flex;
   align-items: center;
-  gap: 8px;
-  font-weight: 600;
-  letter-spacing: .005em;
-  color: var(--foreground);
-  font-size: 13.5px;
 }
-/* the leaf mark: a plot-stamp diamond in green ink */
-.mark .diamond {
-  width: 9px; height: 9px;
-  background: var(--primary);
-  transform: rotate(45deg);
-  border-radius: 1.5px;
-  flex: 0 0 auto;
-}
+.mark-lockup { display: block; height: 20px; width: auto; }
+.mark-lockup-dark { display: none; }
 .proj { display: flex; align-items: baseline; gap: 10px; flex-wrap: wrap; }
 .proj .name { font-weight: 600; }
 .proj .meta { font-family: var(--font-mono); font-size: 10.5px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
