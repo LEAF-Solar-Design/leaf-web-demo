@@ -90,8 +90,8 @@ describe('cost transparency', () => {
     expect(within(table).getByText('Fleet: 0.300000 (30.0000%)')).toBeInTheDocument()
     expect(within(table).getByText('Unattributed: 0.050000 (5.0000%)')).toBeInTheDocument()
     expect(within(table).getByText('0.226543 (22.6543%)')).toBeInTheDocument()
-    expect(within(table).getByText('MEASURED · complete')).toBeInTheDocument()
-    expect(within(table).getByText('ESTIMATED · partial')).toBeInTheDocument()
+    expect(within(table).getByText('Measured · Complete coverage')).toBeInTheDocument()
+    expect(within(table).getByText('Estimated · Some use may be missing')).toBeInTheDocument()
     expect(within(table).getAllByText('covered by credits')).toHaveLength(2)
     const totals = within(table).getByRole('rowheader', { name: 'Totals' }).closest('tr')
     expect(within(totals).getByText('$100.30')).toBeInTheDocument()
@@ -100,7 +100,9 @@ describe('cost transparency', () => {
     expect(within(totals).getByText('$0.300009')).toBeInTheDocument()
     expect(within(table).getByText('Estimated share, not metered')).toBeInTheDocument()
     expect(screen.queryByText(/Cost publication is stale/)).not.toBeInTheDocument()
-    expect(screen.getByText(/Missing sources: aws-storage\. Published: 2026-09-28T12:00:00Z/)).toBeInTheDocument()
+    const published = new Date(fixture.published_at).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    expect(screen.getByText(`Missing sources: aws-storage. Published: ${published}.`)).toBeInTheDocument()
+    expect(panel.textContent).not.toContain(fixture.published_at)
     expect(panel.textContent).not.toContain('other-private-tenant')
     expect(panel.textContent).not.toContain('my-tenant')
     expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
@@ -108,18 +110,20 @@ describe('cost transparency', () => {
   })
 
   it.each([
-    ['321714', 'build-minutes', 'complete', 'share'],
-    ['5003.04', 'instance-hours', 'partial', 'usd-by-environment'],
-    ['0', 'build-minutes', 'unknown', 'share'],
-  ])('shows physical use %s %s separately from the allocation basis', async (amount, unit, coverage, allocationUnit) => {
+    ['321714', 'build-minutes', 'complete', 'share', 'build minutes', 'Complete coverage', 'of the total share'],
+    ['5003.04', 'instance-hours', 'partial', 'usd-by-environment', 'server hours', 'Some use may be missing', 'US dollars split by environment'],
+    ['0', 'gb-month', 'unknown', 'share', 'gigabyte months', 'Coverage unknown', 'of the total share'],
+  ])('shows physical use %s %s separately from the allocation basis', async (amount, unit, coverage, allocationUnit, unitText, coverageText, allocationText) => {
     respond({ ...fixture, resources: [{ ...fixture.resources[0], total_usage: '1', unit: allocationUnit,
       physical_usage: { quantity: amount, unit, coverage } }] })
     const panel = await openPanel()
     const row = screen.getByRole('rowheader', { name: /APS engine/ }).closest('tr')
     const cell = within(row).getAllByRole('cell')[0]
-    expect(within(cell).getByText(`${amount} ${unit}`)).toBeInTheDocument()
-    expect(within(cell).getByText(`Physical use coverage: ${coverage}`)).toBeInTheDocument()
-    expect(within(cell).getByText(`Allocation basis: 1 ${allocationUnit}`)).toBeInTheDocument()
+    expect(within(cell).getByText(`${amount} ${unitText}`)).toBeInTheDocument()
+    expect(within(cell).getByText(`Physical use coverage: ${coverageText}`)).toBeInTheDocument()
+    expect(within(cell).getByText(`Allocation basis: 1 ${allocationText}`)).toBeInTheDocument()
+    expect(cell.textContent).not.toContain(unit)
+    expect(cell.textContent).not.toContain(`1 ${allocationUnit}`)
     expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
     expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
   })
@@ -129,9 +133,32 @@ describe('cost transparency', () => {
     await openPanel()
     const engine = screen.getByRole('rowheader', { name: /APS engine/ }).closest('tr')
     const storage = screen.getByRole('rowheader', { name: /Storage/ }).closest('tr')
-    expect(within(engine).getAllByRole('cell')[0]).toHaveTextContent(/^245 engine-second$/)
-    expect(within(storage).getAllByRole('cell')[0]).toHaveTextContent(/^Unavailable GB-month$/)
+    expect(within(engine).getAllByRole('cell')[0]).toHaveTextContent(/^245 seconds of design processing$/)
+    expect(within(storage).getAllByRole('cell')[0]).toHaveTextContent(/^Unavailable gigabyte months$/)
     expect(screen.queryByText(/Physical use coverage:|Allocation basis:/)).not.toBeInTheDocument()
+  })
+
+  it('uses readable fallbacks for unknown publication labels and an invalid publication date', async () => {
+    respond({ ...fixture, published_at: 'invalid-publication-date', resources: [{
+      ...fixture.resources[0], status: 'INTERNAL_STATUS', coverage: 'INTERNAL_COVERAGE', unit: 'internal-allocation-unit',
+      physical_usage: { quantity: '12', unit: 'internal-physical-unit', coverage: 'INTERNAL_PHYSICAL_COVERAGE' },
+    }] })
+    const panel = await openPanel()
+    expect(screen.getByText('Status unknown · Coverage unknown')).toBeInTheDocument()
+    expect(screen.getByText('12 Units unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Physical use coverage: Coverage unknown')).toBeInTheDocument()
+    expect(screen.getByText('Allocation basis: 245 Units unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Missing sources: aws-storage. Published: Unavailable.')).toBeInTheDocument()
+    expect(panel.textContent).not.toMatch(/INTERNAL_|internal-|invalid-publication-date|Invalid Date/)
+  })
+
+  it('uses readable fallbacks for missing labels in an allocation-only publication', async () => {
+    respond({ ...fixture, published_at: null, resources: [{ ...fixture.resources[0], status: null, coverage: null, unit: null }] })
+    const panel = await openPanel()
+    expect(screen.getByText('Status unknown · Coverage unknown')).toBeInTheDocument()
+    expect(screen.getByText('245 Units unavailable')).toBeInTheDocument()
+    expect(screen.getByText('Missing sources: aws-storage. Published: Unavailable.')).toBeInTheDocument()
+    expect(panel.textContent).not.toContain('Invalid Date')
   })
 
   it('shows each payer bucket without adding tenant-funded value to Leaf totals', async () => {

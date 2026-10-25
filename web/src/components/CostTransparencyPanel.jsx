@@ -8,6 +8,27 @@ const TITLE = 'What Leaf costs to operate'
 const COPY = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
 const dimensions = [['development', 'Development'], ['ci', 'CI'], ['fleet', 'Fleet'], ['unattributed', 'Unattributed']]
 const payerLabels = { tenant_plan: 'Your Claude plan', tenant_api_key: 'Your own API key', leaf: 'Leaf', mixed: 'Mixed payers', unknown: 'Payer unknown' }
+const statusLabels = { MEASURED: 'Measured', ESTIMATED: 'Estimated' }
+const coverageLabels = { complete: 'Complete coverage', partial: 'Some use may be missing', unknown: 'Coverage unknown' }
+const unitLabels = {
+  'engine-second': 'seconds of design processing',
+  'GB-month': 'gigabyte months',
+  'gb-month': 'gigabyte months',
+  'build-minutes': 'build minutes',
+  'instance-hours': 'server hours',
+  'usd-by-environment': 'US dollars split by environment',
+  share: 'of the total share',
+}
+const displayLabel = (labels, value, fallback) => Object.prototype.hasOwnProperty.call(labels, value) ? labels[value] : fallback
+const coverageLabel = (value) => displayLabel(coverageLabels, value, 'Coverage unknown')
+const unitLabel = (value) => displayLabel(unitLabels, value, 'Units unavailable')
+
+function publicationDate(value) {
+  if (!value) return 'Unavailable'
+  const date = new Date(value)
+  if (Number.isNaN(date.getTime())) return 'Unavailable'
+  return date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+}
 
 // Decimal strings never pass through binary floating point, including totals.
 function decimal(value) {
@@ -210,14 +231,14 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
                   <caption>Monthly resource use and costs (USD)</caption>
                   <thead><tr>{['Resource', 'Total used', 'Gross cost', 'Credits', 'Your share', 'Your implied amount', "Leaf’s own share", 'Other customers combined'].map((heading) => <th key={heading} scope="col">{heading}</th>)}</tr></thead>
                   <tbody>{resources.map((row) => <tr key={row.resource_id}>
-                    <th scope="row">{row.display_name}<small>{row.status} · {row.coverage}</small>
+                    <th scope="row">{row.display_name}<small>{displayLabel(statusLabels, row.status, 'Status unknown')} · {coverageLabel(row.coverage)}</small>
                       {row.status === 'ESTIMATED' && <small>{row.unit === 'usd-by-environment' ? 'Split by environment tag and activity' : 'Estimated share, not metered'}</small>}
                     </th>
                     <td>{row.physical_usage ? <>
-                      <div>{quantity(row.physical_usage.quantity)} {row.physical_usage.unit}</div>
-                      <small>Physical use coverage: {row.physical_usage.coverage}</small>
-                      <small>Allocation basis: {quantity(row.total_usage)} {row.unit}</small>
-                    </> : <>{quantity(row.total_usage)} {row.unit}</>}</td>
+                      <div>{quantity(row.physical_usage.quantity)} {unitLabel(row.physical_usage.unit)}</div>
+                      <small>Physical use coverage: {coverageLabel(row.physical_usage.coverage)}</small>
+                      <small>Allocation basis: {quantity(row.total_usage)} {unitLabel(row.unit)}</small>
+                    </> : <>{quantity(row.total_usage)} {unitLabel(row.unit)}</>}</td>
                     <td>{money(row.gross_cost_usd)}</td>
                     <td>{money(row.credits_usd)}<small>covered by credits</small></td>
                     <td>{share(row.your_share)}</td>
@@ -228,7 +249,7 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
                   <tfoot><tr><th scope="row">Totals</th><td>Not applicable</td><td>{money(data.totals?.gross_cost_usd)}</td><td>{money(data.totals?.credits_usd)}</td><td>Not applicable</td><td>{money(data.your_total_implied_cost_usd)}</td><td>Not applicable</td><td>Not applicable</td></tr></tfoot>
                 </table>
               </div>
-              <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? data.missing_sources.join(', ') : 'None reported'}. Published: {data.published_at || 'Unavailable'}.</p>
+              <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? data.missing_sources.join(', ') : 'None reported'}. Published: {publicationDate(data.published_at)}.</p>
             </>}
           </>}
           </>}
