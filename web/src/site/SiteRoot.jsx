@@ -208,7 +208,13 @@ export default function SiteRoot() {
   if (authError) return <div className="site-auth-callback">
     <p role="alert">{authError}</p>
     <button type="button" onClick={async () => {
-      try { await login() } catch {
+      try {
+        const url = new URL(window.location.href)
+        url.searchParams.delete('code')
+        url.searchParams.delete('state')
+        window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
+        await login()
+      } catch {
         setAuthError(humanizeError("Sign-in couldn't start. Check your connection and try again."))
       }
     }}>Sign in</button>

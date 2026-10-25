@@ -10,7 +10,7 @@
 // under jsdom); the REAL module under test is SiteRoot's scene logic. Every
 // mount resets the module registry and sets the global BEFORE the dynamic
 // import, so a module-eval read of it could not hide behind a cached module.
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 vi.mock('./StageScene.jsx', () => ({
@@ -32,11 +32,14 @@ vi.mock('../auth.js', () => ({
   isSignedIn: () => false,
   isAuthRedirectCallback: () => false,
   handleRedirectCallback: async () => false,
+  login: async () => {},
   subscribeTokenStored: () => () => {},
 }))
 
 afterEach(() => {
   cleanup()
+  vi.useRealTimers()
+  vi.restoreAllMocks()
   vi.resetModules()
   delete globalThis.__LEAF_FLAGS
 })
@@ -56,6 +59,31 @@ async function mountAppRoute(flagValue) {
 }
 
 describe('SiteRoot renders the one studio shell', () => {
+  it('removes callback parameters before saving the page URL for a sign-in retry after timeout', async () => {
+    window.history.replaceState({ page: 'drawing' }, '', '/app?surface=cad&code=x&state=y&drawing=roof#details')
+    const auth = await import('../auth.js')
+    vi.spyOn(auth, 'isAuthRedirectCallback').mockReturnValue(true)
+    const callback = vi.spyOn(auth, 'handleRedirectCallback').mockImplementation(() => new Promise(() => {}))
+    let returnTo
+    const login = vi.spyOn(auth, 'login').mockImplementation(async () => {
+      returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`
+    })
+    const { default: SiteRoot } = await import('./SiteRoot.jsx')
+    vi.useFakeTimers()
+    render(<SiteRoot />)
+    expect(screen.getByRole('status').textContent).toBe('Completing sign in')
+    await act(async () => { await vi.advanceTimersByTimeAsync(20000) })
+    expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't be completed.")
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Sign in' })) })
+    expect(callback).toHaveBeenCalledTimes(1)
+    expect(login).toHaveBeenCalledTimes(1)
+    expect(returnTo).toBe('/app?surface=cad&drawing=roof#details')
+    const savedUrl = new URL(returnTo, window.location.origin)
+    expect(savedUrl.searchParams.has('code')).toBe(false)
+    expect(savedUrl.searchParams.has('state')).toBe(false)
+    expect(window.history.state).toEqual({ page: 'drawing' })
+  }, 20_000)
+
   // Cold dynamic imports of the SiteRoot graph after vi.resetModules() can take several seconds on a loaded runner.
   it('SSD1-B row1: a passive decision strip never blocks the Escape eject, an owned one still does', async () => {
     vi.resetModules()
