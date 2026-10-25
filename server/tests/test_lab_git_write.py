@@ -272,6 +272,53 @@ def test_crash_after_commit_recovers_same_revision_without_recommit(world):
     assert len(harness.commits) == 1 and pending(tenant) == []
 
 
+def test_accepted_commit_after_takeover_answers_pending_until_owner_completes(world):
+    from fastapi import HTTPException
+    from routers.lab_artifacts import _call
+
+    tenant, harness = world
+    taken_over = []
+    def take_over():
+        row = pending(tenant)[0]
+        expire(tenant)
+        owner = store.take_over_expired(tenant, row['op_id'], row['lease_owner'], 60)
+        assert owner['fence'] == row['fence'] + 1
+        taken_over.append(owner)
+    harness.before_commit = take_over
+    with pytest.raises(HTTPException) as caught:
+        _call(save, tenant)
+    assert caught.value.status_code == 503
+    assert caught.value.detail == 'lab_commit_pending'
+    owner = taken_over[0]
+    assert store.get(tenant, owner['op_id']) == owner
+    assert len(harness.commits) == 1
+    assert store.commit_get(tenant, harness.head) is None
+    assert git.mirror_status(tenant)['local_sha'] == BASE
+    assert store.authority_get(tenant)['verified_head'] == BASE
+    assert outbox(tenant) == []
+    with pytest.raises(ledger.NotFound):
+        ledger.get(tenant, 'x')
+
+    # Resume the recovering owner with its existing fence and prove the commit
+    # through the same ops/history lookup used by _recover_row.
+    inspected = git._git_inspect(tenant)
+    lookup = git._git_post(tenant, 'ops', {'op_ids': [owner['op_id']], 'head': inspected['head']})
+    match = lookup['ops'][owner['op_id']]
+    history = git._changes(tenant, BASE, inspected['head'])
+    entry = next(item for item in history if item['commit'] == match['commit'])
+    completed = git._complete_pending(tenant, owner, '1', entry['commit'], entry['parent'],
+                                      'writer', history=history)
+    assert completed['revision'] == 1 and completed['author'] == 'writer'
+    assert git._complete_pending(tenant, owner, '1', entry['commit'], entry['parent'],
+                                 'writer', history=history) is None
+    assert ledger.get(tenant, 'x')['revision'] == 1
+    assert pending(tenant) == [] and len(harness.commits) == 1
+    assert store.commit_get(tenant, harness.head)['op_id'] == owner['op_id']
+    assert git.mirror_status(tenant)['local_sha'] == harness.head
+    assert store.authority_get(tenant)['verified_head'] == harness.head
+    assert len(outbox(tenant)) == 1
+
+
 def test_late_recovery_does_not_rewind_completed_descendant(world):
     tenant, harness = world
     harness.unknown_after_commit = True
@@ -302,7 +349,7 @@ def test_completion_orders_converge_through_recorded_commit_gaps(world, monkeypa
     monkeypatch.setattr(git, '_complete_pending', lambda *args, **kwargs: None)
     ops, commits = [], []
     for doc in ('one', 'two', 'three'):
-        with pytest.raises(ledger.GitConflict):
+        with pytest.raises(ledger.GitUnavailable, match='^lab_commit_pending$'):
             save(tenant, doc)
         ops.append(next(row['op_id'] for row in pending(tenant) if row['doc_id'] == doc))
         commits.append(harness.head)
@@ -584,6 +631,7 @@ def test_router_uses_git_error_status_and_safe_detail(world):
             (ledger.GitConflict('private'), 409, 'lab_artifact_conflict'),
             (ledger.GitUnavailable('lab_store_migrating'), 503, 'lab_store_migrating'),
             (ledger.GitUnavailable('lab_harness_capability_missing'), 503, 'lab_harness_capability_missing'),
+            (ledger.GitUnavailable('lab_commit_pending'), 503, 'lab_commit_pending'),
             (ledger.GitUnavailable('private'), 503, 'lab_store_unavailable')]:
         with pytest.raises(HTTPException) as caught:
             _call(fail, error)

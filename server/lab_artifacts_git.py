@@ -377,7 +377,9 @@ def commit_pending(tenant, row, generation, author='git-recovery', *, uncertain=
             completed = _complete_pending(tenant, row, generation, commit, row['expected_parents'][-1], author,
                                           history=row.get('_history', ()))
             if completed is None:
-                raise ledger.GitConflict('lab_artifact_conflict')
+                # The commit exists, but completion belongs to the current
+                # fenced owner. Let recovery resolve it through /lab/ops.
+                raise ledger.GitUnavailable('lab_commit_pending')
             return completed
         except MirrorError as error:
             if error.code == 'lab_ref_conflict':
