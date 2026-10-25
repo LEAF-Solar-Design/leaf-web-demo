@@ -139,8 +139,7 @@
   border-bottom: 1px solid #27272a; background: rgba(10, 10, 10, .86);
   box-sizing: border-box;
 }
-.lp-roundel { border-radius: 50%; }
-.lp-wordmark { font: 600 13.5px 'Inter Tight', sans-serif; }
+.lp-lockup { display: block; height: 24px; width: auto; flex: 0 0 auto; }
 .lp-brandsub { font-size: 12.5px; color: #949494; transition: opacity .4s ease; opacity: 0; }
 .stage-root[data-scene="tool"] .lp-brandsub { opacity: 1; }
 .lp-top-slot { margin-left: auto; position: relative; height: 52px; min-width: 420px; }
@@ -920,7 +919,7 @@
   .tc-product-frame { padding: 28px 18px 48px; }
   .tc-product-columns { grid-template-columns: 1fr; }
   .lp-topbar { padding: 0 10px; }
-  .lp-wordmark { font-size: 12px; }
+  .lp-lockup { height: 20px; }
   /* R2C (try-mobile-header-overlap-and-canvas-sliver): the workspace header
      is two rows on a phone, the wordmark then the project chip and status,
      so the chip no longer overprints "Leaf Automation". The judge names this

@@ -62,8 +62,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
       {/* Top bar: persistent chrome shell (never recasts); the right-hand
           site cluster dissolves with the site cast. */}
       <div className="lp-topbar" data-cast="both">
-        <img src="/site/icon-color.png" width="24" height="24" alt="" className="lp-roundel" />
-        <span className="lp-wordmark">Leaf Automation</span>
+        <img className="lp-lockup" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="Leaf Automation" height="24" />
         <span className="lp-brandsub">/ Leaf Build · utility-estimation</span>
         <div className="lp-top-slot">
           <div className="lp-top-site" data-cast="site" style={{ '--rank': 0 }}>

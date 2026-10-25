@@ -6,17 +6,20 @@ const read = (path) => readFileSync(`${process.cwd()}/${path}`, 'utf8')
 const manifest = JSON.parse(read('src/standard/SOURCES.json'))
 const fontFiles = [400, 500, 600, 700].map((weight) => `inter-tight-${weight}-latin.woff2`)
 const expectedFonts = [...fontFiles, 'OFL-inter-tight.txt']
+const expectedBrand = ['leaf-automation-horizontal-on-dark.svg', 'leaf-automation-horizontal-on-light.svg']
 
 describe('vendored Leaf standard v1', () => {
-  it('lists exactly the six pinned assets and no extra Inter Tight files', () => {
+  it('lists exactly the eight pinned assets and no extra Inter Tight or brand files', () => {
     expect(manifest.schema).toBe('leaf.vendored-sources.v1')
     expect(manifest.files.map(({ path }) => path).sort()).toEqual([
       'src/standard/leaf-standard.css',
       ...expectedFonts.map((name) => `public/fonts/${name}`),
+      ...expectedBrand.map((name) => `public/brand/${name}`),
     ].sort())
     const actualFonts = readdirSync(`${process.cwd()}/public/fonts`)
       .filter((name) => name.startsWith('inter-tight') || name.startsWith('OFL-inter-tight'))
     expect(actualFonts.sort()).toEqual([...expectedFonts].sort())
+    expect(readdirSync(`${process.cwd()}/public/brand`).sort()).toEqual([...expectedBrand].sort())
   })
 
   for (const entry of manifest.files) {
@@ -36,6 +39,22 @@ describe('vendored Leaf standard v1', () => {
     const standardIndex = lines.indexOf(standardImports[0])
     const studioIndex = lines.findIndex((line) => /^\s*import\s+['"]\.\/styles\.css['"];?\s*$/.test(line))
     expect(studioIndex).toBeGreaterThan(standardIndex)
+  })
+
+  it('names the header mark independently of its two decorative lockups', () => {
+    const mark = read('src/App.jsx').match(/<div\b([^>]*\bclassName="mark"[^>]*)>([\s\S]*?)<\/div>/)
+    expect(mark).not.toBeNull()
+    expect(mark[1]).toMatch(/\brole="img"/)
+    expect(mark[1]).toMatch(/\baria-label="Leaf Automation"/)
+    const images = mark[2].match(/<img\b[^>]*>/g) || []
+    expect(images).toHaveLength(2)
+    expect(images.map((image) => image.match(/\bclassName="([^"]*)"/)?.[1].split(/\s+/)
+      .filter((name) => name === 'mark-lockup-light' || name === 'mark-lockup-dark')))
+      .toEqual([['mark-lockup-light'], ['mark-lockup-dark']])
+    for (const image of images) {
+      expect(image).toMatch(/\balt=""/)
+      expect(image).toMatch(/\baria-hidden="true"/)
+    }
   })
 
   it('declares exactly four normal, swap Inter Tight faces with local font files', () => {
