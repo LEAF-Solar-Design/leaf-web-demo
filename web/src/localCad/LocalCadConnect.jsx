@@ -1,5 +1,10 @@
 import React, { useEffect, useState } from 'react'
 
+// LCERR: the browser's own words for "nothing answered on this port" (Chromium, Firefox, Safari). Unreachable already
+// says AutoCAD was not found, so these add nothing; any other error (an HTTP status, a bad reply, a timeout) means
+// something answered or hung, and stays visible.
+const UNREACHED = /^(?:Failed to fetch|NetworkError when attempting to fetch resource\.?|Load failed)$/
+
 export default function LocalCadConnect({ status = 'stopped', drawing, summary, truncated, error, textPending, onConnect, onDisconnect }) {
   const [denied, setDenied] = useState(false)
   useEffect(() => {
@@ -28,9 +33,7 @@ export default function LocalCadConnect({ status = 'stopped', drawing, summary, 
       onClick={connect ? onConnect : onDisconnect}>{connect ? 'Connect AutoCAD' : 'Disconnect'}</button>
     <span aria-live="polite" style={{ fontSize: 11, minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
       <span data-testid="local-cad-status">{label}</span>
-      {/* LCERR: unreachable already says AutoCAD was not found here; the raw transport error ("Failed to fetch") adds
-          nothing a user can act on, so it is shown only once the bridge answered. */}
-      {error && status !== 'unreachable' && <span>{`. The last update failed: ${error}`}</span>}
+      {error && !(status === 'unreachable' && UNREACHED.test(error)) && <span>{`. The last update failed: ${error}`}</span>}
       {(textPending || (error && /text|font|glyph|label/i.test(error))) && <span> · labels unavailable</span>}
       <span data-testid="local-cad-summary" style={{ marginLeft: summary || truncated ? 6 : 0 }}>{summary ?? ''}{truncated ? ' (showing the first 200,000 points)' : ''}</span>
     </span>

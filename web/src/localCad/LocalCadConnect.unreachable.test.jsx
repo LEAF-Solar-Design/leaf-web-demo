@@ -25,4 +25,25 @@ describe('LocalCadConnect unreachable', () => {
       cleanup()
     }
   })
+
+  it('every browser wording of a network failure is hidden', () => {
+    for (const error of ['Failed to fetch', 'NetworkError when attempting to fetch resource.', 'Load failed']) {
+      render(<LocalCadConnect status="unreachable" error={error} />)
+
+      const statusText = screen.getByTestId('local-cad-status').closest('[aria-live]').textContent
+      expect(statusText).not.toContain('The last update failed')
+      expect(statusText).not.toContain(error)
+      cleanup()
+    }
+  })
+
+  it('an unreachable bridge keeps errors from a connector that answered or hung', () => {
+    for (const error of ['Bridge HTTP 500', 'Invalid bridge response', 'Bridge request timed out']) {
+      render(<LocalCadConnect status="unreachable" error={error} />)
+
+      expect(screen.getByTestId('local-cad-status').closest('[aria-live]').textContent)
+        .toContain(`. The last update failed: ${error}`)
+      cleanup()
+    }
+  })
 })
