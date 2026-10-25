@@ -1,8 +1,9 @@
 // Slice 13b (theming tokens): the --leaf-* namespace is aliases ONLY. Every
 // --leaf-* declaration in the site stylesheets must be a var() reference to
 // a token declared in the very same selector scope (this slice never spans
-// scopes), never a re-typed literal. The cockpit inherits --leaf-ink and
-// --leaf-warn from the vendored v1 package instead of aliasing them back.
+// scopes), never a re-typed literal. The cockpit inherits --leaf-ink,
+// --leaf-warn, --leaf-glass-band, --leaf-glass-panel and --leaf-glass-dock
+// from the vendored v1 package instead of aliasing them back.
 import { readFileSync } from 'node:fs'
 import { describe, it, expect } from 'vitest'
 
@@ -219,10 +220,35 @@ describe('the --leaf-* token namespace is alias-only (slice 13b)', () => {
       [read('src/site/studioShell.css'), '.studio-shell .app[data-studio-shell="cockpit"][data-surface]'],
     ]) {
       const decls = declsFor(css, selector)
-      for (const role of ['ink', 'warn']) {
+      for (const role of ['ink', 'warn', 'glass-band', 'glass-panel', 'glass-dock']) {
         expect(root).toHaveProperty(`--leaf-${role}`)
         expect(decls).not.toHaveProperty(`--leaf-${role}`)
         expect(decls[`--ck-${role}`]).toBe(`var(--leaf-${role})`)
+      }
+    }
+  })
+
+  it('has no custom property cycles through plain var() references in the same scope', () => {
+    const scopes = [
+      ...SCOPES,
+      { file: 'cockpit.css', css: cockpit, selector: '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])' },
+      { file: 'studioShell.css', css: read('src/site/studioShell.css'), selector: '.studio-shell .app[data-studio-shell="cockpit"][data-surface]' },
+    ]
+    for (const { file, css, selector } of scopes) {
+      const decls = declsFor(css, selector)
+      const references = Object.fromEntries(Object.entries(decls).map(([name, value]) => [
+        name, [...value.matchAll(/var\(\s*(--[a-zA-Z0-9-]+)\s*\)/g)].map((match) => match[1]),
+      ]))
+      for (const name of Object.keys(decls)) {
+        const pending = [...references[name]]
+        const visited = new Set()
+        while (pending.length) {
+          const target = pending.pop()
+          expect(target, `${file} ${selector}: ${name} reaches itself`).not.toBe(name)
+          if (visited.has(target) || !(target in references)) continue
+          visited.add(target)
+          pending.push(...references[target])
+        }
       }
     }
   })

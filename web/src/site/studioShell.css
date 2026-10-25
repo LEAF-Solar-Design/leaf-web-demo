@@ -38,9 +38,6 @@
   color: var(--ck-ink);
   --leaf-font: var(--ck-font);
   --leaf-chrome: var(--ck-chrome);
-  --leaf-glass-band: var(--ck-glass-band);
-  --leaf-glass-panel: var(--ck-glass-panel);
-  --leaf-glass-dock: var(--ck-glass-dock);
   --leaf-glass-blur: var(--ck-glass-blur);
   --leaf-recess: var(--ck-recess);
   --leaf-title: var(--ck-title);
