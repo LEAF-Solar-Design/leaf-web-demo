@@ -1212,7 +1212,7 @@ export default function ConversePanel({
               <img key={`${u.turnId}-pending-image-${index}`} src={src} alt="Pending image attachment" width="96" height="72" style={{ objectFit: 'cover', margin: '4px 4px 4px 0' }} />
             ))}
             <div className="converse-note">
-              <span className="dot live pulse" aria-hidden="true" />
+              {!stoppedTurns.has(u.turnId) && <span className="dot live pulse" aria-hidden="true" />}
               <span className="dim">{stoppedTurns.has(u.turnId) ? 'Reply stopped.' : 'thinking…'}</span>
             </div>
           </div>

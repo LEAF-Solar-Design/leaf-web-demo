@@ -158,6 +158,27 @@ describe('conversation issue sweep', () => {
     expect(screen.queryByText('Reply stopped.')).toBeNull()
   })
 
+  it('S1-42 stops a pending turn without a live indicator when no stream event arrives', async () => {
+    const input = await setup()
+    fireEvent.change(input, { target: { value: 'Count panels' } })
+    await act(async () => { fireEvent.keyDown(input, { key: 'Enter' }) })
+    const turn = screen.getByText('Count panels').closest('.converse-turn')
+    expect(turn.querySelector('.dot.live.pulse')).not.toBeNull()
+    expect(input.readOnly).toBe(true)
+
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Stop' })) })
+
+    expect(converse.cancelTurn).toHaveBeenCalledWith('session', 'sent')
+    expect(converse.openStream.mock.results.at(-1).value.reconcile).toHaveBeenCalledTimes(1)
+    expect(screen.getByText('Reply stopped.')).toBeTruthy()
+    expect(turn.querySelector('.dot.live')).toBeNull()
+    expect(turn.querySelector('.pulse')).toBeNull()
+    expect(screen.queryByText('thinking…')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Stop' })).toBeNull()
+    expect(input).not.toBeDisabled()
+    expect(input.readOnly).toBe(false)
+  })
+
   it('S1-42 reports polling authentication failures instead of silently closing', async () => {
     const actual = await vi.importActual('./converse.js')
     vi.stubGlobal('EventSource', undefined)
