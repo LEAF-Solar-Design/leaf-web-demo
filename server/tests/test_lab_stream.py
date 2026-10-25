@@ -3,6 +3,7 @@ import asyncio
 from datetime import datetime, timedelta, timezone
 import json
 import logging
+import threading
 from types import SimpleNamespace
 
 from fastapi import FastAPI, HTTPException
@@ -88,6 +89,19 @@ def test_query_credentials_refused(rig, credential):
         response = client.get(f"/api/lab/stream/runs?runs=run&{credential}=private")
     assert response.status_code == 400
     assert response.json()["detail"] == "lab_stream_query_credential"
+
+
+def test_credentials_checked_before_missing_runs(rig):
+    with TestClient(rig.app) as client:
+        for credential in ("token", "jwt", "ticket", "access_token"):
+            for query in ("", "&after_seq=bad"):
+                response = client.get(f"/api/lab/stream/runs?{credential}=private" + query)
+                assert response.status_code == 400
+                assert response.json()["detail"] == "lab_stream_query_credential"
+        for query in ("", "?runs="):
+            response = client.get("/api/lab/stream/runs" + query)
+            assert response.status_code == 422
+            assert response.json()["detail"] == "lab_stream_runs_required"
 
 
 def test_authorization_required_and_foreign_run_hidden(rig):
@@ -319,7 +333,7 @@ def test_pending_distinct_blocks_flush_in_order_within_allowance(rig):
     assert output[-1]["kind"] == "finished"
 
 
-def test_disconnect_before_body_starts_releases_response_lease(rig, monkeypatch):
+def test_disconnect_before_body_starts_releases_response_lease(rig, monkeypatch, caplog):
     started = []
 
     async def body(*args, **kwargs):
@@ -350,7 +364,14 @@ def test_disconnect_before_body_starts_releases_response_lease(rig, monkeypatch)
         assert signal not in stream._streams
         assert store.acquire_stream(rig.tenant, rig.tenant, "fifth", 45)
 
-    asyncio.run(disconnect())
+    with caplog.at_level(logging.INFO, logger=stream.__name__):
+        asyncio.run(disconnect())
+    lines = [record.getMessage() for record in caplog.records
+             if record.getMessage().startswith("lab_stream_closed ")]
+    assert len(lines) == 1
+    assert json.loads(lines[0].split(" ", 1)[1]) == {
+        "reason": "disconnect", "runs": {"run": {"count": 0, "p50_ms": None, "p95_ms": None}}}
+    assert "unexpected" not in lines[0] and "payload" not in lines[0]
 
 
 @pytest.mark.parametrize("failure", [False, True])
@@ -398,6 +419,17 @@ def test_oversize_value_truncated(rig):
     assert payload["truncated"] is True and payload["size"] > 64 * 1024
 
 
+def test_oversize_failed_event_truncated_without_stalling(rig):
+    reason = "x" * (3 * 1024 * 1024)
+    events(rig, [{"kind": "failed", "block_id": "block", "payload": {"reason": reason}}, value(1)])
+    rows = frames(collect(rig), "run")
+    assert [(row["seq"], row["kind"], row["block_id"]) for row in rows] == [
+        (0, "failed", "block"), (1, "value", "block")]
+    assert rows[0]["payload"] == {
+        "truncated": True, "size": len(json.dumps({"reason": reason}, separators=(",", ":")).encode())}
+    assert rows[1]["payload"] == {"out": 1}
+
+
 def test_byte_budget_defers_without_losing_events(rig):
     events(rig, [value("x" * 60000, str(i)) for i in range(60)])
     early = frames(collect(rig, stop=.75), "run")
@@ -412,6 +444,161 @@ def test_run_disappears_mid_stream(rig, monkeypatch):
         raise store.NotFound("private")
     monkeypatch.setattr(store, "list_events", missing)
     assert frames(collect(rig), "close") == [{"reason": "run_missing", "run_id": "run"}]
+
+
+def test_deleted_run_closes_before_flushing_pending_values(rig):
+    events(rig, [value(i, str(i)) for i in range(200)])
+    ticks = []
+
+    async def delete(signal):
+        ticks.append(rig.clock.value)
+        store._run(rig.tenant, lambda sql: sql.execute(
+            "DELETE FROM lab_runs WHERE tenant_id=? AND run_id=?", (rig.tenant, "run")), write=True)
+
+    output = collect(rig, stop=4, callback=delete)
+    assert ticks == [.25]
+    assert [row["seq"] for row in frames(output, "run")] == list(range(50))
+    assert frames(output, "close") == [{"reason": "run_missing", "run_id": "run"}]
+
+
+@pytest.mark.parametrize("query,last", [
+    (f"&after_seq={2**63}", None), ("", f"run:{2**63}"),
+    (f"&after_seq={2**53}", None), ("", f"run:{2**53}"),
+    ("&after_seq=-2", None), ("", "run:-1"),
+    ("&after_seq=bad", None), ("", "run:bad"),
+])
+def test_cursor_bounds_rejected_before_streaming(rig, query, last, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid cursor reached the store")
+
+    monkeypatch.setattr(store, "get", forbidden)
+    with TestClient(rig.app) as client:
+        response = client.get("/api/lab/stream/runs?runs=run" + query,
+                              headers={"Last-Event-ID": last} if last else {})
+    assert response.status_code == 400
+    assert response.json()["detail"] == "lab_stream_cursor_invalid"
+    assert stream._cursors("run", 2**53 - 1, None) == {"run": 2**53 - 1}
+    assert stream._cursors("run", -1, f"run:{2**53 - 1}") == {"run": 2**53 - 1}
+
+
+def test_cancelled_slow_acquire_releases_committed_lease(rig, monkeypatch):
+    original_acquire = store.acquire_stream
+    original_release = store.release_stream
+    unblock = threading.Event()
+    acquired_ids = []
+
+    async def cancel():
+        loop = asyncio.get_running_loop()
+        acquiring = asyncio.Event()
+        released = asyncio.Event()
+
+        def slow_acquire(*args):
+            loop.call_soon_threadsafe(acquiring.set)
+            assert unblock.wait(timeout=5)
+            result = original_acquire(*args)
+            acquired_ids.append(args[2])
+            return result
+
+        def release(*args):
+            result = original_release(*args)
+            loop.call_soon_threadsafe(released.set)
+            return result
+
+        monkeypatch.setattr(store, "acquire_stream", slow_acquire)
+        monkeypatch.setattr(store, "release_stream", release)
+        scope = {"type": "http", "query_string": b"runs=run", "headers": []}
+        task = asyncio.create_task(stream.runs(Request(scope), runs="run", after_seq=-1, tenant=rig.context))
+        try:
+            await asyncio.wait_for(acquiring.wait(), 5)
+            task.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await task
+        finally:
+            unblock.set()
+        await asyncio.wait_for(released.wait(), 5)
+        count = store._run(rig.tenant, lambda sql: sql.execute(
+            "SELECT COUNT(*) AS count FROM lab_stream_leases WHERE principal=?", (rig.tenant,)).fetchone()["count"])
+        assert len(acquired_ids) == 1 and count == 0
+        assert not stream._streams
+
+    asyncio.run(cancel())
+
+
+@pytest.mark.parametrize("spec_version", ["2.0", "2.4"])
+@pytest.mark.parametrize("reason,stop", [("max_age", 331), ("drain", 92), ("lease_expired", 15)])
+def test_blocked_send_watchdog_holds_cap_and_enforces_close(rig, monkeypatch, caplog, spec_version, reason, stop):
+    events(rig, [value("payload-secret")])
+    original_renew = store.renew_stream
+    renewals = []
+
+    def renew(*args):
+        renewals.append(rig.clock.value)
+        if reason == "lease_expired":
+            return False
+        if len(renewals) == 1:
+            raise OSError("transient outage")
+        return original_renew(*args)
+
+    monkeypatch.setattr(store, "renew_stream", renew)
+
+    async def blocked():
+        for index in range(3):
+            store.acquire_stream(rig.tenant, rig.tenant, str(index), 600)
+        scope = {"type": "http", "asgi": {"spec_version": spec_version},
+                 "query_string": b"runs=run", "headers": []}
+        response = await stream.runs(Request(scope), runs="run", after_seq=-1, tenant=rig.context)
+        ticks = asyncio.Queue()
+        ready = asyncio.Queue()
+        sending = asyncio.Event()
+
+        async def sleep(seconds):
+            ready.put_nowait(True)
+            await ticks.get()
+
+        async def receive():
+            await asyncio.Event().wait()
+
+        async def send(message):
+            if message["type"] == "http.response.body":
+                sending.set()
+                await asyncio.Event().wait()
+
+        response.clock = rig.clock
+        response.sleep = sleep
+        task = asyncio.create_task(response(scope, receive, send))
+        try:
+            await asyncio.wait_for(sending.wait(), 5)
+            await asyncio.wait_for(ready.get(), 5)
+            for second in range(1, stop):
+                rig.clock.value = second
+                ticks.put_nowait(True)
+                await asyncio.wait_for(ready.get(), 5)
+                if second == 60:
+                    row = store._run(rig.tenant, lambda sql: sql.execute(
+                        "SELECT expires_at FROM lab_stream_leases WHERE stream_id=?",
+                        (response.lease.stream_id,)).fetchone())
+                    assert store._date(row["expires_at"]) > store._now()
+                    with pytest.raises(store.TooLarge):
+                        store.acquire_stream(rig.tenant, rig.tenant, "fifth", 45)
+                    if reason == "drain":
+                        response.lease.signal.set()
+            rig.clock.value = stop
+            ticks.put_nowait(True)
+            with pytest.raises(asyncio.CancelledError):
+                await asyncio.wait_for(task, 5)
+            assert response.lease.reason == reason
+            assert renewals[:2] == [15, 15]
+            assert response.lease.signal not in stream._streams
+            assert store.acquire_stream(rig.tenant, rig.tenant, "fifth", 45)
+        finally:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+    with caplog.at_level(logging.INFO, logger=stream.__name__):
+        asyncio.run(blocked())
+    lines = [record.getMessage() for record in caplog.records
+             if record.getMessage().startswith("lab_stream_closed ")]
+    assert len(lines) == 1 and "payload-secret" not in lines[0]
 
 
 def test_latency_summary_has_counts_without_payload(rig, caplog):

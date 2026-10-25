@@ -23,16 +23,34 @@ logger = logging.getLogger(__name__)
 LEASE_TTL = 45
 VALUE_BYTES = 64 * 1024
 STREAM_BYTES = 2 * 1024 * 1024
+MAX_CURSOR = 2**53 - 1
 _streams = set()
 
 
 class _StreamLease:
-    def __init__(self, tenant, principal, stream_id, signal):
+    def __init__(self, tenant, principal, stream_id, signal, cursors=()):
         self.tenant = str(tenant)
         self.principal = principal
         self.stream_id = stream_id
         self.signal = signal
         self.release_task = None
+        self.response_managed = False
+        self.reason = "disconnect"
+        self.logged = False
+        self.latencies = {run_id: deque(maxlen=15000) for run_id in cursors}
+        self.counts = dict.fromkeys(cursors, 0)
+
+    def log_summary(self):
+        if self.logged:
+            return
+        self.logged = True
+        summary = {}
+        for run_id, samples in self.latencies.items():
+            ordered = sorted(samples)
+            summary[run_id] = {"count": self.counts[run_id], **{
+                key: ordered[max(0, math.ceil(len(ordered) * percentile) - 1)] if ordered else None
+                for key, percentile in (("p50_ms", .5), ("p95_ms", .95))}}
+        logger.info("lab_stream_closed %s", json.dumps({"reason": self.reason, "runs": summary}))
 
     async def _release(self):
         _streams.discard(self.signal)
@@ -49,15 +67,60 @@ class _StreamLease:
 
 
 class _LeasedStreamingResponse(StreamingResponse):
-    def __init__(self, content, lease, **kwargs):
+    def __init__(self, content, lease, *, clock=time.monotonic, sleep=asyncio.sleep, **kwargs):
         super().__init__(content, **kwargs)
         self.lease = lease
+        lease.response_managed = True
+        self.clock = clock
+        self.sleep = sleep
+
+    async def _watch(self, response_task):
+        started = self.clock()
+        renew_at = started + 15
+        drain_at = None
+        while True:
+            await self.sleep(1)
+            now = self.clock()
+            if self.lease.signal.is_set() and drain_at is None:
+                drain_at = now
+            reason = None
+            if now - started > 330:
+                reason = "max_age"
+            elif drain_at is not None and now - drain_at > 30:
+                reason = "drain"
+            elif now >= renew_at:
+                renewed = False
+                for _ in range(2):
+                    try:
+                        renewed = await asyncio.to_thread(
+                            store.renew_stream, self.lease.tenant, self.lease.principal,
+                            self.lease.stream_id, LEASE_TTL)
+                    except Exception:
+                        pass
+                    if renewed:
+                        break
+                if not renewed:
+                    reason = "lease_expired"
+                renew_at = now + 15
+            if reason:
+                self.lease.reason = reason
+                response_task.cancel()
+                return
 
     async def __call__(self, scope, receive, send):
+        watchdog = asyncio.create_task(self._watch(asyncio.current_task()))
         try:
             await super().__call__(scope, receive, send)
         finally:
-            await self.lease.release()
+            watchdog.cancel()
+            try:
+                await asyncio.gather(watchdog, return_exceptions=True)
+                await self.body_iterator.aclose()
+            finally:
+                try:
+                    await self.lease.release()
+                finally:
+                    self.lease.log_summary()
 
 
 @router.on_event("shutdown")
@@ -72,6 +135,12 @@ def _frame(kind, data, event_id=None):
 
 
 def _cursors(runs, after_seq, last_id):
+    try:
+        after_seq = int(after_seq)
+    except (ValueError, TypeError):
+        raise HTTPException(400, detail="lab_stream_cursor_invalid") from None
+    if not -1 <= after_seq <= MAX_CURSOR:
+        raise HTTPException(400, detail="lab_stream_cursor_invalid")
     ids = runs.split(",")
     if not 1 <= len(ids) <= 8 or len(set(ids)) != len(ids):
         raise HTTPException(422, detail="invalid_lab_stream_runs")
@@ -86,12 +155,16 @@ def _cursors(runs, after_seq, last_id):
             seen = set()
             for pair in pairs:
                 run_id, seq = pair.rsplit(":", 1)
-                if run_id not in cursors or run_id in seen or int(seq) < -1:
+                if not 0 <= int(seq) <= MAX_CURSOR:
+                    raise HTTPException(400, detail="lab_stream_cursor_invalid")
+                if run_id not in cursors or run_id in seen:
                     raise ValueError
                 seen.add(run_id)
                 cursors[run_id] = int(seq)
         return cursors
-    except (ValueError, store.InvalidGraph):
+    except ValueError:
+        raise HTTPException(400, detail="lab_stream_cursor_invalid") from None
+    except store.InvalidGraph:
         raise HTTPException(422, detail="invalid_lab_stream_cursor") from None
 
 
@@ -99,7 +172,7 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
                        clock=time.monotonic, sleep=asyncio.sleep,
                        wall_clock=time.time, request=None, lease=None):
     if lease is None:
-        lease = _StreamLease(tenant, principal, stream_id, signal)
+        lease = _StreamLease(tenant, principal, stream_id, signal, cursors)
     started = clock()
     binding_at = started
     heartbeat_at = started + 15
@@ -108,17 +181,16 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
     rates = dict.fromkeys(cursors, 0)
     pending = {run_id: {} for run_id in cursors}
     # Bounded rolling samples; counts cover the complete stream.
-    latencies = {run_id: deque(maxlen=15000) for run_id in cursors}
-    counts = dict.fromkeys(cursors, 0)
+    latencies = lease.latencies
+    counts = lease.counts
     newest = None
     reason = "disconnect"
 
     def encode(run_id, event, coalesced=0):
         public = _public_event(event)
-        if public["kind"] == "value":
-            size = len(json.dumps(public["payload"], separators=(",", ":")).encode())
-            if size > VALUE_BYTES:
-                public["payload"] = {"truncated": True, "size": size}
+        size = len(json.dumps(jsonable_encoder(public["payload"]), separators=(",", ":")).encode())
+        if size > VALUE_BYTES:
+            public["payload"] = {"truncated": True, "size": size}
         if coalesced:
             public["coalesced"] = coalesced
         return _frame("run", {"run_id": run_id, **public}, f'{run_id}:{event["seq"]}')
@@ -160,7 +232,8 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
             if request is not None and await request.is_disconnected():
                 return
             if now >= heartbeat_at:
-                if not await asyncio.to_thread(store.renew_stream, str(tenant), principal, stream_id, LEASE_TTL):
+                if not lease.response_managed and not await asyncio.to_thread(
+                        store.renew_stream, str(tenant), principal, stream_id, LEASE_TTL):
                     reason = "lease_expired"
                     break
                 heartbeat_at = now + 15
@@ -171,6 +244,14 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
                 window, byte_count = now, 0
                 rates = dict.fromkeys(cursors, 0)
             for run_id in cursors:
+                if pending[run_id]:
+                    try:
+                        await asyncio.to_thread(store.get, str(tenant), run_id)
+                    except store.NotFound:
+                        pending[run_id].clear()
+                        reason = "run_missing"
+                        yield _frame("close", {"reason": reason, "run_id": run_id})
+                        return
                 # Deliver the newest deferred value per block before reading more.
                 for block, (event, removed) in sorted(pending[run_id].items(), key=lambda item: item[1][0]["seq"]):
                     closed = await closing_reason()
@@ -233,32 +314,40 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
         yield _frame("close", {"reason": reason})
     finally:
         try:
-            await lease.release()
+            if not lease.response_managed:
+                await lease.release()
         finally:
-            summary = {}
-            for run_id, samples in latencies.items():
-                ordered = sorted(samples)
-                summary[run_id] = {"count": counts[run_id], **{
-                    key: ordered[max(0, math.ceil(len(ordered) * percentile) - 1)] if ordered else None
-                    for key, percentile in (("p50_ms", .5), ("p95_ms", .95))}}
-            logger.info("lab_stream_closed %s", json.dumps({"reason": reason, "runs": summary}))
+            if lease.reason == "disconnect":
+                lease.reason = reason
+            if not lease.response_managed:
+                lease.log_summary()
 
 
 @router.get("/runs")
-async def runs(request: Request, runs: str = Query(...), after_seq: int = Query(-1, ge=-1),
+async def runs(request: Request, runs: str | None = Query(None), after_seq: str = Query("-1"),
                tenant=Depends(deps.require_tenant)):
-    _admit(tenant, "build")
     if any(key in request.query_params for key in ("token", "jwt", "ticket", "access_token")):
         raise HTTPException(400, detail="lab_stream_query_credential")
+    _admit(tenant, "build")
+    if not runs:
+        raise HTTPException(422, detail="lab_stream_runs_required")
     cursors = _cursors(runs, after_seq, request.headers.get("last-event-id"))
     for run_id in cursors:
         await asyncio.to_thread(_call, store.get, str(tenant), run_id)
     principal = getattr(tenant, "subject", None) or "tenant:" + str(tenant)
     stream_id = uuid.uuid4().hex
     signal = asyncio.Event()
-    lease = _StreamLease(tenant, principal, stream_id, signal)
+    lease = _StreamLease(tenant, principal, stream_id, signal, cursors)
+    acquire = asyncio.create_task(asyncio.to_thread(
+        store.acquire_stream, str(tenant), principal, stream_id, LEASE_TTL))
     try:
-        await asyncio.to_thread(store.acquire_stream, str(tenant), principal, stream_id, LEASE_TTL)
+        await asyncio.shield(acquire)
+    except asyncio.CancelledError:
+        def release_acquired(task):
+            if not task.cancelled() and task.exception() is None and task.result():
+                asyncio.create_task(lease.release())
+        acquire.add_done_callback(release_acquired)
+        raise
     except store.TooLarge:
         raise HTTPException(409, detail="lab_stream_limit") from None
     except Exception:
