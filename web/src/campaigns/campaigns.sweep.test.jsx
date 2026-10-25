@@ -158,6 +158,28 @@ describe('campaign sweep regressions', () => {
     expect(screen.queryByText('Question recorded.')).toBeNull()
   })
 
+  it('explains that an uploaded file stays in the project instead of offering removal', async () => {
+    const path = 'inputs/roof/roof.txt'
+    uploadProjectInput.mockResolvedValue({ path, name: 'roof.txt' })
+    show()
+    fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })
+    fireEvent.change(screen.getByLabelText('Title'), { target: { value: 'Roof layout' } })
+    fireEvent.change(screen.getByLabelText('Prompt'), { target: { value: 'Deliver the roof layout.' } })
+    fireEvent.change(screen.getByLabelText('Input file (optional)'), {
+      target: { files: [new File(['roof'], 'roof.txt', { type: 'text/plain' })] },
+    })
+    expect(screen.getByRole('button', { name: 'Remove selected file' })).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Add to project' }))
+    await screen.findByText('roof.txt added to this project. Ready for this release.')
+    expect(screen.queryByRole('button', { name: 'Remove selected file' })).toBeNull()
+    expect(screen.getByText('This file was added to the project and stays there.')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Request release' }).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Request release' }))
+    await waitFor(() => expect(campaign.submit).toHaveBeenCalledWith(expect.objectContaining({
+      finish: expect.objectContaining({ artifact_refs: [path] }),
+    })))
+  })
+
   it('removes an unwanted input from both state and the file picker', async () => {
     show()
     fireEvent.change(screen.getByLabelText('Campaign goal'), { target: { value: 'finish' } })

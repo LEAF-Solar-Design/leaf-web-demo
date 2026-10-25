@@ -142,10 +142,11 @@ function SubmitForm({ campaign, projectId, navigationRef, onBusyChange }) {
       <p className="dim">JSON, ASCII DXF, CSV, TXT or MD. UTF-8 text, from 1 byte through 1 MiB.</p>
       <button type="button" className="chip-act" disabled={busy || !input.file || !!input.ready}
         aria-busy={input.busy} onClick={addInput}>Add to project</button>
-      {input.file && <button type="button" className="chip-act" disabled={busy} onClick={() => {
+      {input.file && !input.ready && <button type="button" className="chip-act" disabled={busy} onClick={() => {
         setInput({ file: null, ready: null, error: null, busy: false })
         if (fileInput.current) fileInput.current.value = ''
       }}>Remove selected file</button>}
+      {input.ready && <p className="dim">This file was added to the project and stays there.</p>}
       <p role="status">{input.busy ? 'Adding input to project…' : input.ready ? `${input.ready.name} added to this project. Ready for this release.`
         : input.file ? 'Add the selected input to this project before requesting a release.' : 'Existing project material will be used if no file is selected.'}</p>
       <Alert error={input.error} />
