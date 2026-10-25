@@ -544,7 +544,7 @@ describe('R13F project Solar execution and form ingresses', () => {
         }
       }
     }
-    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), 'efbcbfe1a68a117368579c9455804ad9b3aae7b848903752ecb351a38a5c033c')
+    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '688612676474cf1de98e15efd6249ec92f57c9b3ec0809aa2df56fa2fdc320b8')
   })
 
   it('R13F-20 App retains one refusal helper and admits the project workspace', () => {
@@ -651,10 +651,10 @@ describe('R13F project Solar execution and form ingresses', () => {
     other.callback('onRequestCatalogRun')({ name: 'cad-read' }, other.params)
     assert.equal(other.calls('commit').length, 1)
     assert.deepEqual(other.errors, [])
-    const anchor = '{!running && (runErr || routeErr) && ('
+    const anchor = '{(runErr || routeErr) && ('
     assert.equal(appSource.split(anchor).length - 1, 1)
     const strip = r13One((node) => node.type === 'LogicalExpression' && node.operator === '&&'
-      && node.right.type === 'JSXElement' && appSource.slice(node.start, node.end).startsWith('!running && (runErr || routeErr)'))
+      && node.right.type === 'JSXElement' && appSource.slice(node.start, node.end).startsWith('(runErr || routeErr)'))
     const sentence = r13One((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'span'
       && node.openingElement.attributes.some((attr) => attr.name?.name === 'className' && attr.value?.value === 'strip-sentence'), strip.right)
     const text = sentence.children.find((node) => node.type === 'JSXExpressionContainer').expression
@@ -686,9 +686,9 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.deepEqual(h.errors, [])
     const other = r13Fixture({ rows: [] })
     const missing = { lane: 'run', tool: 'cad-missing' }
-    assert.equal(other.callback('armDecision')(missing), missing)
+    assert.equal(other.callback('armDecision')(missing), undefined)
     assert.equal(other.calls('lookup').length, 1)
-    assert.deepEqual(other.errors, [])
+    assert.deepEqual(other.errors, ['This tool is no longer in your catalog. Choose another tool to run.'])
   })
 
   it('R13F-11 slash dispatch refuses project Solar before routing', () => {
@@ -4658,21 +4658,22 @@ const DECLARED_AND_USED = [
 
 describe('App.jsx wiring', () => {
   it('names the drawing refresh wait when interrupting a finished job', () => {
-    const start = stripped.indexOf('onInterruptRun: () => {')
-    const end = stripped.indexOf('onClearSelection:', start)
+    const start = stripped.indexOf('onStopRun = useCallback')
+    const end = stripped.indexOf('const anyFamilyOpen', start)
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, new RegExp('showToast\\(result != null\\s*\\?\\s*\\{\\s*text:\\s*`Stopped waiting for the drawing to refresh after \\$\\{tool\\}\\.`'))
-    assert.match(stripped, /interruptRun,\s*currentJob\?\.tool,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
+    assert.match(stripped, /interruptRun,\s*selectedTool\?\.label,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
+    assert.match(stripped, /onInterruptRun: onStopRun/)
   })
 
   it('acknowledges interrupting live and mock runs after detaching', () => {
-    const start = stripped.indexOf('onInterruptRun: () => {')
-    const end = stripped.indexOf('onClearSelection:', start)
+    const start = stripped.indexOf('onStopRun = useCallback')
+    const end = stripped.indexOf('const anyFamilyOpen', start)
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, /interruptRun\(\);[\s\S]*showToast\(/)
-    assert.match(handler, /typeof currentJob\?\.tool === "string" && currentJob\.tool\.trim\(\) \? currentJob\.tool : "the run"/)
+    assert.match(handler, /selectedTool\?\.label \|\| "the run"/)
     assert.match(handler, new RegExp('text:\\s*mock\\s*\\?\\s*`Stopped waiting for \\$\\{tool\\}\\.`\\s*:\\s*currentJob\\?\\.job_id\\s*\\?\\s*`Stopped following \\$\\{tool\\}\\. It keeps running; find it in Jobs\\.`\\s*:\\s*`Stopped waiting for \\$\\{tool\\} to be accepted\\. If the server accepts it, it will appear in Jobs\\.`'))
   })
 
@@ -5002,7 +5003,7 @@ describe('App.jsx wiring', () => {
       assert.notEqual(refusal, -1, 'onRun must read engineDirtyRef.current')
       assert.notEqual(run, -1)
       assert.ok(refusal < run, 'the dirty refusal must precede runJob')
-      assert.match(onRunBody.slice(refusal, run), /REASONS\.unsavedEngineEdits[\s\S]*return null/)
+      assert.match(onRunBody.slice(refusal, run), /Save or discard your drawing edits before running[\s\S]*return null/)
     })
 
     it('the ref and the ribbon state are written by the one dirty-change callback the provider gets', () => {
@@ -5025,7 +5026,7 @@ describe('App.jsx wiring', () => {
     it('armDecision and onRun share the one write predicate', () => {
       const armStart = stripped.indexOf('armDecision = useCallback')
       assert.notEqual(armStart, -1)
-      assert.match(stripped.slice(armStart, armStart + 1600), /isWrite = isWriteTool\(catalogTool\)/)
+      assert.match(stripped.slice(armStart, armStart + 2000), /isWrite = isWriteTool\(catalogTool\)/)
       assert.match(onRunBody, /isWrite = isWriteTool\(tool\)/)
     })
 
@@ -5033,7 +5034,8 @@ describe('App.jsx wiring', () => {
       const armStart = stripped.indexOf('armDecision = useCallback')
       assert.notEqual(armStart, -1)
       const armBody = stripped.slice(armStart, armStart + 5200)
-      assert.ok(armBody.includes('if (!mock && session.status !== "active") return'))
+      assert.ok(armBody.includes('if (!mock && session.status !== "active")'))
+      assert.ok(armBody.includes('Sign in to run tools.'))
       assert.equal(armBody.includes('if (!mock && !tenant) return'), false)
       const dependencyStart = armBody.indexOf('[tools, mock, session.status')
       assert.notEqual(dependencyStart, -1)

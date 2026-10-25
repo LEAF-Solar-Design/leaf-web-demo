@@ -2265,14 +2265,18 @@ export default function App() {
     const catalogTool = refreshedTool || tools.find((candidate) => candidate.name === decision.tool)
     if (!catalogTool) {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
-      return decision
+      setRunErr('This tool is no longer in your catalog. Choose another tool to run.')
+      return
     }
     // A resolved platform session is the authority gate. Off-auth local stacks
     // intentionally omit the auth-only tenant echo and use config.tenant for
     // their X-Tenant-Id stub, so `tenant` itself cannot be the live-run gate.
-    if (!mock && session.status !== 'active') return
+    if (!mock && session.status !== 'active') {
+      setRunErr('Sign in to run tools.', { local: true })
+      return
+    }
     if (!catalogRunContextRef.current) {
-      setRunErr('This workspace has no canonical drawing version to run. Import a drawing first.')
+      setRunErr('This workspace has no drawing yet. Import a drawing first.')
       return
     }
     const isWrite = isWriteTool(catalogTool)
@@ -2282,15 +2286,26 @@ export default function App() {
       && catalogRunContextRef.current.projectId == null
       && catalogRunContextRef.current.drawingVersion == null
     ) {
-      setRunErr('The current drawing version is not ready. Refresh the drawing before running a write tool.')
+      setRunErr('The drawing is not ready. Refresh it before running tools that change it.')
       return
     }
-    if (running || previewing || (isWrite && (writeLocked || !canRunWrite))) return
+    if (running) {
+      setRunErr('Another run is in progress. Wait for it to finish, then try again.')
+      return
+    }
+    if (previewing) {
+      setRunErr("You're viewing an older version. Return to the latest version to run tools.")
+      return
+    }
+    if (isWrite && (writeLocked || !canRunWrite)) {
+      setRunErr("This drawing is locked for editing, so tools that change it can't run right now.")
+      return
+    }
     // W4g-2 (one head): every run path (ribbon, rail, slash, the natural-
     // language route, the tour) arms through here, so this is the one place
     // a write tool is refused while the browser engine holds unsaved edits.
     if (isWrite && engineDirty) {
-      setRunErr(`${catalogTool.name} not run: ${REASONS.unsavedEngineEdits}.`)
+      setRunErr(`Save or discard your drawing edits before running ${catalogTool.label || 'this tool'}.`)
       return
     }
     const prepared = prepareRunParams(catalogTool, decision.params, { complete: decision.paramsComplete === true })
@@ -2470,7 +2485,7 @@ export default function App() {
     // Every path to a run ends in this call (the confirm click, the mock
     // path, the tour), and the ref carries the current fact, not a closure's.
     if (isWrite && engineDirtyRef.current) {
-      setRunErr(`${tool.name} not run: ${REASONS.unsavedEngineEdits}.`)
+      setRunErr(`Save or discard your drawing edits before running ${tool.label || 'this tool'}.`)
       return null
     }
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
@@ -2534,11 +2549,15 @@ export default function App() {
         }
         currentTool = latestTools.find((candidate) => candidate.name === intent?.toolName) || null
       }
-      toolSnapshot = createCatalogToolSnapshot(currentTool)
-    } catch {
+      if (currentTool) toolSnapshot = createCatalogToolSnapshot(currentTool)
+    } catch (cause) {
+      setRunErr(humanizeError(cause))
+      return
+    }
+    if (!currentTool) {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current, intent?.intentId)
       dismissRoute({ outcome: 'invalidated' })
-      setRunErr('That catalog tool changed or is no longer available. Choose Run again to create a new intent.')
+      setRunErr('That catalog tool changed or is no longer available. Choose Run again to review it.')
       if (ENV_SOLAR_FLOW_RAIL) clearSolarFlowStaged(intent?.intentId ?? null)
       return
     }
@@ -2553,7 +2572,9 @@ export default function App() {
     runIntentStateRef.current = confirmed.state
     if (!confirmed.ok) {
       dismissRoute({ outcome: 'invalidated' })
-      setRunErr('That run confirmation is no longer valid. Choose Run again to create a new intent.')
+      setRunErr(confirmed.code === 'changed_tool_snapshot' || confirmed.code === 'changed_tool'
+        ? 'That catalog tool changed or is no longer available. Choose Run again to review it.'
+        : 'That run confirmation is no longer valid. Choose Run again to review it.')
       if (ENV_SOLAR_FLOW_RAIL) clearSolarFlowStaged(intent?.intentId ?? null)
       return
     }
@@ -2710,11 +2731,10 @@ export default function App() {
 
   // solar-parity-017: the run kept across a sign-in expiry goes back through
   // the same confirm ladder as a catalog pick, so nothing runs on its own. The
-  // catalog loads before the run is taken, so a failed load keeps the inputs.
+  // catalog loads before arming; only an armed run releases the saved inputs.
   const onResumePendingRun = useCallback(async () => {
     if (mock) return
-    // Refuse a saved project Solar run before preparing it: preparation takes
-    // the run out of storage, and a refusal must keep the saved inputs.
+    // Refuse a saved project Solar run before loading its catalog.
     if (refuseProjectSolar(pendingRun?.tool)) return
     let prepared
     try {
@@ -2726,8 +2746,10 @@ export default function App() {
     if (!prepared) return
     const { pending, tool } = prepared
     if (refuseProjectSolar(tool?.name || pending.tool)) return
-    if (tool) onRequestCatalogRun(tool, pending.params, null, 'catalog', { complete: true })
-    else setRunErr(`${pending.tool} is no longer in your catalog. Your saved inputs were discarded.`)
+    if (tool) {
+      const armed = onRequestCatalogRun(tool, pending.params, null, 'catalog', { complete: true })
+      if (armed?.runIntent?.intentId) prepared.complete?.()
+    } else setRunErr('This tool is no longer in your catalog. Your saved inputs were kept.')
   }, [mock, onRequestCatalogRun, pendingRun, preparePendingRun, setRunErr, refuseProjectSolar])
 
   // An agent-dispatched job (job_linked event) -> the SAME §7 attach
@@ -2884,7 +2906,7 @@ export default function App() {
       return
     }
     setLastAuthoredTool(runnableTool)
-    commitCatalogDecision({
+    const armed = commitCatalogDecision({
       lane: 'run', tool: runnableTool.name, params: {}, confidence: 0.99,
       rationale: `Authored just now. Confirm to run “${runnableTool.name}”.`,
       alternatives: [],
@@ -2895,6 +2917,7 @@ export default function App() {
       // run.confirm_shown source vocabulary.
       source: 'authored',
     })
+    if (!armed?.runIntent?.intentId) return
     setTimeout(() => document.querySelector('main')?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
   }, [commitCatalogDecision, loadCatalogTools, showToast])
 
@@ -3260,6 +3283,23 @@ export default function App() {
     refreshJobs()
   }, [mock, currentJobId, refreshJobs])
   */
+
+  const onStopRun = useCallback(() => {
+    track('run.interrupted', {
+      ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
+      ...(interruptSnapshotRef.current.elapsedMs != null
+        ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
+    })
+    interruptRun()
+    const tool = selectedTool?.label || 'the run'
+    showToast(result != null
+      ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
+      : { text: mock
+        ? `Stopped waiting for ${tool}.`
+        : currentJob?.job_id
+          ? `Stopped following ${tool}. It keeps running; find it in Jobs.`
+          : `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.` })
+  }, [interruptRun, selectedTool?.label, currentJob?.job_id, result, mock, showToast])
 
   // R ladder (item D): every displayed R keycap must be live, and only the
   // HIGHEST-PRIORITY visible error responds — one keypress, one retry, never
@@ -3821,26 +3861,7 @@ export default function App() {
       onCloseStart: onReturnToDrawing,
       onDismissRoute: () => (ENV_SOLAR_FLOW_RAIL ? onDismissSolarFlowRoute() : dismissRoute()),
       onClearErrors: () => { clearRouteError(); clearRunErr() },
-      onInterruptRun: () => {
-        // P2 wave C-2: latency tolerance in the wild. Esc-on-running is the
-        // ONE interrupt gesture (the rail keeps the job; nothing cancels
-        // server-side). Refs, not deps: elapsed ticks every 1s and must
-        // not re-subscribe this listener.
-        track('run.interrupted', {
-          ...(interruptSnapshotRef.current.tool ? { tool: interruptSnapshotRef.current.tool } : {}),
-          ...(interruptSnapshotRef.current.elapsedMs != null
-            ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
-        })
-        interruptRun()
-        const tool = typeof currentJob?.tool === 'string' && currentJob.tool.trim() ? currentJob.tool : 'the run'
-        showToast(result != null
-          ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
-          : { text: mock
-          ? `Stopped waiting for ${tool}.`
-          : currentJob?.job_id
-            ? `Stopped following ${tool}. It keeps running; find it in Jobs.`
-            : `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.` })
-      },
+      onInterruptRun: onStopRun,
       onClearSelection: () => setSelectedHandle(null),
       onCloseProject: () => onCloseProject(),
       onRetryRoute: () => onDispatch(),
@@ -3859,7 +3880,7 @@ export default function App() {
     window.addEventListener('keydown', onKey)
     return () => window.removeEventListener('keydown', onKey)
   }, [startOpen, onReturnToDrawing, drawer, drawerViewport, studioShell, studioDrawer, historyOpen, route, routeErr, runErr, running, selectedHandle,
-      interruptRun, currentJob?.tool, currentJob?.job_id, result, mock, showToast, onDispatch, openProjectId, onCloseProject, rTarget,
+      onStopRun, onDispatch, openProjectId, onCloseProject, rTarget,
       closeHistory, loadHistory, retryTools, loadCatalog, onRetryViewerRefresh, dismissRoute, clearRouteError,
       onDismissSolarFlowRoute, drawingState, canUndo, canRedo, versionBusy, previewing, drawingMutationsBlocked, onUndo, onRedo])
   // S27: Escape from inside the typed Solar settings form closes it through
@@ -5842,16 +5863,16 @@ export default function App() {
                 {runElapsedMs != null ? ` · ${fmtElapsed(runElapsedMs)}` : ''}
               </span>
               <span className="key hot">Esc</span>
-              <span className="dim">interrupt</span>
+              <button type="button" className="chip-act" onClick={onStopRun}>Stop</button>
             </div>
           )}
-          {!running && (runErr || routeErr) && (
-            <div className="strip-failed enter">
+          {(runErr || routeErr) && (
+            <div className="strip-failed enter" role="alert">
               <span className="dot red" aria-hidden="true" />
               <span className="strip-sentence">
                 {routeErr
                   ? `Couldn’t route the prompt: ${routeErr}`
-                  : `Couldn’t run ${selectedTool?.name || 'the tool'}: ${runErr}`}
+                  : runErr}
                 <span className="dim"> · your last good result is unchanged</span>
               </span>
               <button

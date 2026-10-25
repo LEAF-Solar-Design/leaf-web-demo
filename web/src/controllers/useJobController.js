@@ -143,6 +143,8 @@ export default function useJobController({
   const [elapsedMs, setElapsedMs] = useState(null)
   const [result, setResult] = useState(null)
   const [error, setError] = useState(null)
+  const [localError, setLocalError] = useState(null)
+  useEffect(() => { setLocalError(null) }, [readsPaused, resetKey])
   const [pollGeneration, setPollGeneration] = useState(0)
   const [staleResults, setStaleResults] = useState([])
   const [pendingRun, setPendingRun] = useState(() => (mock ? null : readPendingRun(storage)))
@@ -207,14 +209,19 @@ export default function useJobController({
     if (clearPointer) clearInflightJob(null, storageRef.current)
   }, [resetActivity, setJobId])
 
-  const reportError = useCallback((cause) => {
+  const reportError = useCallback((cause, { local = false } = {}) => {
+    // Local refusal copy contains no signed-in job data and remains visible to guests.
+    if (local && readsPausedRef.current) {
+      setLocalError(formatLifecycleError(cause, callbacksRef.current.formatError))
+      return
+    }
     if (readsPausedRef.current) return
     setError(typeof cause === 'string'
       ? cause
       : formatLifecycleError(cause, callbacksRef.current.formatError))
   }, [])
 
-  const clearError = useCallback(() => setError(null), [])
+  const clearError = useCallback(() => { setError(null); setLocalError(null) }, [])
 
   const adoptEnvelope = useCallback((envelope, { jobId = null, toolName = null } = {}) => {
     if (readsPausedRef.current) return null
@@ -495,9 +502,8 @@ export default function useJobController({
     return record
   }, [])
 
-  // Loads the catalog BEFORE taking the pending run, so a failed load rejects
-  // with the saved inputs still stored. Resolves null when nothing is pending,
-  // else { pending, tool } with tool null when the catalog no longer has it.
+  // Preparation preserves inputs. Only a successfully armed caller completes
+  // the handoff; a refusal or failed catalog load leaves the saved run intact.
   const preparePendingRun = useCallback(async (loadTools) => {
     if (readsPausedRef.current) {
       setAuth(true)
@@ -510,11 +516,16 @@ export default function useJobController({
     const pauseGeneration = pauseGenerationRef.current
     const tools = await loadTools()
     if (readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration) return null
-    const pending = takePendingRun()
+    const pending = readPendingRun(storageRef.current)
     if (!pending) return null
     const tool = (Array.isArray(tools) ? tools : [])
       .find((candidate) => candidate?.name === pending.tool) || null
-    return { pending, tool }
+    const complete = () => {
+      if (readsPausedRef.current || pauseGenerationRef.current !== pauseGeneration) return
+      const current = readPendingRun(storageRef.current)
+      if (JSON.stringify(current) === JSON.stringify(pending)) takePendingRun()
+    }
+    return { pending, tool, complete }
   }, [setAuth, takePendingRun])
 
   const discardPendingRun = useCallback(() => {
@@ -707,7 +718,7 @@ export default function useJobController({
     progress: readsPaused ? null : progress,
     elapsedMs: readsPaused ? null : elapsedMs,
     result: readsPaused ? null : result,
-    error: readsPaused ? null : error,
+    error: readsPaused ? localError : error,
     runJob,
     attachJob,
     detachJob,
