@@ -64,6 +64,9 @@ const APP_ONLY_HOSTS = new Set([
   'platform-staging.leafdesign.ai',
 ])
 const MARKETING_ORIGIN = 'https://www.leafautomation.ai'
+// Accepted destinations match SheetsPage's SHEET_CODES without eagerly
+// importing the lazy sheets component and its rendering dependencies.
+const SHEET_TARGETS = new Set(['l-000', 'g-000', 'a-101', 'a-102', 'e-401', 'c-201', 's-501'])
 
 // THE reading of the boot query, made once (ACCEPTANCE route matrix: "one
 // reading must serve both consumers"). The same string drives the BOOT
@@ -80,17 +83,20 @@ export default function SiteRoot() {
   // Armed by the callback QUERY on ANY path, not just /try: the redirect_uri is
   // the bare origin, so /try is the one landing this never sees. See authBoot.js.
   const [authCallbackPending, setAuthCallbackPending] = useState(shouldDeferForAuthCallback)
-  const { path } = useRoute()
+  const { path, hash } = useRoute()
   const scene = bootApp ? 'app' : sceneForPath(path)
-  // Sheets leave for the marketing hub on app-only hosts. The
-  // sheets codes differ between the two surfaces ('02'.. here, 'l-000'.. on
-  // www), so any /sheets path lands on the www sheets hub, not a 404.
+  // Sheets leave for the marketing hub on app-only hosts, keeping a valid
+  // destination. Like SheetsPage, prefer a recognized path code to the hash.
   useEffect(() => {
     if (scene !== 'sheets') return
     if (!APP_ONLY_HOSTS.has(window.location.hostname)) return
     if (shouldDeferForAuthCallback()) return
-    window.location.replace(MARKETING_ORIGIN + '/sheets')
-  }, [scene])
+    const pathTarget = path.match(/^\/sheets\/([a-z]-\d{3})\/?$/i)?.[1]
+    const target = [pathTarget, hash?.replace(/^#/, '')]
+      .map((code) => code?.toLowerCase())
+      .find((code) => SHEET_TARGETS.has(code))
+    window.location.replace(MARKETING_ORIGIN + '/sheets' + (target ? `#${target}` : ''))
+  }, [scene, path, hash])
   const stageRef = useRef(null)
   // The studio ground node (W3 one-shell). State, not a ref: App's portal
   // must re-render when the node ATTACHES, and a ref mutation is invisible
