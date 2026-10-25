@@ -75,11 +75,13 @@ def _grant_admin_url(tenant: str) -> Optional[str]:
 
 
 def _require_grant_owner(tenant=Depends(deps.require_active_tenant)):
-    """Require the current platform tenant owner for grant administration.
+    """Require the tenant owner or a platform admin for grant administration.
 
     Auth-off keeps the hermetic demo contract unchanged. In live mode, resolve
     the binding and role again at the point of mutation so a recent revoke or
     tenant move fails closed before the harness receives any request.
+    Platform admins need both admin tier and allowlist membership, and may
+    administer grants only in their own tenant with an active binding role.
     """
     if not deps.auth_live():
         return tenant
@@ -100,7 +102,11 @@ def _require_grant_owner(tenant=Depends(deps.require_active_tenant)):
             status_code=503,
             detail="platform identity binding authority is unavailable",
         ) from exc
-    if role != "owner":
+    if role != "owner" and not (
+        isinstance(role, str) and role
+        and getattr(tenant, "tier", None) == "admin"
+        and tenant.subject in deps.admin_subjects()
+    ):
         raise HTTPException(status_code=403, detail="tenant owner authority required")
     return tenant
 

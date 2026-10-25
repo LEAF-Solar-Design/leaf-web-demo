@@ -38,6 +38,68 @@ def _tenant() -> deps.TenantContext:
     )
 
 
+def _admin_tenant() -> deps.TenantContext:
+    return deps.TenantContext(
+        "org-canonical",
+        org_id="org-canonical",
+        tier="admin",
+        subject="auth0|owner",
+    )
+
+
+@pytest.mark.parametrize("role", ["editor", "reviewer", "read_only"])
+def test_live_platform_admin_with_non_owner_binding_is_authorized(monkeypatch, role):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|owner")
+    monkeypatch.setattr(platform_link, "platform_store", lambda: _Store(role=role))
+    tenant = _admin_tenant()
+    assert tenant_router._require_grant_owner(tenant) is tenant
+
+
+@pytest.mark.parametrize("allowlist", ["auth0|other", None])
+def test_admin_tier_without_allowlist_entry_is_denied(monkeypatch, allowlist):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    if allowlist is None:
+        monkeypatch.delenv("LEAF_PLATFORM_ADMIN_SUBJECTS", raising=False)
+    else:
+        monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", allowlist)
+    monkeypatch.setattr(platform_link, "platform_store", lambda: _Store(role="editor"))
+    with pytest.raises(HTTPException) as exc:
+        tenant_router._require_grant_owner(_admin_tenant())
+    assert exc.value.status_code == 403
+
+
+def test_allowlisted_subject_without_admin_tier_is_denied(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|owner")
+    monkeypatch.setattr(platform_link, "platform_store", lambda: _Store(role="editor"))
+    with pytest.raises(HTTPException) as exc:
+        tenant_router._require_grant_owner(_tenant())
+    assert exc.value.status_code == 403
+
+
+def test_platform_admin_without_role_in_tenant_is_denied(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|owner")
+    monkeypatch.setattr(platform_link, "platform_store", lambda: _Store(role=None))
+    with pytest.raises(HTTPException) as exc:
+        tenant_router._require_grant_owner(_admin_tenant())
+    assert exc.value.status_code == 403
+
+
+def test_platform_admin_binding_move_fails_closed(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|owner")
+    monkeypatch.setattr(
+        platform_link,
+        "platform_store",
+        lambda: _Store(role="editor", binding_tenant="org-moved"),
+    )
+    with pytest.raises(HTTPException) as exc:
+        tenant_router._require_grant_owner(_admin_tenant())
+    assert exc.value.status_code == 403
+
+
 def test_auth_off_preserves_legacy_grant_admin(monkeypatch):
     monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
     assert tenant_router._require_grant_owner("acme") == "acme"
