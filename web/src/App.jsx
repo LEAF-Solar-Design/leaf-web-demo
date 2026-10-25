@@ -147,7 +147,7 @@ import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
 import { composeDiagnostics, collectRefusals, taskRevisionOf } from './diagnostics.js'
 import { recentRequestFailures } from './api.js'
 import { cadTimingRows } from './cadTimingPresentation.js'
-import { getSessionHolderId } from './checkoutIdentity.js'
+import { describeLockHolder, getSessionHolderId } from './checkoutIdentity.js'
 import {
   confirmRunIntent, createCatalogRunContext, createCatalogToolSnapshot, createRunIntentState,
   dismissRunIntent, drawingVersionForRun, mintCorrelationId, prepareCatalogRunParams, stageRunIntent,
@@ -4422,7 +4422,7 @@ export default function App() {
         acquired = await takeCheckout(REQUESTED_DRAWING_ID, 'cad-edit-save')
         if (!acquired.acquired) {
           const e = new Error('drawing is checked out by '
-            + (acquired.locked_by || 'another session')
+            + describeLockHolder(acquired.locked_by, ownHolder)
             + '. Try again when the lock clears')
           e.status = 409
           throw e

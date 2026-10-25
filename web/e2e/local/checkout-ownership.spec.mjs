@@ -6,7 +6,7 @@ import { requireLocalReady } from './requireReady.mjs'
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
 const DRAWING_ID = 'cat-panels'
-const OTHER_HOLDER = 'other-editor'
+const OTHER_HOLDER = 'sess-72d58f4d-36af-421b-a164-a98394156cfa'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
 test('checkout conflict, expiry, take, and release stay authoritative in the unified scene', async ({ page, request }, testInfo) => {
@@ -42,7 +42,7 @@ test('checkout conflict, expiry, take, and release stay authoritative in the uni
 
   await page.goto('/try?proof=1')
   await expect(page.getByTestId('operator-phase')).toContainText('Drawing ready', { timeout: 15_000 })
-  await expect(page.getByText(`Editing locked by ${OTHER_HOLDER}`)).toBeVisible()
+  await expect(page.getByText('Editing locked by another session')).toBeVisible()
 
   await page.getByRole('tab', { name: /Catalog/ }).click()
   const writeTool = page.locator('.tool-card').filter({ hasText: 'delete-marked-panel' })
