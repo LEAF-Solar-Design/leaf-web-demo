@@ -859,7 +859,7 @@ describe('CockpitStatus', () => {
     const status = screen.getByTestId('cockpit-status')
     const [x, y] = status.querySelectorAll('.cockpit-coord b')
     expect(x.textContent).toBe('—')
-    expect(status.textContent).toContain('3 entities · 1 layers')
+    expect(status.textContent).toContain('3 rendered paths · 1 layers')
     expect(status.textContent).toContain('sel A1')
 
     move(ground, 123.4, 50)
