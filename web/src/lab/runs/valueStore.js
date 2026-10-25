@@ -19,7 +19,7 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
   }
   let list = [], events = [], dropped = 0, order = 0
   maxEvents = Math.max(0, Math.floor(maxEvents))
-  maxRuns = Math.min(40, Math.max(1, Math.floor(maxRuns)))
+  maxRuns = Math.min(20, Math.max(1, Math.floor(maxRuns)))
   const publishList = () => { list = [...runs.values()].sort((a, b) => b.order - a.order); notify(listeners) }
   const publish = id => { notify(runListeners.get(id)); publishList() }
   function trim() {
@@ -36,7 +36,7 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
   function ensure(id, metadata = {}) {
     if (!runs.has(id) && id !== 'local' && [...runs.keys()].filter(key => key !== 'local').length >= maxRuns) {
       const oldest = [...runs.values()].filter(run => run.id !== 'local' && terminalState(run.state) && !recovering.has(run.id) && run.transport.status !== 'auth_expired').sort((a, b) => a.order - b.order)[0]
-      if (!oldest && [...runs.keys()].filter(key => key !== 'local').length >= 40) throw new Error('Too many active runs')
+      if (!oldest) throw new Error('Too many active runs')
       if (oldest) {
         runs.delete(oldest.id)
         streamControls.delete(oldest.id)
@@ -52,7 +52,7 @@ export function createValueStore({ maxEvents = 10000, maxRuns = 20 } = {}) {
   const store = {
     getRun: id => runs.get(id), getBlock: (id, block) => runs.get(id)?.blocks[block],
     getRuns: () => list, getEvents: () => events, get dropped() { return dropped },
-    canAddRun: () => [...runs.keys()].filter(id => id !== 'local').length < 40
+    canAddRun: () => [...runs.keys()].filter(id => id !== 'local').length < maxRuns
       || [...runs.values()].some(run => run.id !== 'local' && terminalState(run.state) && !recovering.has(run.id) && run.transport.status !== 'auth_expired'),
     subscribeBlock: (id, block, listener) => listen(blockListeners, `${id}/${block}`, listener),
     subscribeRun: (id, listener) => listen(runListeners, id, listener),

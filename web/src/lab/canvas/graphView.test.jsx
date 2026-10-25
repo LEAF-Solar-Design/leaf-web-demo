@@ -120,7 +120,7 @@ describe('first-click live graph', () => {
     }
   })
 
-  it('F5 serialises concurrent clicks at 19 active runs and tracks each accepted submission', async () => {
+  it('F5 serialises concurrent clicks at 19 active runs and admits another after one finishes', async () => {
     const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
     const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
     client.setDocId('concurrent-runs')
@@ -141,6 +141,7 @@ describe('first-click live graph', () => {
       await act(async () => accept({ ok: true, status: 202, json: async () => ({ run_id: 'concurrent-19', state: 'queued' }) }))
       await waitFor(() => expect(run).toBeEnabled())
       expect(fetchImpl).toHaveBeenCalledTimes(2)
+      act(() => labValueStore.upsertRun('concurrent-0', { state: 'finished' }))
       fireEvent.click(run)
       await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3))
       await act(async () => accept({ ok: true, status: 202, json: async () => ({ run_id: 'concurrent-20', state: 'queued' }) }))
@@ -151,7 +152,7 @@ describe('first-click live graph', () => {
       }
     } finally {
       view.unmount()
-      for (let n = 0; n <= 20; n++) labValueStore.upsertRun(`concurrent-${n}`, { state: 'finished' })
+      labValueStore.getRuns().filter(run => run.id.startsWith('concurrent-')).forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
     }
   })
 
@@ -160,18 +161,20 @@ describe('first-click live graph', () => {
     const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })
     client.setDocId('hard-cap')
     labValueStore.getRuns().filter(run => run.id !== 'local').forEach(run => labValueStore.upsertRun(run.id, { state: 'finished' }))
-    for (let n = 0; n < 40; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'running' })
+    for (let n = 0; n < 20; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'running' })
     const fetchImpl = vi.fn(); vi.stubGlobal('fetch', fetchImpl)
     const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
     try {
       const run = await screen.findByRole('button', { name: 'Run saved revision r4' })
       await waitFor(() => expect(run).toBeEnabled())
       fireEvent.click(run)
-      expect(screen.getByText('Too many active runs. Wait for a run to finish.')).toBeVisible()
+      expect(screen.getByText('Too many active runs (20). Wait for one to finish.')).toBeVisible()
       expect(fetchImpl).not.toHaveBeenCalled()
+      expect(run).toBeEnabled()
+      for (let n = 0; n < 20; n++) expect(labValueStore.getRun(`hard-cap-${n}`).state).toBe('running')
     } finally {
       view.unmount()
-      for (let n = 0; n < 40; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'finished' })
+      for (let n = 0; n < 20; n++) labValueStore.upsertRun(`hard-cap-${n}`, { state: 'finished' })
     }
   })
 

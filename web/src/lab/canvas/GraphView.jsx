@@ -230,11 +230,11 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const localTiming = useRun(labValueStore, 'local')?.timing
   async function runSaved() {
     if (submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
-    if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs. Wait for a run to finish.'); return }
     submissionPending.current = true
     setSubmitting(true); setRunMessage('')
     const { docId, head, document } = latest.current
     try {
+      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
       const saved = await client.revision(docId, head)
       if (!mounted.current) return
       if (!saved.ok) {
@@ -245,7 +245,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         || canonicalJSON(saved.graph) !== canonicalJSON(latest.current.document)) {
         setRunMessage('Save before running'); return
       }
-      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs. Wait for a run to finish.'); return }
+      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
       const result = await submitRun({ docId, graphRevision: head })
       if (!mounted.current) return
       if (!result.ok) {
