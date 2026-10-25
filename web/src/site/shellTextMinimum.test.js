@@ -47,6 +47,7 @@ describe('shell text minimum (L9)', () => {
       expect(body, file).toMatch(/overflow\s*:\s*hidden\s*;/)
       expect(body, file).toMatch(/flex-wrap\s*:\s*wrap\s*;/)
       expect(body, file).toMatch(/align-content\s*:\s*flex-start\s*;/)
+      expect(body, file).toMatch(/row-gap\s*:\s*29px\s*;/)
     }
   })
 })

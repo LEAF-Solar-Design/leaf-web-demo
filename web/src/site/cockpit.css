@@ -713,7 +713,8 @@
      coordinate readout and the document tabs must never be the thing that
      gets clipped. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-system {
-    justify-content: flex-end; overflow: hidden; flex-wrap: wrap; align-content: flex-start; padding: 0 10px;
+    /* row-gap is at least the region's 29 px height, so a wrapped row starts at or below the clip line whatever the first row's height. */
+    justify-content: flex-end; overflow: hidden; flex-wrap: wrap; align-content: flex-start; row-gap: 29px; padding: 0 10px;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-system > * + * { border-left: 1px solid var(--leaf-line); }
   /* The instruments: coordinates, scale, counts, selection, then the drafting
