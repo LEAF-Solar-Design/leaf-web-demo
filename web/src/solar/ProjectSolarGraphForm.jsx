@@ -56,13 +56,17 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   const [refresh, setRefresh] = useState(0)
   const [view, setView] = useState(null)
   const [, repaint] = useState(0)
-  const invalidate = () => {
+  const invalidate = (inputOnly = false) => {
+    // Input edits expire previews, but leave the unchanged context usable at the new generation.
+    if (inputOnly && scope.keptContext?.generation === scope.generation) scope.keptContext.generation += 1
+    else scope.keptContext = null
+    if (!inputOnly) scope.previewInputs = null
     scope.generation += 1
     scope.armed = null
     for (const controller of scope.controllers) controller.abort()
   }
   if (scope.digest !== catalogDigest || scope.coordinateKey !== coordinateKey) {
-    invalidate()
+    invalidate(scope.digest === catalogDigest)
     scope.digest = catalogDigest
     scope.coordinateKey = coordinateKey
   }
@@ -126,17 +130,33 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   }, [scope, Boolean(available)])
 
   useEffect(() => {
-    if (!available || busy || scope.lock || scope.blocked || !scopeCurrent()) return undefined
+    const previous = scope.previewInputs
+    scope.previewInputs = { coordinateKey, catalogDigest, busy, refresh, available: Boolean(available) }
+    const inputOnly = previous && previous.coordinateKey !== coordinateKey
+      && previous.catalogDigest === catalogDigest && previous.busy === busy && previous.refresh === refresh
+      && previous.available === Boolean(available)
+    if (!available || busy || scope.lock || scope.blocked || !scopeCurrent()) {
+      scope.keptContext = null
+      return undefined
+    }
+    const kept = scope.keptContext
+    const reuseContext = inputOnly && kept?.generation === scope.generation
+      && kept.catalogDigest === catalogDigest && kept.refresh === refresh
+    if (!reuseContext) scope.keptContext = null
     scope.armed = null
     const pending = operation()
     scope.previewCurrent = pending.checkoutCurrent
     if (!pending.current()) { pending.finish(); return undefined }
     setCurrent({ reason: 'context_loading' }, pending.generation)
     let phase = 'context'
-    ;(async () => {
+    const runPreview = async () => {
       try {
-        const outcome = await projectClient.readContext({ signal: pending.signal })
         if (!pending.current() || latest.current.busy) return
+        const outcome = reuseContext ? kept.outcome : await projectClient.readContext({ signal: pending.signal })
+        if (!pending.current() || latest.current.busy) return
+        if (!reuseContext && outcome?.ok === true) {
+          scope.keptContext = { outcome, generation: pending.generation, catalogDigest, refresh }
+        }
         const state = outcome?.ok === true ? deriveProjectSolarGraphFormState({ binding, contextView: outcome.data })
           : { mode: 'refused', reason: 'context_unreadable' }
         if (state.mode !== 'edit') { setCurrent({ reason: state.reason }, pending.generation); return }
@@ -184,8 +204,14 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
             : phase === 'preview' ? 'preview_refused' : 'request_invalid' }, pending.generation)
         }
       } finally { pending.finish() }
-    })()
-    return () => pending.controller.abort()
+    }
+    const timer = inputOnly ? setTimeout(runPreview, 300) : null
+    if (!inputOnly) runPreview()
+    return () => {
+      clearTimeout(timer)
+      pending.controller.abort()
+      pending.finish()
+    }
   }, [scope, Boolean(available), coordinateKey, catalogDigest, busy, refresh])
 
   useEffect(() => {
@@ -321,7 +347,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
         <label>Group {index + 1} name
           <input type="text" value={panelInputs.names[proposal.key] ?? `Group ${index + 1}`}
             onChange={(event) => {
-              invalidate()
+              invalidate(true)
               setPanelDraft({ scope, names: { ...panelInputs.names, [proposal.key]: event.target.value },
                 numbers: panelInputs.numbers })
             }} />
@@ -335,7 +361,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
       ].map(([key, label]) => <label key={key}>{label}
         <input type="number" required min="0" max="1000000" step="any" value={panelInputs.numbers[key] ?? ''}
           onChange={(event) => {
-            invalidate()
+            invalidate(true)
             setPanelDraft({ scope, names: panelInputs.names, numbers: { ...panelInputs.numbers, [key]: event.target.value } })
           }} />
       </label>)}
@@ -351,7 +377,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           const text = event.target.value
           const point = parseProjectSolarInsertionPoint(text)
           const nextKey = point.ok ? JSON.stringify(point.point) : null
-          if (nextKey !== scope.coordinateKey) invalidate()
+          if (nextKey !== scope.coordinateKey) invalidate(true)
           setDraft({ scope, text })
         }} />
     </label>}
