@@ -98,6 +98,107 @@ async function assertRefusal(name, code, sentence) {
   return h
 }
 
+function panelGroupHarness() {
+  const h = harness('solar-panel-groups')
+  h.graph = { panels: [
+    { id: 'a', angle: 0, frame_ref: null, provenance: { source_handle: 'A' } },
+    { id: 'b', angle: 0, frame_ref: null, provenance: { source_handle: 'B' } },
+    { id: 'c', angle: 90, frame_ref: null, provenance: { source_handle: 'C' } },
+    { id: 'd', angle: 90, frame_ref: null, provenance: { source_handle: 'D' } },
+    { id: 'e', angle: 45, frame_ref: null, provenance: { source_handle: 'E' } },
+  ], frames: [] }
+  h.client.readContext.mockImplementation(() => {
+    const data = context()
+    Object.assign(data.intake.solar_design_graph, h.graph)
+    return Promise.resolve({ ok: true, data })
+  })
+  return h
+}
+function fillGroupNumbers() {
+  for (const label of ['Module width along row', 'Module height across row', 'Alignment tolerance']) {
+    fireEvent.change(screen.getByRole('spinbutton', { name: label }), { target: { value: '1' } })
+  }
+}
+it('W1C-26 renders angle proposals and requires all shared dimensions before preview and submission', async () => {
+  const h = panelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Group 1 name' }).value).toBe('Group 1'))
+  expect(screen.getByRole('textbox', { name: 'Group 2 name' }).value).toBe('Group 2')
+  expect(screen.getByText('2 panels, angle 0.0°')).toBeTruthy()
+  expect(screen.getByText('2 panels, angle 90.0°')).toBeTruthy()
+  expect(screen.getByText('1 singleton panels cannot be grouped.')).toBeTruthy()
+  expect(action().disabled).toBe(true)
+  for (const label of ['Module width along row', 'Module height across row', 'Alignment tolerance']) {
+    expect(screen.getByRole('spinbutton', { name: label }).value).toBe('')
+  }
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Module width along row' }), { target: { value: '1' } })
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Module height across row' }), { target: { value: '1' } })
+  await act(async () => {})
+  expect(action().disabled).toBe(true)
+  expect(h.client.catalog).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Alignment tolerance' }), { target: { value: '0' } })
+  await act(async () => {})
+  expect(action().disabled).toBe(true)
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Alignment tolerance' }), { target: { value: '0.01' } })
+  await submitAndWait(h)
+  expect(h.submit.mock.calls[0][0].params.groups).toEqual([
+    { name: 'Group 1', panel_refs: ['a', 'b'], module_width_along_row: 1, module_height_across_row: 1, alignment_tolerance: 0.01 },
+    { name: 'Group 2', panel_refs: ['c', 'd'], module_width_along_row: 1, module_height_across_row: 1, alignment_tolerance: 0.01 },
+  ])
+})
+it('W1C-26 shows existing frame name collisions and invalidates preview on name and number edits', async () => {
+  const h = panelGroupHarness()
+  h.graph.frames.push({ name: 'GROUP 1' })
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByRole('textbox', { name: 'Group 1 name' })
+  fillGroupNumbers()
+  await screen.findByText('Group names must be unique, including existing panel groups.')
+  expect(action().disabled).toBe(true)
+  fireEvent.change(screen.getByRole('textbox', { name: 'Group 1 name' }), { target: { value: 'North' } })
+  await arm()
+  const delayed = deferred()
+  h.previews.push(delayed.promise)
+  fireEvent.change(screen.getByRole('textbox', { name: 'Group 1 name' }), { target: { value: 'South' } })
+  expect(action().disabled).toBe(true)
+  await waitFor(() => expect(h.client.catalog.mock.calls.length).toBe(2))
+  await act(async () => delayed.resolve(catalog(h.name)))
+  await arm()
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Alignment tolerance' }), { target: { value: '' } })
+  expect(action().disabled).toBe(true)
+  await screen.findByText('Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.')
+  expect(h.submit).not.toHaveBeenCalled()
+})
+it('W1C-26 refuses changed proposal membership on the fresh submit context', async () => {
+  const h = panelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByRole('textbox', { name: 'Group 1 name' })
+  fillGroupNumbers()
+  await arm()
+  h.graph = { ...h.graph, panels: h.graph.panels.map(panel => panel.id === 'a' ? { ...panel, id: 'new' } : panel) }
+  fireEvent.click(action())
+  await screen.findByText('The proposed panel groups changed. Refresh the preview before continuing.')
+  expect(action().disabled).toBe(true)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+it('W1C-26 disables an empty proposal set with a status reason', async () => {
+  const h = panelGroupHarness()
+  h.graph.panels = []
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByText('No panel angles have at least two ungrouped panels.')
+  expect(action().disabled).toBe(true)
+  expect(h.client.catalog).not.toHaveBeenCalled()
+})
+it('W1C-26 shows a refused proposal set without preparing a partial request', async () => {
+  const h = panelGroupHarness()
+  h.graph.panels = Array.from({ length: 4097 }, (_, index) => ({ id: String(index), angle: 0,
+    frame_ref: null, provenance: { source_handle: index.toString(16) } }))
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByText('A proposed group has more than 4096 panels. No panels have been omitted.')
+  expect(screen.getByText('4097 panels, angle 0.0°')).toBeTruthy()
+  expect(action().disabled).toBe(true)
+  expect(h.client.prepareRun).not.toHaveBeenCalled()
+})
+
 it('R13C-15 renders equipment assignment refusal', async () => {
   for (const code of ['EQUIPMENT_ASSIGNMENT_REQUIRED', 'equipment_assignment_required']) {
     await assertRefusal('solar-homeruns', code,

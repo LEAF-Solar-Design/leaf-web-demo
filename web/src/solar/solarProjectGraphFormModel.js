@@ -2,7 +2,7 @@ import { createSolarDrawingBinding, sameSolarDrawingBinding } from './solarDrawi
 import { deriveProjectSettingsState } from './solarSettingsModel.js'
 
 export const PROJECT_SOLAR_GRAPH_TOOLS = Object.freeze([
-  'solar-panels-from-drawing', 'solar-homeruns', 'solar-feeders', 'solar-schedule',
+  'solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-feeders', 'solar-schedule',
 ])
 
 export const PROJECT_SOLAR_GRAPH_REASONS = Object.freeze({
@@ -18,6 +18,13 @@ export const PROJECT_SOLAR_GRAPH_REASONS = Object.freeze({
   idempotency_key_required: 'This Solar request could not be identified. Review it again.',
   request_invalid: 'This Solar request could not be prepared. Review the inputs.',
   insertion_invalid: 'Enter two or three comma-separated coordinates, each between -1000000000000 and 1000000000000.',
+  no_panel_groups: 'No panel angles have at least two ungrouped panels.',
+  too_many_groups: 'There are more than 128 proposed groups. No groups have been omitted.',
+  group_too_large: 'A proposed group has more than 4096 panels. No panels have been omitted.',
+  panel_groups_stale: 'The proposed panel groups changed. Refresh the preview before continuing.',
+  group_name_invalid: 'Enter a group name of 1 to 255 characters without [.',
+  group_name_collision: 'Group names must be unique, including existing panel groups.',
+  group_numbers_invalid: 'Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.',
   tool_unsupported: 'This tool has no project form in this view.',
   submit_unavailable: 'Project Solar submission is unavailable in this view.',
   run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
@@ -59,6 +66,13 @@ export function projectSolarGraphReason(code, tool) {
   if (code == null) return null
   if (!boundedCode(code)) return PROJECT_SOLAR_GRAPH_REASONS.request_refused
   switch (code.toLowerCase()) {
+    case 'no_panel_groups': return PROJECT_SOLAR_GRAPH_REASONS.no_panel_groups
+    case 'too_many_groups': return PROJECT_SOLAR_GRAPH_REASONS.too_many_groups
+    case 'group_too_large': return PROJECT_SOLAR_GRAPH_REASONS.group_too_large
+    case 'panel_groups_stale': return PROJECT_SOLAR_GRAPH_REASONS.panel_groups_stale
+    case 'group_name_invalid': return PROJECT_SOLAR_GRAPH_REASONS.group_name_invalid
+    case 'group_name_collision': return PROJECT_SOLAR_GRAPH_REASONS.group_name_collision
+    case 'group_numbers_invalid': return PROJECT_SOLAR_GRAPH_REASONS.group_numbers_invalid
     case 'sip_r7_binding_invalid':
     case 'binding_invalid': return PROJECT_SOLAR_GRAPH_REASONS.binding_invalid
     case 'context_unreadable': return PROJECT_SOLAR_GRAPH_REASONS.context_unreadable
@@ -140,7 +154,78 @@ export function deriveProjectSolarGraphFormState({ binding, contextView }) {
   return { mode: 'edit', binding: state.binding, intakeSha256: state.intakeSha256, rev: state.rev }
 }
 
-export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText,
+export function panelGroupAngleKey(angleDegrees) {
+  if (!Number.isFinite(angleDegrees)) return null
+  // Match angle_key(math.radians(panel.angle)), including r_to_d's strict snaps.
+  let degrees = (angleDegrees * (Math.PI / 180)) * (180 / Math.PI)
+  for (const snap of [360, 270, 180, 90, 0]) {
+    if (degrees < snap + 0.001 && degrees > snap - 0.001) { degrees = snap; break }
+  }
+  degrees %= 360
+  if (degrees < 0) degrees += 360
+  if (degrees >= 180) degrees -= 180
+  // toFixed rounds the exact positive binary value, as Decimal(float) HALF_UP does.
+  return degrees.toFixed(1)
+}
+
+export function proposePanelGroups(graph) {
+  const buckets = new Map()
+  let ungrouped = 0
+  for (const panel of graph?.panels ?? []) {
+    if (panel?.frame_ref !== null || typeof panel.id !== 'string'
+        || typeof panel.provenance?.source_handle !== 'string') continue
+    const key = panelGroupAngleKey(panel.angle)
+    if (key === null) continue
+    ungrouped += 1
+    if (!buckets.has(key)) buckets.set(key, [])
+    buckets.get(key).push(panel.id)
+  }
+  let singletons = 0
+  const proposals = []
+  for (const [key, refs] of [...buckets].sort(([a], [b]) => Number(a) - Number(b))) {
+    if (refs.length === 1) { singletons += 1; continue }
+    proposals.push({ key, angle_key: key, panel_refs: refs.slice().sort(), count: refs.length })
+  }
+  const refused = proposals.length > 128 ? 'too_many_groups'
+    : proposals.some((proposal) => proposal.count > 4096) ? 'group_too_large' : null
+  return { proposals, singletons, ungrouped, refused }
+}
+
+export function validatePanelGroups(graph, groups, numbers) {
+  const fail = (reason) => ({ ok: false, reason })
+  const { proposals, refused } = proposePanelGroups(graph)
+  if (refused) return fail(refused)
+  if (!proposals.length) return fail('no_panel_groups')
+  if (!Array.isArray(groups) || groups.length !== proposals.length
+      || proposals.some((proposal, index) => groups[index]?.key !== proposal.key)) return fail('panel_groups_stale')
+  const names = new Set((graph?.frames ?? []).map((frame) => foldGroupName(frame.name ?? '')))
+  const named = []
+  for (const group of groups) {
+    const name = typeof group.name === 'string' ? group.name.trim() : ''
+    if (!name || [...name].length > 255 || name.includes('[')) return fail('group_name_invalid')
+    const folded = foldGroupName(name)
+    if (names.has(folded)) return fail('group_name_collision')
+    names.add(folded)
+    named.push(name)
+  }
+  const parsed = {}
+  for (const key of ['module_width_along_row', 'module_height_across_row', 'alignment_tolerance']) {
+    const text = numbers?.[key]
+    const value = typeof text === 'string' && text.trim() ? Number(text) : NaN
+    if (!Number.isFinite(value) || value <= 0 || value > 1e6) return fail('group_numbers_invalid')
+    parsed[key] = value
+  }
+  return { ok: true, value: proposals.map((proposal, index) => ({ name: named[index],
+    panel_refs: proposal.panel_refs, ...parsed })) }
+}
+
+function foldGroupName(name) {
+  // Expand Unicode case variants (including sharp s, ligatures and final sigma).
+  // Dotless i has no casefold mapping and must remain distinct from ASCII i.
+  return name.replace(/[^\u0131]+/gu, (text) => text.toUpperCase().toLowerCase()).replace(/ß/g, 'ss')
+}
+
+export function buildProjectSolarGraphRequest({ tool, binding, state, currentState, insertionPointText, groups,
   catalogDigest, idempotencyKey }) {
   const fail = (reason) => ({ ok: false, reason })
   try {
@@ -166,6 +251,10 @@ export function buildProjectSolarGraphRequest({ tool, binding, state, currentSta
     return fail('idempotency_key_required')
   }
   const params = { drawing_id: exact.drawing_id, expected_rev: state.rev }
+  if (tool === 'solar-panel-groups') {
+    if (!Array.isArray(groups) || !groups.length || groups.length > 128) return fail('request_invalid')
+    params.groups = groups
+  }
   if (tool === 'solar-schedule') {
     const parsed = parseProjectSolarInsertionPoint(insertionPointText)
     if (!parsed.ok) return parsed

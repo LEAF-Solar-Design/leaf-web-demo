@@ -118,7 +118,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
   assert.deepEqual(declaration.init.arguments[0].elements.map(element => element.value), [
     'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
     'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
-    'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing',
+    'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
     'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
     'solar-electrical-schedules', 'solar-cable-export',
   ])
