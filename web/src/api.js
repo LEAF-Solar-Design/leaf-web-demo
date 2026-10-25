@@ -800,15 +800,10 @@ export async function unlinkClaudeGrant(accountId) {
 //   POST   /api/tenant/mcp-servers/{id}/connect   start the OAuth flow
 //   GET    /api/tenant/mcp-servers/{id}/health    bounded ping
 //   DELETE /api/tenant/mcp-servers/{id}           unlink
-// listTenantMcpServers degrades to [] on a sibling that isn't deployed yet,
-// same posture as getClaudeGrant's null degrade.
+// List failures must remain distinguishable from a successful empty list.
 export async function listTenantMcpServers() {
-  try {
-    const body = await http('/api/tenant/mcp-servers', { headers: { 'X-Tenant-Id': TENANT } })
-    return Array.isArray(body?.servers) ? body.servers : []
-  } catch {
-    return []
-  }
+  const body = await http('/api/tenant/mcp-servers', { headers: { 'X-Tenant-Id': TENANT } })
+  return Array.isArray(body?.servers) ? body.servers : []
 }
 
 export async function registerTenantMcpServer(url, label) {

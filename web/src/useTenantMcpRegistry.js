@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { humanizeError } from './errorHumanize.js'
 import {
   connectTenantMcpServer,
   healthTenantMcpServer,
@@ -22,21 +23,29 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
   const [loading, setLoading] = useState(false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
+  const [listError, setListError] = useState(null)
   const generation = useRef(0)
   // Read after an await: a mutation that settles after the switch to mock acts on the current mode.
   const mockRef = useRef(mock)
   mockRef.current = mock
 
   const refresh = useCallback(async () => {
-    if (mock) { generation.current += 1; setServers([]); setLoading(false); return [] }
+    if (mock) { generation.current += 1; setServers([]); setLoading(false); setError(null); setListError(null); return [] }
     const gen = ++generation.current
     setLoading(true)
     setError(null)
-    const list = await listTenantMcpServers()
-    if (gen !== generation.current) return list
-    setServers(list)
-    setLoading(false)
-    return list
+    try {
+      const list = await listTenantMcpServers()
+      if (gen !== generation.current) return list
+      setServers(list)
+      setListError(null)
+      return list
+    } catch (e) {
+      if (gen === generation.current) setListError(humanizeError(e))
+      return null
+    } finally {
+      if (gen === generation.current) setLoading(false)
+    }
   }, [mock])
   const refreshRef = useRef(refresh)
   refreshRef.current = refresh
@@ -54,7 +63,7 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
       await refreshRef.current()
       return record
     } catch (e) {
-      if (!mockRef.current) setError(String(e?.body?.error?.message || e?.message || e))
+      if (!mockRef.current) setError(e?.body?.error?.message || humanizeError(e))
       throw e
     } finally {
       setBusy(false)
@@ -84,14 +93,20 @@ export default function useTenantMcpRegistry({ mock = false } = {}) {
   const unlink = useCallback(async (id) => {
     if (mock) return null
     setBusy(true)
+    setError(null)
     try {
       const result = await unlinkTenantMcpServer(id)
       await refreshRef.current()
       return result
+    } catch (e) {
+      if (!mockRef.current) setError(e?.body?.error?.message || humanizeError(e))
+      throw e
     } finally {
       setBusy(false)
     }
   }, [mock])
 
-  return { servers, loading, busy, error, refresh, register, connect, health, unlink }
+  // SurfaceFrame forwards error unchanged; carry retry here without changing scene wiring.
+  const visibleError = listError ? { kind: 'list', message: listError, retry: refresh } : error
+  return { servers, loading, busy, error: visibleError, refresh, register, connect, health, unlink }
 }

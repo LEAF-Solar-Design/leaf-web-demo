@@ -1,0 +1,108 @@
+// @vitest-environment jsdom
+import { act, cleanup, fireEvent, render, renderHook, screen, waitFor } from '@testing-library/react'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
+import { connectTenantMcpServer, listTenantMcpServers, registerTenantMcpServer, unlinkTenantMcpServer } from './api.js'
+import { MSG_NETWORK, MSG_SERVICE } from './errorHumanize.js'
+import useTenantMcpRegistry from './useTenantMcpRegistry.js'
+import LinkServiceDrawer from './components/LinkServiceDrawer.jsx'
+
+vi.mock('./api.js', () => ({
+  listTenantMcpServers: vi.fn(),
+  connectTenantMcpServer: vi.fn(),
+  healthTenantMcpServer: vi.fn(),
+  registerTenantMcpServer: vi.fn(),
+  unlinkTenantMcpServer: vi.fn(),
+}))
+
+const servers = [{ id: 's1', label: 'Roof scanner', state: 'connected' }]
+beforeEach(() => {
+  vi.resetAllMocks()
+  listTenantMcpServers.mockResolvedValue(servers)
+})
+afterEach(cleanup)
+
+function Drawer() {
+  const registry = useTenantMcpRegistry()
+  return <LinkServiceDrawer {...registry} open onToggle={() => {}}
+    onRegister={registry.register} onConnect={registry.connect}
+    onHealth={registry.health} onUnlink={registry.unlink} />
+}
+
+it('retains the previous list and exposes a readable error after a failed refresh', async () => {
+  const { result } = renderHook(() => useTenantMcpRegistry())
+  await waitFor(() => expect(result.current.servers).toEqual(servers))
+  listTenantMcpServers.mockRejectedValue(new TypeError('Failed to fetch'))
+  await act(async () => { await result.current.refresh() })
+  expect(result.current.servers).toEqual(servers)
+  expect(result.current.error.message).toBe(MSG_NETWORK)
+  expect(result.current.loading).toBe(false)
+})
+
+it('shows a failed initial read and retries to a successful empty list', async () => {
+  listTenantMcpServers.mockRejectedValueOnce(new Error('GET /api/tenant/mcp-servers -> 502'))
+  render(<Drawer />)
+  expect(await screen.findByText('Linked services could not be loaded.')).toBeInTheDocument()
+  expect(screen.getByText(MSG_SERVICE)).toBeInTheDocument()
+  expect(screen.queryByText('No services linked yet.')).not.toBeInTheDocument()
+  expect(screen.queryByText('0 linked')).not.toBeInTheDocument()
+  listTenantMcpServers.mockResolvedValue([])
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(await screen.findByText('No services linked yet.')).toBeInTheDocument()
+  expect(screen.getByText('0 linked')).toBeInTheDocument()
+})
+
+it('records a failed unlink and catches the rejection in the click handler', async () => {
+  unlinkTenantMcpServer.mockRejectedValue(new TypeError('Failed to fetch'))
+  render(<Drawer />)
+  await screen.findByText('Roof scanner')
+  fireEvent.click(screen.getByRole('button', { name: 'Unlink' }))
+  fireEvent.click(screen.getByRole('button', { name: 'Unlink' }))
+  await waitFor(() => expect(screen.queryByRole('button', { name: 'Keep' })).not.toBeInTheDocument())
+  expect(screen.getByText('Roof scanner')).toBeInTheDocument()
+  // Both the hook's shared error and the row's caught failure are readable.
+  expect(screen.getAllByText(MSG_NETWORK)).toHaveLength(2)
+  expect(listTenantMcpServers).toHaveBeenCalledTimes(1)
+})
+
+it('shows a connect 502 without its transport path', async () => {
+  connectTenantMcpServer.mockRejectedValue(new Error('POST /api/tenant/mcp-servers/s1/connect -> 502'))
+  const { container } = render(<Drawer />)
+  await screen.findByText('Roof scanner')
+  fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+  expect(await screen.findByText(MSG_SERVICE)).toBeInTheDocument()
+  expect(container.textContent).not.toMatch(/\/api\/|POST|502/)
+})
+
+it('keeps the last list when the refresh after each successful write fails', async () => {
+  const { result } = renderHook(() => useTenantMcpRegistry())
+  await waitFor(() => expect(result.current.servers).toEqual(servers))
+  listTenantMcpServers.mockRejectedValue(new TypeError('Failed to fetch'))
+  registerTenantMcpServer.mockResolvedValue({ id: 's2' })
+  connectTenantMcpServer.mockResolvedValue({ authorize_url: 'https://example.test/connect' })
+  unlinkTenantMcpServer.mockResolvedValue({ deleted: true })
+  for (const mutate of [
+    () => result.current.register('https://example.test', 'Roof scanner'),
+    () => result.current.connect('s1'),
+    () => result.current.unlink('s1'),
+  ]) {
+    await act(async () => { await mutate() })
+    expect(result.current.servers).toEqual(servers)
+    expect(result.current.error.message).toBe(MSG_NETWORK)
+    expect(result.current.busy).toBe(false)
+  }
+})
+
+it('humanizes registration transport failures and preserves readable server reasons', async () => {
+  const { result } = renderHook(() => useTenantMcpRegistry())
+  await waitFor(() => expect(result.current.servers).toEqual(servers))
+  registerTenantMcpServer.mockRejectedValue(new TypeError('Failed to fetch'))
+  await act(async () => {
+    await expect(result.current.register('https://example.test', 'Roof scanner')).rejects.toThrow()
+  })
+  expect(result.current.error).toBe(MSG_NETWORK)
+  registerTenantMcpServer.mockRejectedValue({ body: { error: { message: 'Choose a different service label.' } } })
+  await act(async () => {
+    await result.current.register('https://example.test', 'Roof scanner').catch(() => {})
+  })
+  expect(result.current.error).toBe('Choose a different service label.')
+})
