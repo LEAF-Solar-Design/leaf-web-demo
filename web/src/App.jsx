@@ -1707,10 +1707,20 @@ export default function App() {
 
       if (!stillCurrent()) throw new Error('Sign-in scope changed')
       if (owner.ready && owner.checkout.canRelease) {
-        await client.releaseCheckout()
+        try {
+          await client.releaseCheckout()
+        } catch {
+          showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+        }
       }
       if (!stillCurrent()) throw new Error('Sign-in scope changed')
-    } else if (checkout.actions.getCapability()) await checkout.actions.release()
+    } else if (checkout.actions.getCapability()) {
+      try {
+        await checkout.actions.release()
+      } catch {
+        showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+      }
+    }
 
     // ONE sign-in path: both branches end their checkout authority above, then log in here.
     await login()

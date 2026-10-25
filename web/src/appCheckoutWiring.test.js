@@ -173,8 +173,45 @@ describe('App.jsx checkout controller adoption', () => {
     expect(appText(statements[0].test)).toBe('projectModeRef.current')
     expect(appText(statements[0].consequent.body.at(-1))).toBe("if (!stillCurrent()) throw new Error('Sign-in scope changed')")
     expect(appText(statements[0].consequent)).not.toContain('login(')
-    expect(appText(statements[0].alternate)).toBe('if (checkout.actions.getCapability()) await checkout.actions.release()')
+    const standalone = statements[0].alternate
+    expect(appText(standalone.test)).toBe('checkout.actions.getCapability()')
+    expect(standalone.consequent.body).toHaveLength(1)
+    const release = standalone.consequent.body[0]
+    expect(release.type).toBe('TryStatement')
+    expect(release.block.body).toHaveLength(1)
+    expect(appText(release.block.body[0])).toBe('await checkout.actions.release()')
+    expect(appText(release.handler)).toContain('showToast')
     expect(appText(statements[1])).toBe('await login()')
+  })
+
+  it.each([false, true])('continues sign-in once with feedback when checkout release rejects (projectMode=%s)', async (projectMode) => {
+    const binding = { kind: 'project',
+      organization_id: '11111111-1111-1111-1111-111111111111',
+      project_id: '22222222-2222-2222-2222-222222222222',
+      drawing_id: '33333333-3333-3333-3333-333333333333',
+      input_version_id: '44444444-4444-4444-4444-444444444444' }
+    const snapshot = { binding, authorityKey: 'authority' }
+    const release = vi.fn().mockRejectedValue(new Error('Release failed'))
+    const client = { getSnapshot: () => snapshot, releaseCheckout: release }
+    const controller = { getSnapshot: () => ({ generation: 7 }) }
+    const projectSolarLoginRef = { current: { generation: 7, controller, projectSolar: {
+      ready: true, projectClient: client, checkout: { canRelease: true },
+      scope: { binding, authorityKey: 'authority' },
+    } } }
+    const checkout = { actions: { getCapability: vi.fn(() => 'capability'), release } }
+    const login = vi.fn().mockResolvedValue(undefined)
+    const showToast = vi.fn()
+    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
+      'sameSolarDrawingBinding', 'showToast', 'humanizeError', `return (${appText(loginCallback())})`)(
+      { current: projectMode }, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, showToast, String)
+
+    await onLogin()
+
+    expect(release).toHaveBeenCalledExactlyOnceWith()
+    expect(showToast).toHaveBeenCalledExactlyOnceWith({
+      text: "Sign-in couldn't start. Check your connection and try again.",
+    })
+    expect(login).toHaveBeenCalledExactlyOnceWith()
   })
 
   it.each([false, true])('R13F-07 project mode deactivates both legacy checkout inputs and preserves standalone inputs (knownGuest=%s)', (knownGuest) => {
