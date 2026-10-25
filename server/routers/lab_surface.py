@@ -1,6 +1,7 @@
 """Authenticated Lab status and the reversible Lab admission rail."""
 from __future__ import annotations
 
+import logging
 import os
 from datetime import datetime, timezone
 from typing import Any
@@ -13,6 +14,7 @@ import lab_run_store
 from routers.lab_artifacts import _call
 
 router = APIRouter(tags=["lab_surface"])
+logger = logging.getLogger(__name__)
 
 FLAG_LAB_SURFACE = "LEAF_LAB_SURFACE_ENABLED"
 
@@ -73,18 +75,26 @@ def status(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
     if not allowed:
         return response
 
-    workers = []
-    for row in _call(lab_run_store.worker_status, 60):
-        heartbeat = row["heartbeat_at"]
-        if isinstance(heartbeat, str):
-            heartbeat = datetime.fromisoformat(heartbeat)
-        workers.append({
-            "build_revision": row["build_revision"], "color": row["color"],
-            "heartbeat_age_s": max(0, (datetime.now(timezone.utc) - heartbeat).total_seconds()),
-            "active_runs": row["active_runs"], "queued_runs": row["queued_runs"],
-        })
-    response["worker"] = {
-        "paused": _call(lab_run_store.paused), "workers": workers,
-        "queue_age_max_s": _call(lab_run_store.oldest_queued_age_s),
-    }
+    try:
+        workers = []
+        for row in _call(lab_run_store.worker_status, 60):
+            heartbeat = row["heartbeat_at"]
+            if isinstance(heartbeat, str):
+                heartbeat = datetime.fromisoformat(heartbeat)
+            workers.append({
+                "build_revision": row["build_revision"], "color": row["color"],
+                "heartbeat_age_s": max(0, (datetime.now(timezone.utc) - heartbeat).total_seconds()),
+                "active_runs": row["active_runs"], "queued_runs": row["queued_runs"],
+            })
+        response["worker"] = {
+            "paused": _call(lab_run_store.paused), "workers": workers,
+            "queue_age_max_s": _call(lab_run_store.oldest_queued_age_s),
+        }
+    except HTTPException as exc:
+        reason = exc.detail if isinstance(exc.detail, str) else "lab_store_unavailable"
+        response["worker"] = {"state": "unavailable", "reason": reason}
+        logger.warning("Lab worker status unavailable: %s", reason)
+    except Exception:
+        response["worker"] = {"state": "unavailable", "reason": "lab_store_unavailable"}
+        logger.warning("Lab worker status unavailable: %s", "lab_store_unavailable")
     return response
