@@ -551,21 +551,28 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         # 13 skipped / 685 executed. W4d Slice B then re-measured exact-head
         # Linux CI at 748 collected / 17 skipped / 731 executed after the
         # lossless-handle correction added one gated and one portable case.
-        "web-vitest": 752,
+        # File sharding needs measured per-shard floors; require execution.
+        "web-vitest-1": 1,
+        "web-vitest-2": 1,
+        "web-vitest-3": 1,
     }
     assert {
         suite_id: suites[suite_id].expected
         for suite_id in measured_residual_floors
     } == measured_residual_floors
 
-    assert suites["web-vitest"].argv == [
-        g._npm(), "run", "test:unit", "--", "--maxWorkers=2",
-    ]
-    assert suites["web-vitest"].allowed_vitest_skips == (
-        ("src/cad/engineWasmHarness.realwasm.test.js", 1),
-        ("src/cadedit/cadEditSurface.test.jsx", 16),
-        ("src/cad/engineBatchAtomic.test.js", 12),
-    )
+    for shard in range(1, 4):
+        suite = suites[f"web-vitest-{shard}"]
+        assert suite.argv == [
+            g._npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2",
+        ]
+        assert suite.allowed_vitest_skips == (
+            ("src/cad/engineWasmHarness.realwasm.test.js", 1),
+            ("src/cadedit/cadEditSurface.test.jsx", 16),
+            ("src/cad/engineBatchAtomic.test.js", 12),
+        )
+        assert suite.kind == "vitest" and suite.cwd == g.WEB
+        assert suite.timeout_s == 900
 
     restore = suites["server-version-restore"]
     assert restore.expected == 26
@@ -2625,6 +2632,16 @@ def test_partition_keeps_catalog_order_within_a_shard():
         assert indexes == sorted(indexes)
 
 
+def test_partition_separates_all_three_web_vitest_suites():
+    g = _load_runner()
+    suites = g.build_suites()
+    web_ids = {f"web-vitest-{shard}" for shard in range(1, 4)}
+    assert {s.id for s in suites if s.id.startswith("web-vitest")} == web_ids
+    assert all(g._MEASURED_EST_S[sid] == 140.0 for sid in web_ids)
+    partitions = g.partition_suites(suites, 3)
+    assert all(len(web_ids & {s.id for s in shard}) == 1 for shard in partitions)
+
+
 def test_partition_separates_the_two_heaviest_suites():
     """LPT sanity: the top two weights must never share a shard at n=8 —
     if they do, the weights or the assignment loop regressed and the critical
@@ -3595,7 +3612,9 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
         "harness-tsc-noemit": "npm/npx",
         "harness-tsc-build": "npm/npx",
         "harness-audit-high": "npm/npx",
-        "web-vitest": "npm/npx",
+        "web-vitest-1": "npm/npx",
+        "web-vitest-2": "npm/npx",
+        "web-vitest-3": "npm/npx",
         "web-build": "npm/npx",
         "web-link-service-flow": "npm/npx",
         "web-demo-gate": "nested runner",
@@ -3626,8 +3645,10 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
     assert {"web-tree", "harness-tree"} <= g.conflict_resources(by_id["web-link-service-flow"])
     assert g.conflict_resources(by_id["studio-walk-regressions"]) == frozenset({"web-tree", "harness-tree"})
     assert "studio-walk-regressions" in {s.id for s in prelude}
-    assert not (g.conflict_resources(by_id["server-backbone"])
-                & g.conflict_resources(by_id["web-vitest"]))
+    for shard in range(1, 4):
+        resources = g.conflict_resources(by_id[f"web-vitest-{shard}"])
+        assert resources == frozenset({"web-tree"})
+        assert not (g.conflict_resources(by_id["server-backbone"]) & resources)
 
 
 @pytest.mark.parametrize("prelude_slots", [(), (2, 9)])
