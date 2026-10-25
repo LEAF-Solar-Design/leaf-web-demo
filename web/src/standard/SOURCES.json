@@ -1,0 +1,59 @@
+{
+  "schema": "leaf.vendored-sources.v1",
+  "files": [
+    {
+      "path": "src/standard/leaf-standard.css",
+      "source_repo": "LEAF-Solar-Design/leaf-design-system",
+      "ref": "leaf-standard-v1.0.0@124a05012a9f3304f738ac345e01d87fd0b7ed02",
+      "upstream_path": "tokens/dist/leaf-standard.css",
+      "sha256": "d4dd1dc8ad44ba0fa1a1195e07b5047b7aeab588b340c45c5985656b04d05fec",
+      "bytes": 3249,
+      "license": "internal"
+    },
+    {
+      "path": "public/fonts/inter-tight-400-latin.woff2",
+      "source_package": "@fontsource/inter-tight@5.3.0",
+      "ref": "5.3.0",
+      "upstream_path": "files/inter-tight-latin-400-normal.woff2",
+      "sha256": "6f32da94d4f26e98cb6ccd97034d306aa38945322c816f54a93c7d15dc0905b8",
+      "bytes": 22016,
+      "license": "OFL-1.1"
+    },
+    {
+      "path": "public/fonts/inter-tight-500-latin.woff2",
+      "source_package": "@fontsource/inter-tight@5.3.0",
+      "ref": "5.3.0",
+      "upstream_path": "files/inter-tight-latin-500-normal.woff2",
+      "sha256": "6c0019f88d5bc179f2c972998ed8c14e779254566da9081c5e29f364a0a0aeb6",
+      "bytes": 22616,
+      "license": "OFL-1.1"
+    },
+    {
+      "path": "public/fonts/inter-tight-600-latin.woff2",
+      "source_package": "@fontsource/inter-tight@5.3.0",
+      "ref": "5.3.0",
+      "upstream_path": "files/inter-tight-latin-600-normal.woff2",
+      "sha256": "db1a039d03ed646ef6a899f9ff92bf2f6fe382a49f1b0992066e85caf88b5be9",
+      "bytes": 22660,
+      "license": "OFL-1.1"
+    },
+    {
+      "path": "public/fonts/inter-tight-700-latin.woff2",
+      "source_package": "@fontsource/inter-tight@5.3.0",
+      "ref": "5.3.0",
+      "upstream_path": "files/inter-tight-latin-700-normal.woff2",
+      "sha256": "9c4f02f38678f2628292d66c4f7a1a6a06af7ffac4d279359b09074e7d0f1fe0",
+      "bytes": 22748,
+      "license": "OFL-1.1"
+    },
+    {
+      "path": "public/fonts/OFL-inter-tight.txt",
+      "source_package": "@fontsource/inter-tight@5.3.0",
+      "ref": "5.3.0",
+      "upstream_path": "LICENSE",
+      "sha256": "1e1c8b3dc6dfcbd5498a33f17fcc68ff2d39c599f6e8195fbf14601261dbef6a",
+      "bytes": 4489,
+      "license": "OFL-1.1"
+    }
+  ]
+}
