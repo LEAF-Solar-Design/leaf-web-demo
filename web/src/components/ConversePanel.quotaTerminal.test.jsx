@@ -75,7 +75,7 @@ describe('terminal quota transcript recovery', () => {
 
   it('keeps an unrelated active turn busy', async () => {
     await setup([...prior, event('turn_started', 'other'), quota()])
-    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).disabled).toBe(true)
+    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).readOnly).toBe(true)
     expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
     assertNoMutations()
   })
@@ -92,7 +92,7 @@ describe('terminal quota transcript recovery', () => {
     await setup([...prior, event('error', 'resume', { error: {
       error_code: 'temporary_error', message: 'Still awaiting a terminal event',
     } })])
-    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).disabled).toBe(true)
+    expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).readOnly).toBe(true)
     expect(screen.getByRole('button', { name: 'Stop' })).toBeTruthy()
     assertNoMutations()
   })
