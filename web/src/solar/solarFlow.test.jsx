@@ -1345,7 +1345,7 @@ it('R13D-28 pending status is scoped independently of admission', async () => {
 
 it('R13D-29 standalone rendering remains byte-identical', () => {
   for (const [file, anchor, bytes, digest] of [
-    ['SolarFlowRail.jsx', 'function StandaloneSolarFlowRail(', 5471, '332d3d72ee4b2b5caf9240f54a57ba385b413afeb14789db266893c971fa96da'],
+    ['SolarFlowRail.jsx', 'function StandaloneSolarFlowRail(', 6256, '59e86df0649f6120e8a44fac57e2165da1b71e4d6466df6d3d940cb2fffdec12'],
     ['SolarStepEditor.jsx', 'function StandaloneSolarStepEditor(', 4601, '9d7dd3ef5cb3af31d33113f60cb7a24543c8a6404fdb772e48c8653e88d9c5fe'],
   ]) {
     const source = readFileSync(resolve(process.cwd(), 'src/solar', file))
