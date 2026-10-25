@@ -37,6 +37,7 @@ class _Run:
     suspended: bool = False
     terminal: bool = False
     cancel: bool = False
+    cancel_reason: str | None = None
     checked_at: float = float("-inf")
     future: object = None
 
@@ -162,6 +163,15 @@ class LabWorker:
                 self.emit.emit_lab_queue_age_max(0 if age is None else age)
                 self._status_at = now
 
+    def _activation_inactive(self, run):
+        if run.row["adapter_revision"] != "lab-activation.v1":
+            return False
+        try:
+            return not lab_activation.holds_run(run.row["tenant_id"], run.row["run_id"])
+        except Exception as exc:
+            _LOG.warning("lab_worker_activation_check_failed class=%s", type(exc).__name__)
+            return True
+
     def _cancelled(self, run):
         with run.lock:
             reason = self._off_reason()
@@ -171,7 +181,11 @@ class LabWorker:
                 return True
             now = time.monotonic()
             if now - run.checked_at >= 0.25:
-                run.cancel = self.store.cancel_requested(run.row["tenant_id"], run.row["run_id"])
+                if self._activation_inactive(run):
+                    run.cancel = True
+                    run.cancel_reason = "activation_inactive"
+                else:
+                    run.cancel = self.store.cancel_requested(run.row["tenant_id"], run.row["run_id"])
                 run.checked_at = now
             return run.cancel
 
@@ -216,7 +230,7 @@ class LabWorker:
         try:
             renewer.start()
             row = run.row
-            if row["adapter_revision"] == "lab-activation.v1" and not lab_activation.holds_run(row["tenant_id"], row["run_id"]):
+            if self._activation_inactive(run):
                 self._terminal(run, "cancelled", "activation_inactive")
                 return
             artifact = self.artifacts.get(row["tenant_id"], row["doc_id"], row["graph_revision"])
@@ -242,7 +256,7 @@ class LabWorker:
             elapsed = max(0, self.clock() - started)
             if elapsed >= 600:
                 raise RunBudgetExceeded()
-            if row["adapter_revision"] == "lab-activation.v1" and not lab_activation.holds_run(row["tenant_id"], row["run_id"]):
+            if self._activation_inactive(run):
                 self._terminal(run, "cancelled", "activation_inactive")
                 return
 
@@ -277,7 +291,7 @@ class LabWorker:
             self._terminal(run, "finished")
         except RunCancelled:
             if run.cancel:
-                self._terminal(run, "cancelled")
+                self._terminal(run, "cancelled", run.cancel_reason)
             elif self._stop.is_set():
                 self._suspend(run, "worker_disabled")
         except RunBudgetExceeded:

@@ -121,7 +121,9 @@ def _admit_graph(graph):
 
 def readmit(row):
     principal = row["principal"]
-    if deps.auth_live() and principal and not principal.startswith("tenant:"):
+    if not principal.startswith("tenant:"):
+        if not deps.auth_live():
+            return "auth_mode_changed"
         try:
             tenant, tier = deps.resolve_active_platform_tenant_authority(principal)
         except Exception:

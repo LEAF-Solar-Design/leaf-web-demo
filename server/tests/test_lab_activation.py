@@ -138,13 +138,43 @@ def test_readmission_stops_with_transition(rig, monkeypatch, reason):
     assert rig.row()["in_flight_run_id"] is None
 
 
-@pytest.mark.parametrize("auth_live,principal", [(False, "subject-private"), (True, "tenant:local")])
-def test_non_subject_and_auth_off_skip_binding(rig, monkeypatch, auth_live, principal):
+@pytest.mark.parametrize("auth_live", [False, True])
+def test_tenant_principal_skips_binding(rig, monkeypatch, auth_live):
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1" if auth_live else "0")
     def forbidden(*args):
         pytest.fail("binding lookup must be skipped")
     monkeypatch.setattr(activation.deps, "resolve_active_platform_tenant_authority", forbidden)
-    assert rig.create(principal=principal)["state"] == "active"
+    assert rig.create(principal="tenant:local")["state"] == "active"
+
+
+@pytest.mark.parametrize("inflight", [False, True])
+def test_subject_activation_stops_on_first_tick_after_auth_off(rig, monkeypatch, inflight):
+    rig.create()
+    if inflight:
+        activation.tick(rig.now[0])
+        rig.advance()
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    activation.tick(rig.now[0])
+    row = rig.row()
+    assert (row["state"], row["reason"]) == ("stopped", "auth_mode_changed")
+    assert row["transitions"][0]["reason"] == "auth_mode_changed"
+    if inflight:
+        assert runs.get(rig.tenant, row["in_flight_run_id"])["state"] == "cancelled"
+    else:
+        assert row["in_flight_run_id"] is None
+
+
+def test_tenant_principal_keeps_scheduling_with_auth_off(rig, monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    rig.create(principal="tenant:local")
+    activation.tick(rig.now[0])
+    first = rig.row()["in_flight_run_id"]
+    assert first
+    finish(rig, first, 7)
+    rig.advance()
+    activation.tick(rig.now[0])
+    assert rig.row()["state"] == "active"
+    assert rig.row()["in_flight_run_id"] not in (None, first)
 
 
 def test_expiry_requires_explicit_renewal(rig):
