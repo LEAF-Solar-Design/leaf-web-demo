@@ -494,6 +494,59 @@ def test_verified_head_walk_is_bounded_and_resumes_on_next_completion(world):
     assert store.authority_get(tenant)['verified_head'] == 'b' * 40
 
 
+@pytest.mark.parametrize('background', ['recover_pending', 'process_outbox'])
+def test_background_resumes_verified_head_after_long_chain_recovery(world, monkeypatch, background):
+    tenant, harness = world
+    harness.page_size = 200
+    harness.unknown_after_commit = True
+    with pytest.raises(ledger.GitUnavailable, match='lab_store_unavailable'):
+        save(tenant)
+    row = pending(tenant)[0]
+    commits = [harness.head]
+    def record_descendants(sql):
+        for revision in range(1, 1002):
+            parent = harness.head
+            commit = harness.foreign('lab/graphs/other.json')
+            commits.append(commit)
+            store.record_sql(sql, tenant, commit, uuid.uuid4().hex, 'other', revision, 'graph', parent)
+        git._update(sql, tenant, local_sha=commits[-1])
+    store._run(tenant, record_descendants, write=True)
+    assert store.authority_get(tenant)['verified_head'] == BASE
+    expire(tenant)
+    assert git.recover_pending(tenant)[0]['revision'] == 1
+    assert pending(tenant) == []
+    assert store.commit_get(tenant, commits[0])['op_id'] == row['op_id']
+    assert store.authority_get(tenant)['verified_head'] == commits[999]
+    assert not store._run(tenant, lambda sql: git.advance_verified_head(sql, tenant, limit=0), write=True)
+    assert git.mirror_status(tenant)['local_sha'] == commits[-1]
+    assert outbox(tenant) == []
+
+    resume = getattr(git, background)
+    assert resume(tenant + '-other') == ([] if background == 'recover_pending' else 0)
+    assert store.authority_get(tenant)['verified_head'] == commits[999]
+    assert resume(tenant) == ([] if background == 'recover_pending' else 0)
+    authority = store.authority_get(tenant)
+    assert authority['verified_head'] == commits[-1]
+    assert git.mirror_status(tenant)['local_sha'] == commits[-1]
+
+    # A caught-up invocation does one successor lookup and no cursor update or
+    # harness request, even when there are no pending operations or outbox rows.
+    execute = ledger._SQL.execute
+    walks, updates = [], []
+    def observe(sql, query, params=()):
+        if query.startswith('SELECT "commit" FROM lab_git_commits'):
+            walks.append(params)
+        if query.startswith('UPDATE lab_git_authority SET verified_head='):
+            updates.append(params)
+        return execute(sql, query, params)
+    monkeypatch.setattr(ledger._SQL, 'execute', observe)
+    harness.calls.clear()
+    assert resume(tenant) == ([] if background == 'recover_pending' else 0)
+    assert len(walks) == 1 and updates == [] and harness.calls == []
+    assert store.authority_get(tenant) == authority
+    assert store._run(tenant, lambda sql: git.advance_verified_head(sql, tenant), write=True)
+
+
 def test_unknown_commit_stays_ambiguous_until_proven(world):
     tenant, harness = world
     harness.unknown_after_commit = True

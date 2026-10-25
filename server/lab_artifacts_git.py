@@ -276,13 +276,44 @@ def _quarantine_sql(sql, tenant, row, reason):
     return True
 
 
+class _CompletionConflict(Exception):
+    pass
+
+
+def advance_verified_head(sql, tenant, limit=1000):
+    """Walk a bounded recorded prefix; return True when no successor remains."""
+    import lab_git_authority as store
+
+    if type(limit) is not int or limit < 0:
+        raise ValueError('lab_git_invalid_limit')
+    active = store.authority_get_sql(sql, tenant)
+    if not active or active['mode'] != 'git':
+        return True
+    verified = active['verified_head']
+    for step in range(limit + 1):
+        successors = sql.execute('SELECT "commit" FROM lab_git_commits WHERE tenant_id=? '
+            'AND (parent=? OR (parent IS NULL AND CAST(? AS TEXT) IS NULL)) LIMIT 2',
+            (tenant, verified, verified)).fetchall()
+        if not successors:
+            return True
+        if len(successors) != 1:
+            raise _CompletionConflict()
+        if step == limit:
+            return False
+        successor = successors[0]['commit']
+        if sql.execute('UPDATE lab_git_authority SET verified_head=?,updated_at=? '
+                       'WHERE tenant_id=? AND generation=? AND '
+                       '(verified_head=? OR (verified_head IS NULL AND CAST(? AS TEXT) IS NULL))',
+                       (successor, store._now().isoformat(), tenant, active['generation'],
+                        verified, verified)).rowcount != 1:
+            raise _CompletionConflict()
+        verified = successor
+
+
 def _complete_pending(tenant, row, generation, commit, parent, author='git-recovery', *, history=()):
     import lab_git_authority as store
 
     proven = {entry['commit']: entry for entry in history}
-
-    class CompletionConflict(Exception):
-        pass
 
     def operation(sql):
         active = store.authority_get_sql(sql, tenant)
@@ -316,43 +347,27 @@ def _complete_pending(tenant, row, generation, commit, parent, author='git-recov
         if local != parent and is_ancestor(local, parent):
             if sql.execute('UPDATE lab_git_tenants SET local_sha=? WHERE tenant_id=? AND local_sha=?',
                            (parent, tenant, local)).rowcount != 1:
-                raise CompletionConflict()
+                raise _CompletionConflict()
             local = parent
         if local == parent:
             if sql.execute('UPDATE lab_git_tenants SET local_sha=?,updated_at=CURRENT_TIMESTAMP '
                            'WHERE tenant_id=? AND local_sha=?', (commit, tenant, parent)).rowcount != 1:
-                raise CompletionConflict()
+                raise _CompletionConflict()
             local, moved = commit, True
         else:
             # An earlier completion can arrive after its recorded descendants.
             # It may fill a ledger gap, but must never rewind the local cursor.
             if not is_ancestor(commit, local):
-                raise CompletionConflict()
-        verified = active['verified_head']
-        for _ in range(1000):
-            successors = sql.execute('SELECT "commit" FROM lab_git_commits WHERE tenant_id=? '
-                'AND (parent=? OR (parent IS NULL AND CAST(? AS TEXT) IS NULL)) LIMIT 2',
-                (tenant, verified, verified)).fetchall()
-            if not successors:
-                break
-            if len(successors) != 1:
-                raise CompletionConflict()
-            successor = successors[0]['commit']
-            if sql.execute('UPDATE lab_git_authority SET verified_head=?,updated_at=? '
-                           'WHERE tenant_id=? AND generation=? AND '
-                           '(verified_head=? OR (verified_head IS NULL AND CAST(? AS TEXT) IS NULL))',
-                           (successor, store._now().isoformat(), tenant, active['generation'],
-                            verified, verified)).rowcount != 1:
-                raise CompletionConflict()
-            verified = successor
+                raise _CompletionConflict()
+        advance_verified_head(sql, tenant)
         if not store.complete_conditional_sql(sql, tenant, row['op_id'], row['fence']):
-            raise CompletionConflict()
+            raise _CompletionConflict()
         if moved:
             store.enqueue_sql(sql, tenant, 'publish', local, {'target_sha': local, 'generation': str(generation)})
         return result
     try:
         return store._run(tenant, operation, write=True)
-    except CompletionConflict:
+    except _CompletionConflict:
         return None
 
 
@@ -476,6 +491,8 @@ def recover_pending(tenant, limit=10):
 
     if type(limit) is not int or limit < 0:
         raise ValueError('lab_git_invalid_limit')
+    # Resume prior work before recovery, so a new completion keeps its own bound.
+    store._run(tenant, lambda sql: advance_verified_head(sql, tenant), write=True)
     rows = store._run(tenant, lambda sql: sql.execute("SELECT op_id FROM lab_git_pending "
         "WHERE tenant_id=? AND state<>'abandoned' AND lease_expires_at<=? ORDER BY created_at,op_id LIMIT ?",
         (tenant, store._now().isoformat(), limit)).fetchall())
@@ -493,6 +510,9 @@ def recover_pending(tenant, limit=10):
 def process_outbox(tenant, limit=20):
     import lab_git_authority as store
 
+    if type(limit) is not int or limit < 0:
+        raise ValueError('lab_git_invalid_limit')
+    store._run(tenant, lambda sql: advance_verified_head(sql, tenant), write=True)
     completed = 0
     for row in store.claim_due(tenant, limit):
         try:
