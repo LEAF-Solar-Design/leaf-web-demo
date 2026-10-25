@@ -200,6 +200,7 @@ describe('cost transparency', () => {
     expect(screen.queryByRole('table')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Month')).toHaveValue(new Date().toISOString().slice(0, 7))
     fireEvent.change(screen.getByLabelText('Month'), { target: { value: '2025-01' } })
+    fireEvent.blur(screen.getByLabelText('Month'))
     await waitFor(() => expect(fetchMock).toHaveBeenLastCalledWith(
       `${config.apiBase}/api/cost?period=2025-01`, expect.any(Object),
     ))
@@ -395,15 +396,16 @@ describe('cost transparency', () => {
     expect(screen.queryByText(monthLabel)).not.toBeInTheDocument()
   })
 
-  it('keeps the guest button and unavailable panel without monthly or history reads', async () => {
+  it('keeps the guest button and sign-in explanation without monthly or history reads', async () => {
     const fetchMock = respond()
     await act(async () => { render(<CostTransparencyPanel readsPaused />) })
     expect(screen.getByRole('button', { name: title })).toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: title }))
-    expect(screen.getByText('Costs are unavailable for this month.')).toBeInTheDocument()
-    fireEvent.click(screen.getByRole('button', { name: 'History' }))
-    expect(screen.getByText('Cost history is unavailable.')).toBeInTheDocument()
+    expect(screen.getByText('Sign in to view your costs and cost history.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'History' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Retry/ })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Month')).not.toBeInTheDocument()
     expect(fetchMock).not.toHaveBeenCalled()
   })
 

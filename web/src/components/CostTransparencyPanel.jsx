@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { authHeaders, config, getCost } from '../api.js'
 import './CostTransparencyPanel.css'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 
 const TITLE = 'What Leaf costs to operate'
 const COPY = 'This page shows what Leaf actually costs to run and your share of it. It is not a bill and does not change your plan, quotas, or limits.'
@@ -45,6 +46,23 @@ async function getCostHistory(from, to) {
   }
 }
 
+function MonthInput({ value, min, max, onCommit }) {
+  const [draft, setDraft] = useState(value)
+  useEffect(() => { setDraft(value) }, [value])
+  const commit = () => {
+    if (/^\d{4}-(0[1-9]|1[0-2])$/.test(draft) && (!min || draft >= min) && (!max || draft <= max)) {
+      onCommit(draft)
+    } else {
+      setDraft(value)
+    }
+  }
+  return <input type="month" value={draft} min={min} max={max}
+    onChange={(event) => setDraft(event.target.value)} onBlur={commit}
+    onKeyDown={(event) => {
+      if (event.key === 'Enter' && !isCompositionKey(event)) { event.preventDefault(); commit() }
+    }} />
+}
+
 function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRetry }) {
   if (loading) return <p role="status">Loading cost history...</p>
   if (!data) return <>
@@ -56,8 +74,8 @@ function HistoryView({ data, loading, from, to, currentMonth, onFrom, onTo, onRe
   const latestTo = latestAllowedTo < currentMonth ? latestAllowedTo : currentMonth
   return <>
     <div>
-      <label>From month <input type="month" value={from} min={earliestFrom} max={to} onChange={(event) => onFrom(event.target.value)} /></label>
-      <label>To month <input type="month" value={to} min={from} max={latestTo} onChange={(event) => onTo(event.target.value)} /></label>
+      <label>From month <MonthInput value={from} min={earliestFrom} max={to} onCommit={onFrom} /></label>
+      <label>To month <MonthInput value={to} min={from} max={latestTo} onCommit={onTo} /></label>
     </div>
     <h3>Months</h3>
     <ul aria-label="Cost history months">{(data.months || []).map((month) => <li key={month.period}>
@@ -99,10 +117,10 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
   const closeButton = useRef(null)
   const panelRef = useRef(null)
 
-  // A known guest keeps the panel and its button but makes no cost reads, so it shows the unavailable state.
+  // A known guest keeps the panel and its button but makes no cost reads.
   useEffect(() => {
     let active = true
-    if (mock || readsPaused) { setData(null); return undefined }
+    if (mock || readsPaused) { setData(null); setLoading(false); return undefined }
     setLoading(true)
     setData(null)
     getCost(period).then((result) => { if (active) setData(result) }).catch(() => {
@@ -153,6 +171,7 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
           <button type="button" ref={closeButton} className="chip-neutral cost-close" onClick={close}>Close cost panel</button>
           <h2>{TITLE}</h2>
           <p>{COPY}</p>
+          {readsPaused ? <p role="status">Sign in to view your costs and cost history.</p> : <>
           <div role="group" aria-label="Cost view">
             <button type="button" className="chip-neutral" aria-pressed={view === 'monthly'} onClick={() => setView('monthly')}>Monthly</button>
             <button type="button" className="chip-neutral" aria-pressed={view === 'history'} onClick={() => setView('history')}>History</button>
@@ -162,10 +181,7 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
             onFrom={(value) => { if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= shiftMonth(historyTo, -23) && value <= historyTo) setHistoryFrom(value) }}
             onTo={(value) => { if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value >= historyFrom && value <= shiftMonth(historyFrom, 23) && value <= currentMonth) setHistoryTo(value) }}
             onRetry={() => setHistoryRetry((value) => value + 1)} /> : <>
-          <label>Month <input type="month" value={period} max={currentMonth} onChange={(event) => {
-            const value = event.target.value
-            if (/^\d{4}-(0[1-9]|1[0-2])$/.test(value) && value <= currentMonth) setPeriod(value)
-          }} /></label>
+          <label>Month <MonthInput value={period} max={currentMonth} onCommit={setPeriod} /></label>
           {loading ? <p role="status">Loading costs…</p> : !data ? <>
             <p role="status">Costs are unavailable for this month.</p>
             <button type="button" className="chip-neutral" onClick={() => setRetry((value) => value + 1)}>Retry costs</button>
@@ -214,6 +230,7 @@ export default function CostTransparencyPanel({ mock = false, readsPaused = fals
               </div>
               <p className="cost-footnote">Missing sources: {data.missing_sources?.length ? data.missing_sources.join(', ') : 'None reported'}. Published: {data.published_at || 'Unavailable'}.</p>
             </>}
+          </>}
           </>}
           </>}
         </section>
