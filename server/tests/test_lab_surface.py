@@ -5,13 +5,14 @@ from pathlib import Path
 import re
 
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.routing import APIRoute
 from fastapi.testclient import TestClient
 from route_flatten import iter_leaf_routes
 
 import deps
 import entitlements
+import lab_artifacts as ledger
 from routers import lab_router, lab_surface
 
 LAB_PATHS = [
@@ -226,6 +227,58 @@ def test_status_omits_worker_when_entitlement_lookup_fails(monkeypatch, lookup, 
     assert response.json() == {
         "ok": True, "schema": "leaf.lab-status.v1", "rail": "on",
         "posture": "staging", "tenant": "tenant-a",
+    }
+
+
+@pytest.mark.parametrize("lookup", ["worker_status", "paused", "oldest_queued_age_s"])
+def test_status_worker_store_failure_keeps_surface(monkeypatch, lookup):
+    def unavailable(*args):
+        raise HTTPException(503, detail="lab_store_unavailable")
+
+    monkeypatch.setattr(lab_surface.lab_run_store, lookup, unavailable)
+    client = _client()
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="hosted_pro")
+    response = client.get("/api/lab/status")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True, "schema": "leaf.lab-status.v1", "rail": "on",
+        "posture": "staging", "tenant": "tenant-a",
+        "worker": {"state": "unavailable", "reason": "lab_store_unavailable"},
+    }
+
+
+def test_status_worker_store_migrating_reason_is_kept(monkeypatch):
+    def unavailable(*args):
+        raise ledger.GitUnavailable("lab_store_migrating")
+
+    monkeypatch.setattr(lab_surface.lab_run_store, "worker_status", unavailable)
+    client = _client()
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="hosted_pro")
+    response = client.get("/api/lab/status")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True, "schema": "leaf.lab-status.v1", "rail": "on",
+        "posture": "staging", "tenant": "tenant-a",
+        "worker": {"state": "unavailable", "reason": "lab_store_migrating"},
+    }
+
+
+def test_status_worker_unexpected_error_keeps_surface(monkeypatch):
+    def unavailable(*args):
+        raise RuntimeError("store read failed")
+
+    monkeypatch.setattr(lab_surface.lab_run_store, "worker_status", unavailable)
+    client = _client()
+    client.app.dependency_overrides[deps.require_tenant] = lambda: deps.TenantContext(
+        "tenant-a", tier="hosted_pro")
+    response = client.get("/api/lab/status")
+    assert response.status_code == 200
+    assert response.json() == {
+        "ok": True, "schema": "leaf.lab-status.v1", "rail": "on",
+        "posture": "staging", "tenant": "tenant-a",
+        "worker": {"state": "unavailable", "reason": "lab_store_unavailable"},
     }
 
 
