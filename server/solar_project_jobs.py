@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import threading
 from types import SimpleNamespace
 from uuid import UUID
@@ -405,6 +406,21 @@ def _cloud_prepare(job, guard):
     return db.run_transaction(lambda conn: prepare_project_graph_job(job, conn=conn))
 
 
+def _emit_unsettled_job_event(job_id, tool_name, attempt, owner, phase, *, exc=None, outcome=None):
+    """Best-effort worker signal containing only the unsettled-exit allowlist."""
+    try:
+        reason = getattr(exc, "reason_code", getattr(exc, "code", None))
+        event = {"event": "graph_job_unsettled", "phase": phase,
+                 "job_id": str(job_id), "tool_name": tool_name, "attempt": attempt,
+                 "worker_id": owner, "exception": type(exc).__name__ if exc is not None else None,
+                 "reason_code": reason if isinstance(reason, str) else None, "outcome": outcome}
+        sys.stderr.write("LEAF_GRAPH_JOB_EVENT " + json.dumps(
+            event, separators=(",", ":"), sort_keys=True) + "\n")
+        sys.stderr.flush()
+    except Exception:
+        pass
+
+
 def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
     if tool_name not in graph.SUPPORTED_TOOLS:
         raise ValueError(f"no canonical solver adapter for {tool_name}")
@@ -428,21 +444,35 @@ def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
         guard.close()
         if not guard.lost:
             try:
-                jobs.fail_project_graph_job(job_id, owner, attempt, _preparation_error(exc))
-            except Exception:
+                outcome = jobs.fail_project_graph_job(job_id, owner, attempt, _preparation_error(exc))
+            except Exception as persist_exc:
                 # Failure persistence also recovers through the durable lease.
-                pass
+                _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
+                                          "fail_persist_error", exc=persist_exc)
+            else:
+                if isinstance(outcome, str) and outcome not in ("failed", "retry", "duplicate"):
+                    _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
+                                              "fail_not_settled", outcome=outcome)
+        else:
+            _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "lease_lost")
         return True
     guard.close()
     if guard.lost or prepared is None:
+        _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
+                                  "lease_lost" if guard.lost else "prepared_none")
         return True
     try:
         if tool_name == solve.TOOL_NAME:
-            platform_link.platform_db().run_transaction(lambda conn:
+            outcome = platform_link.platform_db().run_transaction(lambda conn:
                 jobs.complete_project_solve_job(job_id, owner, attempt, prepared, conn=conn))
         else:
-            complete_project_graph_job(job_id, owner, attempt, prepared)
-    except Exception:
+            outcome = complete_project_graph_job(job_id, owner, attempt, prepared)
+    except Exception as exc:
         # Uncertain persistence is recovered by readback/reclaim, never a false failure.
-        pass
+        _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "complete_error", exc=exc)
+    else:
+        if (isinstance(outcome, (tuple, list)) and len(outcome) == 2
+                and isinstance(outcome[0], str) and outcome[0] not in ("applied", "duplicate")):
+            _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
+                                      "complete_not_settled", outcome=outcome[0])
     return True
