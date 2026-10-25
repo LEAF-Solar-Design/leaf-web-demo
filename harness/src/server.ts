@@ -58,6 +58,7 @@ import { ForgePublicationError } from "./vendor/mushy-author/ports/impl/forgeRem
 import type { LabDocumentPort } from "./vendor/mushy-author/ports/labDocumentPort.js";
 import { handleLabCommit, LAB_COMMIT_MAX_BODY_BYTES } from "./lab/labCommit.js";
 import { handleLabInspect, LAB_INSPECT_MAX_BODY_BYTES } from "./lab/labInspect.js";
+import { handleLabPublish, LAB_PUBLISH_MAX_BODY_BYTES } from "./lab/labPublish.js";
 import { classifyRoute } from "./routing.js";
 import {
   DEFAULT_TENANT,
@@ -950,8 +951,36 @@ export function createHarness(ports: HarnessPorts, opts?: {
             error: { code: "lab_inspect_unavailable", message: "Lab inspect is unavailable" },
           });
         }
-        const body = await readJsonBody(req, LAB_INSPECT_MAX_BODY_BYTES, true, false, true);
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, LAB_INSPECT_MAX_BODY_BYTES, true, false, true);
+        } catch (error) {
+          if (error instanceof AuthorLoopError && error.status === 413) {
+            return send(res, 413, { error: { code: "lab_body_too_large" } });
+          }
+          return send(res, 422, { error: { code: "lab_inspect_invalid", pointer: "", message: "Invalid JSON body" } });
+        }
         const result = await handleLabInspect(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
+        return send(res, result.status, result.body);
+      }
+
+      if (method === "POST" && path === "/lab/publish") {
+        res.setHeader("cache-control", "no-store");
+        if (!opts?.labDocuments) {
+          return send(res, 501, {
+            error: { code: "lab_publish_unavailable", message: "Lab publish is unavailable" },
+          });
+        }
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, LAB_PUBLISH_MAX_BODY_BYTES, true, false, true);
+        } catch (error) {
+          if (error instanceof AuthorLoopError && error.status === 413) {
+            return send(res, 413, { error: { code: "lab_body_too_large" } });
+          }
+          return send(res, 422, { error: { code: "lab_publish_invalid", pointer: "", message: "Invalid JSON body" } });
+        }
+        const result = await handleLabPublish(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
         return send(res, result.status, result.body);
       }
 
@@ -962,7 +991,15 @@ export function createHarness(ports: HarnessPorts, opts?: {
             error: { code: "lab_commit_unavailable", message: "Lab commit is unavailable" },
           });
         }
-        const body = await readJsonBody(req, LAB_COMMIT_MAX_BODY_BYTES, true, false, true);
+        let body: unknown;
+        try {
+          body = await readJsonBody(req, LAB_COMMIT_MAX_BODY_BYTES, true, false, true);
+        } catch (error) {
+          if (error instanceof AuthorLoopError && error.status === 413) {
+            return send(res, 413, { error: { code: "lab_body_too_large" } });
+          }
+          return send(res, 422, { error: { code: "lab_commit_invalid", pointer: "", message: "Invalid JSON body" } });
+        }
         const result = await handleLabCommit(opts.labDocuments, authorityHeader(req, "x-tenant-id"), body);
         return send(res, result.status, result.body);
       }

@@ -162,6 +162,24 @@ describe("Lab commit", () => {
     expect(port.commit).not.toHaveBeenCalled();
   });
 
+  it("returns a fixed error for malformed JSON and reader validation failures", async () => {
+    const port = fakePort();
+    const url = listen(port);
+    for (const body of ['{"expected_sha":', "not JSON", '{"expected_sha":null,"expected_sha":null}', new Uint8Array([0xff])]) {
+      const response = await fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", "x-tenant-id": TENANT, "x-harness-secret": SECRET },
+        body,
+      });
+      expect(response.status).toBe(422);
+      expect(response.headers.get("cache-control")).toBe("no-store");
+      expect(await response.json()).toEqual({
+        error: { code: "lab_commit_invalid", pointer: "", message: "Invalid JSON body" },
+      });
+    }
+    expect(port.commit).not.toHaveBeenCalled();
+  });
+
   it("rejects invalid closed bodies with the offending JSON pointer", async () => {
     const port = fakePort();
     const url = listen(port);
@@ -187,6 +205,15 @@ describe("Lab commit", () => {
       expect(result.status).toBe(422);
       expect(errorBody(result).error).toMatchObject({ code: "lab_commit_invalid", pointer });
     }
+    expect(port.commit).not.toHaveBeenCalled();
+  });
+
+  it("returns a fixed error for an oversized body without committing", async () => {
+    const port = fakePort();
+    const result = await post(listen(port), { ...validBody(), padding: "x".repeat(labCommit.LAB_COMMIT_MAX_BODY_BYTES) });
+    expect(result.status).toBe(413);
+    expect(result.body).toEqual({ error: { code: "lab_body_too_large" } });
+    expect(result.cacheControl).toBe("no-store");
     expect(port.commit).not.toHaveBeenCalled();
   });
 
