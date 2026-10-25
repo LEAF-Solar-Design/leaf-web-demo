@@ -2327,7 +2327,7 @@ test('failed drawing setup accepts an empty canvas and requires the product no-d
         assert.deepEqual(options, { name: 'Quick access', exact: true })
         return { getByRole: (role, options) => {
           assert.equal(role, 'button')
-          assert.deepEqual(options, { name: 'Undo version (unavailable: no versioned drawing)', exact: true })
+          assert.deepEqual(options, { name: 'Undo version (unavailable: No saved versions yet)', exact: true })
           return undo
         } }
       },
@@ -3430,4 +3430,184 @@ test('staging evidence records a passing action without a skip reason', async ()
   assert.equal(persisted.projectSolar.classification.status, 'passed')
   assert.equal(persisted.projectSolar.classification.barrierFailure, null)
   assert.equal(Object.hasOwn(persisted.projectSolar, 'skipReason'), false)
+})
+
+function emitG10Overflow(page, status = 409, errorCode = 'CONTEXT_FAILED') {
+  emitStagingEvidenceResponse(page, '/api/projects/p1/context?drawing_id=private&token=secret', status, errorCode)
+  for (let index = 0; index < 205; index++) {
+    emitStagingEvidenceResponse(page, `/api/${index % 2 ? 'jobs' : 'builds'}/${index}?limit=private`)
+  }
+}
+
+function g10ActionDiagnostics(error) {
+  const line = error.message.split('\n').find(line => line.startsWith('Staging actions: '))
+  assert.ok(line, 'original error must retain action diagnostics')
+  return JSON.parse(line.slice('Staging actions: '.length))
+}
+
+test('G10 failure text retains submit context after polling overflow', async () => {
+  for (const [status, errorCode] of [[409, 'CONTEXT_FAILED'], [200, null]]) {
+    const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+    page.url = () => stagingBase
+    const failure = new Error('submit UI barrier did not complete')
+    let rejectWait, persisted
+    page.waitForResponse = () => new Promise((resolve, reject) => { rejectWait = reject })
+    await assert.rejects(stagingEvidenceStep(runtime, { title: 'G10-overflow' }, () =>
+      stagingAction(page, stagingBase, 'POST', '/api/run', () => {
+        emitG10Overflow(page, status, errorCode)
+        rejectWait(failure)
+      }), async evidence => { persisted = structuredClone(evidence.projectSolar) }), error => error === failure)
+    assert.equal(persisted.network.length, 40)
+    assert.equal(persisted.network.some(record => record.path.includes('context')), false)
+    assert.equal(persisted.network.some(record => record.method === 'POST'), false)
+    assert.deepEqual(persisted.classification,
+      { status: 'failed', barrierFailure: 'submit UI barrier did not complete', observations: [] })
+    assert.ok(failure.message.startsWith('submit UI barrier did not complete\nStaging network:'))
+    const expected = { actions: [{ action: 'POST /api/run', requests: [{ method: 'GET',
+      path: '/api/projects/p1/context?drawing_id&token', status, duration_ms: 120, error_code: errorCode }],
+    truncated: false }], truncated: false }
+    assert.deepEqual(persisted.actions, expected)
+    assert.deepEqual(g10ActionDiagnostics(failure), expected)
+    assert.equal(/private|secret/.test(failure.message), false)
+  }
+})
+
+test('G10 failure text survives evidence write failure', async () => {
+  const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+  page.url = () => stagingBase
+  const failure = new Error('submit UI barrier did not complete')
+  let rejectWait, writes = 0
+  page.waitForResponse = () => new Promise((resolve, reject) => { rejectWait = reject })
+  await assert.rejects(stagingEvidenceStep(runtime, { title: 'G10-disk-failure' }, () =>
+    stagingAction(page, stagingBase, 'POST', '/api/run', () => {
+      emitG10Overflow(page)
+      rejectWait(failure)
+    }), async () => { writes++; throw new Error('disk unavailable') }), error => error === failure)
+  assert.equal(writes, 1)
+  assert.equal(runtime.evidence.projectSolar.network.length, 40)
+  const retained = g10ActionDiagnostics(failure).actions[0].requests
+  assert.deepEqual(retained, [{ method: 'GET', path: '/api/projects/p1/context?drawing_id&token',
+    status: 409, duration_ms: 120, error_code: 'CONTEXT_FAILED' }])
+  assert.equal(failure.message.includes('disk unavailable'), false)
+})
+
+test('G10 retained diagnostics redact and bound action windows', () => {
+  const jwt = 'eyJsynthetic.payload.signature', capability = 'lco1.synthetic-capability'
+  const requests = Array.from({ length: 45 }, (_, index) => ({ method: `GET ${jwt}`,
+    path: `/api/context/${index}/${capability}?drawing_id=private-value&token=${jwt}`,
+    status: 409, duration_ms: index, error_code: capability,
+    body: 'private-body', headers: { authorization: 'private-header' } }))
+  const actions = { actions: Array.from({ length: 23 }, (_, index) => ({
+    action: `${index} ${jwt} ${capability} ${'a'.repeat(100)}`, requests, truncated: false,
+  })), truncated: false }
+  const ring = [requests[0]], consoleMessages = [{ level: 'warning', text: jwt }]
+  const original = structuredClone({ actions, ring, consoleMessages })
+  const output = stagingNetworkFailure(ring, consoleMessages, actions)
+  const lines = output.split('\n')
+  assert.equal(lines.length, 3)
+  assert.equal(lines[0].startsWith('Staging network: '), true)
+  assert.equal(lines[1].startsWith('Staging console: '), true)
+  const safe = JSON.parse(lines[2].slice('Staging actions: '.length))
+  assert.equal(safe.truncated, true)
+  assert.equal(safe.actions.length, 20)
+  assert.equal(safe.actions[0].action.startsWith('3 '), true)
+  assert.equal(safe.actions.at(-1).action.startsWith('22 '), true)
+  for (const window of safe.actions) {
+    assert.equal(window.action.length, 80)
+    assert.equal(window.truncated, true)
+    assert.equal(window.requests.length, 40)
+    assert.match(window.requests[0].path, /^\/api\/context\/5\//)
+    assert.match(window.requests.at(-1).path, /^\/api\/context\/44\//)
+    for (const request of window.requests) {
+      assert.deepEqual(Object.keys(request), ['method', 'path', 'status', 'duration_ms', 'error_code'])
+      assert.ok(request.path.endsWith('?drawing_id&token'))
+    }
+  }
+  for (const marker of [jwt, capability, 'private-value', 'private-body', 'private-header', 'headers', 'body']) {
+    assert.equal(output.includes(marker), false)
+  }
+  assert.deepEqual({ actions, ring, consoleMessages }, original)
+  assert.equal(stagingNetworkFailure(ring, consoleMessages), lines.slice(0, 2).join('\n'))
+  assert.equal(stagingNetworkFailure([]), 'Staging network: []\nStaging console: []')
+  for (const truncated of [false, true]) {
+    const snapshot = { actions: [{ action: 'small', requests: [], truncated }], truncated }
+    assert.deepEqual(g10ActionDiagnostics({ message: stagingNetworkFailure([], [], snapshot) }), snapshot)
+  }
+  const discarded = g10ActionDiagnostics({ message: stagingNetworkFailure([], [], {
+    actions: [{ action: 'filtered', requests: [{ ...requests[0], path: '/assets/ignored' }], truncated: false }],
+    truncated: false,
+  }) })
+  assert.deepEqual(discarded, { actions: [{ action: 'filtered', requests: [], truncated: true }], truncated: false })
+})
+
+test('G10 cleanup and late metadata preserve action attribution', async () => {
+  const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+  page.url = () => stagingBase
+  const events = ['request', 'response', 'requestfailed', 'console']
+  const baselineListener = () => {}
+  for (const event of events) page.on(event, baselineListener)
+  const counts = events.map(event => page.listenerCount(event))
+  const symbols = Object.getOwnPropertySymbols(page)
+  page.waitForResponse = async () => stagingResponse('/api/run', {}, 202, 'POST')
+  const request = { method: () => 'GET', url: () => `${stagingBase}/api/projects/p1/context?token=private`,
+    timing: () => ({ startTime: 1, responseEnd: 321 }) }
+  let completeBody, completeResponse, persisted
+  const body = new Promise(resolve => { completeBody = resolve })
+  const finished = new Promise(resolve => { completeResponse = resolve })
+  const failure = new Error('late metadata barrier')
+  await assert.rejects(stagingEvidenceStep(runtime, { title: 'G10-late' }, async () => {
+    emitStagingEvidenceResponse(page, '/api/before-action')
+    await stagingAction(page, stagingBase, 'POST', '/api/run', () => page.emit('request', request))
+    await stagingAction(page, stagingBase, 'GET', '/api/projects', () => {
+      page.emit('response', { request: () => request, status: () => 409,
+        json: () => body, finished: () => finished })
+      completeBody({ error_code: 'CONTEXT_FAILED' })
+      emitStagingEvidenceResponse(page, '/api/inside-b')
+    })
+    completeResponse()
+    throw failure
+  }, async evidence => { persisted = structuredClone(evidence.projectSolar) }), error => error === failure)
+  assert.deepEqual(persisted.actions.actions[0].requests, [{ method: 'GET',
+    path: '/api/projects/p1/context?token', status: 409, duration_ms: 321, error_code: 'CONTEXT_FAILED' }])
+  assert.deepEqual(persisted.actions.actions[1].requests, [stagingEvidenceEntry('/api/inside-b')])
+  assert.deepEqual(g10ActionDiagnostics(failure), persisted.actions)
+  assert.deepEqual(events.map(event => page.listenerCount(event)), counts)
+  assert.deepEqual(Object.getOwnPropertySymbols(page), symbols)
+  assert.equal(await stagingEvidenceStep(runtime, { title: 'G10-reused-page' }, async () => {
+    emitStagingEvidenceResponse(page, '/api/outside-next-action')
+    await stagingAction(page, stagingBase, 'POST', '/api/run', () => {})
+    return 'next step'
+  }, async () => {}), 'next step')
+  assert.deepEqual(runtime.evidence.projectSolar.actions,
+    { actions: [{ action: 'POST /api/run', requests: [], truncated: false }], truncated: false })
+  assert.deepEqual(events.map(event => page.listenerCount(event)), counts)
+  assert.deepEqual(Object.getOwnPropertySymbols(page), symbols)
+})
+
+test('G10 pass and named skip preserve verdicts with retained actions', async () => {
+  for (const skip of [false, true]) {
+    const page = new EventEmitter(), runtime = { page, evidence: { projectSolar: {} } }
+    page.url = () => stagingBase
+    page.waitForResponse = async () => stagingResponse('/api/run', {}, 202, 'POST')
+    const failure = new Error('Test is skipped: SIZED_PANEL_GROUPS_REQUIRED')
+    const value = { passed: true }
+    let persisted
+    const run = () => stagingEvidenceStep(runtime, { title: 'G10-verdict', expectedStatus: 'passed' }, async () => {
+      await stagingAction(page, stagingBase, 'POST', '/api/run', () => {
+        emitG10Overflow(page)
+        if (skip) throw failure
+      })
+      return value
+    }, async evidence => { persisted = structuredClone(evidence.projectSolar) })
+    if (skip) {
+      await assert.rejects(run(), error => error === failure)
+      assert.equal(failure.message, 'Test is skipped: SIZED_PANEL_GROUPS_REQUIRED')
+      assert.equal(persisted.skipReason, 'SIZED_PANEL_GROUPS_REQUIRED')
+    } else assert.equal(await run(), value)
+    assert.deepEqual(persisted.classification,
+      { status: skip ? 'skipped' : 'passed', barrierFailure: null, observations: [] })
+    assert.equal(persisted.network.length, 40)
+    assert.deepEqual(persisted.actions.actions[0].requests, [{ method: 'GET',
+      path: '/api/projects/p1/context?drawing_id&token', status: 409, duration_ms: 120, error_code: 'CONTEXT_FAILED' }])
+  }
 })

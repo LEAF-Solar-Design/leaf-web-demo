@@ -164,6 +164,46 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(requestBindingGrant).toHaveBeenCalledTimes(2)
   })
 
+  it('offers a status check when accepted binding never sends ready, without binding twice', async () => {
+    await chooseGrantVersion()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect drawing' }))
+    await act(async () => {})
+    vi.useFakeTimers()
+    setBridgeState({ ...state, bindingResult: 'DWG connected. Starting the signed cross-probe session.' })
+    act(() => vi.advanceTimersByTime(10_000))
+    expect(getActionStatus().textContent).toContain('AutoCAD has not confirmed')
+    expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Check connection status' }))
+    expect(bridge.retryHello).toHaveBeenCalledTimes(1)
+    expect(requestBindingGrant).toHaveBeenCalledTimes(1)
+    expect(bridge.bindDrawingWithGrant).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Connect drawing' }).disabled).toBe(false)
+    expect(screen.queryByRole('button', { name: 'Check connection status' })).toBeNull()
+    setBridgeState({ ...state, status: 'connected', ready })
+    expect(getActionStatus().textContent).toBe('DWG connected.')
+    act(() => vi.advanceTimersByTime(10_000))
+    expect(screen.queryByRole('button', { name: 'Check connection status' })).toBeNull()
+  })
+
+  it('retries a missing connected project name without displaying a drawing id as its name', async () => {
+    listProjects.mockRejectedValueOnce(new Error('GET /api/projects -> 503'))
+    state = { ...state, status: 'connected', ready }
+    render(<LeafPlatformScene />)
+    await act(async () => {})
+    expect(screen.getByText('Drawing connected; project name unavailable.')).toBeTruthy()
+    expect(screen.queryByText(`Connected to ${drawingId.slice(0, 8)}.`)).toBeNull()
+    fireEvent.click(screen.getByRole('button', { name: 'Retry project name' }))
+    expect(await screen.findByText('Connected to Roof project.')).toBeTruthy()
+    expect(listProjects).toHaveBeenCalledTimes(2)
+  })
+
+  it('separates the Studio recovery link from the next sentence', async () => {
+    listProjects.mockResolvedValue([])
+    mountUnbound()
+    const link = await screen.findByRole('link', { name: 'Open Leaf Automation Studio' })
+    expect(link.parentElement.textContent).toBe('Open Leaf Automation Studio. Then run LEAFPLATFORM again in AutoCAD to come back.')
+  })
+
   it.each([401, 403, 404, 422, 429, 503])('maps HTTP %s to a safe typed grant error', async (status) => {
     const api = await vi.importActual('../api.js')
     const fetchMock = vi.spyOn(globalThis, 'fetch').mockResolvedValue({
@@ -493,13 +533,15 @@ describe('AutoCAD palette scene in Studio', () => {
     expect(document.body.innerHTML).not.toContain(sessionKey)
   })
 
-  it('keeps the short drawing id when the bound project is not found', async () => {
+  it('explains a missing project name and offers a lookup retry', async () => {
     listProjects.mockResolvedValue([{ project_id: orgId, name: 'Another project' }])
     state = { status: 'connected', ready, selectedObjectId: null }
     render(<LeafPlatformScene />)
     await act(async () => {})
     expect(listProjects).toHaveBeenCalledWith(orgId)
-    expect(screen.getByText(`Connected to ${drawingId.slice(0, 8)}.`, { selector: 'section p' })).toBeTruthy()
+    expect(screen.getByText('Drawing connected; project name unavailable.', { selector: 'section p' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Retry project name' })).toBeTruthy()
+    expect(screen.queryByText(`Connected to ${drawingId.slice(0, 8)}.`)).toBeNull()
     expect(screen.queryByText('Connected to Another project.')).toBeNull()
   })
 
@@ -697,7 +739,7 @@ describe('AutoCAD palette scene in Studio', () => {
 
   it.each([
     ['Roof project', 'Connected to Roof project.'],
-    [null, `Connected to ${drawingId.slice(0, 8)}.`],
+    [null, 'Drawing connected; project name unavailable.'],
   ])('keeps the connection label visible after rejected Zoom with project name %s', async (name, connectionText) => {
     listProjects.mockResolvedValue([{ project_id: projectId, name }])
     bridge.focusObject.mockResolvedValue({ action: 'focus', status: 'rejected', reason: 'selection_apply_failed' })
@@ -709,8 +751,9 @@ describe('AutoCAD palette scene in Studio', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Zoom to' }))
     await waitFor(() => expect(region.textContent).toBe('AutoCAD could not find those objects. Select them again in AutoCAD.'))
     expect(screen.getByText(connectionText)).toBe(connection)
-    expect(connection.nextElementSibling.textContent).toBe('Drawing 33333333, Version 3')
-    expect(connection.nextElementSibling.nextElementSibling.textContent).toBe('Selected object: panel:A1')
+    const detail = name ? connection.nextElementSibling : screen.getByRole('button', { name: 'Retry project name' }).nextElementSibling
+    expect(detail.textContent).toBe('Drawing 33333333, Version 3')
+    expect(detail.nextElementSibling.textContent).toBe('Selected object: panel:A1')
     expect(region).not.toBe(connection)
     for (const element of [connection, region]) {
       expect(element.hidden).toBe(false)

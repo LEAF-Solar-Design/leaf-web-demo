@@ -14,7 +14,7 @@ vi.mock('./api.js', () => ({
   setIdentityDisplayName: vi.fn(),
 }))
 
-import { getProjectLifecycle, inviteMember, setIdentityDisplayName } from './api.js'
+import { exportProject, getProjectLifecycle, inviteMember, setIdentityDisplayName } from './api.js'
 import useProjectLifecycle from './useProjectLifecycle.js'
 
 function snapshot(projectId) {
@@ -93,6 +93,40 @@ it('LCR1 a mutation resolving after unmount refetches nothing and still returns 
   await act(async () => { invite.resolve({ ok: true, membership_id: 'm-new' }) })
   await expect(pending).resolves.toEqual({ ok: true, membership_id: 'm-new' })
   expect(lifecycleCalls('A')).toBe(1)
+})
+
+it('S1-170 returns the export artifact while its refresh is still pending', async () => {
+  const artifact = { export: { name: 'Roof' }, receipt: { receipt_id: 'export-receipt' } }
+  exportProject.mockResolvedValue(artifact)
+  const { result } = await mounted()
+  const refresh = deferred()
+  getProjectLifecycle.mockReturnValue(refresh.promise)
+  let returned
+  await act(async () => {
+    result.current.actions.export().then((value) => { returned = value })
+    await settle()
+  })
+  expect(returned).toBe(artifact)
+  expect(result.current.refreshing).toBe(true)
+  expect(result.current.status).toBe('ready')
+  await act(async () => { refresh.resolve(snapshot('A')) })
+})
+
+it('S1-170 a failed background refresh cannot reject a successful export', async () => {
+  const artifact = { export: {}, receipt: { receipt_id: 'export-receipt' } }
+  exportProject.mockResolvedValue(artifact)
+  const { result } = await mounted()
+  const refresh = deferred()
+  getProjectLifecycle.mockReturnValue(refresh.promise)
+  let returned
+  await act(async () => {
+    result.current.actions.export().then((value) => { returned = value })
+    await settle()
+  })
+  expect(returned).toBe(artifact)
+  await act(async () => { refresh.reject(new TypeError('Failed to fetch')) })
+  expect(result.current.status).toBe('ready')
+  expect(result.current.error).toMatch(/Check the connection/)
 })
 
 it('LCR2 a mutation started for A that resolves after the hook moved to B neither refetches A nor discards B', async () => {

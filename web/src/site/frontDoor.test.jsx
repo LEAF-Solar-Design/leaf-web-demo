@@ -164,7 +164,7 @@ describe('Leaf workspace guest front door', () => {
     expect(document.querySelector('.lp-price').textContent).toBe('Free to try. Pricing coming soon.')
     expect(screen.queryByText(/\$299|14-day trial|Start free trial/)).toBeNull()
     fireEvent.click(screen.getByRole('button', { name: '05 Pricing' }))
-    expect(mocks.navigate).toHaveBeenCalledWith('/sheets#05')
+    expect(mocks.navigate).toHaveBeenCalledWith('/sheets#c-201')
     const email = screen.getByLabelText('Want a workspace that uses your own API key?')
     fireEvent.change(email, { target: { value: 'guest@example.com' } })
     fireEvent.submit(screen.getByRole('form', { name: 'Register interest' }))

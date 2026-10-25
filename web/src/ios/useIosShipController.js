@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 import {
   emptyIosShipReadiness, fetchIosShipReadiness, getIosShipExecution,
   getIosShipReceipt, iosShipLaunchAffordance, makeIosShipLaunchKey,
@@ -6,10 +7,9 @@ import {
 } from '../site/iosShipReadiness.js'
 
 const terminal = (execution) => ['succeeded', 'failed'].includes(execution?.status)
-const MAX_ERROR_CHARS = 300
 const message = (cause) => {
-  const text = String(cause?.envelope?.message || cause?.message || 'The iOS ship status is unavailable.')
-  return text.length > MAX_ERROR_CHARS ? `${text.slice(0, MAX_ERROR_CHARS - 1)}…` : text
+  const text = String(cause?.envelope?.message || cause?.message || '')
+  return humanizeError(/\b\w+_\w+\b|\b\d{3}\b|field invalid|\n\s*at\b/.test(text) ? null : text)
 }
 const FOLLOW_LIMIT = 30 * 60 * 1000
 const SOURCE_DEFAULTS = Object.freeze({ sources: [], approvals: [], sync: null, canApprove: false, sourcesError: null })
@@ -129,12 +129,25 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     try {
       const next = await fetchIosShipReadiness({ projectId, revision })
       if (generation !== readGeneration.current) return
-      update({ readiness: decorate(next), loading: false, error: next.launchable ? null : next.setupAction || next.reason })
+      update({ readiness: decorate(next), loading: false, error: null })
+      return next
     } catch (cause) {
       if (generation !== readGeneration.current) return
       update({ readiness: decorate(emptyIosShipReadiness('unreachable', null, projectId)), loading: false, error: message(cause) })
     }
   }, [enabled, sessionActive, projectId, revision, live, update])
+
+  const nextBuild = useCallback(async () => {
+    if (!terminal(visible.execution)) return
+    const generation = executionGeneration.current
+    const next = await refresh()
+    if (!live() || executionGeneration.current !== generation) return
+    if (iosShipLaunchAffordance(next, { projectId, revision, sessionActive })) {
+      executionGeneration.current += 1
+      storage(pointerKey, 'remove')
+      update({ execution: null, receipt: null, followStopped: false })
+    }
+  }, [visible.execution, refresh, live, projectId, revision, sessionActive, pointerKey, update])
 
   useEffect(() => {
     update({ readiness: decorate(emptyIosShipReadiness('loading', null, projectId)), loading: false, launching: false, error: null })
@@ -163,10 +176,12 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
     let cancelled = false
     let timer
     let deadlineTimer
+    let failures = 0
     const generation = executionGeneration.current
     const valid = () => !cancelled && live() && executionGeneration.current === generation
     const token = {}
     following.current = token
+    update({ followStopped: false })
     const stop = () => {
       clearTimeout(timer)
       clearTimeout(deadlineTimer)
@@ -198,21 +213,30 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
       return true
     }
     const poll = async () => {
+      let settledExecution
       try {
         const response = await getIosShipExecution({ projectId, executionId })
         if (!valid()) return
+        settledExecution = response.execution
         update({ execution: response.execution, error: null })
         if (!await settle(response.execution) && valid()) timer = setTimeout(poll, 2000)
+        failures = 0
       } catch (cause) {
-        if (valid()) update({ error: message(cause) })
-        stop()
+        if (!valid()) return
+        update({ error: message(cause) })
+        if (!terminal(settledExecution) && (cause?.status == null || cause.status >= 500 || cause.status === 429) && failures < 3) {
+          timer = setTimeout(poll, 2000 * 2 ** failures++)
+        } else {
+          update({ followStopped: true })
+          stop()
+        }
       }
     }
     if (terminal(visible.execution)) {
-      settle(visible.execution).catch((cause) => { if (valid()) update({ error: message(cause) }); stop() })
+      settle(visible.execution).catch((cause) => { if (valid()) update({ error: message(cause), followStopped: true }); stop() })
     } else {
       deadlineTimer = setTimeout(() => {
-        if (valid()) update({ error: 'still running; refresh to keep following' })
+        if (valid()) update({ error: 'Status updates paused. Resume to check the build.', followStopped: true })
         cancelled = true
         stop()
       }, FOLLOW_LIMIT)
@@ -301,7 +325,7 @@ export function useIosShipController({ projectId, revision, sessionActive, enabl
             : /^(http_|unreachable$|readiness_unavailable$|provider_unavailable$)/.test(readiness.reason || '') ? 'unavailable'
               : readiness.setupState !== 'none' ? 'setup-required' : 'unavailable'
   return Object.freeze({ readiness, execution: visible.execution, receipt: visible.receipt, error: visible.error,
-    busy: phase === 'launching', phase, launch, refresh,
+    busy: phase === 'launching', phase, launch, refresh, nextBuild, loading: visible.loading, followStopped: visible.followStopped === true,
     sources: catalog.sources, approvals: catalog.approvals, sync: catalog.sync, canApprove: catalog.canApprove,
     sourcesError: catalog.sourcesError, approving: visible.approving, approve, refreshSources })
 }

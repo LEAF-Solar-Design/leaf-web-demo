@@ -105,11 +105,23 @@ export function observeStagingNetwork(page, records, recorder) {
   }
 }
 
-export function stagingNetworkFailure(records, consoleMessages = []) {
+export function stagingNetworkFailure(records, consoleMessages = [], actions) {
   const safeRecords = [], safeConsole = []
   for (const record of records) appendStagingRequest(safeRecords, record)
   for (const message of consoleMessages) appendStagingConsole(safeConsole, message)
-  return `Staging network: ${JSON.stringify(safeRecords)}\nStaging console: ${JSON.stringify(safeConsole)}`
+  const diagnostic = `Staging network: ${JSON.stringify(safeRecords)}\nStaging console: ${JSON.stringify(safeConsole)}`
+  if (actions === undefined) return diagnostic
+  const safeActions = { actions: actions.actions.slice(-20).map(window => {
+    const requests = []
+    let truncated = window.truncated === true || window.requests.length > 40
+    for (const request of window.requests.slice(-40)) {
+      try {
+        if (!appendStagingRequest(requests, request)) truncated = true
+      } catch { truncated = true }
+    }
+    return { action: redactSolarDiagnostic(window.action, { maxLength: 80 }), requests, truncated }
+  }), truncated: actions.truncated === true || actions.actions.length > 20 }
+  return `${diagnostic}\nStaging actions: ${JSON.stringify(safeActions)}`
 }
 
 async function persistStagingEvidence(evidence, title) {
@@ -147,11 +159,12 @@ export async function stagingEvidenceStep(runtime, testInfo, action, persist = p
     runtime.page.off('console', onConsole)
     await finish()
     recorder.end()
-    runtime.evidence.projectSolar.actions = recorder.snapshot()
+    const actions = recorder.snapshot()
+    runtime.evidence.projectSolar.actions = actions
     runtime.evidence.projectSolar.classification = classifyStagingOutcome({ error: skipReason ? null : failure,
       skipped: skipReason, network: records })
     if (skipReason) runtime.evidence.projectSolar.skipReason = skipReason
-    if (!skipReason && failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages)}`
+    if (!skipReason && failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages, actions)}`
     try {
       await persist(runtime.evidence, testInfo.title)
     } catch { /* Evidence IO must not replace the step's verdict. */ }

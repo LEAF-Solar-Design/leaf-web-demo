@@ -282,7 +282,7 @@ test.describe('DrawingUploadControl policy refusal', () => {
 })
 
 test.describe('OperatorEntry probe', () => {
-  for (const status of [401, 404, 503]) {
+  for (const status of [401, 403, 404, 503]) {
     test(`a ${status} probe hides the operator entry and is never repeated`, async ({ page }) => {
       test.setTimeout(90_000)
       await signIn(page)

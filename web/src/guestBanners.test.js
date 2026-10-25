@@ -122,13 +122,16 @@ describe('known guest authenticated reads', () => {
 
   it('keeps the drawer Refresh from reading usage for a known guest', () => {
     const refresh = one((node) => node.type === 'ObjectExpression'
-      && node.properties.some((property) => property.key?.name === 'label' && property.value?.value === 'Refresh')
+      && node.properties.some((property) => property.key?.name === 'label' && property.value?.type === 'ConditionalExpression'
+        && property.value.alternate.value === 'Refresh')
       && node.properties.some((property) => property.key?.name === 'onClick'))
     const onClick = refresh.node.properties.find((property) => property.key?.name === 'onClick')
-    expect(text(onClick.value)).toBe('() => { if (!knownGuest) loadUsage(); loadHealth() }')
-    const session = one((node) => node.type === 'CallExpression' && node.callee.name === 'useCallback'
-      && text(node.arguments[0].body).includes("'Session · provenance'"))
-    expect(text(session.node.arguments[1].elements.at(-1))).toBe('knownGuest')
+    expect(text(onClick.value)).toBe('() => Promise.all([knownGuest ? null : loadUsage(), loadHealth()])')
+    const session = one((node) => node.type === 'VariableDeclarator' && node.id.name === 'sessionDetails')
+    expect(session.node.init.callee.name).toBe('useMemo')
+    expect(session.node.init.arguments[1].elements.map(text)).toContain('knownGuest')
+    expect(text(session.node.init.arguments[0].body)).toContain('action: mock ? null : isSignedIn()')
+    expect(prop(opening('DetailsDrawer').node, 'data')).toBe('sessionDetails')
   })
 
   it('stops the quota re-poll for a known guest', () => {

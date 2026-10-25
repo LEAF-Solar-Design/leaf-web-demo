@@ -61,14 +61,14 @@ const DRAWER_FRAME_QUERY = '(max-width: 599px), (max-width: 1023px) and (min-hei
 // dynamic-import pattern) keeps first paint off the critical path.
 const Viewer = React.lazy(() => import('./components/Viewer.jsx'))
 const WORKSPACE_QUICK_BEFORE = Object.freeze([
-  { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
-  { id: 'quick-import-dxf', dataTool: 'quick-import-dxf', label: 'Open DXF', icon: 'open', disabled: true, reason: 'Drawing upload is unavailable in this session' },
+  { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: "Start a new drawing from the project board's Start button" },
+  { id: 'quick-import-dxf', dataTool: 'quick-import-dxf', label: 'Open DXF', icon: 'open' },
   { id: 'quick-save-version', dataTool: 'quick-save-version', label: 'Save version', icon: 'save', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-undo-edit', dataTool: 'quick-undo-edit', label: 'Undo edit', icon: 'undo', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-redo-edit', dataTool: 'quick-redo-edit', label: 'Redo edit', icon: 'redo', disabled: true, reason: REASONS.noVersions },
 ])
 const WORKSPACE_QUICK_AFTER = Object.freeze([
-  { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: 'printing is not in the browser engine' },
+  { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: "Printing isn't available yet" },
   { id: 'sep-1', kind: 'sep' },
   { id: 'quick-undo', label: 'Undo version', icon: 'undo', disabled: true, reason: REASONS.noVersions },
   { id: 'quick-redo', label: 'Redo version', icon: 'redo', disabled: true, reason: REASONS.noVersions },
@@ -76,7 +76,7 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
-import PromptBox from './components/PromptBox.jsx'
+import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
@@ -153,7 +153,7 @@ import {
   dismissRunIntent, drawingVersionForRun, mintCorrelationId, prepareCatalogRunParams, stageRunIntent,
 } from './runIntent.js'
 import useExit from './useExit.js'
-import DetailsDrawer from './components/DetailsDrawer.jsx'
+import DetailsDrawer, { ServiceStatus } from './components/DetailsDrawer.jsx'
 import ShortcutSheet from './components/ShortcutSheet.jsx'
 import {
   config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync,
@@ -961,6 +961,9 @@ export default function App() {
     usage,
     usageAt,
     health,
+    healthError,
+    healthLoading,
+    usageLoading,
     entitlements,
     entLoading,
     grant,
@@ -3166,15 +3169,13 @@ export default function App() {
           : (env?.version ?? '—')}`,
         `timing ${rec.elapsed_ms != null ? `${rec.elapsed_ms} ms` : (env?.timing_ms != null ? `${env.timing_ms} ms` : '·')}`,
         `cost ${env?.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
-        `degraded ${(env?.degraded_mode || rec.degraded_mode) ? 'yes — local fallback' : 'no'}`,
+        `Processing: ${(env?.degraded_mode || rec.degraded_mode) ? 'Local backup' : 'Normal'}`,
       ]
       // A mock envelope can carry a bare string error — don't render a blank row.
-      if (env?.error) rows.push(typeof env.error === 'string'
-        ? `error ${env.error}`
-        : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+      if (env?.error) rows.push(`Error: ${humanizeError(env.error)}`)
       rows.push(...cadTimingRows(env))
       setDrawer({
-        title: `${rec.tool || job.tool || 'job'} · provenance`,
+        title: `${rec.tool || job.tool || 'Job'} details`,
         rows,
         action: {
           label: 'Show in result pane',
@@ -3186,7 +3187,7 @@ export default function App() {
             setTimeout(() => resultBlockRef.current?.scrollIntoView({ block: 'start', behavior: 'smooth' }), 0)
           },
         },
-        foot: 'Esc closes. The rail behind never re-flows.',
+        foot: 'Run details are read-only.',
       })
     } catch (e) {
       setRunErr(humanizeError(e))
@@ -3207,47 +3208,46 @@ export default function App() {
         : (env.version ?? '—')}`,
       `timing ${env.timing_ms != null ? `${env.timing_ms} ms` : '·'}`,
       `cost ${env.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
-      `degraded ${env.degraded_mode ? 'yes — local fallback' : 'no'}`,
+      `Processing: ${env.degraded_mode ? 'Local backup' : 'Normal'}`,
     ]
-    if (env.error) rows.push(typeof env.error === 'string'
-      ? `error ${env.error}`
-      : `error ${env.error.error_code || ''} · ${env.error.message || ''}`)
+    if (env.error) rows.push(`Error: ${humanizeError(env.error)}`)
     rows.push(...cadTimingRows(env))
     setDrawer({
-      title: 'Run · provenance',
+      title: 'Run details',
       rows,
       action: currentJobId
-        ? { label: 'Copy job id', onClick: () => navigator.clipboard?.writeText(String(currentJobId)) }
+        ? { label: 'Copy job id', copyText: String(currentJobId) }
         : null,
-      foot: 'Esc closes. Provenance is read-only.',
+      foot: 'Run details are read-only.',
     })
   }, [result, currentJobId, selectedTool])
 
   // A failed Solar tool run reads as its refusal sentence in the result card;
-  // the Details drawer above still shows the raw code from `result` itself.
+  // the Details drawer also humanizes errors from the original result.
   const shownResult = useMemo(() => (ENV_CAD_EDIT ? solarRefusalEnvelope(result, selectedTool) : result),
     [result, selectedTool])
 
   // Header "Details" -> session identity/spend drawer (metadata demoted from
   // the permanent header chrome per the standard).
   const openSessionDetails = useCallback(() => {
+    setDrawer({ urlKey: 'details', title: 'Session details' })
+  }, [])
+  const sessionDetails = useMemo(() => {
+    if (drawer?.urlKey !== 'details') return drawer
     const rows = [
-      `org ${org || '—'}`,
-      `tenant ${tenantLabel} · tier ${tierDisplay}`,
-      `mode ${mock ? 'mock (no cloud)' : `live · ${config.apiBase}`}`,
-      `served ${health?.source_sha || (mock ? 'sample data' : 'not available')}`,
-      `task ${taskRevisionOf(health?.task_definition_arn) || 'not available'}`,
-      `entitlement tier ${gateTier}`,
+      `Account: ${org || 'Guest'}`,
+      `Workspace: ${tenantLabel}`,
+      `Plan: ${tierDisplay}`,
+      mock ? 'Demo (sample data)' : healthError ? 'Service unreachable' : health ? 'Service connected' : 'Checking service...',
     ]
     if (!mock && usage) {
-      rows.push(`spend $${Number(usage.today?.usd_est || 0).toFixed(3)} today · ${usage.today?.runs || 0} run${(usage.today?.runs || 0) === 1 ? '' : 's'}`)
+      rows.push(`Usage: $${Number(usage.today?.usd_est || 0).toFixed(3)} today · ${usage.today?.runs || 0} run${(usage.today?.runs || 0) === 1 ? '' : 's'}`)
       if (usage.cap?.enabled && typeof usage.cap?.remaining === 'number') {
-        rows.push(`cap $${Number(usage.cap.remaining).toFixed(2)} left`)
+        rows.push(`Budget: $${Number(usage.cap.remaining).toFixed(2)} left`)
       }
     }
-    rows.push(`build ${__BUILD_HASH__}`)
-    setDrawer({
-      title: 'Session · provenance',
+    return {
+      title: 'Session details',
       // S24: the one DT2 drawer the URL may name (`drawer=details`).
       urlKey: 'details',
       rows,
@@ -3268,12 +3268,13 @@ export default function App() {
       // the refusal reason is `signed_out` — the ONE reason the bounded token
       // recovery refuses to re-open. Ending a session through raw logout() left
       // a deliberate sign-out indistinguishable from an expiry.
-      action: isSignedIn()
+      action: mock ? null : isSignedIn()
         ? { label: 'Sign out', onClick: sessionActions.signOut }
-        : { label: 'Refresh', onClick: () => { if (!knownGuest) loadUsage(); loadHealth() } },
+        : { label: healthLoading || usageLoading ? 'Refreshing...' : 'Refresh', disabled: healthLoading || usageLoading,
+          onClick: () => Promise.all([knownGuest ? null : loadUsage(), loadHealth()]) },
       foot: 'Your account and usage.',
-    })
-  }, [org, tenantLabel, tierDisplay, mock, usage, gateTier, loadUsage, loadHealth, sessionActions, health, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout, knownGuest])
+    }
+  }, [drawer, org, tenantLabel, tierDisplay, mock, usage, loadUsage, loadHealth, sessionActions, health, healthError, healthLoading, usageLoading, checkout.readFailed, checkout.failure, lock.unknown, heldByUs, otherHeldCheckout, knownGuest, signedIn])
 
   // Esc while a live run is in flight: detach this session from the job (the
   // rail keeps tracking it; the close beacon flags it reap-able server-side).
@@ -3339,10 +3340,7 @@ export default function App() {
   useEffect(() => {
     const onClick = (e) => {
       const t = e.target
-      if (!(t instanceof Element)) return
-      if (t.closest('button, a, input, textarea, select, label, summary, canvas, '
-        + '[role="button"], [role="option"], [role="listbox"], [contenteditable="true"], '
-        + '.drawer, .vh-pop, .proj-menu, .claude-pop, .ops-drawer, .resolver, .bar')) return
+      if (shouldSkipPromptFocus(t)) return
       const sel = window.getSelection && window.getSelection()
       if (sel && sel.toString()) return
       barInputRef.current?.focus()
@@ -4136,8 +4134,12 @@ export default function App() {
       return { clusters: [], quickBefore: [], quickAfter: [], view: null, version: null, rail: [], author: null }
     }
     if (!drafting) {
+      const upload = profileTabs.flatMap((tab) => tab.clusters).flatMap((cluster) => cluster.tools || [])
+        .find((tool) => tool.id === 'files:upload')
       return { clusters: profileTabs.find((tab) => tab.id === activeRibbonTab)?.clusters || [],
-        quickBefore: WORKSPACE_QUICK_BEFORE, quickAfter: [
+        quickBefore: WORKSPACE_QUICK_BEFORE.map((tool) => tool.id === 'quick-import-dxf'
+          ? { ...tool, disabled: upload?.disabled ?? true, reason: upload?.reason ?? PROFILE_REASONS.uploadDrawing, onClick: upload?.onClick }
+          : tool), quickAfter: [
           ...WORKSPACE_QUICK_AFTER,
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
             expanded: drawerViewport ? studioDrawer === 'nav' : navExpanded,
@@ -4253,7 +4255,7 @@ export default function App() {
     const byTab = {
       solar: (profileTabs.find((tab) => tab.id === 'solar')?.clusters || []).map((cluster) => cluster.id === 'solar-panels'
         ? { ...cluster, extra: ENV_CAD_EDIT ? <div id="cockpit-solar-panels-slot" className="ribbon-slot" /> : null,
-          note: ENV_CAD_EDIT ? null : 'Panel placement needs the browser engine' }
+          note: ENV_CAD_EDIT ? null : 'Panel placement needs the drawing editor' }
         : cluster),
       // The Clipboard panel stays LAST, where the reference puts it. With
       // the flag ON it is an EMPTY cluster carrying a slot div, and the
@@ -4286,10 +4288,10 @@ export default function App() {
       // fewer set of live builder calls to keep in sync generally.
       view, version, rail, author,
       quickBefore: [
-        { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: 'new drawings start on the project board (Start tab)' },
+        { id: 'new', label: 'New drawing', icon: 'new-file', disabled: true, reason: "Start a new drawing from the project board's Start button" },
       ],
       quickAfter: [
-        { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: 'printing is not in the browser engine' },
+        { id: 'print', label: 'Print', icon: 'print', disabled: true, reason: "Printing isn't available yet" },
         { id: 'sep-1', kind: 'sep' },
         { ...undo, id: 'quick-undo', label: 'Undo version' },
         { ...redo, id: 'quick-redo', label: 'Redo version' },
@@ -4580,6 +4582,8 @@ export default function App() {
           inputRef={barInputRef}
           routeActive={!!route}
           mcpDiscoveryEnabled={!mock && !knownGuest}
+          liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}
+          mock={mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
           // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)
@@ -4663,6 +4667,11 @@ export default function App() {
             surface: nothing here. */}
         {studioShell && surfaceSlots.toolbar.ribbon && (
           <CockpitTopBand tabs={profileTabs} tab={activeRibbonTab} onTab={setRibbonTab} before={ribbon.quickBefore} after={ribbon.quickAfter} />
+        )}
+        {projectMode && (
+          <>
+            {projectSolarRuntime.canRetryReadback && !projectSolarRuntime.busy && <button type="button" className="chip-act" disabled={projectSolarRuntime.busy} onClick={projectSolarRuntime.retryReadback}>Refresh</button>}
+          </>
         )}
         <div className="proj" ref={projectSwitcherRef}>
           <ProjectSwitcher
@@ -4753,7 +4762,7 @@ export default function App() {
               onUnlink={onUnlinkClaude}
             />
           )}
-          {!mock && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+          {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
       </header>
 
@@ -5543,7 +5552,7 @@ export default function App() {
                   <p role="status" aria-live="polite">
                     {projectSolarRuntime.notice || projectSolarAppReason(projectSolar.scope.reason || 'scope_pending')}
                     {projectSolarRuntime.publishedVersionId && <code>{projectSolarRuntime.publishedVersionId}</code>}
-                    {projectSolarRuntime.publishedVersionId && <button type="button" className="chip-act" disabled={projectSolarRuntime.busy} onClick={projectSolarRuntime.retryReadback}>Retry</button>}
+                    {projectSolarRuntime.canRetryReadback && <button type="button" className="chip-act" disabled={projectSolarRuntime.busy} onClick={projectSolarRuntime.retryReadback}>Retry</button>}
                   </p>
                 )}
               </>
@@ -6028,38 +6037,9 @@ export default function App() {
         )}
         {/* Real statuses get the 6px dot + tinted sentence-case word; counts and
             spend are muted metadata (green is reserved for genuine states). */}
-        {mock ? (
-          <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">mock (no cloud)</span></span>
-        ) : authRequired ? (
-          /* the ONLY unauthenticated signal is the public /api/health ping — a
-             rosy "cloud live · N tools" over a 401-walled app would be a lie */
-          <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">sign-in required</span></span>
-        ) : health ? (
-          health.aps_live
-            ? <span className="foot-stat"><span className="dot" aria-hidden="true" />backend · <span className="ok-txt">cloud live</span></span>
-            : <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">local only</span></span>
-        ) : !authConfigured ? (
-          /* Gating window (a VITE_MOCK=0 build with Auth0 unconfigured, before the
-             401 auto-fallback flips to mock): never claim a green "live" state we
-             haven't confirmed. Neutral until the fallback lands. */
-          <span className="foot-stat"><span className="dot square" aria-hidden="true" />backend · <span className="warn-txt">connecting…</span></span>
-        ) : (
-          <span className="foot-stat"><span className="dot" aria-hidden="true" />backend · <span className="ok-txt">live</span></span>
-        )}
-        {mock ? (
-          <span className="foot-stat"><span className="dot" aria-hidden="true" />local solver · <span className="ok-txt">ready</span></span>
-        ) : authRequired ? null : health ? (
-          <span className="foot-stat">
-            <span className={health.da_client_present ? 'dot' : 'dot square'} aria-hidden="true" />
-            data agent · <span className={health.da_client_present ? 'ok-txt' : 'warn-txt'}>
-              {health.da_client_present ? 'ready' : 'absent'}
-            </span> · <span className="dim">{plural(health.n_tools, 'tool')}</span>
-          </span>
-        ) : (
-          <span className="foot-stat"><span className="dot" aria-hidden="true" />local solver · <span className="ok-txt">ready</span></span>
-        )}
+        <ServiceStatus mock={mock} health={health} healthError={healthError} authRequired={authRequired} />
         {/* One census per surface: under the studio the footer counts the same surface-scoped families the rail shows. */}
-        <span className="dim">{plural(studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount, 'cap')} · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · tier {gateTier}</span>
+        <span className="dim">Tools: {studioGround ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} available · Plan: {gateTier}</span>
         {!mock && usage && (
           <span className="dim">${Number(usage.today?.usd_est || 0).toFixed(3)} today</span>
         )}
@@ -6079,7 +6059,7 @@ export default function App() {
             Restart guided tour
           </button>
         )}
-        <span style={{ marginLeft: 'auto' }}>build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span> · {mock ? 'sample data' : 'live'}</span>
+        <span style={{ marginLeft: 'auto' }}>Build <span style={{ fontFamily: 'var(--font-mono)' }}>{__BUILD_HASH__}</span></span>
         </FootRegion>
         {/* The drawing instruments, anchored at the right edge like the
             reference's. They moved BELOW the build hash in the DOM so the
@@ -6102,9 +6082,8 @@ export default function App() {
 
       {signedIn && customizeExit.shown && <CustomizePanel tenant={tenant} onDismiss={() => setCustomizeOpen(false)} exiting={customizeExit.exiting} />}
 
-      {/* DT2 drawer: fixed over the events rail (row 2, col 3) — the rail
-          behind never re-flows. Esc (global ladder) or the header cap closes. */}
-      <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
+      {/* Details stays over the events list; the header control closes it. */}
+      <DetailsDrawer data={sessionDetails} onClose={() => setDrawer(null)} />
 
       <ShortcutSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
 
@@ -6127,7 +6106,7 @@ export default function App() {
           mounted (LEAF_OPERATOR_ENABLED=1) AND this caller holds a grant.
           Tenant deployments never see it and never re-probe.
           The demo has no operator grant, so the probe would only produce the 404 the campaign counted. */}
-      {!mock && <OperatorEntry />}
+      {!mock && !knownGuest && signedIn && <OperatorEntry />}
     </div>
     </SurfaceFrame>
     </DrawingObjectsProvider>
