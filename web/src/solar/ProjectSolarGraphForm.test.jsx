@@ -168,6 +168,35 @@ it('W1C-26 shows existing frame name collisions and invalidates preview on name 
   await screen.findByText('Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.')
   expect(h.submit).not.toHaveBeenCalled()
 })
+it('W1C-26b keeps submission disabled when the panel-groups preview refuses sizing readiness', async () => {
+  const h = panelGroupHarness()
+  h.code = 'sizing_confirmation_required'
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByRole('textbox', { name: 'Group 1 name' })
+  fillGroupNumbers()
+  await waitFor(() => expect(feedback()).toContain('sizing_confirmation_required'))
+  expect(feedback()).toContain(generic)
+  expect(screen.getByTestId('project-solar-graph-feedback').getAttribute('role')).toBe('status')
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog.mock.calls[0][0].intents[0]).toMatchObject({ tool: 'solar-panel-groups',
+    params: { groups: [expect.objectContaining({ panel_refs: ['a', 'b'] }),
+      expect.objectContaining({ panel_refs: ['c', 'd'] })] } })
+  expect(action().disabled).toBe(true)
+  fireEvent.click(action())
+  expect(h.submit).not.toHaveBeenCalled()
+  expect(screen.queryByText(/private path|hostile detail/)).toBe(null)
+})
+it('W1C-26b reports invalid handle exclusions and refuses duplicate handles before preview', async () => {
+  const h = panelGroupHarness()
+  h.graph.panels.push({ id: 'bad', angle: 0, frame_ref: null, provenance: { source_handle: 'g1' } })
+  h.graph.panels[2].provenance.source_handle = 'a'
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByText('Two panels share a drawing handle, so they cannot be grouped. Re-import the panels.')
+  expect(screen.getByText('1 panels have a drawing handle that cannot be grouped.')).toBeTruthy()
+  expect(screen.getByText('2 panels, angle 0.0°')).toBeTruthy()
+  expect(action().disabled).toBe(true)
+  expect(h.client.prepareRun).not.toHaveBeenCalled()
+})
 it('W1C-26 refuses changed proposal membership on the fresh submit context', async () => {
   const h = panelGroupHarness()
   render(<ProjectSolarGraphForm {...h.props} />)
@@ -250,6 +279,9 @@ it('R13C-24 renders panel import refusals', async () => {
     'PANEL_LIMIT_EXCEEDED', 'INVALID_PANEL_HANDLE', 'UNSUPPORTED_PANEL_OUTLINE']) {
     await assertRefusal('solar-panels-from-drawing', code, generic)
   }
+})
+it('keeps ambiguous panel import handles on the generic refusal message', async () => {
+  await assertRefusal('solar-panels-from-drawing', 'AMBIGUOUS_PANEL_HANDLE', generic)
 })
 it('R13C-25 renders routing and feeder refusals', async () => {
   for (const code of ['INVALID_ROUTING_REQUEST', 'PERSISTED_GRAPH_UNAVAILABLE', 'INVALID_FEEDER_REQUEST',

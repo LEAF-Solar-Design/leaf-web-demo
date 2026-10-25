@@ -21,6 +21,7 @@ export const PROJECT_SOLAR_GRAPH_REASONS = Object.freeze({
   no_panel_groups: 'No panel angles have at least two ungrouped panels.',
   too_many_groups: 'There are more than 128 proposed groups. No groups have been omitted.',
   group_too_large: 'A proposed group has more than 4096 panels. No panels have been omitted.',
+  ambiguous_panel_handle: 'Two panels share a drawing handle, so they cannot be grouped. Re-import the panels.',
   panel_groups_stale: 'The proposed panel groups changed. Refresh the preview before continuing.',
   group_name_invalid: 'Enter a group name of 1 to 255 characters without [.',
   group_name_collision: 'Group names must be unique, including existing panel groups.',
@@ -66,13 +67,30 @@ export function projectSolarGraphReason(code, tool) {
   if (code == null) return null
   if (!boundedCode(code)) return PROJECT_SOLAR_GRAPH_REASONS.request_refused
   switch (code.toLowerCase()) {
-    case 'no_panel_groups': return PROJECT_SOLAR_GRAPH_REASONS.no_panel_groups
-    case 'too_many_groups': return PROJECT_SOLAR_GRAPH_REASONS.too_many_groups
-    case 'group_too_large': return PROJECT_SOLAR_GRAPH_REASONS.group_too_large
-    case 'panel_groups_stale': return PROJECT_SOLAR_GRAPH_REASONS.panel_groups_stale
-    case 'group_name_invalid': return PROJECT_SOLAR_GRAPH_REASONS.group_name_invalid
-    case 'group_name_collision': return PROJECT_SOLAR_GRAPH_REASONS.group_name_collision
-    case 'group_numbers_invalid': return PROJECT_SOLAR_GRAPH_REASONS.group_numbers_invalid
+    case 'no_panel_groups':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.no_panel_groups
+    case 'too_many_groups':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.too_many_groups
+    case 'group_too_large':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_too_large
+    case 'ambiguous_panel_handle':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.ambiguous_panel_handle
+    case 'panel_groups_stale':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.panel_groups_stale
+    case 'group_name_invalid':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_name_invalid
+    case 'group_name_collision':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_name_collision
+    case 'group_numbers_invalid':
+      if (tool !== 'solar-panel-groups') return PROJECT_SOLAR_GRAPH_REASONS.request_refused
+      return PROJECT_SOLAR_GRAPH_REASONS.group_numbers_invalid
     case 'sip_r7_binding_invalid':
     case 'binding_invalid': return PROJECT_SOLAR_GRAPH_REASONS.binding_invalid
     case 'context_unreadable': return PROJECT_SOLAR_GRAPH_REASONS.context_unreadable
@@ -168,27 +186,40 @@ export function panelGroupAngleKey(angleDegrees) {
   return degrees.toFixed(1)
 }
 
+export function panelHandleValid(handle) {
+  return typeof handle === 'string' && /^\s*[+-]?(?:0[xX]_?)?[0-9a-fA-F](?:_?[0-9a-fA-F])*\s*$/.test(handle)
+}
+
 export function proposePanelGroups(graph) {
   const buckets = new Map()
   let ungrouped = 0
+  let invalid_handles = 0
   for (const panel of graph?.panels ?? []) {
-    if (panel?.frame_ref !== null || typeof panel.id !== 'string'
-        || typeof panel.provenance?.source_handle !== 'string') continue
+    if (panel?.frame_ref !== null || typeof panel.id !== 'string') continue
+    if (!panelHandleValid(panel.provenance?.source_handle)) { invalid_handles += 1; continue }
     const key = panelGroupAngleKey(panel.angle)
     if (key === null) continue
     ungrouped += 1
     if (!buckets.has(key)) buckets.set(key, [])
-    buckets.get(key).push(panel.id)
+    buckets.get(key).push(panel)
   }
   let singletons = 0
   const proposals = []
-  for (const [key, refs] of [...buckets].sort(([a], [b]) => Number(a) - Number(b))) {
-    if (refs.length === 1) { singletons += 1; continue }
-    proposals.push({ key, angle_key: key, panel_refs: refs.slice().sort(), count: refs.length })
+  const seenHandles = new Set()
+  let ambiguous = false
+  for (const [key, panels] of [...buckets].sort(([a], [b]) => Number(a) - Number(b))) {
+    if (panels.length === 1) { singletons += 1; continue }
+    for (const panel of panels) {
+      const handle = panel.provenance.source_handle.toUpperCase()
+      if (seenHandles.has(handle)) ambiguous = true
+      seenHandles.add(handle)
+    }
+    proposals.push({ key, angle_key: key, panel_refs: panels.map((panel) => panel.id).sort(), count: panels.length })
   }
   const refused = proposals.length > 128 ? 'too_many_groups'
-    : proposals.some((proposal) => proposal.count > 4096) ? 'group_too_large' : null
-  return { proposals, singletons, ungrouped, refused }
+    : proposals.some((proposal) => proposal.count > 4096) ? 'group_too_large'
+      : ambiguous ? 'ambiguous_panel_handle' : null
+  return { proposals, singletons, ungrouped, invalid_handles, refused }
 }
 
 export function validatePanelGroups(graph, groups, numbers) {

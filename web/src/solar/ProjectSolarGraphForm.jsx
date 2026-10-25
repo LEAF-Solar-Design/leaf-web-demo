@@ -340,6 +340,9 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
           }} />
       </label>)}
       <p role="status">{panelProposals.singletons} singleton panels cannot be grouped.</p>
+      {panelProposals.invalid_handles > 0 && <p role="status">
+        {panelProposals.invalid_handles} panels have a drawing handle that cannot be grouped.
+      </p>}
     </fieldset>}
     {name === 'solar-schedule' && <label>
       Insertion point (x, y, optional z)
