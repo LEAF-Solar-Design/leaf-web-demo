@@ -239,9 +239,9 @@ jobs:
           LEAF_LAB_RUN_STORE: postgres_required
         run: |
           test -n "${DATABASE_URL:-}"
-          # The suites apply through 0089 and prove activation scheduling,
+          # The suites apply through 0090 and prove activation scheduling,
           # stream leases and worker control under the required selector.
-          if ! out=$(python -m pytest -q -rs tests/test_lab_run_store.py tests/test_lab_stream.py tests/test_lab_activation.py 2>&1); then
+          if ! out=$(python -m pytest -q -rs tests/test_lab_run_store.py tests/test_lab_stream.py tests/test_lab_activation.py tests/test_lab_git_authority.py 2>&1); then
             printf '%s\n' "$out"
             exit 1
           fi
@@ -261,6 +261,8 @@ jobs:
               conn.execute("SELECT kind FROM lab_documents LIMIT 0")
               conn.execute("SELECT mode,frozen,remote_sha,local_sha,receipt,notified FROM lab_git_tenants LIMIT 0")
               conn.execute('SELECT tenant_id,doc_id,revision,"commit",sha256 FROM lab_git_mirror LIMIT 0')
+              for table in ('lab_git_generations', 'lab_git_authority', 'lab_git_pending', 'lab_git_commits', 'lab_git_outbox', 'lab_git_quarantine', 'lab_git_transitions'):
+                  conn.execute("SELECT * FROM " + table + " LIMIT 0")
           db.run_transaction(proof)
           PY
 
