@@ -1,4 +1,9 @@
-"""mirror of web/src/lab/runtime/evaluate.js for pure graphs; host and effectful graphs are refused before evaluation; change both together and extend server/tests/fixtures/lab-graph-cases.v1.json"""
+"""Mirror of web/src/lab/runtime/evaluate.js for pure graphs.
+
+Tool nodes run only server-side through the adapter; the browser mirror never
+executes them. The shared pure graph fixtures are unchanged. Change pure
+evaluation in both runtimes together and extend the shared fixtures.
+"""
 from __future__ import annotations
 
 from collections import deque
@@ -386,7 +391,8 @@ class Budget:
 
 
 def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
-                   cpu_clock=time.thread_time, cancelled=None, on_block=None):
+                   cpu_clock=time.thread_time, cancelled=None, on_block=None,
+                   tool_adapter=None):
     graph, registry = _graph_inputs(graph, registry)
     validate_graph(graph)
     manifests = _admit_graph(graph, registry)
@@ -395,6 +401,7 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
     blocks = {block["id"]: block for block in graph["blocks"]}
     incoming = {key: [] for key in blocks}
     outgoing = {key: [] for key in blocks}
+    tool_blocks = {}
     for block_id, block in blocks.items():
         ref = block["registry"]
         manifest = manifests[block_id]
@@ -403,6 +410,9 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
                 or manifest["id"] in ("studio-jobs", "studio-capabilities", "host-source")
                 or (trusted is not None and trusted.residency == "host")):
             raise GraphRefused("lab_graph_host_refused", block_id)
+        if tool_adapter is not None and tool_adapter.admissible(trusted):
+            tool_blocks[block_id] = trusted
+            continue
         if manifest["effect"] != "pure" or (trusted is not None and trusted.effect != "pure"):
             raise GraphRefused("lab_graph_effect_refused", block_id)
     for pipe in graph["pipes"]:
@@ -437,13 +447,23 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
             if port not in inputs and pin["has_default"]:
                 inputs[port] = runtime_value(pin["default"], mode=pin["mode"])
         metadata = inherited(inputs.values())
-        if manifest["kind"] == "builtin" and has_operator(manifest["id"]):
+        remote = block_id in tool_blocks
+        if remote:
+            adapted = tool_adapter(block_id, tool_blocks[block_id], manifest, inputs, block["settings"])
+        elif manifest["kind"] == "builtin" and has_operator(manifest["id"]):
             result = evaluate_operation(manifest["id"], inputs, block["settings"],
                                         output_mode=next(iter(manifest["outputs"].values()))["mode"])
         else:
             result = runtime_value(None, **metadata, error="server-execution-refused")
         outputs = {}
         for port, pin in manifest["outputs"].items():
+            if remote:
+                try:
+                    result = (runtime_value(None, **metadata, error=adapted["error"])
+                              if "error" in adapted else
+                              runtime_value(adapted["outputs"].get(port), mode=pin["mode"], **metadata))
+                except Exception:
+                    result = runtime_value(None, **metadata, error="output-refused")
             value = result
             try:
                 if not value.error:
@@ -460,7 +480,7 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
                    for value in outputs.values())
         cpu_ms = (cpu_clock() - cpu_started) * 1000
         wall_ms = (clock() - wall_started) * 1000
-        if (cpu_ms > budget.block_cpu_ms or wall_ms > budget.block_wall_ms
+        if ((not remote and (cpu_ms > budget.block_cpu_ms or wall_ms > budget.block_wall_ms))
                 or size > budget.block_output_bytes):
             outputs = {port: runtime_value(None, **inherited([value]), error="budget-exceeded")
                        for port, value in outputs.items()}

@@ -372,6 +372,8 @@
     "server-lab-widgets",
     "server-lab-run-store",
     "server-lab-runs",
+    "server-lab-tool-nodes",
+    "server-broker-lab-sandbox",
     "server-lab-diff",
     "server-lab-registry",
     "server-lab-validate",

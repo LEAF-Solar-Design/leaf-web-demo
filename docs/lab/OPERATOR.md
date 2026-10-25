@@ -41,8 +41,8 @@ immediately; running workers observe the request cooperatively. A repeated
 request returns `cancel_requested: false`. A paused running run may need worker
 recovery before its cancellation completes. Cancellation records the tenant
 subject as actor. Run creation pins a stored document revision; it does not
-accept inline graphs or caller-supplied run IDs. Host and effectful graphs are
-refused before enqueue. A tenant can queue at most 16 runs; queue overflow is
+accept inline graphs or caller-supplied run IDs. Host graphs and, by default,
+effectful graphs are refused before enqueue. A tenant can queue at most 16 runs; queue overflow is
 `409 lab_run_queue_full`.
 
 ## Signals
@@ -55,3 +55,46 @@ age with absent heartbeats calls for worker and pause-state inspection.
 
 Staging has no paging alarm on these metrics. Inspect status, run events, and
 EMF output directly during staging operation and recovery.
+
+## Tool nodes
+
+`LEAF_LAB_TOOL_NODES=1` enables server-side tool nodes; the default is off.
+The browser never executes these nodes. With the flag off, runs retain the
+existing `lab_graph_effect_refused` policy. Host blocks always fail first with
+`lab_graph_host_refused`.
+
+Admission proceeds in this order: trusted compute/read effect (no host, live
+APS, drawing.write, solve or cloud-proposal); clean input values; a drawing
+binding; a seed catalog tool and matching drawing input; the tenant's current
+provisioned tier and required entitlement; the daily jobs window; the sandbox
+seconds ledger; then durable submission. The drawing setting must contain
+exactly `project_id`, `drawing_id` (strings of 1–200 characters), and
+`dwg_version` (an integer at least 1, never a boolean).
+
+Adapter refusal codes use the `lab_tool_` prefix: `effect_refused`,
+`input_error`, `drawing_required`, `unknown`, `drawing_mismatch`,
+`binding_unavailable`, `policy_unavailable`, `entitlement_required`,
+`budget_unreadable`, `daily_jobs_exhausted`, `daily_sandbox_exhausted`,
+`inflight_cap`, `submit_refused`, and `submit_unavailable`. After submission,
+`timeout`, `failed`, or `output_invalid` describe remote failures; schema
+validation can produce `output-refused`. Cancellation stops polling.
+
+`LEAF_LAB_TOOL_DAILY_JOBS` is an integer from 1 to 200 (default 100).
+`LEAF_LAB_TOOL_DAILY_SANDBOX_S` is a number from 1 to 86400 (default 3600).
+Both budgets use the UTC day; sandbox usage sums tenant `e2b_exec` cost events
+in `sandbox_seconds`. Invalid configuration, unreadable ledgers, invalid tenant
+UUIDs, or a truncated ledger window fail closed with `lab_tool_budget_unreadable`.
+`LEAF_LAB_TOOL_TIMEOUT_S` is an integer from 1 to 600 (default 300), with
+polling every 0.5 seconds. Remote waits retain run wall and output byte limits.
+
+Tool nodes submit only through `jobs.submit_job` and the broker. The durable
+key is `lab:<run_id>:<block_id>:1`; a lease takeover reuses it and skips the
+daily budget checks when that job is already present. Lab tool jobs count
+against `LEAF_TENANT_MAX_INFLIGHT` (default 32).
+
+The broker requires the microvm sandbox for lab jobs, checked at request time
+(`LEAF_TOOL_SANDBOX_PROVIDER=e2b`). Missing, off, invalid, and subprocess tiers
+return 503 `lab_sandbox_unavailable`. Malformed execution markers return 422
+`lab_execution_invalid`; live APS and write/solve/cloud-proposal capabilities
+return 403 `lab_aps_refused` or `lab_write_refused`. Lab data plans return 403
+`lab_plan_refused`.

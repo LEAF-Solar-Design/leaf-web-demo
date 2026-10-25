@@ -10,6 +10,7 @@ from starlette.concurrency import run_in_threadpool
 import deps
 import lab_artifacts as ledger
 import lab_registry
+import lab_tool_nodes
 import lab_run_store as store
 from dependency_health import _source_revision
 from lab_canonical import graph_digest
@@ -48,6 +49,10 @@ def _create(tenant, body):
                 or manifest["id"] in ("studio-jobs", "studio-capabilities", "host-source")
                 or (trusted is not None and trusted.residency == "host")):
             raise GraphRefused("lab_graph_host_refused")
+        if lab_tool_nodes.enabled() and lab_tool_nodes.tool_block_admissible(trusted):
+            if not lab_tool_nodes.drawing_valid(block["settings"].get("drawing")):
+                raise GraphRefused("lab_tool_drawing_required")
+            continue
         if manifest["effect"] != "pure" or (trusted is not None and trusted.effect != "pure"):
             raise GraphRefused("lab_graph_effect_refused")
     row = store.create(str(tenant), body["doc_id"], uuid.uuid4().hex,
