@@ -104,6 +104,28 @@ def test_activation_tick_colour_guards_and_five_second_cadence(rig, monkeypatch,
     assert calls == ([1234, 1239] if mode == "active" else [])
 
 
+@pytest.mark.parametrize('mode', ['active', 'idle', 'disabled', 'paused', 'rail-off'])
+def test_git_tick_colour_guards_and_thirty_second_cadence(rig, monkeypatch, mode):
+    calls, clock = [], [0.0]
+    monkeypatch.setattr(worker.lab_activation, 'tick', lambda now: None)
+    monkeypatch.setattr(worker.lab_artifacts_git, 'background_tick', lambda now: calls.append(now))
+    if mode == 'idle':
+        rig.create(build='other-build')
+    elif mode == 'disabled':
+        rig.env['LEAF_LAB_WORKER_DISABLED'] = '1'
+    elif mode == 'paused':
+        store.set_paused(True, 'test', 'actor')
+    elif mode == 'rail-off':
+        monkeypatch.setattr(worker, 'lab_surface_enabled', lambda: False)
+    instance = rig.make(clock=lambda: clock[0], wall=lambda: 1234 + clock[0])
+    instance.tick()
+    clock[0] = 29.99
+    instance.tick()
+    clock[0] = 30
+    instance.tick()
+    assert calls == ([1234, 1264] if mode == 'active' else [])
+
+
 def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
     monkeypatch.setattr(worker.lab_activation, "holds_run", lambda tenant, run_id: True)
     from test_lab_tool_nodes import tool_graph

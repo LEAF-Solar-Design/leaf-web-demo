@@ -307,12 +307,12 @@ def test_exit_authorization_requires_transaction(tenant):
         conn.close()
 
 
-def test_tenants_without_authority_unaffected_and_store_disabled(tenant):
+def test_tenants_without_authority_unaffected_and_store_ready(tenant):
     store.next_generation(tenant)
     mirror.mirror_status(tenant)
     ledger._run(tenant, lambda sql: mirror._update(sql, tenant, frozen=False, mode='ledger'), write=True)
     ledger._run(tenant, lambda sql: sql.execute('DELETE FROM lab_git_tenants WHERE tenant_id=?', (tenant,)), write=True)
-    assert store.GIT_AUTHORITY_READY is False
+    assert store.GIT_AUTHORITY_READY is True
 
 
 def test_quarantine_preserves_evidence_and_tenant_boundary(tenant):
