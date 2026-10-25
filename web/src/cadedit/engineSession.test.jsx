@@ -632,7 +632,7 @@ describe('save completion', () => {
     const session = await editedSession({ headVersion: 4, save }, onSaved)
     await act(async () => { await session.current.actions.save() })
 
-    expect(session.current.status).toBe('Save failed: Failed to fetch')
+    expect(session.current.status).toBe("Save failed: Couldn't reach the service. Check the connection and retry.")
     expect(session.current.errorKind).toBe(SESSION_ERROR.SAVE)
     expect(session.current.receipt).toBeNull()
     expect(session.current.savedVersion).toBeNull()
@@ -699,7 +699,7 @@ describe('save completion', () => {
     const session = await editedSession({ headVersion: 4, save }, onSaved)
     await act(async () => { await session.current.actions.save() })
 
-    expect(session.current.status).toBe(message)
+    expect(session.current.status).toBe('Save failed: The save may still be running. Reopen the drawing to check before saving again.')
     expect(session.current.dirty).toBe(true)
     expect(session.current.receipt).toBeNull()
     expect(onSaved).not.toHaveBeenCalled()
@@ -713,7 +713,7 @@ describe('save completion', () => {
     })
 
     expect(save).toHaveBeenCalledTimes(1)
-    expect(session.current.status).toBe('Save failed: Failed to fetch')
+    expect(session.current.status).toBe("Save failed: Couldn't reach the service. Check the connection and retry.")
   })
 
   it('will not save with no target, and will not save unedited bytes', async () => {
@@ -919,14 +919,45 @@ describe('save completion', () => {
     expect(onSaved).not.toHaveBeenCalled()
   })
 
-  it('reports an unknown outcome verbatim and keeps the edit dirty', async () => {
+  it('humanizes a non-JSON server failure and keeps the edited drawing', async () => {
+    const onSaved = vi.fn()
+    const session = await editedSession({ headVersion: 4, save: async () => {
+      throw new Error('POST /api/drawings/private/versions/edited -> 502')
+    } }, onSaved)
+    await act(async () => { await session.current.actions.save() })
+    expect(session.current.status).toBe('Save failed: The service had a temporary problem. Try again.')
+    expect(session.current.dirty).toBe(true)
+    expect(session.current.receipt).toBeNull()
+    expect(onSaved).not.toHaveBeenCalled()
+  })
+
+  it('turns missing or failed save receipts into plain words', async () => {
+    for (const message of ['live commit failed', 'live commit reported no version', 'live commit named another drawing']) {
+      const session = await editedSession({ headVersion: 4, save: async () => { throw new Error(message) } })
+      await act(async () => { await session.current.actions.save() })
+      expect(session.current.status).toBe('Save failed: The drawing was not saved. Try again.')
+      expect(session.current.dirty).toBe(true)
+      expect(session.current.receipt).toBeNull()
+    }
+  })
+
+  it('humanizes transport text even when saving is refused', async () => {
+    const session = await editedSession({ headVersion: 4, save: async () => {
+      throw Object.assign(new Error('POST /api/drawings/private/versions/edited -> 409'), { status: 409 })
+    } })
+    await act(async () => { await session.current.actions.save() })
+    expect(session.current.status).toBe('Save refused: The service had a temporary problem. Try again.')
+    expect(session.current.dirty).toBe(true)
+  })
+
+  it('reports an unknown outcome without its internal job id and keeps the edit dirty', async () => {
     const message = 'outcome unknown: job plan-4 may still be running; reopen the drawing to see whether the version landed'
     const onSaved = vi.fn()
     const session = await editedHeadSession({ headVersion: 4, save: async () => {
       throw Object.assign(new Error(message), { outcomeUnknown: true })
     } }, onSaved)
     await act(async () => { await session.current.actions.save() })
-    expect(session.current.status).toBe(message)
+    expect(session.current.status).toBe('Save failed: The save may still be running. Reopen the drawing to check before saving again.')
     expect(session.current.dirty).toBe(true)
     expect(session.current.committedVersion).toBe(4)
     expect(onSaved).not.toHaveBeenCalled()

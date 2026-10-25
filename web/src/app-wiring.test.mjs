@@ -621,8 +621,8 @@ describe('R13F project Solar execution and form ingresses', () => {
     for (const [name, count] of Object.entries(sites)) assert.equal(r13Find(refusal, r13Callback(name)).length, count, name)
     assert.equal(r13Find(refusal).length, 20)
     for (const [name, hash] of Object.entries({
-      // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
-      engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
+      // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
+      engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
       onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -5538,8 +5538,8 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
   const hashes = {
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
     onRedo: '6061cdf05fef2e3119473e0e3639a1a6997c90e4d2b73c7b514508468853ecff',
-    // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
-    engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
+    // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
+    engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
     onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',

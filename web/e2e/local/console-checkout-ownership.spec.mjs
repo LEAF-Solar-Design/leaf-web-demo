@@ -16,7 +16,7 @@ import { requireLocalReady } from './requireReady.mjs'
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
 const DRAWING_ID = 'cat-panels'
-const OTHER_HOLDER = 'other-console-editor'
+const OTHER_HOLDER = 'sess-72d58f4d-36af-421b-a164-a98394156cfa'
 const WRITE_TOOL = 'delete-marked-panel'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 
@@ -97,7 +97,7 @@ test('the console holds the same single-writer lock the stage does [rail 1]', as
   expect(await page.locator('[data-checkout-instance]').count()).toBe(1)
   const checkoutInstance = await page.locator('[data-checkout-instance]').getAttribute('data-checkout-instance')
   expect(checkoutInstance).toBeTruthy()
-  await expect(page.getByText(OTHER_HOLDER)).toBeVisible()
+  await expect(page.locator('.checkout-chip')).toContainText('Editing locked by another session')
 
   // The write tool is genuinely DISABLED, and no run leaves the browser.
   await openEveryCatalogFamily(page)

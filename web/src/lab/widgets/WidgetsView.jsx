@@ -110,7 +110,7 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
           }}>Request publication</button>}
       </div>
       {publication && <p role="status" aria-label="Publication request">{publication}</p>}
-      <p role="status">{({ empty: 'Choose a project to create a text widget.', loading: 'Loading widget…', saving: 'Saving widget…', saved: `Saved revision ${head ?? ''}.`, editing: 'Local edits. Save when ready.', invalid: 'Invalid widget. Correct the indicated field before saving.', conflict: 'Conflict: the document changed. Your local edits are kept. Reload to use the stored revision.', error: 'The document request failed. Your local edits are kept.' })[displayedStatus]}</p>
+      <p role="status">{({ empty: 'Enter a Document ID, then choose New or Load.', loading: 'Loading widget…', saving: 'Saving widget…', saved: `Saved revision ${head ?? ''}.`, editing: 'Local edits. Save when ready.', invalid: 'Invalid widget. Correct the indicated field before saving.', conflict: 'Conflict: the document changed. Your local edits are kept. Reload to use the stored revision.', error: 'The document request failed. Your local edits are kept.' })[displayedStatus]}</p>
       {problem && <p role="alert">{typeof problem.detail === 'string' ? problem.detail : JSON.stringify(problem.detail)}{problem.pointer ? ` (${problem.pointer})` : ''}</p>}
       {status === 'conflict' && <button type="button" onClick={() => load(loadedId)}>Reload</button>}
     </>}
