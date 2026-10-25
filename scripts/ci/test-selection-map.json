@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "server-lab-activation",
     "server-lab-worker",
     "server-integration-turn-grant-capture",
     "server-integration-turn-grant-lifecycle",

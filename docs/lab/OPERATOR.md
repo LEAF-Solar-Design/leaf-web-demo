@@ -141,6 +141,52 @@ can be exceeded by at most one job per extra process at the moment of the race.
 The sandbox-seconds budget is read from completed e2b cost events, so in-flight
 sandbox time is not yet counted.
 
+## Activations
+
+Deploys can activate only a published revision, with trusted pure, read or
+simulate blocks. Host, compute and effectful blocks are refused. Read and
+simulate also require `LEAF_LAB_TOOL_NODES=1`; activation runs use a restricted
+adapter that never admits compute. The activating subject is stored privately.
+
+An activation starts `active`. Pause moves active to `paused`; resume re-admits
+a paused activation. Off moves active, paused, expired or stopped to terminal
+`off`. A due activation whose 24-hour lease has elapsed becomes `expired` and
+never resumes silently. Renew is allowed from active, paused or expired,
+re-admits now, grants 24 hours from renewal and lands in active. Stopped and off
+cannot renew or resume; create a fresh activation after resolving the cause.
+An expired paused lease also requires renewal. Controls and scheduler state
+changes append transitions; the store keeps 200 and the UI shows the latest 20.
+
+Each due tick checks the principal's current binding and deploy entitlement,
+the published revision and graph hash, registry/catalog digest, operations
+revision and input digest. This also applies while a run is in flight. Failures
+stop scheduling with `binding_changed`, `binding_unavailable`,
+`entitlement_revoked`, `policy_unavailable`, `publication_changed`,
+`registry_changed`, `ops_changed` or `input_changed`. A disabled tool flag stops
+tool activations with `lab_activation_tools_disabled`; newly inadmissible
+blocks produce `lab_activation_effect_refused`. Missing retained runs stop
+with `run_unavailable`. Auth-off and tenant-only principals skip subject binding
+and entitlement resolution, matching the existing tenant-context behavior.
+
+Intervals are integers from 60 to 86400 seconds. A tenant may have at most ten
+active, paused or expired activations. There is one run in flight per activation;
+due ticks during a run coalesce instead of creating more work. Queue saturation
+also coalesces. The next successful harvest replaces the prior declared output
+and summary (run id, terminal state, finish time, duration and coalesced ticks).
+Output retention is capped at 64 KiB; overflow becomes `{"truncated": true}`.
+It does not retain output history or undeclared intermediate values.
+
+Use the global worker pause (`POST /api/lab/runs/worker/pause`) to pause all
+activation ticks, including expiry processing. Resume the worker through
+`POST /api/lab/runs/worker/resume`; elapsed leases then expire on their next
+tick. Only the active worker color schedules, at most once every five seconds.
+The same tenant transaction serializes enqueueing and the activation pointer.
+
+Production migration `0089_lab_activations.sql` must run **forward-normal**
+through `migrate-leaf-platform-production-db.yml` before adopting any image that
+reads these tables, even with the Lab rail off. Roll back the image without
+dropping the additive tables; pause the worker to stop scheduling globally.
+
 Tool nodes submit only through `jobs.submit_job` and the broker. The durable
 key is `lab:<run_id>:<block_id>:1`; a lease takeover reuses it and skips the
 daily budget checks when that job is already present. Lab tool jobs count

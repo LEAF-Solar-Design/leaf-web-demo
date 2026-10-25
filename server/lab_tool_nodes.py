@@ -30,12 +30,12 @@ def enabled():
     return os.environ.get("LEAF_LAB_TOOL_NODES") == "1"
 
 
-def tool_block_admissible(trusted):
+def tool_block_admissible(trusted, effects=("compute", "read")):
     return (trusted is not None and trusted.residency != "host"
             and trusted.aps_live is False
             and lab_registry.total_effect(trusted.capability, trusted.solar_adapter,
                                           trusted.execution_class, trusted.aps_live)
-            in ("compute", "read"))
+            in effects)
 
 
 def drawing_valid(drawing):
@@ -84,17 +84,19 @@ def _sandbox_seconds_today(tenant, midnight):
 
 
 class ToolNodeAdapter:
-    admissible = staticmethod(tool_block_admissible)
-
     def __init__(self, tenant, run_id, *, cancelled, submit=None, get_job=None,
                  list_jobs=None, tier_of=None, sandbox_seconds_today=None, now=None,
-                 sleep=time.sleep, monotonic=time.monotonic):
+                 sleep=time.sleep, monotonic=time.monotonic, effects=("compute", "read")):
+        self.effects = tuple(effects)
         self.tenant, self.run_id, self.cancelled = str(tenant), run_id, cancelled
         self.submit, self.get_job, self.list_jobs = submit, get_job, list_jobs
         self.tier_of = tier_of
         self.sandbox_seconds_today = sandbox_seconds_today or _sandbox_seconds_today
         self.now = now or (lambda: datetime.now(timezone.utc))
         self.sleep, self.monotonic = sleep, monotonic
+
+    def admissible(self, trusted):
+        return tool_block_admissible(trusted, self.effects)
 
     def __call__(self, block_id, trusted, manifest, inputs, settings, *, deadline_s=None):
         run_deadline = None if deadline_s is None else self.monotonic() + deadline_s

@@ -15,6 +15,7 @@ import uuid
 
 import emf_metrics
 import lab_artifacts
+import lab_activation
 import lab_run_store
 import lab_tool_nodes
 from dependency_health import _source_revision
@@ -59,6 +60,7 @@ class LabWorker:
         self._thread = None
         self._pool = ThreadPoolExecutor(max_workers=slots, thread_name_prefix="lab-run")
         self._status_at = float("-inf")
+        self._activation_at = float("-inf")
 
     def start(self):
         with self._lock:
@@ -129,6 +131,9 @@ class LabWorker:
             reason = self._off_reason()
             latest = self.store.latest_build_revision()
             color = "active" if latest is None or latest == self.revision else "idle"
+            if not reason and color == "active" and self.clock() - self._activation_at >= 5:
+                self._activation_at = self.clock()
+                lab_activation.tick(self.wall())
             if reason:
                 for run in self._runs.values():
                     self._suspend(run, reason)
@@ -249,8 +254,10 @@ class LabWorker:
 
             tool_options = {}
             if lab_tool_nodes.enabled():
+                effects = ({"effects": ("read", "simulate")}
+                           if row["adapter_revision"] == "lab-activation.v1" else {})
                 tool_options["tool_adapter"] = lab_tool_nodes.ToolNodeAdapter(
-                    row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run))
+                    row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run), **effects)
             evaluate_graph(artifact["graph"], trusted_registry(), budget=Budget(run_wall_s=600 - elapsed),
                            clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block,
                            **tool_options)

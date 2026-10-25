@@ -434,6 +434,12 @@ _REQUIRED_COLUMNS = {
 # still write PostgreSQL, so they require the same proof as canonical reads.
 _AUTHORITY_REQUIRED_COLUMNS = {
     "lab_runs": {
+        "lab_activations": {"tenant_id", "activation_id", "doc_id", "revision", "graph_sha256",
+                            "registry_digest", "ops_revision", "input_digest", "principal", "interval_s",
+                            "state", "reason", "lease_expires_at", "next_due_at", "in_flight_run_id",
+                            "coalesced_ticks", "last_output", "last_summary", "created_by", "created_at", "updated_at"},
+        "lab_activation_transitions": {"tenant_id", "activation_id", "seq", "from_state", "to_state",
+                                       "reason", "actor", "at"},
         "lab_stream_leases": {"principal", "stream_id", "tenant_id", "expires_at"},
         "lab_runs": {"tenant_id", "doc_id", "run_id", "graph_revision", "graph_sha256",
                      "registry_digest", "ops_revision", "input_digest", "adapter_revision",
@@ -1200,6 +1206,13 @@ _REQUIRED_TRIGGERS = {
 # shape, referential integrity, and immutable audit records used by callers.
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
     "lab_runs": {
+        "lab_activations_pkey": _catalog_contract("lab_activations", "PRIMARY KEY (tenant_id, activation_id)"),
+        "lab_activations_interval_s_check": _catalog_contract("lab_activations", "CHECK", "interval_s", "60", "86400"),
+        "lab_activations_state_check": _catalog_contract("lab_activations", "CHECK", "state", "active", "paused", "expired", "stopped", "off"),
+        "lab_activation_transitions_pkey": _catalog_contract("lab_activation_transitions", "PRIMARY KEY (tenant_id, activation_id, seq)"),
+        "lab_activation_transitions_tenant_id_activation_id_fkey": _catalog_contract(
+            "lab_activation_transitions", "FOREIGN KEY (tenant_id, activation_id)",
+            "REFERENCES lab_activations(tenant_id, activation_id)"),
         "lab_runs_pkey": _catalog_contract("lab_runs", "PRIMARY KEY (tenant_id, run_id)"),
         "lab_stream_leases_pkey": _catalog_contract("lab_stream_leases", "PRIMARY KEY (principal, stream_id)"),
         "lab_runs_claimed_color_check": _catalog_contract("lab_runs", "CHECK", "claimed_color", "active", "idle"),
@@ -1677,6 +1690,7 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
 
 _AUTHORITY_REQUIRED_INDEXES = {
     "lab_runs": {
+        "lab_activations_due_idx": _catalog_contract("lab_activations", "(state, next_due_at)"),
         "lab_runs_doc_created_idx": _catalog_contract(
             "lab_runs", "(tenant_id, doc_id, created_at DESC)"),
         "lab_run_events_created_idx": _catalog_contract("lab_run_events", "(created_at)"),

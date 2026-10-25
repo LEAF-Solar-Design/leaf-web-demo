@@ -18,7 +18,7 @@ import deps  # noqa: E402
 import lab_artifacts as ledger  # noqa: E402
 import lab_run_store as run_store  # noqa: E402
 import tenancy  # noqa: E402
-from routers import deployment_identity, lab_artifacts, lab_router, lab_runs, lab_stream, lab_widgets  # noqa: E402
+from routers import deployment_identity, lab_activation, lab_artifacts, lab_router, lab_runs, lab_stream, lab_widgets  # noqa: E402
 from route_flatten import iter_leaf_routes  # noqa: E402
 from test_auth import _ENV, bearer, mint  # noqa: E402
 
@@ -46,6 +46,14 @@ RUN_CASES = [
     ("POST", "/private-run/cancel", None),
     ("POST", "/worker/pause", {"reason": "maintenance"}),
     ("POST", "/worker/resume", None),
+]
+ACTIVATION_CASES = [
+    ("POST", "", {"doc_id": DOC, "interval_s": 60}),
+    ("GET", "", None),
+    ("POST", "/private-activation/pause", {}),
+    ("POST", "/private-activation/resume", {}),
+    ("POST", "/private-activation/renew", {}),
+    ("POST", "/private-activation/off", {}),
 ]
 
 
@@ -110,8 +118,74 @@ def owner(client, tmp_path):
     return db, _owner_snapshot(db)
 
 
+@pytest.mark.parametrize("method,suffix,body", ACTIVATION_CASES)
+@pytest.mark.parametrize("mode,status", [("rail-off", 404), ("auth-off", 503), ("anonymous", 401), ("no-deploy", 403)])
+def test_activation_admission_precedes_storage(client, monkeypatch, method, suffix, body, mode, status):
+    if mode == "rail-off":
+        monkeypatch.setenv("LEAF_LAB_SURFACE_ENABLED", "0")
+    elif mode == "auth-off":
+        monkeypatch.setenv("LEAF_AUTH_LIVE", "0")
+    elif mode == "no-deploy":
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", lambda subject: ("tenant-b", "restricted"))
+    def forbidden(*args, **kwargs):
+        pytest.fail("activation admission reached storage")
+    monkeypatch.setattr(lab_activation.store, "_run", forbidden)
+    response = client.request(method, "/api/lab/activations" + suffix, json=body,
+                              headers={} if mode == "anonymous" else _h("tenant-b"))
+    assert response.status_code == status, response.text
+
+
+@pytest.mark.parametrize("action", ["pause", "resume", "renew", "off"])
+def test_activation_foreign_tenant_not_found(client, owner, action):
+    # Empty graphs are published and read-only; no catalog test extension needed.
+    graph = {"schema": "leaf.lab-graph.v1", "blocks": [], "pipes": [], "outputs": {}}
+    ledger.save("tenant-a", "activation-doc", graph, None, "owner")
+    ledger.publish("tenant-a", "activation-doc", 1, "owner")
+    row = lab_activation.store.create("tenant-a", "activation-doc", 60, "tenant:tenant-a", "owner")
+    response = client.post(f'/api/lab/activations/{row["activation_id"]}/{action}', headers=_h("tenant-b"))
+    assert response.status_code == 404
+    assert "tenant-a" not in response.text
+    assert lab_activation.store.list("tenant-a")[0]["state"] == "active"
+    assert client.get("/api/lab/activations", headers=_h("tenant-b")).json() == {"activations": []}
+
+
+def test_activation_owner_controls_and_http_errors(client, monkeypatch):
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", lambda subject: ("tenant-a", "hosted_pro"))
+    headers = _h("tenant-a")
+    graph = {"schema": "leaf.lab-graph.v1", "blocks": [], "pipes": [], "outputs": {}}
+    ledger.save("tenant-a", "activation-doc", graph, None, "owner")
+    body = {"doc_id": "activation-doc", "interval_s": 60}
+    assert client.post("/api/lab/activations", json=body, headers=headers).status_code == 409
+    ledger.publish("tenant-a", "activation-doc", 1, "owner")
+    response = client.post("/api/lab/activations", json=body, headers=headers)
+    assert response.status_code == 202, response.text
+    row = response.json()
+    assert "principal" not in row
+    aid = row["activation_id"]
+    for action, state in [("pause", "paused"), ("resume", "active"), ("renew", "active"), ("off", "off")]:
+        response = client.post(f"/api/lab/activations/{aid}/{action}", headers=headers)
+        assert response.status_code == 200, response.text
+        assert response.json()["state"] == state
+    assert client.post(f"/api/lab/activations/{aid}/renew", headers=headers).status_code == 409
+    assert client.post("/api/lab/activations", json={**body, "interval_s": 59}, headers=headers).status_code == 422
+    def unavailable(*args):
+        raise RuntimeError("private configuration")
+    monkeypatch.setattr(lab_activation.store, "list", unavailable)
+    response = client.get("/api/lab/activations", headers=headers)
+    assert response.status_code == 503 and "private configuration" not in response.text
+
+
 def test_route_inventory_is_complete():
     # Pin the surface so adding a route requires adding its negative cases.
+    assert {(method, path)
+            for path, route in iter_leaf_routes(lab_activation.router.routes)
+            for method in route.methods} == {
+        ("POST", "/api/lab/activations"), ("GET", "/api/lab/activations"),
+        ("POST", "/api/lab/activations/{activation_id}/pause"),
+        ("POST", "/api/lab/activations/{activation_id}/resume"),
+        ("POST", "/api/lab/activations/{activation_id}/renew"),
+        ("POST", "/api/lab/activations/{activation_id}/off"),
+    }
     assert {(method, path)
             for path, route in iter_leaf_routes(lab_stream.router.routes)
             for method in route.methods} == {("GET", "/api/lab/stream/runs")}

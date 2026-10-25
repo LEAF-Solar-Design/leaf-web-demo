@@ -206,7 +206,25 @@ def test_lab_run_schema_proof(mode):
     }
     assert columns["lab_worker_control"] == {"id", "paused", "reason", "updated_by", "updated_at"}
     assert columns["lab_stream_leases"] == {"principal", "stream_id", "tenant_id", "expires_at"}
+    assert columns["lab_activations"] == {
+        "tenant_id", "activation_id", "doc_id", "revision", "graph_sha256", "registry_digest",
+        "ops_revision", "input_digest", "principal", "interval_s", "state", "reason", "lease_expires_at",
+        "next_due_at", "in_flight_run_id", "coalesced_ticks", "last_output", "last_summary",
+        "created_by", "created_at", "updated_at",
+    }
+    assert columns["lab_activation_transitions"] == {
+        "tenant_id", "activation_id", "seq", "from_state", "to_state", "reason", "actor", "at",
+    }
     catalog = db.required_catalog_for_selected_authorities(selected)
+    for name in ("lab_activations_pkey", "lab_activations_interval_s_check", "lab_activations_state_check",
+                 "lab_activation_transitions_pkey", "lab_activation_transitions_tenant_id_activation_id_fkey"):
+        assert name in catalog["constraints"]
+    assert catalog["indexes"]["lab_activations_due_idx"] == db._catalog_contract(
+        "lab_activations", "(state, next_due_at)")
+    activation_migration = (db._PKG_DIR / "migrations/0089_lab_activations.sql").read_text(encoding="utf-8")
+    for fragment in ("CREATE TABLE IF NOT EXISTS lab_activations", "CREATE TABLE IF NOT EXISTS lab_activation_transitions",
+                     "CHECK (interval_s BETWEEN 60 AND 86400)", "last_output JSONB", "last_summary JSONB"):
+        assert fragment in activation_migration
     assert catalog["constraints"]["lab_stream_leases_pkey"] == db._catalog_contract(
         "lab_stream_leases", "PRIMARY KEY (principal, stream_id)")
     stream_migration = (db._PKG_DIR / "migrations/0088_lab_stream_leases.sql").read_text(encoding="utf-8")

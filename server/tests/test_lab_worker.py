@@ -83,6 +83,46 @@ def test_finishes_values_pins_and_status(rig):
     assert any(kind == "age" for kind, value in rig.metrics)
 
 
+@pytest.mark.parametrize("mode", ["active", "idle", "disabled", "paused", "rail-off"])
+def test_activation_tick_colour_guards_and_five_second_cadence(rig, monkeypatch, mode):
+    calls, clock = [], [0.0]
+    monkeypatch.setattr(worker.lab_activation, "tick", lambda now: calls.append(now))
+    if mode == "idle":
+        rig.create(build="other-build")
+    elif mode == "disabled":
+        rig.env["LEAF_LAB_WORKER_DISABLED"] = "1"
+    elif mode == "paused":
+        store.set_paused(True, "test", "actor")
+    elif mode == "rail-off":
+        monkeypatch.setattr(worker, "lab_surface_enabled", lambda: False)
+    instance = rig.make(clock=lambda: clock[0], wall=lambda: 1234 + clock[0])
+    instance.tick()
+    clock[0] = 4.99
+    instance.tick()
+    clock[0] = 5
+    instance.tick()
+    assert calls == ([1234, 1239] if mode == "active" else [])
+
+
+def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
+    from test_lab_tool_nodes import tool_graph
+    tool = tool_graph(monkeypatch)
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    adapters = []
+    def evaluate(graph, registry, *, tool_adapter, **kwargs):
+        adapters.append(tool_adapter)
+        assert not tool_adapter.admissible(tool.trusted)  # worker => compute
+        from dataclasses import replace
+        assert tool_adapter.admissible(replace(tool.trusted, effect="read", execution_class="inline"))
+        assert tool_adapter.admissible(replace(tool.trusted, effect="simulate", execution_class="inline", capability="simulate.value"))
+    monkeypatch.setattr(worker, "evaluate_graph", evaluate)
+    store.create(rig.tenant, "doc", "run", 1, "a" * 64, worker.OPS_REVISION,
+                 "b" * 64, "lab-activation.v1", "abc1234")
+    rig.make().tick()
+    terminal(rig)
+    assert len(adapters) == 1 and adapters[0].effects == ("read", "simulate")
+
+
 @pytest.mark.parametrize("enabled", [True, False])
 def test_tool_node_flag_and_value_event(rig, monkeypatch, enabled):
     from test_lab_tool_nodes import tool_graph

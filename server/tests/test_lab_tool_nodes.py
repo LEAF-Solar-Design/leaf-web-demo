@@ -93,6 +93,23 @@ def test_effect_refused(rig, change):
     assert not rig.calls
 
 
+def test_default_effects_keep_compute_and_read(rig):
+    assert nodes.tool_block_admissible(rig.trusted)
+    read = replace(rig.trusted, effect="read", execution_class="inline")
+    assert nodes.tool_block_admissible(read)
+    assert not nodes.tool_block_admissible(replace(read, capability="simulate.value", effect="simulate"))
+
+
+def test_effect_override_refuses_compute_before_dispatch(rig):
+    adapter = nodes.ToolNodeAdapter(TENANT, "run", effects=("read", "simulate"), **rig.options)
+    assert not adapter.admissible(rig.trusted)
+    assert adapter("node", rig.trusted, rig.manifest, {}, {"drawing": DRAWING}) == {
+        "error": "lab_tool_effect_refused"}
+    assert not rig.calls
+    assert adapter.admissible(replace(rig.trusted, effect="read", execution_class="inline"))
+    assert adapter.admissible(replace(rig.trusted, effect="simulate", execution_class="inline", capability="simulate.value"))
+
+
 @pytest.mark.parametrize("tenant", ["not-a-uuid", "", TENANT.replace("-", ""),
                                   "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", "{" + TENANT + "}"])
 def test_tenant_identity_precedes_replay_and_other_admission(rig, tenant):
