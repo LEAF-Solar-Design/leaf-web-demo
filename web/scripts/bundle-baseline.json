@@ -1,25 +1,25 @@
 {
   "_comment": "gzip -9 bytes per chunk-stem (hash-stripped) from `npm run build` at the commit named in _ref. Regenerate with: node scripts/check_bundle_budget.mjs --write-baseline",
-  "_ref": "d8f3998c",
+  "_ref": "dffe7464",
   "chunks": {
     "App.css": 11110,
-    "App.js": 127133,
-    "ElementContextMenu.js": 34341,
+    "App.js": 127867,
+    "ElementContextMenu.js": 34343,
     "LabCanvas.css": 2545,
     "LabCanvas.js": 60733,
     "LabGround.css": 4237,
-    "LabGround.js": 58177,
+    "LabGround.js": 58181,
     "LeafPlatformScene.css": 494,
     "LeafPlatformScene.js": 9235,
     "OpsWorkspaceGround.js": 174300,
     "SheetsPage.css": 2585,
-    "SheetsPage.js": 5402,
-    "Viewer.js": 13856,
+    "SheetsPage.js": 5403,
+    "Viewer.js": 13857,
     "bridgeText.js": 21368,
     "elk.bundled.js": 437142,
     "hostBridge.js": 2952,
     "index.css": 42212,
-    "index.js": 229174,
+    "index.js": 229528,
     "mockStageAuthority.js": 259,
     "string.js": 4593,
     "useAnnotations.js": 2035,
@@ -27,7 +27,7 @@
     "vendor-viewer.js": 124248,
     "worker-browser.js": 3825
   },
-  "total": 1417903,
+  "total": 1418999,
   "total_allowance_bytes": 32768,
   "_allowance_basis": "32 KiB: raised from 16 KiB on 2026-10-24 by operator directive (raise the bundle allowance); measured on main af3f47f4: 12,467 B over baseline with 3,917 B headroom, and each UI slice needed its own reseed. Original 16 KiB basis: 12 KiB plan allowance (GUESSED) + 4 KiB rebuild-noise headroom (MEASURED: three identical-commit builds varied ~1.5 KiB total gz; panel W0).",
   "stem_caps": {
@@ -329,9 +329,10 @@
     "previous_ref": "90a5c044",
     "previous_total": 1385102,
     "previous_ceiling": 1417870,
-    "total": 1417903,
-    "ceiling": 1450671,
-    "chunks_source": "full in-memory production build of d8f3998c on the Mac mini (mini_node job e44d053d), equal to native CI's dist total for the same tree",
-    "isolated_reseed_job": "54fe5071 (before 716be039 1417872, after d8f3998c 1417903, delta 31)"
+    "total": 1418999,
+    "ceiling": 1451767,
+    "chunks_source": "full in-memory production build of the merged tree dffe7464 (PR 2326 plus main at 34b0693f) on the Mac mini (mini_node job 47819bdb); d8f3998c alone measured 1417903 there and on native CI",
+    "isolated_reseed_job": "54fe5071 (before 716be039 1417872, after d8f3998c 1417903, delta 31)",
+    "merged_main": "34b0693f (#2327 W1C-27 had reseeded this file to 1385224, ceiling 1417992; the merge took this branch's side and the merged tree was re-measured)"
   }
 }
