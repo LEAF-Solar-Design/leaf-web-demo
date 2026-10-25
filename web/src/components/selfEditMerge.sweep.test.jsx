@@ -86,6 +86,50 @@ describe('self-edit confirmations and stale responses', () => {
   })
 
   for (const action of ['Land', 'Merge']) {
+    it(`keeps a newer ${action} busy when an older request settles first`, async () => {
+      const original = { ...first, state: action === 'Land' ? 'approved' : 'landed' }
+      const proposed = { ...second, state: original.state }
+      getPlatformChange.mockResolvedValue(original)
+      const older = deferred()
+      const newer = deferred()
+      const mutate = action === 'Land' ? landPlatformChange : mergePlatformChange
+      mutate.mockReturnValueOnce(older.promise).mockReturnValueOnce(newer.promise)
+      render(<CustomizePanel tenant="test" />)
+      await select(first)
+      fireEvent.click(screen.getByRole('button', { name: action }))
+      fireEvent.click(screen.getByRole('button', { name: action }))
+      expect(mutate).toHaveBeenNthCalledWith(1, first.change_id, first.commit_sha)
+      fireEvent.change(screen.getByLabelText('Title'), { target: { value: second.title } })
+      fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
+      proposePlatformChange.mockResolvedValue(proposed)
+      fireEvent.click(screen.getByRole('button', { name: 'Propose' }))
+      await screen.findByText(second.title, { selector: '.ops-section-copy' })
+      expect(screen.getByRole('button', { name: action }).disabled).toBe(false)
+      fireEvent.click(screen.getByRole('button', { name: action }))
+      fireEvent.click(screen.getByRole('button', { name: action }))
+      expect(mutate).toHaveBeenNthCalledWith(2, second.change_id, second.commit_sha)
+      const busyLabel = action === 'Land' ? 'Landing…' : 'Merging…'
+      expect(screen.getByRole('button', { name: busyLabel }).disabled).toBe(true)
+      expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(true)
+      await act(async () => {
+        older.resolve({ ...original, state: action === 'Land' ? 'landed' : 'merged' })
+      })
+      expect(recordSection().queryByText(second.title)).not.toBeNull()
+      expect(screen.getByRole('button', { name: busyLabel }).disabled).toBe(true)
+      expect(screen.getByRole('button', { name: 'Keep' }).disabled).toBe(true)
+      expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(true)
+      fireEvent.click(screen.getByRole('button', { name: busyLabel }))
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh status' }))
+      expect(mutate).toHaveBeenCalledTimes(2)
+      expect(getPlatformChange).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        newer.resolve({ ...proposed, state: action === 'Land' ? 'landed' : 'merged' })
+      })
+      expect(recordSection().queryByText(action === 'Land' ? 'Landed' : 'Merged', { selector: '.state' })).not.toBeNull()
+      expect(recordSection().queryByText(second.title)).not.toBeNull()
+      expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(false)
+    })
+
     it(`blocks refresh during a pending ${action} and displays its result`, async () => {
       const original = { ...first, state: action === 'Land' ? 'approved' : 'landed' }
       getPlatformChange.mockResolvedValue(original)

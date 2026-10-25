@@ -123,6 +123,8 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   const [landing, setLanding] = useState(false)
   const [mergeConfirming, setMergeConfirming] = useState(false)
   const [merging, setMerging] = useState(false)
+  const activeLandRequest = useRef(0)
+  const activeMergeRequest = useRef(0)
   // Invalidate pending mutations as soon as selection starts, even before
   // its read completes or when the user returns to the same commit.
   const selectionVersion = useRef(0)
@@ -181,6 +183,8 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
       const created = await proposePlatformChange(title.trim(), body)
       if (version !== selectionVersion.current) return
       setRecord(created)
+      // A new proposal can be acted on while the previous record settles.
+      setLanding(false); setMerging(false)
       setRecent(rememberRecent(tenantRef.current, created))
     } catch (e) {
       if (version === selectionVersion.current) setErr(describeError(e))
@@ -207,6 +211,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
 
   const land = useCallback(async () => {
     if (!record?.change_id || !record?.commit_sha || landConfirming !== recordKey || refreshing || submitting || landing) return
+    const requestToken = ++activeLandRequest.current
     const version = selectionVersion.current
     const isCurrent = () => version === selectionVersion.current && currentRecordKey.current === recordKey
     setLanding(true); setErr(null)
@@ -220,12 +225,13 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     } catch (e) {
       if (isCurrent()) setErr(describeError(e))
     } finally {
-      setLanding(false)
+      if (requestToken === activeLandRequest.current) setLanding(false)
     }
   }, [record, recordKey, landConfirming, refreshing, submitting, landing])
 
   const merge = useCallback(async () => {
     if (!record?.change_id || !record?.commit_sha || mergeConfirming !== recordKey || refreshing || submitting || merging) return
+    const requestToken = ++activeMergeRequest.current
     const version = selectionVersion.current
     const isCurrent = () => version === selectionVersion.current && currentRecordKey.current === recordKey
     setMerging(true); setErr(null)
@@ -240,7 +246,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     } catch (e) {
       if (isCurrent()) setErr(describeError(e))
     } finally {
-      setMerging(false)
+      if (requestToken === activeMergeRequest.current) setMerging(false)
     }
   }, [record, recordKey, mergeConfirming, refreshing, submitting, merging])
 
