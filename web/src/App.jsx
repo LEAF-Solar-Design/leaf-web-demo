@@ -76,7 +76,7 @@ const WORKSPACE_QUICK_AFTER = Object.freeze([
 import Legend from './components/Legend.jsx'
 import ResultPanel from './components/ResultPanel.jsx'
 import SelectionReadout from './components/SelectionReadout.jsx'
-import PromptBox from './components/PromptBox.jsx'
+import PromptBox, { shouldSkipPromptFocus } from './components/PromptBox.jsx'
 import RoutePanel from './components/RoutePanel.jsx'
 import DegradedBanner from './components/DegradedBanner.jsx'
 import OperatorEntry from './components/operator/OperatorEntry.jsx'
@@ -3295,10 +3295,7 @@ export default function App() {
   useEffect(() => {
     const onClick = (e) => {
       const t = e.target
-      if (!(t instanceof Element)) return
-      if (t.closest('button, a, input, textarea, select, label, summary, canvas, '
-        + '[role="button"], [role="option"], [role="listbox"], [contenteditable="true"], '
-        + '.drawer, .vh-pop, .proj-menu, .claude-pop, .ops-drawer, .resolver, .bar')) return
+      if (shouldSkipPromptFocus(t)) return
       const sel = window.getSelection && window.getSelection()
       if (sel && sel.toString()) return
       barInputRef.current?.focus()
@@ -4555,6 +4552,8 @@ export default function App() {
           inputRef={barInputRef}
           routeActive={!!route}
           mcpDiscoveryEnabled={!mock && !knownGuest}
+          liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}
+          mock={mock}
           onOpenAuthor={onOpenAuthor}
           // Slice 8a round 3: the bar has no guard of its own. This is the
           // refusal the TRANSPORT raised (api.nlPrompt / converse.postMessage)
@@ -4728,7 +4727,7 @@ export default function App() {
               onUnlink={onUnlinkClaude}
             />
           )}
-          {!mock && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
+          {!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel mock={mock} orgId={orgId} open={addonsOpen} onToggle={setAddonsOpen} />}
         </div>
       </header>
 
@@ -6086,7 +6085,7 @@ export default function App() {
           mounted (LEAF_OPERATOR_ENABLED=1) AND this caller holds a grant.
           Tenant deployments never see it and never re-probe.
           The demo has no operator grant, so the probe would only produce the 404 the campaign counted. */}
-      {!mock && <OperatorEntry />}
+      {!mock && !knownGuest && <OperatorEntry />}
     </div>
     </SurfaceFrame>
     </DrawingObjectsProvider>

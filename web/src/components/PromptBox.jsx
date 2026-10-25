@@ -73,6 +73,16 @@ const STATIC_COMMANDS = slashStaticEntries()
 // already reads it from the bar keep working unchanged.
 export { SECRET_REASONS, SECRET_REASONS_NO_MOUNT }
 
+export function shouldSkipPromptFocus(target) {
+  if (!(target instanceof Element) || window.matchMedia?.('(pointer: coarse)').matches) return true
+  return !!target.closest('button, a, input, textarea, select, label, summary, canvas, '
+    + '[tabindex], [contenteditable]:not([contenteditable="false"]), area[href], iframe, object, embed, audio[controls], video[controls], '
+    + '[role="dialog"], [role="alertdialog"], [aria-modal="true"], '
+    + '[role="button"], [role="option"], [role="listbox"], [role="tab"], [role="menuitem"], '
+    + '[role="switch"], [role="checkbox"], [role="radio"], '
+    + '.drawer, .vh-pop, .proj-menu, .claude-pop, .ops-drawer, .resolver, .bar')
+}
+
 // The bar's scopes, mapped onto the app's lanes (find→run · act→solve ·
 // build→author). Selecting find/act returns you to the composer (the router
 // still decides the lane from what you type — no fake filter); build opens
@@ -182,6 +192,10 @@ export default function PromptBox({
   // passes neither (every existing mount) renders byte-identical to before.
   paletteActions = [],
   drawingId = null,
+  // Signed-in callers explicitly allow live scope reads and usage events.
+  // Demo versions use the same local store as the drawing history.
+  liveCallsAllowed = false,
+  mock = false,
   // mcpDiscoveryEnabled: gates the tenant-scoped MCP list fetch below.
   //   Default true keeps the console's byte-for-byte behavior (it never
   //   passes this prop). The stage passes signedIn && isEntitled('converse')
@@ -314,22 +328,28 @@ export default function PromptBox({
   // drawing, so that one is caught here too), never a thrown error that
   // would blank the whole palette over one dead index.
   useEffect(() => {
+    setVersionsData(null)
+    setSessionsData(null)
     if (activeScope !== 'act') return undefined
+    if (!liveCallsAllowed && !mock) return undefined
     let live = true
     if (drawingId) {
-      getDrawingVersions(false, drawingId).then((data) => { if (live) setVersionsData(data) })
+      getDrawingVersions(mock, drawingId).then((data) => { if (live) setVersionsData(data) })
         .catch(() => { if (live) setVersionsData(null) })
     }
-    listOperatorSessions(false).then((data) => { if (live) setSessionsData(data) })
+    if (liveCallsAllowed && !mock) {
+      listOperatorSessions(false).then((data) => { if (live) setSessionsData(data) })
+    }
     return () => { live = false }
-  }, [activeScope, drawingId])
+  }, [activeScope, drawingId, liveCallsAllowed, mock])
 
   // Find-scope search (slice 10c): one request per query, debounced by a
   // short settle delay so arrow-key/backspace bursts while typing don't fan
   // out a request per keystroke. The wrapper itself is bounded (4s client
   // timeout, server-side caps) and never throws.
   useEffect(() => {
-    if (activeScope !== 'find') return undefined
+    setFindResults(null)
+    if (activeScope !== 'find' || !liveCallsAllowed || mock) return undefined
     const q = value.trim()
     if (!q) { setFindResults(null); return undefined }
     let live = true
@@ -338,19 +358,19 @@ export default function PromptBox({
       searchIndex(false, q, { drawingId }).then((data) => { if (live) setFindResults(data) })
     }, 150)
     return () => { live = false; clearTimeout(timer) }
-  }, [activeScope, value, drawingId])
+  }, [activeScope, value, drawingId, liveCallsAllowed, mock])
 
   // Use the existing org-scoped project API only on an entitled find mount.
   // Public /try and mounts with no workspace org make no project request.
   const projectOrgId = getStoredOrgId()
   useEffect(() => {
     setProjectsData([])
-    if (activeScope !== 'find' || !mcpDiscoveryEnabled || !projectOrgId) return undefined
+    if (activeScope !== 'find' || !liveCallsAllowed || mock || !mcpDiscoveryEnabled || !projectOrgId) return undefined
     let live = true
     listProjects(projectOrgId).then((projects) => { if (live) setProjectsData(projects) })
       .catch(() => { if (live) setProjectsData([]) })
     return () => { live = false }
-  }, [activeScope, mcpDiscoveryEnabled, projectOrgId])
+  }, [activeScope, liveCallsAllowed, mock, mcpDiscoveryEnabled, projectOrgId])
 
   // Slice 5a: an alias is appended to the box's own class, never swapped in
   // for it, so the console's selectors and the stage's both resolve.
@@ -619,7 +639,7 @@ export default function PromptBox({
         ? (byId(row.id) ? { action_id: row.id } : { action_id: 'unregistered', row_hash: digest(row.id) })
         : { row_hash: digest(row.id) }),
     }
-    trackUsage('palette.pick', labels)
+    if (liveCallsAllowed && !mock) trackUsage('palette.pick', labels)
     if (row.kind === 'drawing-object') { drawingObjects?.focus(row.id); return }
     if (row.kind === 'action') { row.onSelect?.(); changePrompt(''); setActiveScope(null); return }
     // An artifact or find-result row has no run handler of its own yet
@@ -808,7 +828,9 @@ export default function PromptBox({
         {scopeMenuOpen && activeScope === 'find' && (
           <div className="resolver find-results" id="find-results-listbox" role="listbox" aria-label="Search results">
             <div className="resolver-header">
-              {!value.trim()
+              {!liveCallsAllowed || mock
+                ? 'Sign in to search your projects.'
+                : !value.trim()
                 ? 'Type to search drawing objects, projects, versions, sessions and tools'
                 : scopeRows.length > 0
                   ? `${scopeRows.length} result${scopeRows.length === 1 ? '' : 's'} · Enter jumps to one`

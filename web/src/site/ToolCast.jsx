@@ -1796,6 +1796,9 @@ export default function ToolCast({
             // line ~768 (transportMock excluded there is not relevant here:
             // discovery is harmless idle in mock mode either way).
             mcpDiscoveryEnabled={isSignedIn() && platform.isEntitled('converse')}
+            liveCallsAllowed={isSignedIn() && !transportMock}
+            mock={PUBLIC_DEMO}
+            drawingId={MODE_DRAWING_ID || drawingId}
             connectedMcpServers={connectedMcpServers}
             paletteActions={stagePaletteActions}
             commandLine
