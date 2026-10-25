@@ -190,6 +190,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   }, [title, edits])
 
   const refresh = useCallback(async (changeId) => {
+    if (merging || landing) return
     const id = changeId || record?.change_id
     if (!id) return
     const version = ++selectionVersion.current
@@ -202,7 +203,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     } finally {
       setRefreshing(false)
     }
-  }, [record])
+  }, [record, merging, landing])
 
   const land = useCallback(async () => {
     if (!record?.change_id || !record?.commit_sha || landConfirming !== recordKey || refreshing || submitting || landing) return
@@ -396,7 +397,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
             )}
 
             <div className="cst-actions">
-              <button className="chip-neutral" onClick={() => refresh()} disabled={refreshing}>
+              <button className="chip-neutral" onClick={() => refresh()} disabled={refreshing || merging || landing}>
                 {refreshing ? 'Refreshing…' : 'Refresh status'}
               </button>
               {state === 'approved' && (

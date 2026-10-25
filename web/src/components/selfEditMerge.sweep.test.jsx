@@ -86,8 +86,34 @@ describe('self-edit confirmations and stale responses', () => {
   })
 
   for (const action of ['Land', 'Merge']) {
+    it(`blocks refresh during a pending ${action} and displays its result`, async () => {
+      const original = { ...first, state: action === 'Land' ? 'approved' : 'landed' }
+      getPlatformChange.mockResolvedValue(original)
+      const pending = deferred()
+      const mutate = action === 'Land' ? landPlatformChange : mergePlatformChange
+      mutate.mockReturnValue(pending.promise)
+      render(<CustomizePanel tenant="test" />)
+      await select(first)
+      fireEvent.click(screen.getByRole('button', { name: action }))
+      fireEvent.click(screen.getByRole('button', { name: action }))
+      expect(mutate).toHaveBeenCalledWith(first.change_id, first.commit_sha)
+      const refreshButton = screen.getByRole('button', { name: 'Refresh status' })
+      expect(refreshButton.disabled).toBe(true)
+      fireEvent.click(refreshButton)
+      // Recent selections also use refresh; its guard must preserve the
+      // pending mutation even when called through an enabled button.
+      fireEvent.click(screen.getByRole('button', { name: new RegExp(second.title) }))
+      expect(getPlatformChange).toHaveBeenCalledTimes(1)
+      await act(async () => {
+        pending.resolve({ ...original, state: action === 'Land' ? 'landed' : 'merged' })
+      })
+      expect(recordSection().queryByText(action === 'Land' ? 'Landed' : 'Merged', { selector: '.state' })).not.toBeNull()
+      expect(recordSection().queryByText(first.title)).not.toBeNull()
+      expect(screen.getByRole('button', { name: 'Refresh status' }).disabled).toBe(false)
+    })
+
     for (const fails of [false, true]) {
-      it(`ignores a stale ${action} ${fails ? 'error' : 'result'} after another change is selected`, async () => {
+      it(`ignores a stale ${action} ${fails ? 'error' : 'result'} after another change is proposed`, async () => {
         const original = { ...first, state: action === 'Land' ? 'approved' : 'landed' }
         getPlatformChange.mockImplementation(async (id) => id === first.change_id ? original : second)
         const pending = deferred()
@@ -98,7 +124,11 @@ describe('self-edit confirmations and stale responses', () => {
         fireEvent.click(screen.getByRole('button', { name: action }))
         fireEvent.click(screen.getByRole('button', { name: action }))
         expect(mutate).toHaveBeenCalledWith(first.change_id, first.commit_sha)
-        await select(second)
+        fireEvent.change(screen.getByLabelText('Title'), { target: { value: second.title } })
+        fireEvent.change(screen.getByLabelText('Path 1'), { target: { value: 'web/src/example.js' } })
+        proposePlatformChange.mockResolvedValue(second)
+        fireEvent.click(screen.getByRole('button', { name: 'Propose' }))
+        await screen.findByText(second.title, { selector: '.ops-section-copy' })
         await act(async () => {
           if (fails) pending.reject(new Error('The old change could not be saved.'))
           else pending.resolve({ ...original, state: action === 'Land' ? 'landed' : 'merged' })
