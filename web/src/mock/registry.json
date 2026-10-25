@@ -81,7 +81,7 @@
     {
       "name": "list-linked-service-items",
       "version": "1.0.0",
-      "description": "Lists items from a service linked to your workspace. Runs once a service is linked.",
+      "description": "Lists items from a service linked to your workspace. Not yet available.",
       "kind": "script",
       "engine_op": "list_linked_service_items",
       "params": { "type": "object", "properties": {}, "required": [] },

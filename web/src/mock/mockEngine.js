@@ -130,10 +130,15 @@ export function runMock(tool, params, intake) {
   const t0 = typeof performance !== 'undefined' ? performance.now() : Date.now()
   const op = OPS[tool.engine_op]
   if (!op) {
+    // DEMOCAT: a tool read from a linked service (mcp_source) has no demo operation and does not run anywhere yet,
+    // so say that in plain words instead of naming the missing engine op.
+    const error = tool.mcp_source
+      ? 'This tool reads from a linked service, which is not available yet.'
+      : `mock engine has no op for '${tool.engine_op}'`
     return {
       ok: false, tool: tool.name, version: tool.version || '1.0.0',
       result: null, overlay: null, timing_ms: 0, cost: null,
-      error: `mock engine has no op for '${tool.engine_op}'`,
+      error,
     }
   }
   const { result, overlay } = op(intake, params || {})
