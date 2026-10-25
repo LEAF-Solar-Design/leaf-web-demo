@@ -5,26 +5,26 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] {
   --ck-font: var(--leaf-font-text);
   --ck-chrome: var(--leaf-surface);
-  --ck-glass-band: rgba(14, 17, 15, .86);
-  --ck-glass-panel: rgba(14, 17, 15, .90);
-  --ck-glass-dock: rgba(14, 17, 15, .92);
+  --ck-glass-band: var(--leaf-glass-band);
+  --ck-glass-panel: var(--leaf-glass-panel);
+  --ck-glass-dock: var(--leaf-glass-dock);
   --ck-glass-blur: blur(6px);
   --ck-recess: var(--leaf-ground);
   --ck-title: var(--leaf-line);
   --ck-field: var(--leaf-ground);
-  --ck-canvas: #212830;
+  --ck-canvas: var(--leaf-cad-canvas);
   --ck-active: var(--leaf-accent);
-  --ck-model: #0f74a6;
-  --ck-sel: #00b4ff;
+  --ck-model: var(--leaf-cad-model);
+  --ck-sel: var(--leaf-cad-selection);
   --ck-cmd: var(--leaf-accent);
   --ck-label: var(--leaf-ink-muted);
   --ck-ink: var(--leaf-ink);
   --ck-ink-dim: var(--leaf-ink-muted);
-  --ck-ink-off: #767676;
+  --ck-ink-off: var(--leaf-cad-ink-off);
   --ck-edge: var(--leaf-line);
   --ck-divider: var(--leaf-line);
   --ck-hover: var(--leaf-raised);
-  --ck-bulb: #f2c94c;
+  --ck-bulb: var(--leaf-cad-bulb);
   --ck-warn: var(--leaf-warn);
   --ck-top: 28px;
   --ck-ribbon: 95px;
@@ -81,21 +81,21 @@
   --status-info: var(--leaf-info);
   --bar-well: var(--leaf-ground);
   --bar-chip: var(--leaf-raised);
-  --bar-focus-ring: rgba(40, 214, 111, .24);
+  --bar-focus-ring: var(--leaf-focus-ring);
   --keycap: var(--leaf-raised);
   --hairline: var(--leaf-line);
   --rail: var(--leaf-surface);
   --input: var(--leaf-ground);
-  --accent-tint: rgba(40, 214, 111, .12);
-  --accent-tint-hover: rgba(40, 214, 111, .20);
-  --warn-tint: rgba(240, 180, 64, .12);
-  --danger-tint: rgba(248, 113, 113, .12);
+  --accent-tint: var(--leaf-accent-tint);
+  --accent-tint-hover: var(--leaf-accent-tint-strong);
+  --warn-tint: var(--leaf-warn-tint);
+  --danger-tint: var(--leaf-error-tint);
   --sheet: var(--leaf-surface);
   --code-bg: var(--leaf-raised);
-  --grid-line: rgba(244, 244, 245, .06);
+  --grid-line: var(--leaf-hover-tint);
   --rule-strong: var(--ck-ink-off);
-  --hover-tint: rgba(244, 244, 245, .06);
-  --hover-tint-strong: rgba(244, 244, 245, .10);
+  --hover-tint: var(--leaf-hover-tint);
+  --hover-tint-strong: var(--leaf-hover-tint-strong);
   --shadow-pop: var(--leaf-shadow-popover);
   --well: var(--leaf-ground);
   --well-border: var(--leaf-line);
@@ -104,7 +104,7 @@
   --well-dim: var(--leaf-ink-muted);
   --well-faint: var(--ck-ink-off);
   --well-accent: var(--leaf-accent);
-  --well-accent-tint: rgba(40, 214, 111, .13);
+  --well-accent-tint: var(--leaf-accent-tint);
   --font-label: var(--ck-font);
   --font-sans: var(--ck-font);
   --paper: var(--background);
@@ -186,7 +186,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail[data-spine] .rail-spine-count { font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.rail:not([data-spine]) {
     position: fixed; right: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: calc(var(--leaf-layer-base) + 5);
-    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
+    width: 300px; margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-popover);
     background: var(--ck-chrome);
   }
 }
@@ -241,7 +241,7 @@
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] aside.rail:not([data-spine]) {
     position: static; inset: auto; z-index: auto;
-    width: var(--ck-rail-width); margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: -8px 0 24px rgba(0, 0, 0, .4);
+    width: var(--ck-rail-width); margin: 0; border: 0; border-left: 1px solid var(--ck-edge); border-radius: 0; box-shadow: var(--leaf-shadow-popover);
     background: var(--ck-chrome);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface="cad"] :is(.cad-overview, .cockpit-cube-wrap, .cockpit-cube-wcs) {
@@ -461,7 +461,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] aside.nav:not([data-spine]) {
     position: fixed; left: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: calc(var(--leaf-layer-base) + 5);
     width: var(--ck-nav-width); margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
-    box-shadow: 8px 0 24px rgba(0, 0, 0, .4); backdrop-filter: none; background: var(--ck-chrome);
+    box-shadow: var(--leaf-shadow-popover); backdrop-filter: none; background: var(--ck-chrome);
     overflow-y: auto;
   }
 }
@@ -642,8 +642,8 @@
 /* Portal grounds carry the same hook because their DOM is a sibling of App. */
 .studio-shell [data-studio-shell="cockpit"]:is(.studio-ground-board, .studio-ground-device) {
   --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
-  --ck-canvas: #212830; --ck-glass-panel: rgba(30, 34, 39, .90);
-  --ck-ink: #e2e2e2; --ck-ink-dim: #b8b8b8; --ck-edge: var(--leaf-line);
+  --ck-canvas: var(--leaf-cad-canvas); --ck-glass-panel: var(--leaf-cad-ground-glass);
+  --ck-ink: var(--leaf-cad-ink); --ck-ink-dim: var(--leaf-cad-ink-dim); --ck-edge: var(--leaf-line);
   background: var(--ck-canvas); color: var(--ck-ink); font: 400 13px/1.5 var(--ck-font);
 }
 .studio-shell [data-studio-shell="cockpit"] .ground-tile {
