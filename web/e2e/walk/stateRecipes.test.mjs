@@ -2327,7 +2327,7 @@ test('failed drawing setup accepts an empty canvas and requires the product no-d
         assert.deepEqual(options, { name: 'Quick access', exact: true })
         return { getByRole: (role, options) => {
           assert.equal(role, 'button')
-          assert.deepEqual(options, { name: 'Undo version (unavailable: no versioned drawing)', exact: true })
+          assert.deepEqual(options, { name: 'Undo version (unavailable: No saved versions yet)', exact: true })
           return undo
         } }
       },
