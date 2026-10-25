@@ -132,7 +132,7 @@
 }
 
 /* ---- the drawing fills the studio behind the chrome ---- */
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   .studio-shell:has(.app:is([data-surface="cad"], [data-surface="solar"])) .studio-ground {
     --cv-bg: var(--leaf-cad-canvas);
     background: var(--leaf-cad-canvas);
@@ -161,7 +161,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) header.top .chip-act .key { font-size: var(--leaf-size-caption); padding: 0 4px; }
 .cockpit-quick { display: inline-flex; align-items: center; gap: 1px; height: var(--ck-top); }
 .cockpit-quick-slot { display: contents; }
-/* Below 981px the status bar keeps the OLD SHELL's flat layout (no regions:
+/* Below 1024px the status bar keeps the OLD SHELL's flat layout (no regions:
    App.jsx gates them on wideViewport, the same breakpoint). The P1 pass moved
    the cursor readout and the drafting toggles below the build hash in the
    DOM so the wide regions read left to right without `order:`; the narrow bar
@@ -169,7 +169,7 @@
    puts the build hash back at the end where it has always been. Scoped to the
    studio's drafting surfaces, which are the only place those two mounts
    render at all. */
-@media (max-width: 980px) {
+@media (max-width: 1023px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar > span[style] { order: 1; }
   .studio-shell .app[data-surface="solar"] .solar-flow-seat { display: contents; }
   .studio-shell .app[data-surface="solar"] .solar-flow-seat-content { display: contents; }
@@ -197,7 +197,7 @@
 /* The product-surface tabs stay ALWAYS-MOUNTED in the centre column (the
    continuity contract: never a remount) and ride the band at its right,
    as a compact surface switch. */
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
     /* Past the ribbon tabs (they end near x=570) and clear of the header's
        own chips at the right, at any wide width. */
@@ -241,7 +241,7 @@
 /* The job monitor: no right column on drafting surfaces (the reference gives
    the whole width to the ribbon and the canvas). Its spine is a chip in the
    status bar; expanded, it is a panel over the canvas's right edge. */
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]):has(aside.nav[data-spine="hidden"]):has(aside.rail[data-spine]) { grid-template-columns: 0 1fr 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.rail[data-spine] {
@@ -434,7 +434,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card > .viewer-wrap { height: 0; min-height: 0; }
 
 /* ---- the canvas instruments ---------------------------------------------- */
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   /* Viewport strip, top-left of the canvas: fit / zoom / history as icons. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view {
     position: fixed; top: var(--ck-canvas-top-live); left: var(--ck-pane); right: auto; z-index: calc(var(--leaf-layer-base) + 3);
@@ -776,7 +776,7 @@
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card .tour-dot.on { background: var(--ck-cmd); }
 }
 
-@media (min-width: 981px) and (max-width: 1199px) {
+@media (min-width: 1024px) and (max-width: 1199px) {
   /* Dock 250 + result lane 458 + seat 280 + overview 200 do not fit below 1200px: while the Solar flow seat is
      mounted beside an open Properties dock, the drawing overview gives way to it. Flag-fenced by the seat itself. */
   .studio-shell .app[data-surface="solar"]:has(.solar-flow-seat):has(.properties-dock) .cad-overview { display: none; }
@@ -807,7 +807,7 @@
    rendered as one continuous strip. The arrangement is now the DOM's, in
    three regions (see the block above); what survives here is the SKIN of the
    individual segments, which the regions do not supply. */
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region-docs { padding: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-tabs { padding: 0; gap: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles { padding: 0 4px; gap: 2px; }
@@ -887,7 +887,7 @@
    EXPANDED rail is a panel over the canvas's left edge, above the properties
    pane (z 3), never under it: proof row "a ribbon click arms the SAME
    confirm ladder" clicked its collapse control through the pane. */
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) aside.nav:not([data-spine]) {
     position: fixed; left: 0; top: var(--ck-canvas-top-live); bottom: var(--ck-status); z-index: calc(var(--leaf-layer-base) + 5);
     width: 300px; margin: 0; border: 0; border-right: 1px solid var(--ck-edge); border-radius: 0;
@@ -903,7 +903,7 @@
 /* The panel host has no box in the reference frame. Hidden panels stay
    mounted so engine portals and widget drafts survive overflow changes. */
 .studio-shell .ribbon-panels { display: contents; }
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   /* Keep panel contents in a shrinkable seat. Their intrinsic width must
      never push the disclosure out of the band or into the activity rail. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon {
@@ -959,7 +959,7 @@
     max-height: none; overflow: visible;
   }
 }
-@media (min-width: 981px) and (max-width: 1499px) {
+@media (min-width: 1024px) and (max-width: 1499px) {
   /* The second tablist starts 2px below the 28px Ribbon tablist. The
      extra space belongs to the band, including its canvas compensation. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 185px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); }
@@ -968,7 +968,7 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs { align-self: flex-start; }
 }
-@media (pointer: coarse) and (max-width: 1499px), (max-width: 980px) {
+@media (pointer: coarse) and (max-width: 1499px), (max-width: 1023px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-ribbon: 151px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles button {
@@ -979,14 +979,14 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] { height: 132px; justify-content: center; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-status-toggles { display: inline-flex; flex-wrap: nowrap; }
 }
-@media (min-width: 981px) and (max-width: 1499px) and (pointer: coarse) {
+@media (min-width: 1024px) and (max-width: 1499px) and (pointer: coarse) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --ck-canvas-top: 241px; --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px)); --ck-status: 46px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .foot-region { height: 44px; }
 }
 /* 800x500 keeps the phone stack: panels stay in one scrolled ribbon row,
    and DraftingRibbon measures the document band's bottom for the ground.
    Short landscape screens retain the narrow ground and shell scrolling. */
-@media (max-width: 980px) and (min-height: 500px) {
+@media (max-width: 1023px) and (min-height: 500px) {
   /* An 85px drawing strip cannot hold a 96px cube. The strip belongs to
      the drawing and the readout, so hide the cube and its WCS chip. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-cube-wrap,
@@ -1059,7 +1059,7 @@
    as on the wide frame, and the status line is one 19px line. So the dock's rise is exact:
    19px plus the dock's 8px gap and its 8px sibling margin. Short landscape and the phone
    drawer keep their own layouts. */
-@media (min-width: 601px) and (max-width: 980px) and (min-height: 500px) {
+@media (min-width: 601px) and (max-width: 1023px) and (min-height: 500px) {
   /* 68px of dock spacing plus the bar's absolute height (32px when unfolded).
      The phone frame keeps 100px; short landscape's app padding stays below. */
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { --tb-r: calc(68px + var(--tb-h, 32px)); }
@@ -1071,7 +1071,7 @@
 
 /* Short landscape keeps the scrolling bands and full-viewport ground,
    with the command input and status bar fixed within reach. */
-@media (max-width: 980px) and (max-height: 499px) {
+@media (max-width: 1023px) and (max-height: 499px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) { padding-bottom: 100px; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar {
     position: fixed; left: 0; right: 0; bottom: 0; height: 46px; min-height: 46px;
@@ -1155,7 +1155,7 @@
 }
 
 /* ---- W4e round 2: the pane's Drawing section (label | field rows) ---- */
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-drawing { display: grid; grid-template-columns: 104px 1fr; gap: 2px 6px; padding: 0 4px; margin: 0; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-drawing dt { height: 20px; line-height: 20px; font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-drawing dd {
@@ -1320,7 +1320,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-dot.on { background: var(--ck-cmd); }
 }
 
-@media (max-width: 600px), (max-width: 980px) and (min-height: 500px) {
+@media (max-width: 600px), (max-width: 1023px) and (min-height: 500px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs {
     position: fixed; inset: auto 0 var(--ck-dock); height: var(--ck-drawer); z-index: calc(var(--leaf-layer-header) + 5);
     display: grid; grid-template-columns: repeat(4, minmax(0, 1fr));
@@ -1378,7 +1378,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] main.center-scroll > section.ent-panel .ent-head { display: flex; }
 }
 
-@media (min-width: 601px) and (max-width: 980px) and (min-height: 500px) {
+@media (min-width: 601px) and (max-width: 1023px) and (min-height: 500px) {
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] {
     --ck-drawer: 44px; --ck-dock: var(--studio-dock-rise, calc(66px + var(--tb-h, 32px) + var(--ck-status-rise, 0px) + env(safe-area-inset-bottom, 0px)));
   }
@@ -1416,7 +1416,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool:hover:not(:disabled):not([aria-expanded="true"]) { background: transparent; }
   .doc-tab-start:hover { background: transparent; color: var(--leaf-ink); }
   .doc-tab-close:hover { background: var(--ck-active); color: var(--leaf-on-accent); }
-  @media (min-width: 981px) {
+  @media (min-width: 1024px) {
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"]:hover:not([aria-selected="true"]) { background: transparent; color: var(--leaf-ink-muted); }
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button:hover { background: transparent; }
     .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button[aria-disabled="true"]:hover { background: transparent; }

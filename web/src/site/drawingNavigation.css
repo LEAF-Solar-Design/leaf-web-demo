@@ -59,7 +59,7 @@
 .drawing-focus { display: flex; align-items: center; gap: 6px; flex: 1; }
 .drawing-navigation .drawing-focus button { flex-shrink: 0; min-width: 24px; min-height: 24px; height: 24px; box-sizing: border-box; font: inherit; line-height: 16px; padding: 0 4px; }
 .drawing-focus > span:first-child { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-@media (min-width: 981px) {
+@media (min-width: 1024px) {
   .drawing-navigation {
     position: fixed;
     top: calc(var(--ck-canvas-top, 0px) + 26px);

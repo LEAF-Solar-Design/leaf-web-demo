@@ -177,7 +177,7 @@ describe('CadOverview', () => {
     expect(f.api.setView).not.toHaveBeenCalled()
   })
 
-  it.each([390, 800, 980])('starts collapsed at CSS width %s and remembers expansion across remounts', (width) => {
+  it.each([390, 800, 1023])('starts collapsed at CSS width %s and remembers expansion across remounts', (width) => {
     vi.stubGlobal('innerWidth', width)
     const f = fixture(), view = render(<CadOverview viewerRef={f.ref} />)
     expect(screen.queryByRole('button', { name: 'Drawing overview', exact: true })).toBeNull()

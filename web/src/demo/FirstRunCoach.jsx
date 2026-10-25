@@ -30,13 +30,13 @@ function writeDismissed() {
   }
 }
 
-// At <=980px landing.css hands the whole bottom half to the rails, so there
+// At <=1023px landing.css hands the whole bottom half to the rails, so there
 // is no placement for the card (coach.css hides it as a belt). This media
 // gate is the suspenders: while it matches, the component renders null and
 // installs NO document listeners -- otherwise an Escape or stray pointerdown
 // would silently dismiss/hide a coach the user never saw, and resizing wider
 // would reveal nothing.
-const SMALL_VIEWPORT_QUERY = '(max-width: 980px)'
+const SMALL_VIEWPORT_QUERY = '(max-width: 1023px)'
 
 function useSmallViewport() {
   const [small, setSmall] = useState(() =>

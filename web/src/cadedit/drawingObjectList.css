@@ -36,7 +36,7 @@
   top: calc(var(--ck-canvas-top, 140px) + 82px);
   width: min(360px, calc(100vw - var(--ck-pane, 0px) - 224px));
 }
-@media (max-width: 980px) {
+@media (max-width: 1023px) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drawing-objects-panel {
     left: min(456px, calc(100vw - 104px));
     top: calc(var(--ck-canvas-top, 140px) + 26px);

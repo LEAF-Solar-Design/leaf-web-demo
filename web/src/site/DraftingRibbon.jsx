@@ -61,11 +61,11 @@ function useBandHeight(ref) {
       host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`)
       // The narrow ground is a sibling of the app. Publish its real band
       // edge on their shared shell, including the document tabs and nav.
-      if (shell && toolbar && window.innerWidth <= 980 && window.innerHeight >= 500) {
+      if (shell && toolbar && window.innerWidth <= 1023 && window.innerHeight >= 500) {
         shell.style.setProperty('--cockpit-stack-top', `${toolbar.getBoundingClientRect().bottom}px`)
       } else shell?.style.removeProperty('--cockpit-stack-top')
       // Desktop canvas top follows a pushed-down band bottom; overlays never move up.
-      if (shell && bandToolbar && window.innerWidth >= 981) {
+      if (shell && bandToolbar && window.innerWidth >= 1024) {
         shell.style.setProperty('--cockpit-band-bottom', `${Math.floor(bandToolbar.getBoundingClientRect().bottom)}px`)
       } else shell?.style.removeProperty('--cockpit-band-bottom')
     }

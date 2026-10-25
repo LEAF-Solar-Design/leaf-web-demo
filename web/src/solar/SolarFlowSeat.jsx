@@ -67,7 +67,7 @@ export default function SolarFlowSeat({ seated, children }) {
   useLayoutEffect(() => {
     const seat = contentRef.current
     if (!seated || !open || !seat || typeof window.matchMedia !== 'function'
-      || !window.matchMedia('(min-width: 981px)').matches
+      || !window.matchMedia('(min-width: 1024px)').matches
       || !seat.closest('.studio-shell .workspace-card')) return undefined
     let revealed = null
     const reveal = () => {

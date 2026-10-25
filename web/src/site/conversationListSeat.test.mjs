@@ -48,10 +48,10 @@ describe('the console ConversationList sits in the rail column, not over the gro
   })
 
   it('the column owns the rail grid seat on desktop and the stacked order on narrow layouts', () => {
-    assert.match(css, /@media \(min-width: 981px\) \{\n  \.rail-stack \{ grid-row: 2; grid-column: 3; \}\n\}/,
+    assert.match(css, /@media \(min-width: 1024px\) \{\n  \.rail-stack \{ grid-row: 2; grid-column: 3; \}\n\}/,
       '.rail-stack must claim grid-row 2 / grid-column 3 on desktop, the seat aside.rail held alone')
     assert.match(css, /\.app > \.rail-stack \{ order: 3; \}/,
-      '.rail-stack must keep the rail\'s order 3 in the stacked (<=980px) layout')
+      '.rail-stack must keep the rail\'s order 3 in the stacked (<=1023px) layout')
   })
 
   it('bounds the list inside the column so it can never push the job monitor off the rail', () => {
