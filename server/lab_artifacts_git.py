@@ -287,7 +287,7 @@ def advance_verified_head(sql, tenant, limit=1000):
     if type(limit) is not int or limit < 0:
         raise ValueError('lab_git_invalid_limit')
     active = store.authority_get_sql(sql, tenant)
-    if not active or active['mode'] != 'git':
+    if not active or active['mode'] not in ('git', 'draining'):
         return True
     verified = active['verified_head']
     for step in range(limit + 1):
@@ -310,7 +310,7 @@ def advance_verified_head(sql, tenant, limit=1000):
         verified = successor
 
 
-def _complete_pending(tenant, row, generation, commit, parent, author='git-recovery', *, history=()):
+def _complete_pending(tenant, row, generation, commit, parent, author='git-recovery', *, history=(), transition=None):
     import lab_git_authority as store
 
     proven = {entry['commit']: entry for entry in history}
@@ -318,7 +318,14 @@ def _complete_pending(tenant, row, generation, commit, parent, author='git-recov
     def operation(sql):
         active = store.authority_get_sql(sql, tenant)
         pending = store.get_sql(sql, tenant, row['op_id'])
-        if (not active or str(active['generation']) != str(generation) or active['mode'] != 'git'
+        draining = False
+        if transition:
+            current_transition = store._get(sql, 'lab_git_transitions', tenant, 'transition_id', transition['transition_id'])
+            draining = (current_transition is not None and current_transition['owner'] == transition['owner']
+                and current_transition['state'] == 'fenced'
+                and store._date(current_transition['lease_expires_at']) > store._now()
+                and active is not None and active['mode'] == 'draining')
+        if (not active or str(active['generation']) != str(generation) or (active['mode'] != 'git' and not draining)
                 or not pending or pending['fence'] != row['fence'] or pending['state'] == 'abandoned'):
             return None
         current = ledger._head(sql, tenant, row['doc_id'])
@@ -712,7 +719,8 @@ def _notify(tenant, event, identity):
     # Read back durable state before publishing either alert signal.
     if key not in mirror_status(tenant)["notified"]:
         return
-    getattr(emf_metrics, "emit_" + event)()
+    metric = 'lab_replay_divergence' if event == 'lab_flip_back_refused' else event
+    getattr(emf_metrics, "emit_" + metric)()
     LOG.warning(event, extra={"tenant": tenant, "event": event, "mirror_key": key})
 
 
@@ -801,7 +809,7 @@ def catch_up(tenant):
         while True:
             def step(sql):
                 state = _state(sql, tenant)
-                if state["mode"] != "mirror" or not _allowed(tenant):
+                if state["mode"] != "mirror" or state['frozen'] or not _allowed(tenant):
                     return None
                 for row in _rows(sql, tenant):
                     mirrored = sql.execute("SELECT revision FROM lab_git_mirror"
@@ -855,7 +863,352 @@ def after_write(tenant):
         pass
 
 
+def _generation(tenant):
+    result = _git_post(tenant, 'generation', {})
+    generation, head = result.get('generation'), result.get('head')
+    if ('generation' not in result or 'head' not in result
+            or (generation is not None and (not isinstance(generation, str)
+                or not re.fullmatch('[1-9][0-9]{0,18}', generation)))
+            or (head is not None and (not isinstance(head, str) or not _SHA.fullmatch(head)))):
+        raise MirrorError('unknown')
+    return generation, head
+
+
+def _proof(sql, tenant, head, *, authority=None):
+    """Bind tree equality and the recorded parent chain to one barrier."""
+    import lab_git_authority as store
+
+    inspected = _git_post(tenant, 'inspect', {'limit': 200})
+    if inspected.get('head') != head or not isinstance(inspected.get('documents'), list):
+        raise MirrorError('lab_replay_divergence')
+    if not _equal(sql, tenant, inspected):
+        raise MirrorError('lab_replay_divergence')
+    state = _state(sql, tenant)
+    receipt = state['receipt']
+    base = authority['base_head'] if authority else receipt.get('base_head')
+    verified = authority['verified_head'] if authority else receipt.get('verified_head')
+    if not authority:
+        commits = inspected.get('commits')
+        if not isinstance(commits, list):
+            raise MirrorError('unknown')
+        complete = (head is None and not commits) or (commits and commits[-1].get('parent') is None)
+        if not complete and verified != head:
+            # Preserve the mirror proof of the history before its replay base;
+            # recording only the replay suffix cannot vouch for unseen ancestry.
+            raise MirrorError('lab_history_too_long')
+    if head is None:
+        if base is not None:
+            raise MirrorError('lab_history_not_ancestor')
+        return
+    try:
+        history = _changes(tenant, base, head)
+    except MirrorError as error:
+        if error.code == 'lab_history_too_long' and verified == head:
+            return
+        raise
+    for entry in history:
+        if authority:
+            recorded = store._get(sql, 'lab_git_commits', tenant, 'commit', entry['commit'])
+            matches = recorded and recorded['parent'] == entry['parent']
+        else:
+            recorded = sql.execute('SELECT doc_id,revision,sha256 FROM lab_git_mirror WHERE tenant_id=? AND "commit"=?',
+                                   (tenant, entry['commit'])).fetchone()
+            matches = (recorded and entry['trailers'].get('Lab-Doc') == recorded['doc_id']
+                       and entry['trailers'].get('Lab-Revision') == str(recorded['revision'])
+                       and entry['trailers'].get('Lab-Sha256') == recorded['sha256'])
+        if not matches:
+            raise MirrorError('foreign_commits_need_import')
+    if not authority and not _known_revisions(sql, tenant, commits):
+        raise MirrorError('foreign_commits_need_import')
+
+
+class _TransitionLost(RuntimeError):
+    pass
+
+
+def _step(tenant, transition, target, operation=lambda sql, row: None):
+    """Serialize a step with takeover and commit its effects with the state CAS."""
+    import lab_git_authority as store
+
+    def transaction(sql):
+        row = store._get(sql, 'lab_git_transitions', tenant, 'transition_id', transition['transition_id'])
+        if (not row or row['owner'] != transition['owner'] or row['state'] != transition['state']
+                or store._date(row['lease_expires_at']) <= store._now()):
+            raise _TransitionLost()
+        operation(sql, row)
+        if sql.execute('UPDATE lab_git_transitions SET state=?,updated_at=?,lease_expires_at=? '
+                       'WHERE tenant_id=? AND transition_id=? AND owner=? AND state=?',
+                       (target, store._now().isoformat(), store._expiry(120), tenant,
+                        row['transition_id'], row['owner'], row['state'])).rowcount != 1:
+            raise _TransitionLost()
+        return store._get(sql, 'lab_git_transitions', tenant, 'transition_id', row['transition_id'])
+    return store._run(tenant, transaction, write=True)
+
+
+def _plan(tenant, kind, actor):
+    import lab_git_authority as store
+
+    def operation(sql):
+        if sql.execute("SELECT 1 FROM lab_git_transitions WHERE tenant_id=? AND state NOT IN ('done','reverted')",
+                       (tenant,)).fetchone():
+            raise MirrorError('lab_transition_active')
+        active = store.authority_get_sql(sql, tenant)
+        state = _state(sql, tenant)
+        if kind == 'cutover':
+            if active or state['mode'] != 'mirror':
+                raise MirrorError('lab_mirror_mode_refused')
+            if sql.execute("SELECT 1 FROM lab_git_pending WHERE tenant_id=? AND state<>'abandoned'", (tenant,)).fetchone():
+                raise MirrorError('lab_git_pending')
+        elif not active or active['mode'] != 'git':
+            raise MirrorError('lab_store_migrating')
+        generation, head = _generation(tenant)
+        if active and str(active['generation']) != generation:
+            raise MirrorError('lab_generation_conflict')
+        allocated = store.next_generation_sql(sql, tenant, int(generation or 0))
+        now = store._now().isoformat()
+        row = dict(tenant_id=tenant, transition_id=uuid.uuid4().hex, kind=kind,
+            from_generation=int(generation or 0), to_generation=allocated, barrier_head=head,
+            owner=uuid.uuid4().hex, lease_expires_at=store._expiry(120), state='planned',
+            created_at=now, updated_at=now)
+        store._insert(sql, 'lab_git_transitions', row)
+        _update(sql, tenant, frozen=True)
+        if active:
+            sql.execute("UPDATE lab_git_authority SET mode='draining',updated_at=? WHERE tenant_id=?", (now, tenant))
+        return row
+    return store._run(tenant, operation, write=True)
+
+
+def _fence(tenant, transition):
+    expected = str(transition['from_generation']) if transition['from_generation'] else None
+    result = _git_post(tenant, 'fence', {'expected_generation': expected,
+        'new_generation': str(transition['to_generation']), 'expected_head': transition['barrier_head'],
+        'transition_id': transition['transition_id']})
+    receipt = result.get('receipt')
+    if (not isinstance(receipt, dict) or receipt != {
+            'transition_id': transition['transition_id'], 'from_generation': expected,
+            'to_generation': str(transition['to_generation']), 'barrier_head': transition['barrier_head']}):
+        raise MirrorError('lab_generation_conflict')
+    return receipt['barrier_head']
+
+
+def _revert_cutover(tenant, transition):
+    import lab_git_authority as store
+
+    def revert(sql, row):
+        if store.authority_get_sql(sql, tenant):
+            raise _TransitionLost()
+        _update(sql, tenant, frozen=False)
+        store.enqueue_sql(sql, tenant, 'notify', row['transition_id'], {'event': 'lab_replay_divergence'})
+    return _step(tenant, transition, 'reverted', revert)
+
+
+def cutover(tenant, actor):
+    import lab_git_authority as store
+
+    if not store.GIT_AUTHORITY_READY:
+        raise MirrorError('lab_git_authority_not_ready')
+    if not _allowed(tenant):
+        raise MirrorError('lab_mirror_ineligible')
+    if os.environ.get('LEAF_LAB_GIT_SINGLE_WRITER') != 'attested':
+        raise MirrorError('lab_git_single_writer_required')
+    transition = _plan(tenant, 'cutover', actor)
+    _resume(tenant, transition)
+    return store.authority_get(tenant)
+
+
+def _resolve_barrier(tenant, transition):
+    """No retries of commits after fencing: absent is now definitive."""
+    import lab_git_authority as store
+
+    rows = store._run(tenant, lambda sql: [store.get_sql(sql, tenant, row['op_id']) for row in sql.execute(
+        "SELECT op_id FROM lab_git_pending WHERE tenant_id=? AND state<>'abandoned' ORDER BY created_at,op_id",
+        (tenant,)).fetchall()])
+    found = []
+    for row in rows:
+        lookup = _git_post(tenant, 'ops', {'op_ids': [row['op_id']], 'head': transition['barrier_head']})
+        if not isinstance(lookup.get('ops'), dict) or row['op_id'] not in lookup['ops']:
+            raise MirrorError('lab_ops_ambiguous')
+        match = lookup['ops'][row['op_id']]
+        if match is None:
+            def abandon(sql, current, row=row):
+                sql.execute("UPDATE lab_git_pending SET state='abandoned',fence=fence+1 WHERE tenant_id=? "
+                            "AND op_id=? AND fence=? AND state<>'abandoned'", (tenant, row['op_id'], row['fence']))
+            _step(tenant, transition, 'fenced', abandon)
+            continue
+        history = _changes(tenant, row['expected_parents'][0], transition['barrier_head'])
+        _, author = _pending_context(row, store.authority_get(tenant))
+        identity = dict(re.findall(r'^(Lab-[A-Za-z0-9-]+): (.*)$', _pending_message(row, author), re.MULTILINE))
+        entry = next((entry for entry in history if isinstance(match, dict) and entry['commit'] == match.get('commit')), None)
+        if (not isinstance(match, dict) or match.get('doc_id') != row['doc_id']
+                or match.get('revision') != row['revision'] or match.get('sha256') != row['sha256']
+                or entry is None or entry['parent'] not in row['expected_parents']
+                or _path(row) not in entry['changed_paths']
+                or any(entry['trailers'].get(key) != value for key, value in identity.items())):
+            raise MirrorError('lab_ops_ambiguous')
+        found.append((row, entry, history))
+        _step(tenant, transition, 'fenced')
+    # Each history is newest first. Sorting by ancestor depth completes parents
+    # before children even when staging/response order differed across documents.
+    found.sort(key=lambda item: next(i for i, e in enumerate(item[2]) if e['commit'] == item[1]['commit']), reverse=True)
+    for row, entry, history in found:
+        active = store.authority_get(tenant)
+        _, author = _pending_context(row, active)
+        if _complete_pending(tenant, row, active['generation'], entry['commit'], entry['parent'], author,
+                             history=history, transition=transition) is None:
+            raise MirrorError('lab_commit_pending')
+
+
+def _refuse_rollback(tenant, transition, reason):
+    import lab_git_authority as store
+
+    # Persist a separate compensation fence before sending it. Its identical
+    # replay remains available after a lost response or a process crash.
+    def plan(sql, row):
+        state = _state(sql, tenant)
+        if state['receipt'].get('rollback_refusal', {}).get('transition_id') == row['transition_id']:
+            return
+        generation = store.next_generation_sql(sql, tenant, row['to_generation'])
+        refusal = dict(transition_id=row['transition_id'], reason=reason,
+            from_generation=row['to_generation'], to_generation=generation,
+            barrier_head=row['barrier_head'], fence_id=uuid.uuid4().hex)
+        _update(sql, tenant, receipt={**state['receipt'], 'rollback_refusal': refusal})
+    transition = _step(tenant, transition, transition['state'], plan)
+    def restore(sql, row):
+        refusal = _state(sql, tenant)['receipt']['rollback_refusal']
+        _fence(tenant, {**refusal, 'transition_id': refusal['fence_id']})
+        sql.execute("UPDATE lab_git_authority SET mode='git',generation=?,updated_at=? WHERE tenant_id=?",
+                    (refusal['to_generation'], store._now().isoformat(), tenant))
+        # A queued publication must use the generation which can now publish.
+        if row['barrier_head'] is not None:
+            store.enqueue_sql(sql, tenant, 'publish', 'refusal-' + row['transition_id'],
+                {'target_sha': row['barrier_head'], 'generation': str(refusal['to_generation'])})
+        store.enqueue_sql(sql, tenant, 'notify', row['transition_id'],
+            {'event': 'lab_flip_back_refused', 'reason': refusal['reason']})
+    _step(tenant, transition, 'reverted', restore)
+    raise MirrorError('lab_flip_back_refused', observed=reason)
+
+
+def _resume(tenant, transition, *, takeover=False):
+    import lab_git_authority as store
+
+    try:
+        if transition['state'] == 'planned':
+            if takeover:
+                generation, _ = _generation(tenant)
+                expected = str(transition['from_generation']) if transition['from_generation'] else None
+                if generation == expected:
+                    if transition['kind'] == 'cutover':
+                        return _revert_cutover(tenant, transition)
+                    return _step(tenant, transition, 'reverted', lambda sql, row: sql.execute(
+                        "UPDATE lab_git_authority SET mode='git' WHERE tenant_id=?", (tenant,)))
+            def fence(sql, row):
+                if row['kind'] == 'cutover':
+                    _proof(sql, tenant, row['barrier_head'])
+                _fence(tenant, row)
+                if row['kind'] == 'rollback':
+                    sql.execute('UPDATE lab_git_authority SET generation=?,updated_at=? WHERE tenant_id=?',
+                                (row['to_generation'], store._now().isoformat(), tenant))
+            transition = _step(tenant, transition, 'fenced', fence)
+        if transition['kind'] == 'cutover':
+            if transition['state'] == 'fenced':
+                def activate(sql, row):
+                    _proof(sql, tenant, row['barrier_head'])
+                    store._insert(sql, 'lab_git_authority', dict(tenant_id=tenant, mode='git',
+                        generation=row['to_generation'], base_head=row['barrier_head'], verified_head=row['barrier_head'],
+                        updated_at=store._now().isoformat()))
+                    _update(sql, tenant, mode='mirror', frozen=True, local_sha=row['barrier_head'])
+                transition = _step(tenant, transition, 'proven', activate)
+            return _step(tenant, transition, 'done')
+        refusal = mirror_status(tenant)['receipt'].get('rollback_refusal', {})
+        if refusal.get('transition_id') == transition['transition_id']:
+            return _refuse_rollback(tenant, transition, refusal['reason'])
+        if transition['state'] == 'fenced':
+            _resolve_barrier(tenant, transition)
+            transition = _step(tenant, transition, 'resolved')
+        if transition['state'] == 'resolved':
+            def publish_plan(sql, row):
+                if row['barrier_head'] is not None:
+                    store.enqueue_sql(sql, tenant, 'publish', 'rollback-' + row['transition_id'],
+                        {'target_sha': row['barrier_head'], 'generation': str(row['to_generation'])})
+            transition = _step(tenant, transition, 'resolved', publish_plan)
+            process_outbox(tenant)
+            def drained(sql, row):
+                if sql.execute('SELECT 1 FROM lab_git_outbox WHERE tenant_id=? AND done_at IS NULL', (tenant,)).fetchone():
+                    raise MirrorError('lab_outbox_pending')
+            transition = _step(tenant, transition, 'drained', drained)
+        if transition['state'] == 'drained':
+            def prove(sql, row):
+                # Each transaction has a bounded cursor walk. A later tick
+                # continues it without discarding work on a proof failure.
+                active = store.authority_get_sql(sql, tenant)
+                _proof(sql, tenant, row['barrier_head'], authority=active)
+            while not store._run(tenant, lambda sql: advance_verified_head(sql, tenant), write=True):
+                transition = _step(tenant, transition, 'drained')
+            try:
+                transition = _step(tenant, transition, 'proven', prove)
+            except MirrorError as error:
+                if error.code in {'foreign_commits_need_import', 'lab_replay_divergence',
+                                  'lab_history_not_ancestor', 'lab_history_nonlinear', 'lab_history_too_long'}:
+                    return _refuse_rollback(tenant, transition, 'foreign_commits_need_import'
+                        if error.code != 'lab_replay_divergence' else 'lab_replay_divergence')
+                raise
+        def exit_git(sql, row):
+            with store.authorize_exit(sql, tenant, row['transition_id']):
+                # Consume the exit authorization while authority still exists.
+                _update(sql, tenant, mode='ledger', frozen=False)
+                sql.execute('DELETE FROM lab_git_authority WHERE tenant_id=?', (tenant,))
+        return _step(tenant, transition, 'done', exit_git)
+    except Exception:
+        if transition['kind'] == 'cutover' and store.authority_get(tenant) is None:
+            _revert_cutover(tenant, transition)
+        raise
+
+
+def _rollback(tenant, actor):
+    transition = _plan(tenant, 'rollback', actor)
+    _resume(tenant, transition)
+    return mirror_status(tenant)
+
+
+def background_tick(now):
+    import lab_git_authority as store
+
+    try:
+        tenants = store.background_tenants(20)
+    except Exception as error:
+        LOG.warning('lab_git_background_failed class=%s', type(error).__name__)
+        return
+    for tenant in tenants:
+        try:
+            transition = store.get_active(tenant)
+            if transition and store._date(transition['lease_expires_at']) <= store._now():
+                owner = uuid.uuid4().hex
+                if store.transition_take_over_expired(tenant, transition['transition_id'], owner, 120):
+                    _resume(tenant, store.get_active(tenant), takeover=True)
+        except Exception as error:
+            LOG.warning('lab_git_reconcile_failed class=%s', type(error).__name__)
+        for operation in (recover_pending, process_outbox):
+            try:
+                operation(tenant)
+            except Exception as error:
+                LOG.warning('lab_git_background_failed class=%s', type(error).__name__)
+        # Rotate a bounded batch even when an older tenant has no work or fails.
+        try:
+            def touch(sql):
+                now = store._now().isoformat()
+                sql.execute('UPDATE lab_git_authority SET updated_at=? WHERE tenant_id=?', (now, tenant))
+                sql.execute("UPDATE lab_git_transitions SET updated_at=? WHERE tenant_id=? AND state NOT IN ('done','reverted')",
+                            (now, tenant))
+            store._run(tenant, touch, write=True)
+        except Exception as error:
+            LOG.warning('lab_git_background_failed class=%s', type(error).__name__)
+
+
 def flip_back(tenant, actor):
+    import lab_git_authority as store
+
+    if store.authority_get(tenant) is not None:
+        return _rollback(tenant, actor)
     def operation(sql):
         state = _state(sql, tenant)
         inspected = _inspect(tenant)

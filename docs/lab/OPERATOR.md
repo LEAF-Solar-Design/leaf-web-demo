@@ -141,6 +141,85 @@ can be exceeded by at most one job per extra process at the moment of the race.
 The sandbox-seconds budget is read from completed e2b cost events, so in-flight
 sandbox time is not yet counted.
 
+## Git-authoritative mode
+
+Activation is an operator decision. Apply migration `0090_lab_git_authority.sql`
+before adopting this release. The default `LEAF_LAB_GIT_TENANTS` allowlist is
+empty. Add the tenant explicitly and set `LEAF_LAB_GIT_SINGLE_WRITER=attested`
+only after checking all of the following:
+
+- One leaf-platform ECS task writes the repositories: desired count 1,
+  maximum percent 100, minimum healthy percent 0.
+- No other service, manual RunTask, or process using a shared volume writes
+  these tenant repositories. Service deployment settings alone cannot prove this.
+- Every harness serving this tenant supports `lab-generation-v1`; no older
+  harness can access or mutate its repository. Responses must carry
+  `x-leaf-lab-capability: lab-generation-v1`, including error responses.
+
+The attestation states that the operator checked these facts; the server cannot
+prove that another process is absent. Keep these conditions true throughout
+git mode, including maintenance and recovery.
+
+From a server operator Python session with the deployment environment loaded,
+first call `lab_artifacts_git.enable_mirror(tenant, actor)` and let mirror
+catch-up finish. Then call `lab_artifacts_git.cutover(tenant, actor)`. These are
+operator functions, with no public HTTP route. Cutover requires mirror mode,
+no live pending writes, digest equality and recorded ancestry. It freezes the
+ledger mirror, allocates a monotonic generation, records `/lab/fence`'s
+receipt, and repeats the proofs at its barrier head. Success leaves
+`lab_git_tenants.frozen=TRUE` and an authority row with mode `git`, generation
+equal to the receipt's destination, and base/verified heads at the barrier.
+Writes now use git and complete into the ledger; publication retries through
+the durable outbox.
+
+For rollback, call `lab_artifacts_git.flip_back(tenant, actor)`. With authority
+present this first sets mode `draining` and fences to the next generation.
+Every pending operation is looked up at the barrier: landed operations complete
+in parent order; only definitively absent operations are abandoned. It drains
+the outbox, catches the verified cursor up, and proves digest equality and
+recorded ancestry from the authority's base to the barrier. Only then does one
+authorized database transaction delete authority and set ledger mode with
+`frozen=FALSE`. A mirror-only flip-back keeps its existing behavior.
+
+Do not flip ledger mode or clear frozen by hand. `lab_flip_back_refused` with
+reason `foreign_commits_need_import` means some git history lacks ledger commit
+evidence. Reason `lab_replay_divergence` means the ledger digests differ. Either
+refusal returns authority to git under one additional fenced generation,
+retains the frozen flag, and records one notification in `lab_git_outbox`.
+Resolve the evidence/content discrepancy before retrying rollback. Foreign
+commits are a residual requiring an explicit import/reconciliation procedure;
+this release does not automatically import them. A stale ledger cannot be
+made authoritative merely by changing a mode flag.
+
+Read `lab_git_transitions` filtered by `tenant_id`, ordered by `created_at`.
+`transition_id` identifies the harness receipt; `from_generation` (0 means no
+prior generation), `to_generation`, and `barrier_head` bind its fence request.
+States are `planned`, `fenced`, `resolved`, `drained`, `proven`, and terminal
+`done` or `reverted`. Cutover skips the rollback-only resolve/drain states.
+`owner` and `lease_expires_at` identify the current 120-second owner lease.
+A planned row's barrier field stores the expected head so an identical fence
+can be replayed after a lost response. Refused rollback's extra fence plan is
+retained in `lab_git_tenants.receipt.rollback_refusal`, including its fence ID
+and generations. Do not edit these records to force recovery.
+
+The active worker color runs the git background tick at most every 30 seconds
+while the worker is enabled, the rail is on, and the worker is unpaused. It
+rotates through at most 20 tenants, oldest first, taking over expired
+transitions, recovering pending writes, and processing the outbox. A planned
+transition whose generation never changed reverts; an applied fence is replayed
+to recover its receipt; fenced work continues from its recorded barrier.
+Failures are isolated per operation and tenant and log exception class only.
+Outbox failures retry with backoff. Missing capability, ambiguous operation
+lookup, or incomplete ancestry keeps rollback draining until it can be proved;
+never abandon a possibly landed write to unblock it.
+
+Before deploying a release older than this one, roll **every git-mode tenant**
+back successfully and verify that no authority rows or live transitions remain.
+Removing a tenant from the allowlist does not roll it back. Preserve the
+additive tables, generations and receipts across image rollback. Global worker
+pause also pauses git recovery; resume it and wait for terminal transitions
+before a downgrade.
+
 ## Activations
 
 Deploys can activate only a published revision, with trusted pure, read or

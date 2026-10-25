@@ -1305,9 +1305,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_lab_ops_conformance.py"), 188),
         Suite("server-lab-evaluate", "server tests/test_lab_evaluate.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_evaluate.py"), 119),
-        # 54 collected: 31 execute without DATABASE_URL, 23 PostgreSQL twins skip.
+        # 64 collected: 36 execute without DATABASE_URL, 28 PostgreSQL twins skip.
         Suite("server-lab-worker", "server tests/test_lab_worker.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_worker.py"), 31, uses_database=True,
+              _py_pytest("tests/test_lab_worker.py"), 36, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-activation", "server tests/test_lab_activation.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_activation.py"), 49, uses_database=True,
@@ -1322,6 +1322,10 @@ def build_suites() -> List[Suite]:
         # 24 collected: 12 SQLite cases and 12 PostgreSQL twins.
         Suite("server-lab-git-authority", "server tests/test_lab_git_authority.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_git_authority.py"), 12, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: .+",)),
+        # 80 collected: 40 SQLite cases and 40 PostgreSQL twins.
+        Suite("server-lab-git-cutover", "server tests/test_lab_git_cutover.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_git_cutover.py"), 40, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         # 74 collected: 37 SQLite cases and 37 PostgreSQL twins.
         Suite("server-lab-git-write", "server tests/test_lab_git_write.py", "pytest", SERVER,

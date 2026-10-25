@@ -16,6 +16,7 @@ import uuid
 import emf_metrics
 import lab_artifacts
 import lab_activation
+import lab_artifacts_git
 import lab_run_store
 import lab_tool_nodes
 from dependency_health import _source_revision
@@ -62,6 +63,7 @@ class LabWorker:
         self._pool = ThreadPoolExecutor(max_workers=slots, thread_name_prefix="lab-run")
         self._status_at = float("-inf")
         self._activation_at = float("-inf")
+        self._git_at = float("-inf")
 
     def start(self):
         with self._lock:
@@ -135,6 +137,9 @@ class LabWorker:
             if not reason and color == "active" and self.clock() - self._activation_at >= 5:
                 self._activation_at = self.clock()
                 lab_activation.tick(self.wall())
+            if not reason and color == "active" and self.clock() - self._git_at >= 30:
+                self._git_at = self.clock()
+                lab_artifacts_git.background_tick(self.wall())
             if reason:
                 for run in self._runs.values():
                     self._suspend(run, reason)

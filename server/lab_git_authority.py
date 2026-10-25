@@ -1,4 +1,4 @@
-"""Inert git authority substrate. All mutations share the ledger tenant lock."""
+"""Git authority substrate. All mutations share the ledger tenant lock."""
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import json
@@ -8,7 +8,7 @@ import uuid
 
 import lab_artifacts as ledger
 
-GIT_AUTHORITY_READY = False
+GIT_AUTHORITY_READY = True
 
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS lab_git_generations (
@@ -138,11 +138,15 @@ def _insert(sql, table, values):
 
 
 def next_generation(tenant):
-    def operation(sql):
-        sql.execute('INSERT INTO lab_git_generations (tenant_id,generation) VALUES (?,1) '
-                    'ON CONFLICT (tenant_id) DO UPDATE SET generation=lab_git_generations.generation+1', (tenant,))
-        return _get(sql, 'lab_git_generations', tenant)['generation']
-    return _run(tenant, operation, write=True)
+    return _run(tenant, lambda sql: next_generation_sql(sql, tenant), write=True)
+
+
+def next_generation_sql(sql, tenant, floor=0):
+    sql.execute('INSERT INTO lab_git_generations (tenant_id,generation) VALUES (?,?) '
+                'ON CONFLICT (tenant_id) DO UPDATE SET generation=CASE '
+                'WHEN lab_git_generations.generation>=excluded.generation THEN lab_git_generations.generation+1 '
+                'ELSE excluded.generation END', (tenant, floor + 1))
+    return _get(sql, 'lab_git_generations', tenant)['generation']
 
 
 def authority_get(tenant):
@@ -387,6 +391,14 @@ def begin(tenant, transition_id, kind, from_generation, to_generation, owner, le
             barrier_head=barrier_head, state='planned', created_at=now, updated_at=now))
         return _get(sql, 'lab_git_transitions', tenant, 'transition_id', transition_id)
     return _run(tenant, operation, write=True)
+
+
+def background_tenants(limit=20):
+    return _run('lab-git-scheduler', lambda sql: [row['tenant_id'] for row in sql.execute(
+        "SELECT tenant_id,MIN(updated_at) AS oldest FROM ("
+        "SELECT tenant_id,updated_at FROM lab_git_authority UNION ALL "
+        "SELECT tenant_id,updated_at FROM lab_git_transitions WHERE state NOT IN ('done','reverted')"
+        ") AS candidates GROUP BY tenant_id ORDER BY oldest,tenant_id LIMIT ?", (limit,)).fetchall()])
 
 
 def advance(tenant, transition_id, owner, from_state, to_state, **fields):
