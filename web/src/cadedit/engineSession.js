@@ -39,6 +39,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
+import { humanizeError } from '../errorHumanize.js'
 import { offsetEntity } from './offset.js'
 import { MAX_BATCH_STEPS, MAX_COORD, MAX_INTERSECT_POINTS, chamferLines, extendEntity, filletLines, trimEntity } from './intersect.js'
 import { clipboardRecord, describeRecord, pasteOp } from './clipboard.js'
@@ -1699,13 +1700,17 @@ export default function useEngineSession({
       return receipt
     } catch (error) {
       if (generation !== generationRef.current) return null
+      const message = humanizeError(error?.outcomeUnknown
+        ? 'The save may still be running. Reopen the drawing to check before saving again.'
+        : /^live commit\b/i.test(error?.message || '')
+          ? 'The drawing was not saved. Try again.'
+          : error)
       patch({
         busy: false,
         errorKind: SESSION_ERROR.SAVE,
-        status: error?.outcomeUnknown ? error.message
-          : error?.status === 409
-            ? `Save refused: ${error.message}`
-            : `Save failed: ${error?.message || error}`,
+        status: error?.status === 409
+          ? `Save refused: ${message}`
+          : `Save failed: ${message}`,
       })
       return null
     } finally {
