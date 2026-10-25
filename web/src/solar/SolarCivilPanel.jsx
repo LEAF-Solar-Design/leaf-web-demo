@@ -1,18 +1,24 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { CIVIL_OPERATIONS, civilSummary, parseCivilDrafts, validateCivilOperation, validateCivilView } from './solarCivilModel.js'
-import { civilReason } from './solarCivilClient.js'
+import { civilReason, civilReadReason } from './solarCivilClient.js'
+import { humanizeError } from '../errorHumanize.js'
 import { labelOf } from './solarReadResultModel.js'
 
 const UNKNOWN = 'The publication outcome is unknown, so refresh before retrying the original request.'
 const UNAVAILABLE = 'The current physical state could not be read, so publishing stays off.'
 const PENDING = 'A terrain operation is in progress, so wait for it to finish.'
 const LOST = ['TERRAIN_CLIENT_TIMEOUT', 'TERRAIN_CLIENT_NETWORK', 'TERRAIN_CLIENT_ABORTED', 'TERRAIN_CLIENT_RESPONSE_INVALID']
+const EXAMPLES = {
+  boundary: '[[0,0],[100,0],[100,100],[0,100]]',
+  preset: '{"Name":"Full","PileTemplateName":"Full","Rows":2,"Columns":1,"Piling":{"MinPileLengthM":1,"MaxPileLengthM":4}}',
+  pile_template: '{"Name":"Full","Stations":[{"Position":0.5,"Length":2}]}',
+}
 
 export default function SolarCivilPanel(props) {
   return <CivilScope key={JSON.stringify([props.drawingId ?? null, props.projectId ?? null])} {...props} />
 }
 
-function CivilScope({ drawingId, projectId = null, client, headSignal, disabled = false, onPhysicalHeadChanged }) {
+function CivilScope({ drawingId, projectId = null, client, headSignal, disabled = false, disabledReason, onPhysicalHeadChanged }) {
   const [phase, setPhase] = useState(drawingId ? 'loading' : 'no-drawing')
   const [view, setView] = useState(null)
   const [outcome, setOutcome] = useState(null)
@@ -50,12 +56,12 @@ function CivilScope({ drawingId, projectId = null, client, headSignal, disabled 
     setPhase(refresh ? 'refreshing' : 'loading')
     if (!preserve) setRefusal(null)
     let answer
-    try { answer = await client?.getCivil({ drawingId, projectId, signal: controller.signal }) } catch { answer = null }
+    try { answer = await client?.getCivil({ drawingId, projectId, signal: controller.signal }) } catch { answer = { ok: false, code: 'TERRAIN_CLIENT_NETWORK' } }
     if (!alive.current || generation !== readGeneration.current || at !== epoch.current) return null
     const value = answer?.ok ? validateCivilView(answer.value, { drawingId, projectId }) : null
     if (value === null) {
       setPhase('refused')
-      if (!preserve) setRefusal(UNAVAILABLE)
+      if (!preserve) setRefusal(civilReadReason(answer?.code, UNAVAILABLE))
       return null
     }
     setView(value)
@@ -94,7 +100,14 @@ function CivilScope({ drawingId, projectId = null, client, headSignal, disabled 
     event.preventDefault()
     if (lock.current || disabled || view === null || !drawingId) return
     const parsed = parseCivilDrafts(drafts)
-    if (!parsed.ok) { setFieldError(parsed); setRefusal(civilReason(parsed.code)); return }
+    if (!parsed.ok) {
+      let message = civilReason(parsed.code)
+      const draft = drafts[parsed.field === 'pile_template' ? 'pileTemplate' : parsed.field]
+      if (Object.hasOwn(EXAMPLES, parsed.field) && typeof draft === 'string') {
+        try { JSON.parse(draft) } catch { message = `Enter valid JSON for ${labelOf(parsed.field).toLowerCase()}. Follow the example shown beside the field.` }
+      }
+      setFieldError({ ...parsed, message }); setRefusal(message); return
+    }
     if (view.head === null && drafts.operation !== 'frame-generate') {
       setRefusal(civilReason('FRAMES_PILES_STATE_REQUIRED')); return
     }
@@ -140,13 +153,14 @@ function CivilScope({ drawingId, projectId = null, client, headSignal, disabled 
   const jsonField = (key, draftKey = key) => <div key={key}>
     <label htmlFor={`civil-${key}`}>{labelOf(key)}</label>
     <textarea id={`civil-${key}`} value={drafts[draftKey]} onChange={update(draftKey)} disabled={locked}
-      aria-invalid={errorFor(key) || undefined} aria-describedby={errorFor(key) ? 'civil-field-error' : undefined} />
+      aria-invalid={errorFor(key) || undefined} aria-describedby={`civil-${key}-hint${errorFor(key) ? ' civil-field-error' : ''}`} />
+    <p id={`civil-${key}-hint`}>JSON example: <code>{EXAMPLES[key]}</code></p>
   </div>
   if (!drawingId) return <section><p>Open a drawing to view terrain previews</p></section>
   return <section aria-label="Civil operations" data-state={phase}>
     {phase === 'loading' && <p>Reading the current physical state.</p>}
     {phase === 'refreshing' && <p>Refreshing the current physical state.</p>}
-    {disabled && <p>A run is in progress, so wait for it to finish.</p>}
+    {disabled && <p>{humanizeError(disabledReason || 'A run is in progress, so wait for it to finish.')}</p>}
     <form onSubmit={submit}>
       <label htmlFor="civil-operation">{labelOf('operation')}</label>
       <select id="civil-operation" value={operation} onChange={update('operation')} disabled={locked}>
@@ -172,11 +186,11 @@ function CivilScope({ drawingId, projectId = null, client, headSignal, disabled 
         <input id="civil-value" inputMode="decimal" value={drafts.value} onChange={update('value')} disabled={locked}
           aria-invalid={errorFor('value_du') || undefined} aria-describedby={errorFor('value_du') ? 'civil-field-error' : undefined} />
       </>}
-      {fieldError && <p id="civil-field-error">{civilReason(fieldError.code)}</p>}
+      {fieldError && <p id="civil-field-error">{humanizeError(fieldError.message)}</p>}
       <button ref={runButton} type="submit" disabled={locked || view === null}>Run</button>
       <button ref={refreshButton} type="button" onClick={refresh} disabled={busy}>Refresh physical state</button>
     </form>
-    {refusal && <p role="alert">{refusal}</p>}
+    {refusal && <p role="alert">{humanizeError(refusal)}</p>}
     <p role="status" aria-live="polite">{announcement}</p>
     {summary.outcome && <p>{labelOf('outcome')}: {summary.outcome}</p>}
     <dl>{summary.counts.map((row) => <React.Fragment key={`count:${row.key}`}>

@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 import SolarReadResult from './SolarReadResult.jsx'
 import { validateTerrainView } from './solarTerrainModel.js'
 import { READ_RESULT_UNREADABLE, labelOf } from './solarReadResultModel.js'
@@ -6,7 +7,7 @@ import { PHYSICAL_READ_TOOLS, PHYSICAL_EXPORT_FORMATS, buildPhysicalRead, physic
 
 const MOVED = 'The terrain changed, so review the refreshed preview before running again'
 const NO_HEAD = 'No physical state has been published for this drawing.'
-const UNAVAILABLE = 'The current physical state could not be read, so publishing stays off.'
+const UNAVAILABLE = 'The current physical state could not be read. Refresh it before running this read.'
 const NOT_IN_CATALOG = 'This read is not in the current tool catalog, so refresh the tools and run it again.'
 const SHADE_DESCRIPTION = 'Report CPU terrain shade at native frame centres in the current physical head. Uses default clearance and an automatic sample profile. Reads only. Excludes weather weighting and individual-module shading.'
 const EXPORT_DESCRIPTION = 'Download one terrain or CPU terrain shade CSV from the requested physical head. Shade samples native frame centres using default clearance and automatic profiles. Excludes weather weighting and individual-module shading.'
@@ -15,7 +16,7 @@ export default function SolarPhysicalReadPanel(props) {
   return <ReadScope key={JSON.stringify([props.drawingId ?? null, props.projectId ?? null, props.drawingVersion ?? null])} {...props} />
 }
 
-function ReadScope({ drawingId, projectId = null, drawingVersion, terrainClient, runRead, catalogDigestOf, headSignal, disabled = false, download, save }) {
+function ReadScope({ drawingId, projectId = null, drawingVersion, terrainClient, runRead, catalogDigestOf, headSignal, disabled = false, disabledReason, download, save }) {
   const [phase, setPhase] = useState(drawingId ? 'loading' : 'no-drawing')
   const [view, setView] = useState(null)
   const [toolName, setTool] = useState(PHYSICAL_READ_TOOLS[0])
@@ -126,7 +127,7 @@ function ReadScope({ drawingId, projectId = null, drawingVersion, terrainClient,
     <p>{SHADE_DESCRIPTION}</p><p>{EXPORT_DESCRIPTION}</p>
     {phase === 'loading' && <p>Reading the current physical state.</p>}
     {phase === 'refreshing' && <p>Refreshing the current physical state.</p>}
-    {disabled && <p>A run is in progress, so wait for it to finish.</p>}
+    {disabled && <p>{humanizeError(disabledReason || 'A run is in progress, so wait for it to finish.')}</p>}
     {view && !view.head && <p>{NO_HEAD}</p>}
     <form onSubmit={submit}>
       <label htmlFor="physical-read-tool">{labelOf('tool')}</label>
@@ -142,7 +143,7 @@ function ReadScope({ drawingId, projectId = null, drawingVersion, terrainClient,
       <button ref={runButton} type="submit" disabled={busy || disabled || view === null || view.head === null}>Run</button>
       <button type="button" onClick={refresh} disabled={busy}>Refresh physical state</button>
     </form>
-    {refusal && <p role="alert">{refusal}</p>}
+    {refusal && <p role="alert">{humanizeError(refusal)}</p>}
     <p role="status" aria-live="polite">{announcement}</p>
     {result && <SolarReadResult key={JSON.stringify([drawingId, projectId, drawingVersion, result.attempt, result.data.job_id, result.data.output_sha256])}
       data={result.data} download={download} save={save} />}
