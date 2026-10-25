@@ -39,7 +39,9 @@ export function auditPage() {
     const style = getComputedStyle(element)
     const rect = element.getBoundingClientRect()
     if (style.display === 'none' || style.visibility === 'hidden' ||
-        !(Number(style.opacity) > 0.05) || rect.width <= 0 || rect.height <= 0) continue
+        !(Number(style.opacity) > 0.05) || rect.width <= 0 || rect.height <= 0 ||
+        (rect.width <= 1 && rect.height <= 1) || style.clip === 'rect(0px, 0px, 0px, 0px)' ||
+        style.clipPath === 'inset(50%)') continue
 
     if (rect.right > vw + 1 && rect.left < vw && style.position !== 'fixed' && !scrollableAncestor(element)) {
       result.offscreenCount++

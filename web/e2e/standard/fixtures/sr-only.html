@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>sr-only</title>
+<style>
+body { margin: 0; font: 16px/1.5 sans-serif }
+p { font-size: 15px } button { box-sizing: border-box; width: 44px; height: 44px; font: inherit }
+.sr-only { position: absolute; width: 1px; height: 1px; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap }
+.clip-path { display: inline-block; width: 240px; overflow: hidden; white-space: nowrap; clip-path: inset(50%) }
+</style>
+</head>
+<body>
+<span class="sr-only">not in the browser engine yet, a long hidden sentence</span>
+<span class="clip-path">not in the browser engine yet, a long hidden sentence</span>
+<p>Hosted execution is ready.</p>
+<button aria-label="Add">+</button>
+</body>
+</html>
