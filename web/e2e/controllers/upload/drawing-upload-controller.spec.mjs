@@ -61,7 +61,7 @@ test('exhausted polling reports still-running, not a failure the server never de
   expect(controller.getSnapshot().error).not.toContain('did not finish')
 })
 
-test('a server-declared failure surfaces the server message verbatim', async () => {
+test('a server-declared failure preserves a readable server message', async () => {
   const controller = createDrawingUploadController({
     pollMs: 0,
     services: {
@@ -139,4 +139,19 @@ test('cancel prevents a late upload receipt from loading or seating intake', asy
   await pending
   expect(intakeCalls).toBe(0)
   expect(controller.getSnapshot()).toMatchObject({ phase: 'idle', busy: false })
+})
+
+test('a server-declared transport error is humanized before publication', async () => {
+  const controller = createDrawingUploadController({
+    services: {
+      policy: async () => ({ enabled: true, accepted: ['.dxf'], max_bytes: 1024 }),
+      upload: async () => ({ status: 'failed', error: { message: 'GET /api/drawings/private-id -> 503' } }),
+      wait: async () => {}, status: async () => ({}), intake: async () => ({}),
+    },
+  })
+  await controller.loadPolicy()
+  await controller.upload(file)
+  expect(controller.getSnapshot()).toMatchObject({
+    phase: 'failed', error: 'The service had a temporary problem. Try again.',
+  })
 })

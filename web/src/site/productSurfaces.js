@@ -712,7 +712,8 @@ export function surfaceRailState(id, status = labSurfaceStatus,
   scene = typeof window === 'undefined' ? 'app' : sceneForPath(window.location.pathname)) {
   const contract = productSurface(id).contract
   const rail = contract.chrome.rail
-  return rail ? contract.scene === scene && rail === 'lab' && status?.state === 'on' : true
+  const labDeepLink = typeof window !== 'undefined' && /^\/app\/lab(?:\/(?:graph|widgets|history|runs|deploys))?\/?$/.test(window.location.pathname)
+  return rail ? contract.scene === scene && rail === 'lab' && (status?.state === 'on' || labDeepLink) : true
 }
 
 export function normalizeProductSurface(value, status = labSurfaceStatus) {
@@ -737,7 +738,7 @@ export function searchForProductSurface(search, surfaceId) {
 export function productSurfaceStates({ sessionActive, hasDrawing, apsLive, iosReady = false, solarReady = false, labStatus = labSurfaceStatus } = {}) {
   return {
     lab: surfaceRailState('lab', labStatus)
-      ? { state: 'available', label: 'Ready' }
+      ? labStatus?.state === 'on' ? { state: 'available', label: 'Ready' } : { state: 'unavailable', label: 'Lab is unavailable right now.' }
       : { state: 'hidden', label: 'Lab is unavailable right now.' },
     ops: sessionActive
       ? { state: 'available', label: 'Ready' }
