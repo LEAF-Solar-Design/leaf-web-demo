@@ -1323,6 +1323,10 @@ def build_suites() -> List[Suite]:
         Suite("server-lab-git-authority", "server tests/test_lab_git_authority.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_git_authority.py"), 12, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
+        # 74 collected: 37 SQLite cases and 37 PostgreSQL twins.
+        Suite("server-lab-git-write", "server tests/test_lab_git_write.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_git_write.py"), 37, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: .+",)),
         # 44 collected: 24 dependency-free cases and 20 PostgreSQL twins.
         Suite("server-lab-artifacts-git", "server Lab git mirror and stage policy", "pytest", SERVER,
               _py_pytest("tests/test_lab_artifacts_git.py") + ["tests/test_lab_stage_policy.py"], 24,

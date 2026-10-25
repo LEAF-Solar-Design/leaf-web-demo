@@ -146,7 +146,11 @@ def next_generation(tenant):
 
 
 def authority_get(tenant):
-    return _run(tenant, lambda sql: _get(sql, 'lab_git_authority', tenant))
+    return _run(tenant, lambda sql: authority_get_sql(sql, tenant))
+
+
+def authority_get_sql(sql, tenant):
+    return _get(sql, 'lab_git_authority', tenant)
 
 
 def authority_insert(tenant, generation, base_head=None, verified_head=None, mode='git'):
@@ -201,28 +205,42 @@ def authority_delete(tenant, transition_id):
 def stage(tenant, op_id, doc_id, revision, parent_revision, kind, canonical_text, sha256,
           base_blob=None, expected_parents=(), lease_owner='writer', lease_s=30,
           reserved_bytes=None, new_document=False):
+    return _run(tenant, lambda sql: stage_sql(sql, tenant, op_id, doc_id, revision,
+        parent_revision, kind, canonical_text, sha256, base_blob, expected_parents,
+        lease_owner, lease_s, reserved_bytes, new_document), write=True)
+
+
+def stage_sql(sql, tenant, op_id, doc_id, revision, parent_revision, kind, canonical_text, sha256,
+              base_blob=None, expected_parents=(), lease_owner='writer', lease_s=30,
+              reserved_bytes=None, new_document=False):
     parents = list(expected_parents)
     if len(parents) > 4 or any(not isinstance(p, str) or not re.fullmatch('[0-9a-f]{40}', p) for p in parents):
         raise ValueError('lab_git_invalid_parents')
     expires = _expiry(lease_s)
-    def operation(sql):
-        _insert(sql, 'lab_git_pending', dict(op_id=op_id, tenant_id=tenant, doc_id=doc_id, revision=revision,
+    _insert(sql, 'lab_git_pending', dict(op_id=op_id, tenant_id=tenant, doc_id=doc_id, revision=revision,
             parent_revision=parent_revision, kind=kind, canonical_text=canonical_text, sha256=sha256,
             base_blob=base_blob, expected_parents=json.dumps(parents), rebase_count=0, fence=1,
             lease_owner=lease_owner, lease_expires_at=expires, state='staged',
             reserved_bytes=len(canonical_text.encode()) if reserved_bytes is None else reserved_bytes,
             new_document=new_document, created_at=_now().isoformat()))
-        return _get(sql, 'lab_git_pending', tenant, 'op_id', op_id)
-    return _run(tenant, operation, write=True)
+    return get_sql(sql, tenant, op_id)
 
 
 def get(tenant, op_id):
-    return _run(tenant, lambda sql: _get(sql, 'lab_git_pending', tenant, 'op_id', op_id))
+    return _run(tenant, lambda sql: get_sql(sql, tenant, op_id))
+
+
+def get_sql(sql, tenant, op_id):
+    return _get(sql, 'lab_git_pending', tenant, 'op_id', op_id)
 
 
 def complete_conditional(tenant, op_id, fence):
-    return _run(tenant, lambda sql: sql.execute('DELETE FROM lab_git_pending WHERE tenant_id=? AND op_id=? AND fence=?',
-                (tenant, op_id, fence)).rowcount == 1, write=True)
+    return _run(tenant, lambda sql: complete_conditional_sql(sql, tenant, op_id, fence), write=True)
+
+
+def complete_conditional_sql(sql, tenant, op_id, fence):
+    return sql.execute('DELETE FROM lab_git_pending WHERE tenant_id=? AND op_id=? AND fence=?',
+                       (tenant, op_id, fence)).rowcount == 1
 
 
 def _expiry(lease_s):
@@ -272,18 +290,24 @@ def abandon(tenant, op_id, fence):
 
 
 def reservations(tenant):
-    def operation(sql):
-        row = sql.execute("SELECT COALESCE(SUM(reserved_bytes),0) AS bytes,COUNT(*) AS revisions,"
+    return _run(tenant, lambda sql: reservations_sql(sql, tenant))
+
+
+def reservations_sql(sql, tenant):
+    row = sql.execute("SELECT COALESCE(SUM(reserved_bytes),0) AS bytes,COUNT(*) AS revisions,"
             "COALESCE(SUM(CASE WHEN new_document THEN 1 ELSE 0 END),0) AS new_documents "
             "FROM lab_git_pending WHERE tenant_id=? AND state<>'abandoned'", (tenant,)).fetchone()
-        return dict(row)
-    return _run(tenant, operation)
+    return dict(row)
 
 
 def record(tenant, commit, op_id, doc_id, revision, kind, parent=None):
-    return _run(tenant, lambda sql: _insert(sql, 'lab_git_commits', dict(tenant_id=tenant,
+    return _run(tenant, lambda sql: record_sql(sql, tenant, commit, op_id, doc_id, revision, kind, parent), write=True)
+
+
+def record_sql(sql, tenant, commit, op_id, doc_id, revision, kind, parent=None):
+    return _insert(sql, 'lab_git_commits', dict(tenant_id=tenant,
         commit=commit, op_id=op_id, doc_id=doc_id, revision=revision, kind=kind, parent=parent,
-        recorded_at=_now().isoformat())), write=True)
+        recorded_at=_now().isoformat()))
 
 
 def commit_get(tenant, commit):
@@ -291,18 +315,20 @@ def commit_get(tenant, commit):
 
 
 def enqueue(tenant, kind, identity, payload):
-    def operation(sql):
-        row = sql.execute('SELECT outbox_id FROM lab_git_outbox WHERE tenant_id=? AND kind=? AND identity=?',
-                          (tenant, kind, identity)).fetchone()
-        if row:
-            return _get(sql, 'lab_git_outbox', tenant, 'outbox_id', row['outbox_id'])
-        seq = sql.execute('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM lab_git_outbox WHERE tenant_id=?', (tenant,)).fetchone()['n']
-        outbox_id = uuid.uuid4().hex
-        _insert(sql, 'lab_git_outbox', dict(outbox_id=outbox_id, tenant_id=tenant, kind=kind,
-            identity=identity, sequence=seq, payload=json.dumps(payload, allow_nan=False), attempts=0,
-            next_attempt_at=_now().isoformat(), done_at=None))
-        return _get(sql, 'lab_git_outbox', tenant, 'outbox_id', outbox_id)
-    return _run(tenant, operation, write=True)
+    return _run(tenant, lambda sql: enqueue_sql(sql, tenant, kind, identity, payload), write=True)
+
+
+def enqueue_sql(sql, tenant, kind, identity, payload):
+    row = sql.execute('SELECT outbox_id FROM lab_git_outbox WHERE tenant_id=? AND kind=? AND identity=?',
+                      (tenant, kind, identity)).fetchone()
+    if row:
+        return _get(sql, 'lab_git_outbox', tenant, 'outbox_id', row['outbox_id'])
+    seq = sql.execute('SELECT COALESCE(MAX(sequence),0)+1 AS n FROM lab_git_outbox WHERE tenant_id=?', (tenant,)).fetchone()['n']
+    outbox_id = uuid.uuid4().hex
+    _insert(sql, 'lab_git_outbox', dict(outbox_id=outbox_id, tenant_id=tenant, kind=kind,
+        identity=identity, sequence=seq, payload=json.dumps(payload, allow_nan=False), attempts=0,
+        next_attempt_at=_now().isoformat(), done_at=None))
+    return _get(sql, 'lab_git_outbox', tenant, 'outbox_id', outbox_id)
 
 
 def claim_due(tenant, limit=100):
