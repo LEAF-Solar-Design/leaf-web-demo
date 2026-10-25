@@ -33,7 +33,7 @@ export default function WorkspaceSummary({
         <p>Retry to open the project, or close it and choose another.</p>
         <button type="button" onClick={onRetry}>Retry</button>
       </>}
-      <button type="button" onClick={onClose}>Close</button>
+      <EscCap type="button" onClick={onClose} label="Close" />
     </section>
   )
   if (!workspace) return null
