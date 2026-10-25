@@ -1495,7 +1495,7 @@ def build_suites() -> List[Suite]:
               uses_database=True, database_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py"), 39),  # 2026-10-13: PP-3A1 measured +7, then +5 (posture and ready-after-cycle rows), then +2 (base abbreviations, owner generator).
+              SERVER, _py_pytest("tests/test_canonical_worker.py") + ["tests/test_solar_graph_job_events.py"], 39),  # 2026-10-13: PP-3A1 measured +7, then +5 (posture and ready-after-cycle rows), then +2 (base abbreviations, owner generator).
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
               "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 20),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
