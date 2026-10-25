@@ -60,12 +60,13 @@ describe('project Solar transport and lifecycle', () => {
     ]) {
       const prepared = intent({ tool, ...extra })
       expect((await client.catalog({ intents: [prepared] })).ok).toBe(true)
-      const entry = JSON.parse(new URL(url(fetchImpl)).searchParams.get('project_runs'))
+      const entry = JSON.parse(init(fetchImpl).body).project_runs
       expect(entry).toEqual({ [tool]: { params: prepared.params, catalog_digest: digest,
         idempotency_key: 'request-1', ...wire } })
       expect(init(fetchImpl).headers['X-Checkout-Capability']).toBe(token())
       expect(url(fetchImpl)).not.toContain(token())
-      expect(init(fetchImpl)).not.toHaveProperty('body')
+      expect(init(fetchImpl).method).toBe('POST')
+      expect(new URL(url(fetchImpl)).searchParams.has('project_runs')).toBe(false)
     }
   })
   it('W1C5 carries only tool-matched proposal transport fields and keeps checkout proof private', async () => {
@@ -138,7 +139,10 @@ describe('project Solar transport and lifecycle', () => {
     await client.acquireCheckout()
     fetchImpl.mockResolvedValue(response({ families: [] }))
     expect((await client.catalog()).ok).toBe(true)
-    expect(url(fetchImpl)).not.toContain('project_runs')
+    expect(url(fetchImpl)).toBe(`https://api.test/api/capabilities?drawing_id=${D}&project_id=${P}&input_version_id=${V}`)
+    expect(init(fetchImpl).method).toBe('GET')
+    expect(init(fetchImpl)).not.toHaveProperty('body')
+    expect(init(fetchImpl).headers).not.toHaveProperty('Content-Type')
     expect(init(fetchImpl).headers).not.toHaveProperty('X-Checkout-Capability')
     expect((await client.catalog({ intents: [intent()] })).ok).toBe(true)
     expect(init(fetchImpl).headers['X-Checkout-Capability']).toBe(token())
@@ -203,18 +207,18 @@ describe('project Solar transport and lifecycle', () => {
     fetchImpl.mockResolvedValueOnce(response({ families: [] }))
     const baseIntent = intent({ params: { padding: '' } })
     const entries = (prepared) => ({ [prepared.tool]: { params: prepared.params, catalog_digest: prepared.catalogDigest, idempotency_key: prepared.idempotencyKey } })
-    const prepared = intent({ params: { padding: 'x'.repeat(262144 - bytes(entries(baseIntent))) } })
-    expect(bytes(entries(prepared))).toBe(262144)
+    const prepared = intent({ params: { padding: 'x'.repeat(262144 - bytes({ project_runs: entries(baseIntent) })) } })
+    expect(bytes({ project_runs: entries(prepared) })).toBe(262144)
     expect((await client.catalog({ intents: [prepared] })).ok).toBe(true)
-    expect(new TextEncoder().encode(new URL(url(fetchImpl)).searchParams.get('project_runs')).byteLength).toBe(262144)
+    expect(new TextEncoder().encode(init(fetchImpl).body).byteLength).toBe(262144)
     expect(fetchImpl).toHaveBeenCalledOnce()
   })
   it('R7-48 project preview of 262145 UTF-8 bytes refuses before fetch', async () => {
     const { client, fetchImpl, intent } = setup({ families: [] })
     const entries = (prepared) => ({ [prepared.tool]: { params: prepared.params, catalog_digest: prepared.catalogDigest, idempotency_key: prepared.idempotencyKey } })
     const bytes = (value) => new TextEncoder().encode(JSON.stringify(value)).byteLength
-    const prepared = intent({ params: { padding: 'x'.repeat(262145 - bytes(entries(intent({ params: { padding: '' } })))) } })
-    expect(bytes(entries(prepared))).toBe(262145)
+    const prepared = intent({ params: { padding: 'x'.repeat(262145 - bytes({ project_runs: entries(intent({ params: { padding: '' } })) })) } })
+    expect(bytes({ project_runs: entries(prepared) })).toBe(262145)
     expect((await client.catalog({ intents: [prepared] })).reason).toBe('SIP_R7_REQUEST_INVALID')
     expect(fetchImpl).not.toHaveBeenCalled()
   })
@@ -411,11 +415,13 @@ describe('project Solar transport and lifecycle', () => {
     const result = await client.catalog({ intents: [prepared] })
     expect(result.ok).toBe(true)
     const entry = { 'solar-settings': { params: prepared.params, catalog_digest: digest, idempotency_key: 'request-1' } }
-    expect(url(fetchImpl)).toBe(`https://api.test/api/capabilities?drawing_id=${D}&project_id=${P}&input_version_id=${V}&project_runs=${encodeURIComponent(JSON.stringify(entry))}`)
+    expect(url(fetchImpl)).toBe(`https://api.test/api/capabilities?drawing_id=${D}&project_id=${P}&input_version_id=${V}`)
+    expect(init(fetchImpl).method).toBe('POST')
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ project_runs: entry })
+    expect(init(fetchImpl).headers['Content-Type']).toBe('application/json')
     expect(init(fetchImpl).headers['X-Checkout-Capability']).toBe(token())
     expect(init(fetchImpl).headers).not.toHaveProperty('Idempotency-Key')
     expect(url(fetchImpl)).not.toContain(token())
-    expect(init(fetchImpl)).not.toHaveProperty('body')
   })
   it('R7-12 an old scope 401 is stale and cannot invoke the unauthorized callback', async () => {
     const { client, fetchImpl, onUnauthorized } = setup()
