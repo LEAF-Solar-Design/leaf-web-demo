@@ -1316,7 +1316,7 @@ export default function ToolCast({
     setSelectedCatalogTool(null)
     requestAnimationFrame(() => document.querySelector('.tc-bar-input')?.focus())
   }, [catalog.actions])
-  useEscapeOwner('proposal', !!route, dismissProposalOnEscape, { layer: 'proposal' })
+  useEscapeOwner('proposal', active && !!route, dismissProposalOnEscape, { layer: 'proposal' })
 
   // Run layer: Escape detaches from the running job without the page-close
   // beacon (the job keeps running in Jobs).
@@ -1327,7 +1327,7 @@ export default function ToolCast({
     showToast({ text: `Detached from ${toolName}. The job keeps running in Jobs.` })
     return undefined
   }, [currentJob?.tool, detachJob, jobRunning, selectedCatalogTool?.name, showToast])
-  useEscapeOwner('detach', jobRunning, detachOnEscape, { layer: 'run' })
+  useEscapeOwner('detach', active && jobRunning, detachOnEscape, { layer: 'run' })
 
   const changePrompt = useCallback((value) => {
     setPrompt(value)
@@ -1429,6 +1429,7 @@ export default function ToolCast({
   // a visible engine document, Alt, an already-consumed key); undo and redo
   // keep their own gates, and the chips' preview and busy gates apply here.
   useEffect(() => {
+    if (!active) return undefined
     const onVersionKey = (event) => {
       const kind = versionShortcutDecision(event)
       if (!kind) return
@@ -1439,7 +1440,7 @@ export default function ToolCast({
     }
     window.addEventListener('keydown', onVersionKey)
     return () => window.removeEventListener('keydown', onVersionKey)
-  }, [drawing.versionBusy, onUndo, previewLocked, redo])
+  }, [active, drawing.versionBusy, onUndo, previewLocked, redo])
 
   // One controller owns readiness, launch, following, and reload recovery.
   const iosShipController = useIosShipController({

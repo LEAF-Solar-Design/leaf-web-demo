@@ -6,6 +6,16 @@ import { useStudioGround } from './studioGround.js'
 import './drawingNavigation.css'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
+import { humanizeError } from '../errorHumanize.js'
+
+export function focusFailureMessage(reason) {
+  if (reason === 'This object is hidden by its layers.') return humanizeError(reason)
+  const message = reason === 'no bounds' ? 'This object has no visible geometry to frame.'
+    : reason === 'viewer not ready' ? 'The drawing is still loading. Wait a moment, then try again.'
+      : reason === 'unknown id' ? 'This object is no longer in the drawing. Search again.'
+        : 'The drawing could not zoom to this object. Try again.'
+  return humanizeError(message)
+}
 
 // The index preserves physical containment, not layer membership. Recover
 // underlying layers from geometry, then propagate them to physical parents.
@@ -76,7 +86,7 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
         setMessage('')
         if (snapshot.focusedId) {
           const result = current.focus(snapshot.focusedId)
-          if (!result.ok) { current.clearFocus(); setMessage(result.reason) }
+          if (!result.ok) { current.clearFocus(); setMessage(focusFailureMessage(result.reason)) }
         } else current?.clearFocus()
         setQuery(snapshot.query); setResults(null)
         const session = sessionContext?.session
@@ -102,7 +112,7 @@ export default function DrawingNavigationTools({ navigationSourceRef, navigation
   const choose = (record) => {
     const result = navigation.jump(record.id)
     setResults(null)
-    setMessage(result.ok ? '' : result.reason)
+    setMessage(result.ok ? '' : focusFailureMessage(result.reason))
   }
   const resolve = () => {
     const result = index.resolve(query)
