@@ -4,6 +4,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timezone
 from pathlib import Path
+import threading
 from types import SimpleNamespace
 
 import pytest
@@ -15,6 +16,8 @@ from lab_evaluate import Budget, GraphRefused, RunBudgetExceeded, RunCancelled, 
 from test_lab_evaluate import case
 
 NOW = datetime(2026, 10, 25, 12, tzinfo=timezone.utc)
+TENANT = "11111111-1111-1111-1111-111111111111"
+OTHER_TENANT = "22222222-2222-2222-2222-222222222222"
 DRAWING = {"project_id": "project", "drawing_id": "drawing", "dwg_version": 2}
 
 
@@ -64,7 +67,8 @@ def rig(monkeypatch):
                           sandbox_seconds_today=lambda *args: 0, now=lambda: NOW,
                           sleep=lambda seconds: None)
     def call(**kwargs):
-        return nodes.ToolNodeAdapter("tenant", "run", **result.options)(
+        return nodes.ToolNodeAdapter(kwargs.get("tenant", TENANT), kwargs.get("run_id", "run"),
+                                     **result.options)(
             "node", kwargs.get("trusted", result.trusted), kwargs.get("manifest", result.manifest),
             kwargs.get("inputs", {}), kwargs.get("settings", {"drawing": dict(DRAWING)}),
             deadline_s=kwargs.get("deadline_s"))
@@ -85,7 +89,28 @@ def test_flag(monkeypatch, flag, expected):
                                   {"capability": "cloud-proposal"}])
 def test_effect_refused(rig, change):
     trusted = None if change is None else replace(rig.trusted, **change)
-    assert rig.call(trusted=trusted) == {"error": "lab_tool_effect_refused"}
+    assert rig.call(trusted=trusted, tenant="not-a-uuid") == {"error": "lab_tool_effect_refused"}
+    assert not rig.calls
+
+
+@pytest.mark.parametrize("tenant", ["not-a-uuid", "", TENANT.replace("-", ""),
+                                  "AAAAAAAA-AAAA-AAAA-AAAA-AAAAAAAAAAAA", "{" + TENANT + "}"])
+def test_tenant_identity_precedes_replay_and_other_admission(rig, tenant):
+    reads = []
+    def list_jobs(*args):
+        reads.append("jobs")
+        return [{"idempotency_key": "lab:run:node:1", "created_at": NOW}]
+    def ledger(*args):
+        reads.append("ledger")
+        return 0
+    def tier_of(*args):
+        reads.append("tier")
+        return "hosted_pro"
+    rig.options.update(list_jobs=list_jobs, sandbox_seconds_today=ledger, tier_of=tier_of)
+    assert rig.call(tenant=tenant) == {"error": "lab_tool_budget_unreadable"}
+    assert rig.call(tenant=tenant, inputs={"value": runtime_value(None, error="upstream")},
+                    settings={}) == {"error": "lab_tool_budget_unreadable"}
+    assert not reads
     assert not rig.calls
 
 
@@ -151,6 +176,119 @@ def test_daily_jobs_exhausted(rig):
     assert not rig.calls
 
 
+def test_same_tenant_concurrent_admission_serialises_through_submit(rig, monkeypatch):
+    monkeypatch.setenv("LEAF_LAB_TOOL_DAILY_JOBS", "1")
+    lock = nodes._tenant_lock(TENANT)
+    contended, submitting, release = threading.Event(), threading.Event(), threading.Event()
+    rows, reads, results = [], [], {}
+
+    class ObservedLock:
+        def __enter__(self):
+            if lock.locked():
+                contended.set()
+            lock.acquire()
+
+        def __exit__(self, *args):
+            lock.release()
+
+    monkeypatch.setitem(nodes._tenant_locks, TENANT, ObservedLock())
+    def list_jobs(*args):
+        assert lock.locked()
+        reads.append(len(rows))
+        return list(rows)
+    def ledger(*args):
+        assert lock.locked()
+        return 0
+    def submit(*args, **kwargs):
+        assert lock.locked()
+        submitting.set()
+        assert release.wait(5)
+        rig.calls.append((args, kwargs))
+        rows.append({"idempotency_key": kwargs["idempotency_key"], "created_at": NOW})
+        return "job"
+    rig.options.update(list_jobs=list_jobs, sandbox_seconds_today=ledger, submit=submit)
+    first = threading.Thread(target=lambda: results.update(first=rig.call(run_id="first")))
+    second = threading.Thread(target=lambda: results.update(second=rig.call(run_id="second")))
+    first.start()
+    try:
+        assert submitting.wait(5)
+        second.start()
+        assert contended.wait(5)
+        assert reads == [0]
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+    assert results == {"first": {"outputs": {"result": 7}},
+                       "second": {"error": "lab_tool_daily_jobs_exhausted"}}
+    assert reads == [0, 1]
+    assert len(rig.calls) == 1
+
+
+def test_different_tenants_admit_while_first_tenant_is_submitting(rig):
+    submitting, release, second_done = threading.Event(), threading.Event(), threading.Event()
+    results = {}
+    def submit(tenant, *args, **kwargs):
+        if tenant == TENANT:
+            submitting.set()
+            assert release.wait(5)
+        rig.calls.append((tenant, kwargs))
+        return "job"
+    rig.options["submit"] = submit
+    def second_call():
+        results["second"] = rig.call(tenant=OTHER_TENANT)
+        second_done.set()
+    first = threading.Thread(target=lambda: results.update(first=rig.call()))
+    second = threading.Thread(target=second_call)
+    first.start()
+    try:
+        assert submitting.wait(5)
+        second.start()
+        assert second_done.wait(5)
+        assert results["second"] == {"outputs": {"result": 7}}
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+    assert results["first"] == {"outputs": {"result": 7}}
+    assert len(rig.calls) == 2
+
+
+def test_result_wait_does_not_hold_tenant_admission_lock(rig):
+    waiting, release, second_done = threading.Event(), threading.Event(), threading.Event()
+    results = {}
+    def submit(*args, **kwargs):
+        return kwargs["idempotency_key"]
+    def get_job(job):
+        if job == "lab:first:node:1":
+            waiting.set()
+            assert release.wait(5)
+        return {"status": "complete", "result": {"result": 7}}
+    rig.options.update(submit=submit, get_job=get_job)
+    def second_call():
+        results["second"] = rig.call(run_id="second")
+        second_done.set()
+    first = threading.Thread(target=lambda: results.update(first=rig.call(run_id="first")))
+    second = threading.Thread(target=second_call)
+    first.start()
+    try:
+        assert waiting.wait(5)
+        second.start()
+        assert second_done.wait(5)
+        assert results["second"] == {"outputs": {"result": 7}}
+    finally:
+        release.set()
+        first.join(5)
+        if second.ident is not None:
+            second.join(5)
+    assert not first.is_alive() and not second.is_alive()
+    assert results["first"] == {"outputs": {"result": 7}}
+
+
 def test_incomplete_job_window(rig):
     rig.options["list_jobs"] = lambda *args: [{"idempotency_key": None, "created_at": NOW}] * 200
     assert rig.call() == {"error": "lab_tool_budget_unreadable"}
@@ -189,9 +327,9 @@ def test_submit_identity_and_result(rig):
     assert rig.call() == {"outputs": {"result": 7}}
     assert len(rig.calls) == 1
     args, kwargs = rig.calls[0]
-    assert args == ("tenant", {**rig.tool, "lab_execution": {
+    assert args == (TENANT, {**rig.tool, "lab_execution": {
         "run_id": "run", "block_id": "node", "attempt": 1}}, {"drawing_id": "drawing"}, "drawing", False)
-    assert kwargs == {"org_id": "tenant", "project_id": "project", "dwg_version": 2,
+    assert kwargs == {"org_id": TENANT, "project_id": "project", "dwg_version": 2,
                       "idempotency_key": "lab:run:node:1"}
 
 
@@ -320,7 +458,7 @@ def test_failed(rig):
 def test_evaluator_schema(rig, data, error):
     rig.options["get_job"] = lambda job: {"status": "complete", "result": {"result": data}}
     result = evaluate_graph(rig.graph, rig.registry,
-                            tool_adapter=nodes.ToolNodeAdapter("tenant", "run", **rig.options))
+                            tool_adapter=nodes.ToolNodeAdapter(TENANT, "run", **rig.options))
     assert result["outputs"]["result"].error == error
     if error is None:
         assert result["outputs"]["result"].data == data
@@ -332,7 +470,7 @@ def test_remote_wait_keeps_output_budget(rig):
         clock[0] += 10
         return {"status": "complete", "result": {"result": 12345}}
     rig.options["get_job"] = get
-    adapter = nodes.ToolNodeAdapter("tenant", "run", **rig.options)
+    adapter = nodes.ToolNodeAdapter(TENANT, "run", **rig.options)
     result = evaluate_graph(rig.graph, rig.registry, tool_adapter=adapter, clock=lambda: clock[0])
     assert result["outputs"]["result"].error is None
     result = evaluate_graph(rig.graph, rig.registry, tool_adapter=adapter,

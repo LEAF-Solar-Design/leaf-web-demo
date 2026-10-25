@@ -4,6 +4,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 import math
 import os
+import threading
 import time
 import uuid
 
@@ -11,6 +12,18 @@ import catalog
 import entitlements
 import lab_registry
 from lab_evaluate import RunBudgetExceeded, RunCancelled
+
+
+_tenant_locks_guard = threading.Lock()
+_tenant_locks = {}
+
+
+def _tenant_lock(tenant):
+    # Retain one lock per tenant served by this worker process.
+    with _tenant_locks_guard:
+        if tenant not in _tenant_locks:
+            _tenant_locks[tenant] = threading.Lock()
+        return _tenant_locks[tenant]
 
 
 def enabled():
@@ -98,6 +111,11 @@ class ToolNodeAdapter:
 
         if not self.admissible(trusted):
             return refuse("effect_refused")
+        try:
+            if str(uuid.UUID(self.tenant)) != self.tenant:
+                return refuse("budget_unreadable")
+        except ValueError:
+            return refuse("budget_unreadable")
         if any(value.error for value in inputs.values()):
             return refuse("input_error")
         drawing = settings.get("drawing") if isinstance(settings, dict) else None
@@ -133,43 +151,44 @@ class ToolNodeAdapter:
         import jobs
 
         key = f"lab:{self.run_id}:{block_id}:1"
-        try:
-            rows = (self.list_jobs or jobs.list_jobs)(self.tenant, 200)
-            replay = any(row.get("idempotency_key") == key for row in rows)
-            if not replay:
-                midnight = _timestamp(self.now()).replace(hour=0, minute=0, second=0, microsecond=0)
-                limit = _limit("LEAF_LAB_TOOL_DAILY_JOBS", 100, 200)
-                count = sum(1 for row in rows
-                            if (row.get("idempotency_key") or "").startswith("lab:")
-                            and _timestamp(row["created_at"]) >= midnight)
-                if count >= limit:
-                    return refuse("daily_jobs_exhausted")
-                if len(rows) >= 200 and min(_timestamp(row["created_at"]) for row in rows) >= midnight:
-                    return refuse("budget_unreadable")
-                seconds_limit = _limit("LEAF_LAB_TOOL_DAILY_SANDBOX_S", 3600, 86400, integer=False)
-                seconds = float(self.sandbox_seconds_today(self.tenant, midnight))
-                if not math.isfinite(seconds) or seconds < 0:
-                    return refuse("budget_unreadable")
-                if seconds >= seconds_limit:
-                    return refuse("daily_sandbox_exhausted")
-            timeout = _limit("LEAF_LAB_TOOL_TIMEOUT_S", 300, 600)
-        except Exception:
-            return refuse("budget_unreadable")
-        if run_deadline is not None and self.monotonic() >= run_deadline:
-            raise RunBudgetExceeded()
-        try:
-            job_id = (self.submit or jobs.submit_job)(
-                self.tenant, dict(tool, lab_execution={"run_id": self.run_id,
-                                                      "block_id": block_id, "attempt": 1}),
-                params, drawing["drawing_id"], False, org_id=self.tenant,
-                project_id=drawing["project_id"], dwg_version=drawing["dwg_version"],
-                idempotency_key=key)
-        except jobs.TenantInflightCapExceeded:
-            return refuse("inflight_cap")
-        except ValueError:
-            return refuse("submit_refused")
-        except Exception:
-            return refuse("submit_unavailable")
+        with _tenant_lock(self.tenant):
+            try:
+                rows = (self.list_jobs or jobs.list_jobs)(self.tenant, 200)
+                replay = any(row.get("idempotency_key") == key for row in rows)
+                if not replay:
+                    midnight = _timestamp(self.now()).replace(hour=0, minute=0, second=0, microsecond=0)
+                    limit = _limit("LEAF_LAB_TOOL_DAILY_JOBS", 100, 200)
+                    count = sum(1 for row in rows
+                                if (row.get("idempotency_key") or "").startswith("lab:")
+                                and _timestamp(row["created_at"]) >= midnight)
+                    if count >= limit:
+                        return refuse("daily_jobs_exhausted")
+                    if len(rows) >= 200 and min(_timestamp(row["created_at"]) for row in rows) >= midnight:
+                        return refuse("budget_unreadable")
+                    seconds_limit = _limit("LEAF_LAB_TOOL_DAILY_SANDBOX_S", 3600, 86400, integer=False)
+                    seconds = float(self.sandbox_seconds_today(self.tenant, midnight))
+                    if not math.isfinite(seconds) or seconds < 0:
+                        return refuse("budget_unreadable")
+                    if seconds >= seconds_limit:
+                        return refuse("daily_sandbox_exhausted")
+                timeout = _limit("LEAF_LAB_TOOL_TIMEOUT_S", 300, 600)
+            except Exception:
+                return refuse("budget_unreadable")
+            if run_deadline is not None and self.monotonic() >= run_deadline:
+                raise RunBudgetExceeded()
+            try:
+                job_id = (self.submit or jobs.submit_job)(
+                    self.tenant, dict(tool, lab_execution={"run_id": self.run_id,
+                                                          "block_id": block_id, "attempt": 1}),
+                    params, drawing["drawing_id"], False, org_id=self.tenant,
+                    project_id=drawing["project_id"], dwg_version=drawing["dwg_version"],
+                    idempotency_key=key)
+            except jobs.TenantInflightCapExceeded:
+                return refuse("inflight_cap")
+            except ValueError:
+                return refuse("submit_refused")
+            except Exception:
+                return refuse("submit_unavailable")
         started = self.monotonic()
         run_limited = run_deadline is not None and run_deadline <= started + timeout
         deadline = run_deadline if run_limited else started + timeout

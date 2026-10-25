@@ -64,7 +64,8 @@ existing `lab_graph_effect_refused` policy. Host blocks always fail first with
 `lab_graph_host_refused`.
 
 Admission proceeds in this order: trusted compute/read effect (no host, live
-APS, drawing.write, solve or cloud-proposal); clean input values; a drawing
+APS, drawing.write, solve or cloud-proposal); canonical UUID tenant identity
+(the platform org id); clean input values; a drawing
 binding; a seed catalog tool and matching drawing input; the tenant's current
 provisioned tier and required entitlement; the daily jobs window; the sandbox
 seconds ledger; then durable submission. The drawing setting must contain
@@ -86,6 +87,13 @@ in `sandbox_seconds`. Invalid configuration, unreadable ledgers, invalid tenant
 UUIDs, or a truncated ledger window fail closed with `lab_tool_budget_unreadable`.
 `LEAF_LAB_TOOL_TIMEOUT_S` is an integer from 1 to 600 (default 300), with
 polling every 0.5 seconds. Remote waits retain run wall and output byte limits.
+
+Admission is serialised per tenant inside one worker process, from the jobs-list
+read through durable submission; waiting for the job result happens outside the
+lock. Across worker processes (for example two app colors), the daily job budget
+can be exceeded by at most one job per extra process at the moment of the race.
+The sandbox-seconds budget is read from completed e2b cost events, so in-flight
+sandbox time is not yet counted.
 
 Tool nodes submit only through `jobs.submit_job` and the broker. The durable
 key is `lab:<run_id>:<block_id>:1`; a lease takeover reuses it and skips the
