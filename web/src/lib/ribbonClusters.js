@@ -46,6 +46,13 @@ export function humanizeToolName(name) {
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
+// The ribbon already names the surface, so its tools do not repeat it.
+export function dropSurfaceWord(text, word) {
+  if (typeof text !== 'string' || text.slice(0, word.length).toLowerCase() !== word.toLowerCase()) return text
+  const match = text.slice(word.length).match(/^\s+(\S[\s\S]*)$/)
+  return match ? match[1].charAt(0).toUpperCase() + match[1].slice(1) : text
+}
+
 export const SOLAR_REFUSAL_REASONS = Object.freeze({
   invalid_pvcase_convert_request: 'Check the G33 source and graph revision in the conversion request',
   invalid_pvcase_solve_request: 'Check the graph revision in the G33 solve request',
@@ -408,7 +415,7 @@ function solarRailTools(rows, gate, { openName, onOpenForm }, onRun, solarTypedF
       return {
         id: row.name,
         label: row.name,
-        text: row.label || humanizeToolName(row.name) || row.name,
+        text: dropSurfaceWord(row.label || humanizeToolName(row.name) || row.name, 'Solar'),
         icon: toolIcon(row),
         size: toolPlacementSize(row),
         title: row.description || row.name,
@@ -708,7 +715,7 @@ function familyCluster(fam, tools, gate, onOpenFamily) {
       return {
         id: tool.name,
         label: tool.name,
-        text: tool.label || humanizeToolName(tool.name) || tool.name,
+        text: gate.solarRail ? dropSurfaceWord(tool.label || humanizeToolName(tool.name) || tool.name, 'Solar') : tool.label || humanizeToolName(tool.name) || tool.name,
         // The record's own answer, with today's literals as the default.
         icon: toolIcon(tool),
         size: toolPlacementSize(tool),
