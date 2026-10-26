@@ -13,12 +13,6 @@ vi.mock('../controllers/upload/useDrawingUploadController.js', () => ({ default:
 
 afterEach(cleanup)
 const project = { project_id: 'p1', name: 'Roof' }
-
-function standaloneMaterial(upload) {
-  useDrawingUploadController.mockReturnValue(upload)
-  return StandaloneMaterialUpload
-}
-
 function readyUpload() {
   const snapshot = { policyLoading: false, policy: { enabled: true }, busy: false, phase: 'idle' }
   return { ...snapshot, getSnapshot: () => snapshot,
@@ -87,7 +81,7 @@ it('S1-149 focuses the pane heading and returns to the originating tile', () => 
 
 it('S1-149 focuses standalone Material and restores each opening tile after Back', () => {
   const upload = readyUpload()
-  const StandaloneMaterialUpload = standaloneMaterial(upload)
+  useDrawingUploadController.mockReturnValue(upload)
   const onBack = vi.fn()
   function Board() {
     const [pane, setPane] = useState(null)
@@ -113,7 +107,7 @@ it('S1-149 focuses standalone Material and restores each opening tile after Back
 })
 
 it('S1-149 restores standalone Material focus on pane changes and unmount', () => {
-  const StandaloneMaterialUpload = standaloneMaterial(readyUpload())
+  useDrawingUploadController.mockReturnValue(readyUpload())
   const { unmount: removeTile } = render(<button>Material tile</button>)
   const tile = screen.getByRole('button', { name: 'Material tile' })
   const props = { token: 'standalone', selection: null,
