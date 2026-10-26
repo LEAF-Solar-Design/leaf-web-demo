@@ -164,7 +164,7 @@
     background: var(--ck-title); border-color: var(--leaf-line); color: var(--leaf-ink); box-shadow: none;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { font: 400 var(--leaf-size-caption) var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-label); }
-/* Keep status in the accessible tab name without taking space where the row is tight. */
+/* The status takes no space where the row is tight; the tab announces it as its accessible description. */
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav .tc-account-signout { display: none; }
 }
