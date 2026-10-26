@@ -137,7 +137,7 @@
   border-radius: var(--leaf-radius-control);
   background: var(--primary);
   color: var(--on-accent);
-  box-shadow: 0 6px 18px rgba(34, 197, 94, .3);  /* the one halo per sheet */
+  box-shadow: 0 6px 18px color-mix(in srgb, var(--leaf-accent) 30%, transparent);  /* the one halo per sheet */
   font-family: inherit;
   font-weight: 500;
   font-size: var(--leaf-size-dense);
@@ -256,7 +256,7 @@
   color: inherit;
 }
 .sheets-root .sheet-index-row + .sheet-index-row { border-top: 1px solid var(--hairline); }
-.sheets-root .sheet-index-row:hover { background: rgba(255, 255, 255, .03); }
+.sheets-root .sheet-index-row:hover { background: color-mix(in srgb, var(--leaf-ink) 3%, transparent); }
 .sheets-root .sheet-index-row .bar {
   width: 2px;
   align-self: stretch;
@@ -495,37 +495,37 @@
    values. Preview-only surface (deployed hosts redirect /sheets to www),
    but every localhost / Vercel preview reviewer sees it. Additive only. */
 .sheets-root {
-  --background: #0a0a0a;
-  --foreground: #ffffff;
-  --card: #18181b;
-  --card-grad: linear-gradient(180deg, #17171a, #111113);
-  --border: #27272a;
-  --primary: #22c55e;
-  --primary-hover: #4ade80;
-  --on-accent: #04140a;
-  --muted: #a1a1aa;
-  --muted-2: #71717a;
-  --status-success: #22c55e;
-  --status-warning: #e7b643;
-  --status-danger: #e24947;
-  --status-info: #43b2e1;
-  --bar-well: #141416;
-  --bar-chip: #1f1f23;
-  --bar-focus-ring: rgba(34, 197, 94, .07);
-  --keycap: #1c1c20;
-  --hairline: #1c1c20;
-  --rail: #0c0c0e;
-  --input: #141416;
-  --accent-tint: rgba(34, 197, 94, .08);
-  --accent-tint-hover: rgba(34, 197, 94, .14);
-  --warn-tint: rgba(231, 182, 67, .10);
-  --danger-tint: rgba(226, 73, 71, .10);
-  --sheet: #0a0a0a;
-  --code-bg: #101013;
-  --grid-line: rgba(255, 255, 255, .02);
-  --rule-strong: #27272a;
-  --hover-tint: rgba(255, 255, 255, .04);
-  --hover-tint-strong: rgba(255, 255, 255, .08);
+  --background: var(--leaf-ground);
+  --foreground: var(--leaf-ink);
+  --card: var(--leaf-raised);
+  --card-grad: linear-gradient(180deg, var(--leaf-raised), var(--leaf-surface));
+  --border: var(--leaf-line);
+  --primary: var(--leaf-accent);
+  --primary-hover: var(--leaf-accent-hover);
+  --on-accent: var(--leaf-on-accent);
+  --muted: var(--leaf-ink-muted);
+  --muted-2: var(--leaf-ink-muted);
+  --status-success: var(--leaf-ok);
+  --status-warning: var(--leaf-warn);
+  --status-danger: var(--leaf-error);
+  --status-info: var(--leaf-info);
+  --bar-well: var(--leaf-raised);
+  --bar-chip: var(--leaf-raised);
+  --bar-focus-ring: color-mix(in srgb, var(--leaf-accent) 7%, transparent);
+  --keycap: var(--leaf-raised);
+  --hairline: var(--leaf-raised);
+  --rail: var(--leaf-surface);
+  --input: var(--leaf-raised);
+  --accent-tint: color-mix(in srgb, var(--leaf-accent) 8%, transparent);
+  --accent-tint-hover: color-mix(in srgb, var(--leaf-accent) 14%, transparent);
+  --warn-tint: color-mix(in srgb, var(--leaf-warn) 10%, transparent);
+  --danger-tint: color-mix(in srgb, var(--leaf-error) 10%, transparent);
+  --sheet: var(--leaf-ground);
+  --code-bg: var(--leaf-surface);
+  --grid-line: color-mix(in srgb, var(--leaf-ink) 2%, transparent);
+  --rule-strong: var(--leaf-line);
+  --hover-tint: color-mix(in srgb, var(--leaf-ink) 4%, transparent);
+  --hover-tint-strong: color-mix(in srgb, var(--leaf-ink) 8%, transparent);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .55);
   --font-label: 'Inter', system-ui, sans-serif;
   --font-sans: 'Inter Tight', 'Inter', system-ui, sans-serif;
