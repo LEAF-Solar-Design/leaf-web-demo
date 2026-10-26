@@ -101,7 +101,7 @@ describe('cost transparency', () => {
     expect(within(table).getByText('Estimated share, not metered')).toBeInTheDocument()
     expect(screen.queryByText(/Cost publication is stale/)).not.toBeInTheDocument()
     const published = new Date(fixture.published_at).toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
-    expect(screen.getByText(`Missing sources: aws-storage. Published: ${published}.`)).toBeInTheDocument()
+    expect(screen.getByText(`Missing sources: 1 unavailable. Published: ${published}.`)).toBeInTheDocument()
     expect(panel.textContent).not.toContain(fixture.published_at)
     expect(panel.textContent).not.toContain('other-private-tenant')
     expect(panel.textContent).not.toContain('my-tenant')
@@ -148,7 +148,7 @@ describe('cost transparency', () => {
     expect(screen.getByText('12 Units unavailable')).toBeInTheDocument()
     expect(screen.getByText('Physical use coverage: Coverage unknown')).toBeInTheDocument()
     expect(screen.getByText('Allocation basis: 245 Units unavailable')).toBeInTheDocument()
-    expect(screen.getByText('Missing sources: aws-storage. Published: Unavailable.')).toBeInTheDocument()
+    expect(screen.getByText('Missing sources: 1 unavailable. Published: Unavailable.')).toBeInTheDocument()
     expect(panel.textContent).not.toMatch(/INTERNAL_|internal-|invalid-publication-date|Invalid Date/)
   })
 
@@ -157,7 +157,7 @@ describe('cost transparency', () => {
     const panel = await openPanel()
     expect(screen.getByText('Status unknown · Coverage unknown')).toBeInTheDocument()
     expect(screen.getByText('245 Units unavailable')).toBeInTheDocument()
-    expect(screen.getByText('Missing sources: aws-storage. Published: Unavailable.')).toBeInTheDocument()
+    expect(screen.getByText('Missing sources: 1 unavailable. Published: Unavailable.')).toBeInTheDocument()
     expect(panel.textContent).not.toContain('Invalid Date')
   })
 
@@ -193,7 +193,7 @@ describe('cost transparency', () => {
     respond({ ...fixture, stale: true, stale_reason: 'This publication is more than 36 hours old.',
       resources: fixture.resources.map((row) => ({ ...row, unit: 'usd-by-environment' })) })
     const panel = await openPanel()
-    expect(screen.getByText(/Cost publication is stale.*more than 36 hours old/)).toBeInTheDocument()
+    expect(screen.getByText('Cost publication is stale. Recent use may be missing.')).toBeInTheDocument()
     expect(screen.getAllByText('Split by environment tag and activity')).toHaveLength(1)
     expect(screen.queryAllByRole('button', { name: /run/i })).toHaveLength(0)
     expect(panel.textContent).not.toMatch(/[\u2013\u2014]/)
@@ -376,8 +376,8 @@ describe('cost transparency', () => {
     const expectedFrom = expectedFromDate.toISOString().slice(0, 7)
     expect(screen.getByLabelText('From month')).toHaveValue(expectedFrom)
     expect(screen.getByLabelText('To month')).toHaveValue(expectedTo)
-    expect(screen.getByText('2026-08: unpublished. Your implied amount: $0.00')).toBeInTheDocument()
-    expect(screen.getByText(/2026-09: published.*provisional/)).toBeInTheDocument()
+    expect(screen.getByText('2026-08: Not yet published. Your implied amount: $0.00')).toBeInTheDocument()
+    expect(screen.getByText(/2026-09: Published.*provisional/)).toBeInTheDocument()
     expect(within(historyRegion).getByText('2026-07: 0.100000 (10.0000%)')).toBeInTheDocument()
     expect(within(historyRegion).getByText('2026-09: 0.200000 (20.0000%)')).toBeInTheDocument()
     const totals = within(historyRegion).getByRole('rowheader', { name: 'Cumulative totals' }).closest('tr')
@@ -445,7 +445,7 @@ describe('cost transparency', () => {
     const { rerender } = render(<CostTransparencyPanel />)
     fireEvent.click(screen.getByRole('button', { name: title }))
     fireEvent.click(screen.getByRole('button', { name: 'History' }))
-    const monthLabel = '2026-07: published. Your implied amount: $1.00'
+    const monthLabel = '2026-07: Published. Your implied amount: $1.00'
     expect(await screen.findByText(monthLabel)).toBeInTheDocument()
 
     rerender(<CostTransparencyPanel readsPaused />)

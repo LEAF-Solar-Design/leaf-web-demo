@@ -41,6 +41,8 @@ describe('ARLO review in the existing workspace result panel', () => {
     await screen.findByText(/<script>bad/)
     expect(container.querySelector('script')).toBeNull()
     expect(screen.getByText('Rejected')).toBeInTheDocument()
+    expect(container.textContent).not.toContain('2026-09-06T19:00:00Z')
+    expect(container.textContent).not.toContain('review-reject')
     expect(saveArloReview).not.toHaveBeenCalled()
   })
 
@@ -74,6 +76,7 @@ describe('ARLO review in the existing workspace result panel', () => {
     const result=envelope();delete result.job_context
     render(panel(result))
     expect(screen.getByRole('button',{name:'Accept proposal'})).toBeDisabled()
+    expect(screen.getByText('Open this result from its project job to save a decision.')).toBeInTheDocument()
     expect(getArloReviews).not.toHaveBeenCalled()
   })
 })

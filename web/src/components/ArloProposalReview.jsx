@@ -6,6 +6,10 @@ import './ArloProposalReview.css'
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 const number = (value, digits = 2) => Number.isFinite(value) ? value.toLocaleString(undefined, { maximumFractionDigits: digits }) : 'Unavailable'
 const point = p => p && ['x', 'y', 'z'].every(axis => Number.isFinite(p[axis]))
+const reviewDate = value => {
+  const date = value ? new Date(value) : null
+  return date && !Number.isNaN(date.getTime()) ? date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' }) : 'Date unavailable'
+}
 
 function RoutePreview({ proposal }) {
   const routes = (proposal.routes || []).map(route => (route.points || []).filter(point)).filter(points => points.length > 1)
@@ -40,6 +44,7 @@ export default function ArloProposalReview({ envelope, context }) {
   const [saving, setSaving] = useState(false)
   const [error, setError] = useState('')
   const [saved, setSaved] = useState('')
+  const [historyRetry, setHistoryRetry] = useState(0)
   const alive = useRef(false)
   const attempt = useRef(null)
   const bound = ['org_id','project_id','job_id','input_version_id'].every(k => uuid.test(context?.[k] || ''))
@@ -55,7 +60,7 @@ export default function ArloProposalReview({ envelope, context }) {
       setReviews(data.reviews); setLoading(false)
     }).catch(cause => { if (!cancelled) { setError(humanizeError(cause)); setLoading(false) } })
     return () => { cancelled = true; alive.current = false }
-  }, [bound, context?.job_id, envelope.result_sha256])
+  }, [bound, context?.job_id, envelope.result_sha256, historyRetry])
   const decide = async decision => {
     const body = { proposal_id: proposal.proposal_id, result_sha256: envelope.result_sha256, decision, note }
     const fingerprint = JSON.stringify(body)
@@ -72,12 +77,13 @@ export default function ArloProposalReview({ envelope, context }) {
     } catch (cause) { if (alive.current) setError(`Decision not confirmed saved. ${humanizeError(cause)}`) }
     finally { if (alive.current) setSaving(false) }
   }
-  if (!proposal) return <div className="arlo-review"><h4>Feeder design incomplete</h4><p>No complete proposal is available to review.</p><details><summary>Solver diagnostics</summary><pre>{JSON.stringify(result?.diagnostics || {}, null, 2)}</pre></details></div>
+  if (!proposal) return <div className="arlo-review"><h4>Feeder design incomplete</h4><p>No complete proposal is available to review. Run the design again to try another proposal.</p></div>
   const selectedReviews = reviews.filter(r => r.payload.proposalId === proposal.proposal_id)
   const complete = result.status === 'complete' && proposal.production_valid === false && Array.isArray(proposal.violations) && proposal.violations.length === 0
+  const disabledReason = saving ? 'Saving your decision. Please wait.' : !bound ? 'Open this result from its project job to save a decision.' : loading ? 'Loading saved decisions. Please wait.' : !complete ? `This proposal is incomplete${proposal.violations?.length ? ` and has ${proposal.violations.length} design ${proposal.violations.length === 1 ? 'check' : 'checks'} to resolve` : ''}. Run the design again before accepting or rejecting it.` : ''
   return <div className="arlo-review">
     <p className="dim">Electrical design / Proposal review</p><h4>Review the complete feeder</h4>
-    <label>Feeder proposal <select value={proposal.proposal_id} disabled={saving} onChange={e => { setSelectedId(e.target.value); setSaved(''); setNote('') }}>
+    <label>Feeder proposal <select value={proposal.proposal_id} disabled={saving} onChange={e => { setSelectedId(e.target.value); setSaved(''); setError(''); setNote(''); attempt.current = null }}>
       {proposals.map((p,i) => <option value={p.proposal_id} key={p.proposal_id}>Proposal {i+1}, {number(p.estimated_installed_cost)} cost units</option>)}
     </select></label>
     <RoutePreview proposal={proposal} />
@@ -85,15 +91,15 @@ export default function ArloProposalReview({ envelope, context }) {
       {(proposal.quantities || []).map((q,i) => <tr key={i}><td>{q.kind}</td><td>{number(q.quantity)} {q.unit}</td><td>{number(q.installed_cost)}</td></tr>)}
     </tbody></table><p>Total: <strong>{number(proposal.estimated_installed_cost)} catalog cost units</strong>. Currency was not supplied.</p>
     <p>Accepting records your proposal choice. It does not apply CAD changes or grant engineering approval.</p>
-    {!bound && <p>Open this result from its canonical project job to save a decision.</p>}
+    {disabledReason && <p role="status">{disabledReason}</p>}
+    {!complete && Array.isArray(proposal.violations) && proposal.violations.length > 0 && <ul aria-label="Design checks to resolve">{proposal.violations.map((violation, index) => <li key={index}>Design check {index + 1}: {humanizeError(violation?.message || violation)}</li>)}</ul>}
     {loading && <p role="status">Loading saved review history…</p>}
     {error && <p role="alert">{error}</p>}
+    {error && bound && !saving && <button type="button" className="btn ghost" onClick={() => setHistoryRetry(value => value + 1)}>Retry review history</button>}
     {saved && <p role="status">{saved}</p>}
     <label>Review note <textarea value={note} maxLength={1000} disabled={saving || !bound} onChange={e => setNote(e.target.value)} /></label>
     <div className="arlo-actions"><button type="button" className="btn" disabled={!bound || !complete || loading || saving} onClick={() => decide('accept')}>Accept proposal</button>
       <button type="button" className="btn ghost" disabled={!bound || !complete || loading || saving} onClick={() => decide('reject')}>Reject proposal</button></div>
-    <h4>Saved decisions</h4>{selectedReviews.length ? <ol>{selectedReviews.map(row => <li key={row.operation_id}><strong>{row.payload.decision === 'accept' ? 'Accepted' : 'Rejected'}</strong>{row.payload.note && <>: {row.payload.note}</>}<br /><span className="dim">{row.created_at}</span></li>)}</ol> : <p>No saved decision for this proposal.</p>}
-    <details><summary>Complete solver decision trace</summary><pre>{JSON.stringify(result.trace, null, 2)}</pre></details>
-    <details><summary>Proposal and source detail</summary><pre>{JSON.stringify({ source:proposal.source, proposal_id:proposal.proposal_id, native_verification:proposal.native_verification, result_sha256:envelope.result_sha256 },null,2)}</pre></details>
+    <h4>Saved decisions</h4>{selectedReviews.length ? <ol>{selectedReviews.map(row => <li key={row.operation_id}><strong>{row.payload.decision === 'accept' ? 'Accepted' : 'Rejected'}</strong>{row.payload.note && <>: {row.payload.note}</>}<br /><span className="dim">{reviewDate(row.created_at)}</span></li>)}</ol> : <p>No saved decision for this proposal.</p>}
   </div>
 }
