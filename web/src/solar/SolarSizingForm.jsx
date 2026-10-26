@@ -464,11 +464,13 @@ export default function SolarSizingForm(props) {
 
 function ModuleCatalogField({ draft, change, chooseModule, projectClient, searchScope, busy, invalid }) {
   const listId = useId()
-  const [result, setResult] = useState(null)
+  const [storedResult, setResult] = useState(null)
   const [active, setActive] = useState(0)
   const [open, setOpen] = useState(false)
   const query = (draft.module_name ?? '').trim()
   const grantValid = typeof draft.grant_ref === 'string' && /^[a-zA-Z0-9_-]{1,64}(?![\s\S])/.test(draft.grant_ref)
+  const resultKey = JSON.stringify([searchScope, query, draft.module_name, draft.module_confirmed, draft.grant_ref, busy])
+  const result = storedResult?.key === resultKey && storedResult.client === projectClient ? storedResult.data : null
   useEffect(() => {
     const controller = new AbortController()
     setResult(null)
@@ -480,10 +482,13 @@ function ModuleCatalogField({ draft, change, chooseModule, projectClient, search
         const outcome = await projectClient?.searchSizingModules({ q: query, limit: 20,
           grantRef: draft.grant_ref, signal: controller.signal })
         if (controller.signal.aborted) return
-        setResult(outcome?.ok ? { ...outcome.data, modules: outcome.data.modules.slice(0, 20) } : { failed: true })
+        setResult({ key: resultKey, client: projectClient,
+          data: outcome?.ok ? { ...outcome.data, modules: outcome.data.modules.slice(0, 20) } : { failed: true } })
         setOpen(true)
       } catch {
-        if (!controller.signal.aborted) { setResult({ failed: true }); setOpen(true) }
+        if (!controller.signal.aborted) {
+          setResult({ key: resultKey, client: projectClient, data: { failed: true } }); setOpen(true)
+        }
       }
     }, 300)
     return () => { clearTimeout(timer); controller.abort() }
@@ -493,7 +498,7 @@ function ModuleCatalogField({ draft, change, chooseModule, projectClient, search
   function choose(key) { chooseModule(key); setOpen(false); setResult(null) }
   return <>
     <label>Module<input role="combobox" value={draft.module_name ?? ''} disabled={busy}
-      autoComplete="off" aria-autocomplete="list" aria-expanded={expanded} aria-controls={listId}
+      autoComplete="off" aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
       aria-activedescendant={expanded ? `${listId}-${active}` : undefined}
       aria-invalid={invalid.has('module_name') || undefined}
       onChange={(event) => { setResult(null); setOpen(false); change('module_name', event.target.value) }}
