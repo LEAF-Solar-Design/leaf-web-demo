@@ -3,6 +3,8 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { humanizeError } from '../../errorHumanize.js'
 
 export const SAVED_REVISION_EVENT = 'leaf.lab.saved-revision'
+export const MSG_LAB_TOO_LARGE = 'This document is too large to save.'
+export const MSG_LAB_STORAGE_FULL = 'This save is over the Lab storage limit.'
 function identifier(id) {
   if (typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)) throw new Error('Enter a valid Document ID.')
 }
@@ -32,7 +34,10 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       })
       const data = await response.json().catch(() => ({}))
       if (response.ok) return { ...data, ok: true }
-      const detail = humanizeError(data?.error?.message || (typeof data?.detail === 'string' ? data.detail : data?.detail?.message))
+      const code = typeof data?.detail === 'string' ? data.detail : data?.detail?.code
+      const detail = response.status === 413
+        ? (code === 'lab_capacity_exceeded' ? MSG_LAB_STORAGE_FULL : MSG_LAB_TOO_LARGE)
+        : humanizeError(data?.error?.message || (typeof data?.detail === 'string' ? data.detail : data?.detail?.message))
       if (response.status === 409 && resolveConflict) {
         if (fresh(token)) { readSeq += 1; applied = { head: readSeq, revisions: readSeq } }
         const head = await request(id, 'head', undefined, false, token)
