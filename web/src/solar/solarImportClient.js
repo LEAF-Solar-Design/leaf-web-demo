@@ -25,6 +25,7 @@
 // download answers SOLAREDGE_CLIENT_DIGEST_UNAVAILABLE and keeps nothing: that
 // is deliberate fail-closed behaviour, not a gap.
 import { FetchTimeoutError, fetchWithBudget } from '../fetchBudget.js'
+import { humanizeError } from '../errorHumanize.js'
 
 export const SOLAREDGE_PDF_MAX_BYTES = 16_777_216
 export const SOLAREDGE_REPORT_REQUEST_MAX_BYTES = 4096
@@ -106,8 +107,9 @@ export const SOLAREDGE_IMPORT_REASONS = Object.freeze({
   ENTITLEMENT_REQUIRED: 'Your plan does not include this SolarEdge import step',
   ENTITLEMENT_POLICY_UNAVAILABLE: 'The plan policy could not be read, so this step stays off',
   SOLAREDGE_CLIENT_REQUEST_INVALID: 'This SolarEdge step was given input it cannot send',
-  SOLAREDGE_CLIENT_TIMEOUT: 'The server did not answer in time, so try again',
-  SOLAREDGE_CLIENT_NETWORK: 'The server could not be reached, so try again',
+  SOLAREDGE_CLIENT_TIMEOUT: 'The result was not confirmed in time, so check for the saved PDF or report before trying again',
+  SOLAREDGE_CLIENT_NETWORK: 'The connection was lost, so check for the saved PDF or report before trying again',
+  SOLAREDGE_CLIENT_SERVICE_UNAVAILABLE: 'The service had a problem, so check for the saved PDF or report before trying again',
   SOLAREDGE_CLIENT_ABORTED: 'This SolarEdge step was cancelled',
   SOLAREDGE_CLIENT_RESPONSE_INVALID: 'The server answer could not be read, so the step stopped',
   SOLAREDGE_CLIENT_ARTIFACT_MISMATCH: 'The downloaded file did not match its record, so it was not kept',
@@ -151,9 +153,8 @@ const ENVELOPE_KEYS = Object.freeze(['error', 'degraded_mode'])
 
 // Resolves to the sentence for a code; never echoes a malformed or oversized value.
 export function solarEdgeReason(code) {
-  if (typeof code === 'string' && Object.hasOwn(SOLAREDGE_IMPORT_REASONS, code)) return SOLAREDGE_IMPORT_REASONS[code]
-  if (typeof code === 'string' && CODE_PATTERN.test(code)) return `${SOLAREDGE_IMPORT_FALLBACK} (${code})`
-  return SOLAREDGE_IMPORT_FALLBACK
+  if (typeof code === 'string' && Object.hasOwn(SOLAREDGE_IMPORT_REASONS, code)) return humanizeError(SOLAREDGE_IMPORT_REASONS[code])
+  return humanizeError(SOLAREDGE_IMPORT_FALLBACK)
 }
 
 function isPlainObject(value) {
@@ -527,18 +528,19 @@ async function readBoundedJson(call, response) {
 // Maps a non-200, non-401 answer to a failure result.
 async function refusalOf(call, response, status) {
   const retryableServer = status >= 500
+  const fallbackCode = retryableServer ? 'SOLAREDGE_CLIENT_SERVICE_UNAVAILABLE' : 'SOLAREDGE_CLIENT_RESPONSE_INVALID'
   if (status >= 200 && status < 300) {
     releaseBody(response)
     return refuse(status, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false)
   }
   const read = await readBoundedJson(call, response)
   if (read === STOPPED) return call.failure(status)
-  if (!read.ok) return refuse(status, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', retryableServer)
+  if (!read.ok) return refuse(status, fallbackCode, retryableServer)
   const body = read.value
   if (isPlainObject(body) && body.entitlement_required === true) {
     if (status === 403) return refuse(status, 'ENTITLEMENT_REQUIRED', false)
     if (status === 503) return refuse(status, 'ENTITLEMENT_POLICY_UNAVAILABLE', true)
-    return refuse(status, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', retryableServer)
+    return refuse(status, fallbackCode, retryableServer)
   }
   if (isPlainObject(body) && isPlainObject(body.error)
     && typeof body.error.reason_code === 'string' && CODE_PATTERN.test(body.error.reason_code)) {
@@ -548,7 +550,7 @@ async function refusalOf(call, response, status) {
   if (status === 403 && isPlainObject(body) && isPlainObject(body.error) && body.error.error_code === 'FORBIDDEN') {
     return refuse(status, 'FORBIDDEN', false)
   }
-  return refuse(status, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', retryableServer)
+  return refuse(status, fallbackCode, retryableServer)
 }
 
 async function defaultSha256Hex(bytes) {

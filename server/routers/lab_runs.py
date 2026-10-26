@@ -10,12 +10,13 @@ from starlette.concurrency import run_in_threadpool
 import deps
 import lab_artifacts as ledger
 import lab_registry
+import lab_tool_manifests
 import lab_tool_nodes
 import lab_run_store as store
 from dependency_health import _source_revision
 from lab_canonical import graph_digest
 from lab_doc_validators import InvalidGraph, TooLarge
-from lab_evaluate import GraphRefused, admit_graph, trusted_registry
+from lab_evaluate import GraphRefused, admit_graph
 from lab_worker import OPS_REVISION
 from routers.lab_artifacts import _actor, _admit, _body
 
@@ -40,11 +41,11 @@ def _create(tenant, body):
             or type(body["graph_revision"]) is not int or body["graph_revision"] < 1):
         raise InvalidGraph("invalid_lab_run_fields")
     artifact = ledger.get(str(tenant), body["doc_id"], body["graph_revision"])
-    manifests = admit_graph(artifact["graph"], trusted_registry())
+    manifests = admit_graph(artifact["graph"], lab_tool_manifests.registry_for(str(tenant)))
     for block in artifact["graph"]["blocks"]:
         manifest = manifests[block["id"]]
         ref = block["registry"]
-        trusted = lab_registry.lookup(ref["id"], ref["version"])
+        trusted = lab_tool_manifests.trusted_for(str(tenant), ref["id"], ref["version"])
         if (manifest["residency"] == "host"
                 or manifest["id"] in ("studio-jobs", "studio-capabilities", "host-source")
                 or (trusted is not None and trusted.residency == "host")):

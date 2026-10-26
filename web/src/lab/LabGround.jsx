@@ -27,7 +27,7 @@ export default function LabGround({ active, mock = false, studioShell = false, o
     hostBridgeLoader().then((module) => { if (current) setHostBridge(module) }).catch(() => {})
     return () => { current = false }
   }, [embedded, active, status?.state])
-  const content = <section ref={ref} data-ground="lab" data-lab-embed-root={embedded ? '' : undefined} hidden={!active} aria-label="Lab workspace"
+  const content = <section ref={ref} data-ground="lab" data-leaf-theme="dark" data-lab-embed-root={embedded ? '' : undefined} hidden={!active} aria-label="Lab workspace"
     style={{ position: embedded ? 'fixed' : 'absolute', inset: 0, minWidth: 0, overflow: 'hidden', pointerEvents: 'none' }}
     data-studio-shell={studioShell ? 'cockpit' : undefined}>
     {embedded && active && <style>{'body > :not([data-lab-embed-root]) { display: none !important; }'}</style>}

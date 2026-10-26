@@ -110,7 +110,7 @@ const ACCEPT_CODES = [
 const CLIENT_AND_SESSION_CODES = [
   'ENTITLEMENT_POLICY_UNAVAILABLE', 'ENTITLEMENT_REQUIRED', 'FORBIDDEN', 'SOLAREDGE_CLIENT_ABORTED',
   'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH', 'SOLAREDGE_CLIENT_DIGEST_UNAVAILABLE', 'SOLAREDGE_CLIENT_NETWORK',
-  'SOLAREDGE_CLIENT_REQUEST_INVALID', 'SOLAREDGE_CLIENT_RESPONSE_INVALID', 'SOLAREDGE_CLIENT_TIMEOUT',
+  'SOLAREDGE_CLIENT_REQUEST_INVALID', 'SOLAREDGE_CLIENT_RESPONSE_INVALID', 'SOLAREDGE_CLIENT_SERVICE_UNAVAILABLE', 'SOLAREDGE_CLIENT_TIMEOUT',
   'STALE_GRAPH_REVISION', 'UNAUTHENTICATED',
 ]
 
@@ -261,7 +261,7 @@ describe('solar import client', () => {
       expect(list).toEqual([...list].sort())
     }
     const allCodes = [...ROUTE_CODES_TODAY, ...ACCEPT_CODES, ...CLIENT_AND_SESSION_CODES].sort()
-    expect(allCodes).toHaveLength(75)
+    expect(allCodes).toHaveLength(76)
     expect(Object.keys(SOLAREDGE_IMPORT_REASONS).sort()).toEqual(allCodes)
     for (const sentence of Object.values(SOLAREDGE_IMPORT_REASONS)) {
       expect(typeof sentence).toBe('string')
@@ -314,7 +314,7 @@ describe('solar import client', () => {
 
   it('SI4 solarEdgeReason gives a sentence or a bounded fallback', () => {
     expect(solarEdgeReason('REPORT_BUSY')).toBe('Other PDFs are being read right now, so try again shortly')
-    expect(solarEdgeReason('REPORT_PARSE_FUTURE')).toBe('The SolarEdge import stopped (REPORT_PARSE_FUTURE)')
+    expect(solarEdgeReason('REPORT_PARSE_FUTURE')).toBe('The SolarEdge import stopped')
     for (const value of ['bad code', 'x'.repeat(65), 'A'.repeat(65), null, 7, 'constructor', 'toString']) {
       expect(solarEdgeReason(value)).toBe('The SolarEdge import stopped')
     }
@@ -519,7 +519,7 @@ describe('solar import client', () => {
       const { client } = clientWith(answering(() => jsonResponse(body, status)))
       await expect(client.requestReport(reportArgs())).resolves.toEqual(expected)
     }
-    expect(solarEdgeReason('REPORT_PARSE_FUTURE')).toBe('The SolarEdge import stopped (REPORT_PARSE_FUTURE)')
+    expect(solarEdgeReason('REPORT_PARSE_FUTURE')).toBe('The SolarEdge import stopped')
   })
 
   it('SI14 report success bodies that break the shape are refused', async () => {
@@ -558,7 +558,7 @@ describe('solar import client', () => {
       .resolves.toEqual(refused(503, 'ENTITLEMENT_POLICY_UNAVAILABLE', true))
     const odd = clientWith(answering(() => jsonResponse(POLICY_UNAVAILABLE, 500))).client
     await expect(odd.requestReport(reportArgs()))
-      .resolves.toEqual(refused(500, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', true))
+      .resolves.toEqual(refused(500, 'SOLAREDGE_CLIENT_SERVICE_UNAVAILABLE', true))
     const throwing = clientWith(answering(() => jsonResponse(UPLOAD_SMALL)), {
       onResponse: () => { throw new Error('observer failed') },
     }).client
@@ -584,7 +584,7 @@ describe('solar import client', () => {
 
     const gateway = clientWith(answering(() => new Response('Bad gateway', { status: 502 }))).client
     await expect(gateway.requestReport(reportArgs()))
-      .resolves.toEqual(refused(502, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', true))
+      .resolves.toEqual(refused(502, 'SOLAREDGE_CLIENT_SERVICE_UNAVAILABLE', true))
 
     const badCode = sameShape('REPORT_BUSY')
     badCode.error.reason_code = 'bad-code'
@@ -916,7 +916,7 @@ describe('solar import client', () => {
       await expect(run(clientWith(answer(GUEST_TEXT, 400)).client))
         .resolves.toEqual(refused(400, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', false))
       await expect(run(clientWith(answer(GUEST_TEXT, 503)).client))
-        .resolves.toEqual(refused(503, 'SOLAREDGE_CLIENT_RESPONSE_INVALID', true))
+        .resolves.toEqual(refused(503, 'SOLAREDGE_CLIENT_SERVICE_UNAVAILABLE', true))
     }
     const edited = (edit) => {
       const body = JSON.parse(GUEST_TEXT)
