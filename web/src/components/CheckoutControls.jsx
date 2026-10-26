@@ -1,11 +1,33 @@
 import CheckoutChip from './CheckoutChip.jsx'
-import { useLayoutEffect, useRef, useState } from 'react'
+import { useLayoutEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { humanizeError } from '../errorHumanize.js'
 import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
+import { authTenantScope } from '../drawing/drawingIdentity.js'
+import { subscribeTokenStored } from '../auth.js'
+import { subscribeUnauthorized } from '../api.js'
+
+function readAccountScope() {
+  try { return authTenantScope(globalThis.localStorage?.getItem('leaf.jwt')) } catch { return null }
+}
+
+function subscribeAccountScope(listener) {
+  const offStored = subscribeTokenStored(listener)
+  const offUnauthorized = subscribeUnauthorized(listener)
+  const onStorage = (event) => {
+    if (event.key == null || event.key === 'leaf.jwt') listener()
+  }
+  globalThis.addEventListener?.('storage', onStorage)
+  return () => {
+    offStored?.()
+    offUnauthorized?.()
+    globalThis.removeEventListener?.('storage', onStorage)
+  }
+}
 
 export default function CheckoutControls(props) {
   const identity = useDrawingIdentityOptional()
   const drawingKey = props.drawingKey ?? props.drawingId ?? identity?.drawingId
+  const accountScope = useSyncExternalStore(subscribeAccountScope, readAccountScope, readAccountScope)
   const [error, setError] = useState(null)
   const [pending, setPending] = useState(false)
   const root = useRef(null)
@@ -17,7 +39,7 @@ export default function CheckoutControls(props) {
     setError(null)
     setPending(false)
     return () => { generation.current += 1 }
-  }, [drawingKey])
+  }, [drawingKey, accountScope])
   useLayoutEffect(() => {
     if (!pending && restoreFocus.current) {
       restoreFocus.current = false

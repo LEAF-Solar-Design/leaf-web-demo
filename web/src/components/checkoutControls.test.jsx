@@ -50,6 +50,41 @@ describe('checkout controls drawing changes', () => {
   })
 })
 
+describe('checkout controls account changes', () => {
+  afterEach(() => localStorage.removeItem('leaf.jwt'))
+
+  it.each([true, false])('handles a pending refusal with account changed: %s', async (changeAccount) => {
+    localStorage.setItem('leaf.jwt', 'account-a')
+    let rejectTake
+    const onTake = vi.fn(() => new Promise((resolve, reject) => { rejectTake = reject }))
+    const view = render(<CheckoutControls drawingKey="drawing-d" onTake={onTake} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Take edit lock' }))
+    expect(screen.getByRole('button').disabled).toBe(true)
+    view.container.tabIndex = -1
+    view.container.focus()
+
+    if (changeAccount) {
+      act(() => {
+        localStorage.setItem('leaf.jwt', 'account-b')
+        window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' }))
+      })
+    }
+    view.rerender(<CheckoutControls drawingKey="drawing-d" onTake={onTake} />)
+    expect(screen.getByRole('button').disabled).toBe(!changeAccount)
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(document.activeElement).toBe(view.container)
+
+    await act(async () => { rejectTake(new Error('Failed to fetch')) })
+    expect(screen.getByRole('button').disabled).toBe(false)
+    if (changeAccount) {
+      expect(screen.queryByRole('alert')).toBeNull()
+      expect(document.activeElement).toBe(view.container)
+    } else {
+      expect(screen.getByRole('alert')).toBeTruthy()
+    }
+  })
+})
+
 describe('checkout read failure banner', () => {
   it('keeps the sentence and Retry without a code when no record is supplied', () => {
     render(<CheckoutControls unknown readFailed onRetry={vi.fn()} />)
