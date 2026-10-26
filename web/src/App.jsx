@@ -1168,6 +1168,7 @@ export default function App() {
   // (unknown/undeployed policy resolves permissive, like every other gate).
   const canConverse = entOf('converse')
   const agentDisabled = mock || !canConverse
+  const surfaceSlots = useSurfaceContract(activeSurface, mock)
   const catalogRunContext = useMemo(() => createCatalogRunContext({
     tenantId: tenant || config.tenant,
     orgId,
@@ -1921,7 +1922,6 @@ export default function App() {
     onCompleteVersion: (...args) => completedVersionRef.current?.(...args),
   })
   drawingErrorRef.current = setRunErr
-  const surfaceSlots = useSurfaceContract(activeSurface, mock)
   const projectSolarRuntime = useAppProjectSolarRuntime({
     projectMode,
     projectSolar,
