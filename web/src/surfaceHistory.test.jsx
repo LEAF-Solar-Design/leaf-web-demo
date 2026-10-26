@@ -2,10 +2,11 @@
 import React, { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { productSurfaceFromSearch, searchForProductSurface } from './site/productSurfaces.js'
 import { useStudioTransition } from './site/useStudioTransition.js'
+import { parseLabRoute } from './lab/labRoute.js'
 
 // Execute the production callbacks without mounting the drawing renderer.
 const source = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
@@ -31,13 +32,16 @@ function find(predicate, node = tree) {
   return null
 }
 const text = node => source.slice(node.start, node.end)
+const resolveSurface = find(node => node.type === 'FunctionDeclaration' && node.id.name === 'appSurfaceFromLocation')
+const appSurfaceFromLocation = Function('parseLabRoute', 'productSurfaceFromSearch',
+  `return (${text(resolveSurface)})`)(parseLabRoute, productSurfaceFromSearch)
 const commit = find(node => node.type === 'VariableDeclarator' && node.id.name === 'onCommit').init.arguments[0]
 const restore = find(node => node.type === 'CallExpression' && node.callee.name === 'useEffect'
   && text(node.arguments[0]).includes("addEventListener('popstate', restoreSurface)"))
 const retireScope = find(node => node.type === 'CallExpression' && node.callee.name === 'useLayoutEffect'
   && text(node.arguments[0]).includes('queued product-tab switch'))
 function Harness({ animated = false, project = 'a' }) {
-  const [surface, setActiveSurface] = useState('cad')
+  const [surface, setActiveSurface] = useState(() => appSurfaceFromLocation(window.location))
   const committedSurfaceRef = useRef(surface)
   committedSurfaceRef.current = surface
   const onCommit = Function('setActiveSurface', 'searchForProductSurface', 'committedSurfaceRef', `return (${text(commit)})`)(setActiveSurface, searchForProductSurface, committedSurfaceRef)
@@ -48,12 +52,15 @@ function Harness({ animated = false, project = 'a' }) {
   }, [project, request])
   useEffect(() => {
     expect(restore).not.toBeNull()
-    return Function('setActiveSurface', 'productSurfaceFromSearch', 'labStatus', 'request', 'committedSurfaceRef',
-      `return (${text(restore.arguments[0])})()`)(setActiveSurface, productSurfaceFromSearch, undefined, request, committedSurfaceRef)
+    return Function('setActiveSurface', 'appSurfaceFromLocation', 'labStatus', 'request', 'committedSurfaceRef',
+      `return (${text(restore.arguments[0])})()`)(setActiveSurface, appSurfaceFromLocation, undefined, request, committedSurfaceRef)
   }, [request])
   return <><output>{surface}</output><button onClick={() => request('solar')}>Solar</button><button onClick={() => request('browser')}>Browser</button></>
 }
-afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.useRealTimers() })
+afterEach(() => {
+  cleanup(); vi.restoreAllMocks(); vi.useRealTimers()
+  window.history.replaceState(null, '', '/app?surface=cad')
+})
 
 it('cancels a pending tab switch on Back without pushing or committing the queued tab', () => {
   vi.useFakeTimers()
@@ -129,4 +136,19 @@ it('ignores an unknown surface on popstate', () => {
     window.dispatchEvent(new PopStateEvent('popstate'))
   })
   expect(screen.getByText('solar')).toBeTruthy()
+})
+
+it('restores the Lab deep link without a surface query after switching to Solar and going Back', async () => {
+  window.history.replaceState(null, '', '/app/lab/graph')
+  render(<Harness />)
+  expect(screen.getByText('lab')).toBeTruthy()
+  fireEvent.click(screen.getByText('Solar'))
+  expect(screen.getByText('solar')).toBeTruthy()
+  expect(window.location.search).toBe('?surface=solar')
+  act(() => window.history.back())
+  await waitFor(() => expect(screen.getByText('lab')).toBeTruthy())
+  expect(window.location.pathname).toBe('/app/lab/graph')
+  expect(window.location.search).toBe('')
+  expect(screen.getByText('lab')).toBeTruthy()
+  expect(screen.queryByText('cad')).toBeNull()
 })

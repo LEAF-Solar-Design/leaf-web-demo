@@ -18,6 +18,7 @@ import { useLeavingGround, useStudioTransition } from './site/useStudioTransitio
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { useLabSurfaceStatus } from './lab/useLabSurfaceStatus.js'
 import { parseLabRoute } from './lab/labRoute.js'
+import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
 import { CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
 import { createViewHistory } from './lib/viewHistory.js'
@@ -493,6 +494,11 @@ function LocalCadEngineHold({ active }) {
   return null
 }
 
+function appSurfaceFromLocation(location, labStatus) {
+  return location.pathname.startsWith('/app/lab') && parseLabRoute(location.pathname, location.search)
+    ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
+}
+
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
   // DrawingIdentityProvider, seeded from the SAME rule these two module
@@ -515,7 +521,7 @@ export default function App() {
   // (studioGround.js); there is no old shell.
   const studioGround = useStudioGround()
   const [activeSurface, setActiveSurface] = useState(() => {
-    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
+    try { return appSurfaceFromLocation(window.location) } catch { return 'cad' }
   })
   const committedSurfaceRef = useRef(activeSurface)
   committedSurfaceRef.current = activeSurface
@@ -569,13 +575,14 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
+  const { path: surfacePath } = useRoute()
   useEffect(() => {
     const cancelSurfaceSwitch = () => request(committedSurfaceRef.current)
     const restoreSurface = () => {
       // Requesting the committed tab clears the transition timer without a commit.
       cancelSurfaceSwitch()
       const value = new URLSearchParams(window.location.search).get('surface')
-      const surface = productSurfaceFromSearch(window.location.search, labStatus)
+      const surface = appSurfaceFromLocation(window.location, labStatus)
       if (value && value !== surface) return
       setActiveSurface(surface)
     }
@@ -586,7 +593,7 @@ export default function App() {
       window.removeEventListener('leaf:navigate', cancelSurfaceSwitch)
     }
   }, [labStatus, request])
-  useEffect(() => { setActiveSurface(window.location.pathname.startsWith('/app/lab') && parseLabRoute(window.location.pathname, window.location.search) ? 'lab' : productSurfaceFromSearch(window.location.search, labStatus)) }, [labStatus])
+  useEffect(() => { setActiveSurface(appSurfaceFromLocation(window.location, labStatus)) }, [labStatus, surfacePath])
   const [loadErr, setLoadErr] = useState(null)
   const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
