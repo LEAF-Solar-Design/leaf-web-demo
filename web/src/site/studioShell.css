@@ -157,13 +157,15 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs { gap: 2px; margin: 0; padding: 0; border: 0; background: transparent; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] {
     height: 22px; padding: 0 8px; gap: 5px; border-radius: var(--leaf-radius-key); border: 1px solid transparent;
-    font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink-muted); background: transparent; box-shadow: none; align-items: center;
+    font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink-muted); background: transparent; box-shadow: none; align-items: center; flex-direction: row;
   }
 @media (hover: hover) and (pointer: fine) { .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"]:hover { background: var(--ck-hover); color: var(--leaf-ink); } }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"][aria-selected="true"] {
     background: var(--ck-title); border-color: var(--leaf-line); color: var(--leaf-ink); box-shadow: none;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { font: 400 var(--leaf-size-caption) var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-label); }
+/* Keep status in the accessible tab name without taking space where the row is tight. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] small { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); white-space: nowrap; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-nav .tc-account-signout { display: none; }
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] main.center-scroll { padding: 0; }
@@ -521,6 +523,8 @@
     height: 30px; min-height: 30px; padding-top: 2px; align-items: flex-start;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-tabs { align-self: flex-start; }
+/* The own row has room, so status appears inline after the surface name. */
+.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-tabs [role="tab"] small { position: static; width: auto; height: auto; overflow: visible; clip-path: none; }
 }
 @media (pointer: coarse) and (max-width: 1439px), (max-width: 1023px) {
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] { --ck-ribbon: 151px; }
