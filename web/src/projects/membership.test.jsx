@@ -120,6 +120,35 @@ describe('acceptance #1: owner invites/demotes/revokes; revoked member drops the
     await waitFor(() => expect(onChangeRole).toHaveBeenCalledWith('u-editor', 'read-only'))
   })
 
+  it.each(['reviewer', 'read-only'])('an editor can demote an editor to %s', async (role) => {
+    const { onChangeRole } = setup({
+      viewerId: 'u-editor',
+      authority: { role: 'editor', can_invite: true, can_manage: true },
+    })
+    const picker = screen.getByLabelText('Role for Editor Two')
+    expect(picker.disabled).toBe(false)
+    expect(Array.from(picker.options, option => option.value)).toEqual(['reviewer', 'read-only'])
+    expect(picker.selectedIndex).toBe(-1)
+    fireEvent.change(picker, { target: { value: role } })
+    await waitFor(() => expect(onChangeRole).toHaveBeenCalledWith('u-editor', role))
+    expect(onChangeRole).toHaveBeenCalledTimes(1)
+  })
+
+  it('an editor never sees owner or editor as a target role for invitations or any member', () => {
+    const { onChangeRole } = setup({
+      viewerId: 'u-editor',
+      authority: { role: 'editor', can_invite: true, can_manage: true },
+    })
+    const pickers = [screen.getByLabelText('Invite role'), ...MEMBERS.map(member => screen.getByLabelText(`Role for ${member.name}`))]
+    for (const picker of pickers) {
+      expect(Array.from(picker.options, option => option.value)).toEqual(['reviewer', 'read-only'])
+    }
+    for (const role of ['owner', 'editor']) {
+      fireEvent.change(screen.getByLabelText('Role for Reviewer Three'), { target: { value: role } })
+    }
+    expect(onChangeRole).not.toHaveBeenCalled()
+  })
+
   it('an owner revokes a member', async () => {
     const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(true)
     const { onRevoke } = setup()

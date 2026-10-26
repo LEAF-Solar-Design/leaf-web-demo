@@ -84,7 +84,7 @@ export default function Membership({
   const isOwner = authority.role === 'owner'
   const allowedRoles = isOwner ? ROLES : ROLES.filter((role) => !['owner', 'editor'].includes(role))
   const selectedInviteRole = allowedRoles.includes(inviteRole) ? inviteRole : 'read-only'
-  const canManageMember = (member) => canManage && (isOwner || !['owner', 'editor'].includes(member.role))
+  const canRevokeMember = (member) => canManage && (isOwner || !['owner', 'editor'].includes(member.role))
   const choices = identities || []
   const filteredChoices = choices.filter((identity) =>
     identityText(identity).toLowerCase().includes(search.trim().toLowerCase()))
@@ -157,12 +157,12 @@ export default function Membership({
   }
 
   const changeRole = (member, role) => {
-    if (!canManageMember(member) || !allowedRoles.includes(role)) return
+    if (!canManage || !allowedRoles.includes(role)) return
     return withPending(setPendingRoleIds, member.member_id, () => onChangeRole(member.member_id, role))()
   }
 
   const revoke = (member) => {
-    if (!canManageMember(member) || pendingRevokeIds.has(member.member_id)) return
+    if (!canRevokeMember(member) || pendingRevokeIds.has(member.member_id)) return
     const question = member.member_id === viewerId
       ? 'Remove your own access? You will no longer be able to open this project.'
       : `Remove ${memberLabel(member)} from this project? They will lose access.`
@@ -273,20 +273,25 @@ export default function Membership({
               )}
               {canManage ? (
                 <>
+                  {!allowedRoles.includes(member.role) && <span className="membership-role-static">{member.role}</span>}
                   <select
                     aria-label={`Role for ${label}`}
-                    value={member.role}
-                    disabled={roleBusy || !canManageMember(member)}
-                    title={!canManageMember(member) ? 'Only an owner can change an owner or editor.' : roleBusy ? 'Wait for the role change to finish.' : undefined}
+                    value={allowedRoles.includes(member.role) ? member.role : ''}
+                    ref={(select) => {
+                      // Do not display a permitted target as though it were the current role.
+                      if (select && !allowedRoles.includes(member.role)) select.selectedIndex = -1
+                    }}
+                    disabled={roleBusy}
+                    title={roleBusy ? 'Wait for the role change to finish.' : undefined}
                     onChange={(event) => changeRole(member, event.target.value)}
                   >
-                    {ROLES.filter((r) => allowedRoles.includes(r) || r === member.role).map((r) => <option key={r} value={r}>{r}</option>)}
+                    {allowedRoles.map((r) => <option key={r} value={r}>{r}</option>)}
                   </select>
                   <button
                     type="button"
                     className="chip-act membership-revoke"
-                    disabled={revokeBusy || !canManageMember(member)}
-                    title={!canManageMember(member) ? 'Only an owner can remove an owner or editor.' : revokeBusy ? 'Wait for access removal to finish.' : undefined}
+                    disabled={revokeBusy || !canRevokeMember(member)}
+                    title={!canRevokeMember(member) ? 'Only an owner can remove an owner or editor.' : revokeBusy ? 'Wait for access removal to finish.' : undefined}
                     onClick={() => revoke(member)}
                   >
                     {revokeBusy ? 'Revoking…' : `Revoke ${label}`}

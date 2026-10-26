@@ -34,19 +34,21 @@ describe('w3 membership sweep', () => {
     expect(Array.from(picker.options, option => option.value)).toEqual(['reviewer', 'read-only'])
   })
 
-  it('S1-162 prevents editors from changing or revoking protected members with a stated reason', async () => {
+  it('S1-162 permits editor demotions but prevents revoking protected members with a stated reason', async () => {
     const { props } = setup({ viewerId: 'editor-id', authority: { role: 'editor', can_invite: true, can_manage: true } })
     for (const name of ['Olivia', 'Evan']) {
       const role = screen.getByRole('combobox', { name: `Role for ${name}` })
       const revoke = screen.getByRole('button', { name: `Revoke ${name}` })
-      expect(role.disabled).toBe(true)
+      expect(role.disabled).toBe(false)
+      expect(Array.from(role.options, option => option.value)).toEqual(['reviewer', 'read-only'])
       expect(revoke.disabled).toBe(true)
-      expect(role.title).toMatch(/Only an owner/)
       expect(revoke.title).toMatch(/Only an owner/)
       fireEvent.change(role, { target: { value: 'reviewer' } })
       fireEvent.click(revoke)
     }
-    expect(props.onChangeRole).not.toHaveBeenCalled()
+    await waitFor(() => expect(props.onChangeRole).toHaveBeenCalledTimes(2))
+    expect(props.onChangeRole).toHaveBeenCalledWith('owner-id', 'reviewer')
+    expect(props.onChangeRole).toHaveBeenCalledWith('editor-id', 'reviewer')
     expect(props.onRevoke).not.toHaveBeenCalled()
     const readerRole = screen.getByRole('combobox', { name: 'Role for reader@example.com' })
     expect(Array.from(readerRole.options, option => option.value)).toEqual(['reviewer', 'read-only'])
