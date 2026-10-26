@@ -87,7 +87,7 @@ describe('CockpitTopBand panel focus', () => {
     expect(screen.getByRole('button', { name: /Save \(unavailable/ }).getAttribute('data-reason-code')).toBe(reasonCode(reason))
     expect(screen.getByRole('button', { name: 'Open' }).hasAttribute('data-reason-code')).toBe(false)
   })
-  it.each(RIBBON_TABS.filter((tab) => !tab.reason))('$label: Tab skips CSS-hidden controls and enters the first visible enabled control', ({ id, label }) => {
+  it.each(RIBBON_TABS.filter((tab) => !tab.reason))('$label: Tab leaves intervening controls in native focus order', ({ id, label }) => {
     render(<>
       <CockpitTopBand tab={id} />
       <button>Details</button>
@@ -100,32 +100,32 @@ describe('CockpitTopBand panel focus', () => {
     </>)
     const tab = screen.getByRole('tab', { name: label, exact: true })
     tab.focus()
-    fireEvent.keyDown(tab, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Visible command' }))
+    expect(fireEvent.keyDown(tab, { key: 'Tab' })).toBe(true)
+    expect(document.activeElement).toBe(tab)
   })
 
-  it.each(RIBBON_TABS.filter((tab) => !tab.reason))('$label: Tab reaches More panels with no expanded panel', ({ id, label }) => {
+  it.each(RIBBON_TABS.filter((tab) => !tab.reason))('$label: Tab stays native with no expanded panel', ({ id, label }) => {
     render(<><CockpitTopBand tab={id} /><DraftingRibbon tab={id} visiblePanelCount={0} clusters={[
       { id: 'panel', label: 'Panel', tools: [{ id: 'command', label: 'Command' }] },
     ]} /></>)
     const tab = screen.getByRole('tab', { name: label, exact: true })
     tab.focus()
-    fireEvent.keyDown(tab, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'More panels' }))
+    expect(fireEvent.keyDown(tab, { key: 'Tab' })).toBe(true)
+    expect(document.activeElement).toBe(tab)
   })
 
-  it('Annotate with only unavailable tools focuses the panel itself', () => {
+  it('Annotate with only unavailable tools leaves Tab to the browser', () => {
     render(<><CockpitTopBand tab="annotate" /><button>Details</button><DraftingRibbon tab="annotate" clusters={[
       { id: 'annotation', label: 'Annotation', tools: [{ id: 'text', label: 'Text', disabled: true, reason: 'not in the browser engine yet' }] },
     ]} /></>)
     const tab = screen.getByRole('tab', { name: 'Annotate' })
     tab.focus()
-    fireEvent.keyDown(tab, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('toolbar', { name: 'Drafting tools' }))
+    expect(fireEvent.keyDown(tab, { key: 'Tab' })).toBe(true)
+    expect(document.activeElement).toBe(tab)
     expect(screen.getByRole('button', { name: /Text/ }).disabled).toBe(true)
   })
 
-  it('Tab from Draw skips a disabled tool and the intervening Details chip', () => {
+  it('Tab from Draw preserves the intervening Details button in native order', () => {
     render(<>
       <CockpitTopBand />
       <button>Details</button>
@@ -136,12 +136,12 @@ describe('CockpitTopBand panel focus', () => {
     </>)
     const draw = screen.getByRole('tab', { name: 'Draw' })
     draw.focus()
-    fireEvent.keyDown(draw, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Line' }))
+    expect(fireEvent.keyDown(draw, { key: 'Tab' })).toBe(true)
+    expect(document.activeElement).toBe(draw)
     expect(screen.getAllByRole('tab').filter((tab) => tab.tabIndex === 0)).toEqual([draw])
   })
 
-  it('Tab from Draw skips a disabled first child with tabIndex zero', () => {
+  it('Tab from Draw stays native when the panel contains disabled controls', () => {
     render(<>
       <CockpitTopBand />
       <div id="drafting-ribbon" tabIndex={-1}>
@@ -152,18 +152,18 @@ describe('CockpitTopBand panel focus', () => {
     </>)
     const draw = screen.getByRole('tab', { name: 'Draw' })
     draw.focus()
-    fireEvent.keyDown(draw, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Enabled command' }))
+    expect(fireEvent.keyDown(draw, { key: 'Tab' })).toBe(true)
+    expect(document.activeElement).toBe(draw)
   })
 
-  it('Tab reaches More panels when every panel has collapsed', () => {
+  it('Tab stays native when every panel has collapsed', () => {
     render(<><CockpitTopBand /><DraftingRibbon visiblePanelCount={0} clusters={[
       { id: 'clipboard', label: 'Clipboard', tools: [{ id: 'copy', label: 'Copy' }] },
     ]} /></>)
     const draw = screen.getByRole('tab', { name: 'Draw' })
     draw.focus()
-    fireEvent.keyDown(draw, { key: 'Tab' })
-    expect(document.activeElement).toBe(screen.getByRole('button', { name: 'More panels' }))
+    expect(fireEvent.keyDown(draw, { key: 'Tab' })).toBe(true)
+    expect(document.activeElement).toBe(draw)
   })
 
   it('leaves Shift+Tab native and preserves the existing arrow activation pattern', () => {

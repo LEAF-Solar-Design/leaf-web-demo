@@ -1348,6 +1348,8 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-tool-nodes", "server tests/test_lab_tool_nodes.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_tool_nodes.py"), 58),
+        Suite("server-lab-tool-manifests", "server tests/test_lab_tool_manifests.py", "pytest", SERVER,
+              _py_pytest("tests/test_lab_tool_manifests.py"), 41),
         Suite("server-broker-lab-sandbox", "server tests/test_broker_lab_sandbox.py", "pytest", SERVER,
               _py_pytest("tests/test_broker_lab_sandbox.py"), 21),
         Suite("server-lab-diff", "server tests/test_lab_diff.py", "pytest", SERVER,
