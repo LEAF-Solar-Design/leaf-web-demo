@@ -1273,6 +1273,7 @@
   position: absolute; inset: 0; overflow: hidden; color: rgba(240, 242, 240, .86);
   font-family: var(--font-sans);
 }
+.studio-ground-device { color: color-mix(in srgb, var(--leaf-ink) 86%, transparent); }
 .studio-ground-board {
   background:
     linear-gradient(rgba(240, 242, 240, .045) 1px, transparent 1px) 0 0 / 100% 48px,
