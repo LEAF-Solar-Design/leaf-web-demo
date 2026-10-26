@@ -54,14 +54,15 @@ it('shows feedback when starting sign-in fails', async () => {
 
 function CallbackHarness({ callback, onReload, scope = 'first' }) {
   const [pending, setAuthCallbackPending] = useState(true)
-  const [message, setAuthError] = useState('')
+  const [failure, setAuthFailure] = useState(null)
+  const message = failure?.message
   const beginSignIn = useAsyncScope([scope])
   const callbackPathRef = useRef(scope)
-  useEffect(() => Function('callbackPathRef', 'path', 'setAuthCallbackPending',
-    `return (${retireBody})()`)(callbackPathRef, scope, setAuthCallbackPending), [scope])
-  useEffect(() => Function('authCallbackPending', 'handleRedirectCallback', 'setAuthCallbackPending', 'setAuthError', 'humanizeError', 'window', 'beginSignIn',
-    `return (${returnBody})()`)(pending, callback, setAuthCallbackPending, setAuthError, humanizeError,
-    { location: { reload: onReload } }, beginSignIn), [pending, callback, onReload, beginSignIn])
+  useEffect(() => Function('callbackPathRef', 'path', 'setAuthCallbackPending', 'setAuthFailure',
+    `return (${retireBody})()`)(callbackPathRef, scope, setAuthCallbackPending, setAuthFailure), [scope])
+  useEffect(() => Function('authCallbackPending', 'handleRedirectCallback', 'setAuthCallbackPending', 'setAuthFailure', 'humanizeError', 'window', 'beginSignIn', 'callbackPathRef',
+    `return (${returnBody})()`)(pending, callback, setAuthCallbackPending, setAuthFailure, humanizeError,
+    { location: { reload: onReload } }, beginSignIn, callbackPathRef), [pending, callback, onReload, beginSignIn])
   return message ? <p role="alert">{message}</p> : pending ? <p>Completing sign in</p> : null
 }
 
@@ -156,7 +157,7 @@ it.each(['success', 'failure', 'timeout'])('retires the App callback %s after it
 function LoginHarness({ scope = 'first', release, login, showToast, retry = false }) {
   const beginSignIn = useAsyncScope([scope])
   const onClick = retry
-    ? Function('beginSignIn', 'login', 'setAuthError', 'humanizeError', `return (${retryBody})`)(beginSignIn, login, showToast, humanizeError)
+    ? Function('beginSignIn', 'login', 'setAuthFailure', 'humanizeError', 'callbackPathRef', `return (${retryBody})`)(beginSignIn, login, showToast, humanizeError, { current: scope })
     : Function('projectModeRef', 'checkout', 'login', 'showToast', 'humanizeError', 'beginSignIn', `return (${loginBody})`)(
       { current: false }, { actions: { getCapability: () => true, release } }, login, showToast, humanizeError, beginSignIn)
   return <button onClick={onClick}>Sign in</button>

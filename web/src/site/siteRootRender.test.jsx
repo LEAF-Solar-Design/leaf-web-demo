@@ -85,6 +85,40 @@ describe('SiteRoot renders the one studio shell', () => {
     expect(window.location.pathname).toBe(path)
   }, 20_000)
 
+  it.each(['reject', 'timeout'])('drops the callback error page (%s) when history navigates to another path', async outcome => {
+    window.history.replaceState({}, '', '/?code=x&state=y')
+    const auth = await import('../auth.js')
+    vi.spyOn(auth, 'isAuthRedirectCallback').mockReturnValue(true)
+    const callback = vi.spyOn(auth, 'handleRedirectCallback').mockImplementation(() => (outcome === 'reject'
+      ? Promise.reject(new Error('SDK load failed')) : new Promise(() => {})))
+    const { default: SiteRoot } = await import('./SiteRoot.jsx')
+    vi.useFakeTimers()
+    render(<SiteRoot />)
+    await act(async () => { await vi.advanceTimersByTimeAsync(outcome === 'timeout' ? 20000 : 0) })
+    expect(screen.getByRole('alert').textContent).toBe("Sign-in couldn't be completed.")
+    expect(screen.queryByTestId('app-stub')).toBeNull()
+
+    act(() => {
+      window.history.pushState({}, '', '/try')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull()
+    expect(screen.queryByText('Completing sign in')).toBeNull()
+    vi.useRealTimers()
+    expect(await screen.findByTestId('app-stub')).toBeTruthy()
+    expect(window.location.pathname).toBe('/try')
+
+    // Forward/Back to the failed route never resurrects the retired error page.
+    act(() => {
+      window.history.replaceState({}, '', '/')
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByTestId('app-stub')).toBeTruthy()
+    expect(callback).toHaveBeenCalledTimes(1)
+  }, 20_000)
+
   it('removes callback parameters before saving the page URL for a sign-in retry after timeout', async () => {
     window.history.replaceState({ page: 'drawing' }, '', '/app?surface=cad&code=x&state=y&drawing=roof#details')
     const auth = await import('../auth.js')

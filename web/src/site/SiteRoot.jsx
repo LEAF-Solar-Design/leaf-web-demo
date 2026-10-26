@@ -85,8 +85,11 @@ export default function SiteRoot() {
   // Armed by the callback QUERY on ANY path, not just /try: the redirect_uri is
   // the bare origin, so /try is the one landing this never sees. See authBoot.js.
   const [authCallbackPending, setAuthCallbackPending] = useState(shouldDeferForAuthCallback)
-  const [authError, setAuthError] = useState('')
+  // The failure is bound to the path that produced it, so the error page can
+  // never outlive its callback route (Back/Forward shows the destination).
+  const [authFailure, setAuthFailure] = useState(null)
   const { path, hash } = useRoute()
+  const authError = authFailure && authFailure.path === path ? authFailure.message : ''
   const scene = bootApp ? 'app' : sceneForPath(path)
   // Sheets leave for the marketing hub on app-only hosts, keeping a valid
   // destination. Like SheetsPage, prefer a recognized path code to the hash.
@@ -113,6 +116,7 @@ export default function SiteRoot() {
     if (callbackPathRef.current === path) return
     callbackPathRef.current = path
     setAuthCallbackPending(false)
+    setAuthFailure(null)
   }, [path])
 
   useEffect(() => {
@@ -123,14 +127,14 @@ export default function SiteRoot() {
       if (!live || !current()) return
       live = false
       clearTimeout(timer)
-      setAuthError(humanizeError("Sign-in couldn't be completed."))
+      setAuthFailure({ message: humanizeError("Sign-in couldn't be completed."), path: callbackPathRef.current })
       setAuthCallbackPending(false)
     }
     const timer = setTimeout(fail, 20000)
     Promise.resolve().then(() => handleRedirectCallback({ isCurrent: () => live && current() })).then((signedIn) => {
       if (!live || !current()) return
       clearTimeout(timer)
-      if (signedIn) { live = false; setAuthError(''); window.location.reload() }
+      if (signedIn) { live = false; setAuthFailure(null); window.location.reload() }
       else fail()
     }).catch(fail)
     return () => {
@@ -234,7 +238,7 @@ export default function SiteRoot() {
         await login({ isCurrent: current })
       } catch {
         if (!current()) return
-        setAuthError(humanizeError("Sign-in couldn't start. Check your connection and try again."))
+        setAuthFailure({ message: humanizeError("Sign-in couldn't start. Check your connection and try again."), path: callbackPathRef.current })
       }
     }}>Sign in</button>
   </div>
