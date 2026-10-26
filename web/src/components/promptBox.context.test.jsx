@@ -98,13 +98,13 @@ describe('visible selection context', () => {
 })
 
 describe('build drawing egress', () => {
-  it('shows the egress line only after choosing build with drawing content', () => {
+  it('hands build to the author flow without leaving an egress claim on ordinary prompts', () => {
     const onOpenAuthor = vi.fn()
     const { container } = mount({ onOpenAuthor })
     expect(screen.queryByTestId('build-egress')).toBeNull()
     pickScope(container, 'build')
     expect(onOpenAuthor).toHaveBeenCalledTimes(1)
-    expect(screen.getByTestId('build-egress').textContent).toBe('Sends the drawing to Claude')
+    expect(screen.queryByTestId('build-egress')).toBeNull()
     expect(screen.queryByRole('listbox', { name: 'Search results' })).toBeNull()
     pickScope(container, 'act')
     expect(screen.queryByTestId('build-egress')).toBeNull()

@@ -4,11 +4,6 @@
       "file": "src/components/AuthorPanel.jsx",
       "text": "—",
       "reason": "pre-existing on main; fixed by follow-up slice S1-208b after the owning slice merges"
-    },
-    {
-      "file": "src/components/PromptBox.jsx",
-      "text": " — ${name} wasn’t ingested",
-      "reason": "pre-existing on main; fixed by follow-up slice S1-208b after the owning slice merges"
     }
   ]
 }
