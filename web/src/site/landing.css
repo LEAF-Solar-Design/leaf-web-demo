@@ -954,8 +954,9 @@
   .tc-rail-tabs button { min-width: 0; }
   .tc-rail-foot { display: none; }
   .tc-bar-wrap { left: 8px; right: 8px; bottom: calc(50vh - 194px); }
-  .tc-bar .tc-bar-input-row { padding: 11px 12px 8px; }
+  .tc-bar .tc-bar-input-row { padding: 0 12px; }
   .tc-bar .bar-input .tc-bar-input { min-width: 0; font-size: calc(var(--leaf-size-body) + 1px); }
+  .tc-bar .bar-input .tc-bar-input { min-height: 44px; padding: 12px 0; box-sizing: border-box; }
   .tc-bar .bar-controls { padding: 0 10px 9px; }
   .tc-bar .bar-controls :is(.tc-bar-proj, .tc-bar-key) { display: none; }
   /* Carried item (round 2): hiding the project label and keycap above used to
