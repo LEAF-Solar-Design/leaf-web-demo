@@ -2368,25 +2368,20 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 /* (.tc-product-cad-link rules removed: the frame no longer renders an
    "Open ..." button — the tabs are the navigation.) */
 
-/* --- Operator console (Lane E) token re-pin ------------------------------
-   operator.css is a deliberately DARK probe-gated panel (its --panel-bg
-   fallback #101418 always fires; nothing defines --panel-bg) that consumes
-   the shared token vocabulary and inherits body color. Under the paper
-   identity that composed graphite text on a near-black panel. Re-pin the
-   consumed tokens to the dark vocabulary and set the text color explicitly;
-   emitted after operator.css (main.jsx imports styles.css last), so the
-   equal-specificity color declaration wins by source order. */
+/* --- Operator console (Lane E) token re-pin: the console sets data-leaf-theme="stage", so
+   the shared token vocabulary it consumes maps onto the v1 Stage roles here (muted-2 takes ink-muted: #71717a was
+   3.8:1 on the panel). Emitted after operator.css; the doubled-class color rule wins by specificity. */
 .operator-console {
-  --muted: #a1a1aa;
-  --muted-2: #71717a;
-  --primary: #22c55e;
-  --accent-tint: rgba(34, 197, 94, .14);
-  --status-warning: #e7b643;
+  --muted: var(--leaf-ink-muted);
+  --muted-2: var(--leaf-ink-muted);
+  --primary: var(--leaf-accent);
+  --accent-tint: var(--leaf-accent-tint);
+  --status-warning: var(--leaf-warn);
   /* ledger atoms borrowed by the de-JSON panels consume these two (panel
      round 2): the :root paper values were an invisible hover and a light
      hairline on the #101418 panel */
-  --hairline: #262b31;
-  --hover-tint: rgba(255, 255, 255, .05);
+  --hairline: var(--leaf-line);
+  --hover-tint: var(--leaf-hover-tint);
   --font-mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
 /* the session transcript rows carry two columns, not JobRail's four */
@@ -2394,4 +2389,4 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 /* doubled class = (0,2,0): beats operator.css's `color: inherit` (0,1,0) by
    SPECIFICITY, not stylesheet order — dev and build inject CSS in different
    orders, so an order-dependent tie is not a fix */
-.operator-console.operator-console { color: #f4f4f5; }
+.operator-console.operator-console { color: var(--leaf-ink); }
