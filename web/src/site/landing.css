@@ -933,7 +933,7 @@
   }
   .stage-root[data-scene="tool"] .lp-top-slot { height: 24px; }
   .tc-topcluster {
-    top: 32px; left: 0; right: 0; height: 36px; justify-content: flex-start;
+    top: 28px; left: 0; right: 0; height: 44px; justify-content: flex-start;
     gap: 8px; padding: 0 10px; overflow-x: auto;
   }
   .tc-version { display: none; }
