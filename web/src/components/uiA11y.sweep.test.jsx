@@ -21,6 +21,59 @@ const noticeEffectStart = appSource.indexOf('  useEffect(() => {', appSource.ind
 const noticeEffectEnd = appSource.indexOf('\n  }, [', noticeEffectStart)
 const runNoticeEffect = new Function('context', 'with (context) {\n'
   + appSource.slice(noticeEffectStart, noticeEffectEnd) + '\n}')
+const noticeActionStart = appSource.indexOf('useCallback(', appSource.indexOf('  const versionViewAction ='))
+  + 'useCallback('.length
+const noticeActionEnd = appSource.indexOf('\n  }, [', noticeActionStart) + '\n  }'.length
+const makeNoticeViewAction = new Function('context', 'with (context) { return ('
+  + appSource.slice(noticeActionStart, noticeActionEnd) + ') }')
+
+it('S1-68 retained View stays enabled on another console drawing and opens its recorded version', () => {
+  const before = window.location.href
+  const preview = vi.fn(), show = vi.fn()
+  const bus = createNotificationBus()
+  let identity
+  const action = makeNoticeViewAction({
+    noticeMountedRef: { current: true }, noticeTargetRef: { current: { drawingId: 'demo' } },
+    noticeViewRef: { current: { preview, show } },
+    isScopeCurrent: () => identity.isScopeCurrent(), requestNoticeVersionView,
+    selectNoticeDrawing: id => identity.selectNoticeDrawing(id),
+  })('roof', 2)
+  bus.push({ text: 'Roof version saved', action })
+  function Probe({ drawingState, versionBusy }) {
+    identity = useDrawingIdentity()
+    useEffect(() => {
+      runNoticeEffect({ peekNoticeVersionView, takeNoticeVersionView,
+        REQUESTED_DRAWING_ID: identity.drawingId, selectNoticeDrawing: identity.selectNoticeDrawing,
+        drawingState, versionBusy, onPreviewVersion: preview, viewViewer: show })
+    }, [identity, drawingState, versionBusy])
+    return <JobInbox bus={bus} />
+  }
+  const tree = (drawingState = { drawing_id: 'demo' }, versionBusy = false) => (
+    <DrawingIdentityProvider mode="console" search="" publicDemo={false} liveDemo={false}
+      readAuthToken={() => null}>
+      <Probe drawingState={drawingState} versionBusy={versionBusy} />
+    </DrawingIdentityProvider>
+  )
+  try {
+    const view = render(tree())
+    expect(identity.drawingId).toBe('demo')
+    const button = screen.getByRole('button', { name: 'View' })
+    expect(button).toBeEnabled()
+    fireEvent.click(button)
+    expect(identity).toMatchObject({ drawingId: 'roof', source: 'roof', origin: 'stored' })
+    expect(preview).not.toHaveBeenCalled()
+    expect(peekNoticeVersionView()).toMatchObject({ drawingId: 'roof', version: 2 })
+    view.rerender(tree({ drawing_id: 'roof' }, true))
+    expect(preview).not.toHaveBeenCalled()
+    view.rerender(tree({ drawing_id: 'roof' }))
+    expect(preview).toHaveBeenCalledExactlyOnceWith(2)
+    expect(show).toHaveBeenCalledOnce()
+    expect(peekNoticeVersionView()).toBeNull()
+  } finally {
+    takeNoticeVersionView('roof')
+    window.history.replaceState({}, '', before)
+  }
+})
 
 it('S1-68 View selects the operator roof from the demo console and previews v2 once ready', () => {
   const before = window.location.href

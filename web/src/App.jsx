@@ -2119,19 +2119,19 @@ export default function App() {
   const noticeViewRef = useRef(null)
   noticeViewRef.current = { preview: onPreviewVersion, show: viewViewer }
   const versionViewAction = useCallback((drawingId, version) => {
-    const disabledReason = () => !isScopeCurrent()
-      || (noticeMountedRef.current && noticeTargetRef.current?.drawingId !== drawingId)
-      ? 'Open the original drawing to view this version.' : null
+    const disabledReason = () => !drawingId || version == null
+      ? 'This notice has no saved drawing or version to view.' : null
     return { label: 'View', disabledReason, onClick: () => {
-      if (disabledReason()) return
-      if (!noticeMountedRef.current) {
+      if (disabledReason() || !isScopeCurrent()) return
+      if (!noticeMountedRef.current || noticeTargetRef.current?.drawingId !== drawingId) {
         requestNoticeVersionView(drawingId, version, isScopeCurrent)
+        if (noticeMountedRef.current) selectNoticeDrawing(drawingId)
         return
       }
       void noticeViewRef.current.preview(version)
       noticeViewRef.current.show()
     } }
-  }, [isScopeCurrent])
+  }, [isScopeCurrent, selectNoticeDrawing])
   useEffect(() => {
     const pending = peekNoticeVersionView()
     if (!pending) return
