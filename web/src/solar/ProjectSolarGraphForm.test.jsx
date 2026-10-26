@@ -122,6 +122,15 @@ function fillGroupNumbers() {
     fireEvent.change(screen.getByRole('spinbutton', { name: label }), { target: { value: '1' } })
   }
 }
+it.each([true, false])('W1C-31 reports the busy state when panel-group submission is unavailable (busy=%s)', (busy) => {
+  const h = panelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} busy={busy} onProjectSubmit={undefined} />)
+  const inProgress = 'A Solar run is in progress. Wait for it to finish.'
+  const unavailable = 'Project Solar submission is unavailable in this view.'
+  expect(screen.getByText(busy ? inProgress : unavailable)).toBeTruthy()
+  expect(screen.queryByText(busy ? unavailable : inProgress)).toBeNull()
+  expect(action().disabled).toBe(true)
+})
 it('W1C-26 renders angle proposals and requires all shared dimensions before preview and submission', async () => {
   const h = panelGroupHarness()
   render(<ProjectSolarGraphForm {...h.props} />)
@@ -864,7 +873,7 @@ it('R13C-49 a replaced receipt predicate withdraws published feedback', async ()
     mounted.unmount()
   }
 })
-it('R13C-50 a run in progress does not hide an expired receipt', async () => {
+it('R13C-50 a run in progress keeps expired receipt feedback hidden', async () => {
   const h = harness()
   const mounted = render(<ProjectSolarGraphForm {...h.props} />)
   await submitAndWait(h)
@@ -878,8 +887,11 @@ it('R13C-50 a run in progress does not hide an expired receipt', async () => {
   receiptCurrent = false
   mounted.rerender(<ProjectSolarGraphForm {...h.props} projectOutcome={projectOutcome} busy />)
   expect(screen.queryByTestId('project-solar-graph-feedback')).toBe(null)
+  expect(screen.getByText('A Solar run is in progress. Wait for it to finish.')).not.toBe(null)
+  expect(screen.queryByText('The drawing or session changed. Refresh before continuing.')).toBe(null)
+  mounted.rerender(<ProjectSolarGraphForm {...h.props} projectOutcome={projectOutcome} />)
   expect(screen.getByText('The drawing or session changed. Refresh before continuing.')).not.toBe(null)
-  expect(screen.queryByText('A Solar run is in progress. Wait for it to finish.')).toBe(null)
+  expect(screen.queryByTestId('project-solar-graph-feedback')).toBe(null)
   mounted.unmount()
 })
 it('R13C-51 a completion job id is read once', async () => {

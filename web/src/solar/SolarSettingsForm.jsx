@@ -221,8 +221,8 @@ function ProjectSettingsForContext(props) {
   }
   const armed = scope.armed && scope.armed.generation === scope.generation && scope.armed.isCurrent()
     && scope.armed.candidate.fingerprint === fingerprint;
-  const reason = state?.mode === 'refused' ? state.reason : !available ? 'submit_unavailable'
-    : busy || submitting ? 'run_in_progress' : result && !result.ok ? result.reason
+  const reason = state?.mode === 'refused' ? state.reason : busy || submitting ? 'run_in_progress'
+    : !available ? 'submit_unavailable' : result && !result.ok ? result.reason
       : !armed ? (publication?.scope === scope && publication.generation === scope.generation
         ? publication.reason || 'preview_required' : 'preview_required') : null;
   const traceCode = {

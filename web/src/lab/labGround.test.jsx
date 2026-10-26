@@ -197,7 +197,7 @@ it('retains the workbench and all views while propagating hidden', async () => {
   await findCanvas()
   const workbench = container.querySelector('.lab-workbench')
   const views = [...container.querySelectorAll('[data-lab-view]')]
-  expect(views).toHaveLength(5)
+  expect(views).toHaveLength(6)
   expect(views[0]).not.toHaveAttribute('hidden')
   rerender(<LabGround active={false} />)
   expect(container.querySelector('.lab-workbench')).toBe(workbench)
