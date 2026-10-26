@@ -19,22 +19,18 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 const SAMPLE_COUNT = 20
 const DOCUMENT = 'lab-sse-proof'
 function proofGraph() {
-  // server/lab_evaluate.py dispatches through lab_ops.has_operator:
-  // this is server/lab_ops.py's OPERATOR_IDS set.
-  const knownBuiltins = new Set([
-    'constant', 'identity', 'field', 'select', 'filter', 'sort', 'take', 'count',
-    'sum', 'mean', 'min', 'max', 'add', 'subtract', 'multiply', 'divide',
-    'latest', 'window', 'collect',
-  ])
-  // server/tests/test_lab_worker.py::test_finishes_values_pins_and_status
-  // evaluates operator-chain (including constant) and asserts durable value events.
+  // The proof times the stream, not evaluation. Staging admits graphs against
+  // contract/fixtures/lab/blocks.json, whose builtin ids are not server operators
+  // (server/lab_evaluate.py has_operator), so the block's value is the
+  // server-execution-refused marker. The worker still appends one value event per
+  // evaluated block (server/lab_worker.py on_block), and that event is the frame timed.
   const fixture = JSON.parse(readFileSync(new URL('../../../contract/fixtures/lab/blocks.json', import.meta.url), 'utf8'))
   const manifest = fixture.manifests.find((item) =>
-    item.effect === 'pure' && item.kind === 'builtin' && knownBuiltins.has(item.id) &&
+    item.effect === 'pure' && item.kind === 'builtin' &&
     Object.values(item.inputs).every((input) => !input.required || input.has_default) &&
     Object.keys(item.outputs).length > 0)
   if (!manifest) {
-    throw new Error('Lab SSE proof requires a pure known builtin in contract/fixtures/lab/blocks.json with no required inputs lacking defaults and at least one output; no eligible manifest found')
+    throw new Error('Lab SSE proof requires a pure builtin in contract/fixtures/lab/blocks.json with no required inputs lacking defaults and at least one output; no eligible manifest found')
   }
   const settings = Object.fromEntries(Object.entries(manifest.settings_schema.properties || {})
     .filter(([, schema]) => Object.hasOwn(schema, 'default'))
