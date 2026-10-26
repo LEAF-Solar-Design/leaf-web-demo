@@ -76,6 +76,12 @@ export function pendingRunAccount(storage = browserStorage()) {
   } catch { return null }
 }
 
+// Anonymous records are browser-wide, so every signed-out tab may see them.
+export function canSeePendingRun(record, currentAccount) {
+  const account = typeof currentAccount === 'string' && currentAccount ? currentAccount : null
+  return !!record && record.account === account
+}
+
 export function readPendingRun(storage = browserStorage(), now = Date.now(), account = pendingRunAccount(storage)) {
   let raw
   try { raw = storage?.getItem(PENDING_RUN_KEY) } catch { return null }
@@ -105,7 +111,7 @@ export function readPendingRun(storage = browserStorage(), now = Date.now(), acc
       window.sessionStorage.removeItem(PENDING_RUN_SESSION_KEY)
     } catch { return null }
   }
-  if (record.account !== account) {
+  if (!canSeePendingRun(record, account)) {
     clearPendingRun(storage)
     return null
   }
@@ -189,17 +195,15 @@ export default function useJobController({
   const pendingAccountRef = useRef(pendingRunAccount(storage))
   const currentAccount = pendingRunAccount(storage)
   if (currentAccount) pendingAccountRef.current = currentAccount
-  const publishPendingRun = useCallback((expectedAccount = null, { sameTab = false } = {}) => {
+  const publishPendingRun = useCallback(() => {
     const target = storageRef.current ?? browserStorage()
-    const account = pendingRunAccount(target) ?? expectedAccount
+    const account = pendingRunAccount(target)
     let owner = null
     try {
       owner = JSON.parse(target?.getItem(PENDING_RUN_KEY) || 'null')?.account ?? null
     } catch { /* readPendingRun validates and clears malformed records below */ }
     let scoped = null
-    if (!account) {
-      if (sameTab && owner === null) scoped = readPendingRun(target, Date.now(), null)
-    } else if (typeof owner === 'string' && owner !== account) {
+    if (typeof owner === 'string' && !canSeePendingRun({ account: owner }, account)) {
       readPendingRun(target, Date.now(), owner)
     } else {
       scoped = readPendingRun(target, Date.now(), account)
@@ -490,7 +494,7 @@ export default function useJobController({
     if (readsPausedRef.current) {
       if (submission && pendingIntentRef.current === intent) {
         const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
-        if (saved) publishPendingRun(runAccount, { sameTab: true })
+        if (saved) publishPendingRun()
       }
       setAuth(true)
       return null
@@ -526,7 +530,7 @@ export default function useJobController({
         keepPointer = true
       } else if ((sequenceRef.current === sequence || supersededByPause) && pendingIntentRef.current === intent && submission) {
         const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
-        if (saved) publishPendingRun(runAccount, { sameTab: true })
+        if (saved) publishPendingRun()
       }
       setAuth(true)
     }

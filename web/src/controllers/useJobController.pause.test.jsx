@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
-import useJobController, { PENDING_RUN_KEY, PENDING_RUN_LOGOUT_KEY, readInflightJob, readPendingRun, savePendingRun } from './useJobController.js'
+import useJobController, { PENDING_RUN_KEY, PENDING_RUN_LOGOUT_KEY, canSeePendingRun, readInflightJob, readPendingRun, savePendingRun } from './useJobController.js'
 import controllerSource from './useJobController.js?raw'
 import * as api from '../api.js'
 import * as auth from '../auth.js'
@@ -33,6 +33,20 @@ function renderController({ services, storage, readsPaused = false, onAuthRequir
 function accountToken(sub) {
   return `header.${btoa(JSON.stringify({ iss: 'studio', sub }))}.signature`
 }
+
+it.each([
+  [null, null, false],
+  [{ account: null }, null, true],
+  [{ account: 'studio:designer-a' }, 'studio:designer-a', true],
+  [{ account: 'studio:designer-a' }, null, false],
+  [{ account: 'studio:designer-a' }, 'studio:designer-b', false],
+  [{ account: null }, 'studio:designer-a', false],
+  [{ account: null }, undefined, true],
+  [{ account: null }, '', true],
+  [{ account: null }, 42, true],
+])('checks pending-run visibility for record %j and account %j', (record, account, visible) => {
+  expect(canSeePendingRun(record, account)).toBe(visible)
+})
 
 it('keeps saved inputs across a cross-tab token expiry and restores them for the same account', async () => {
   const storage = memoryStorage()
@@ -98,7 +112,7 @@ it('keeps saved account inputs hidden when a different account signs in after to
   expect(hook.result.current.pendingRun).toBeNull()
 })
 
-it('keeps same-tab pending inputs visible after a 401', async () => {
+it('hides saved account inputs after a 401 until the same account signs back in', async () => {
   let unauthorized
   vi.spyOn(api, 'subscribeUnauthorized').mockImplementation(callback => { unauthorized = callback; return () => {} })
   const storage = memoryStorage()
@@ -121,7 +135,7 @@ it('keeps same-tab pending inputs visible after a 401', async () => {
     await run
   })
   const saved = storage.getItem(PENDING_RUN_KEY)
-  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+  expect(hook.result.current.pendingRun).toBeNull()
   expect(JSON.parse(saved).account).toBe('studio:designer-a')
   act(() => {
     storage.setItem('leaf.jwt', token)
@@ -130,7 +144,7 @@ it('keeps same-tab pending inputs visible after a 401', async () => {
   expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
 })
 
-it('shows an anonymous 401 save only in the same tab', async () => {
+it('shows an anonymous 401 save in every signed-out tab and retains it after token events', async () => {
   const sameTabStorage = memoryStorage()
   const pending = deferred()
   const sameTab = renderController({ services: { listJobs: vi.fn(async () => []) }, storage: sameTabStorage })
@@ -145,6 +159,9 @@ it('shows an anonymous 401 save only in the same tab', async () => {
     await run
   })
   expect(sameTab.result.current.pendingRun.params).toEqual({ panels: 6 })
+  const otherTab = renderController({ services: {}, storage: sameTabStorage, readsPaused: true })
+  expect(otherTab.result.current.pendingRun.params).toEqual({ panels: 6 })
+  const saved = sameTabStorage.getItem(PENDING_RUN_KEY)
 
   const crossTabStorage = memoryStorage()
   savePendingRun('count', { panels: 10 }, crossTabStorage)
@@ -153,8 +170,44 @@ it('shows an anonymous 401 save only in the same tab', async () => {
   act(() => {
     window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: null }))
   })
-  expect(crossTab.result.current.pendingRun).toBeNull()
+  expect(crossTab.result.current.pendingRun.params).toEqual({ panels: 10 })
   expect(crossTabStorage.getItem(PENDING_RUN_KEY)).not.toBeNull()
+  expect(otherTab.result.current.pendingRun.params).toEqual({ panels: 6 })
+  expect(sameTabStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
+})
+
+it('hides a 401 save after another tab removes the token until the same account returns', async () => {
+  const storage = memoryStorage()
+  const token = accountToken('designer-a')
+  storage.setItem('leaf.jwt', token)
+  const pending = deferred()
+  const hook = renderController({ services: { listJobs: vi.fn(async () => []) }, storage })
+  let run
+  act(() => {
+    run = hook.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { panels: 8 } },
+    })
+  })
+  act(() => {
+    storage.removeItem('leaf.jwt')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', oldValue: token, newValue: null }))
+  })
+  expect(hook.result.current.pendingRun).toBeNull()
+  expect(storage.getItem(PENDING_RUN_LOGOUT_KEY)).toBeNull()
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  expect(hook.result.current.pendingRun).toBeNull()
+  const saved = storage.getItem(PENDING_RUN_KEY)
+  expect(JSON.parse(saved).account).toBe('studio:designer-a')
+  expect(JSON.parse(saved).params).toEqual({ panels: 8 })
+  act(() => {
+    storage.setItem('leaf.jwt', token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
+  })
+  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+  expect(storage.getItem(PENDING_RUN_KEY)).toBe(saved)
 })
 
 it('routes every non-null pending-run publication through the identity guard', () => {
