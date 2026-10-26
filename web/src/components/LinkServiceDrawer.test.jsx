@@ -23,6 +23,7 @@ const baseProps = (over = {}) => ({
   onToggle: noop,
   onRegister: vi.fn(),
   onConnect: vi.fn(),
+  onRefresh: vi.fn(),
   onHealth: vi.fn(),
   onUnlink: vi.fn(),
   ...over,
@@ -75,11 +76,39 @@ describe('LinkServiceDrawer', () => {
     })} />)
 
     expect(screen.getByText('Billing tool')).toBeInTheDocument()
-    expect(screen.getAllByText('Sign in needed')).toHaveLength(3)
+    expect(screen.getAllByText('Sign in needed')).toHaveLength(2)
     expect(screen.getByText('Roof scanner')).toBeInTheDocument()
     expect(screen.getByText('Connected')).toBeInTheDocument()
     expect(screen.getByText('Flaky server')).toBeInTheDocument()
+    expect(screen.getByText('Sign-in failed, try again')).toBeInTheDocument()
     expect(screen.getByText('Mid-flight')).toBeInTheDocument()
+  })
+
+  it('refreshes registry authorization on return from sign-in and shows Connected', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)
+    const onRefresh = vi.fn().mockResolvedValue([server({ state: 'connected' })])
+    try {
+      render(<LinkServiceDrawer {...baseProps({
+        servers: [server()],
+        onConnect: vi.fn().mockResolvedValue({ authorize_url: 'https://as.example.test/authorize' }),
+        onRefresh,
+      })} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+      await waitFor(() => expect(popup.location.replace).toHaveBeenCalled())
+      fireEvent.focus(window)
+      await waitFor(() => expect(onRefresh).toHaveBeenCalledTimes(1))
+      expect(await screen.findByText('Connected', { selector: '.state' })).toBeInTheDocument()
+    } finally {
+      openSpy.mockRestore()
+    }
+  })
+
+  it('does not hide a persisted registry sign-in failure', () => {
+    render(<LinkServiceDrawer {...baseProps({ servers: [server({ state: 'error' })] })} />)
+    expect(screen.getByText('Sign-in failed, try again', { selector: '.state' })).toBeInTheDocument()
+    expect(screen.queryByText('Sign in needed', { selector: '.state' })).not.toBeInTheDocument()
   })
 
   it('Connect reserves a tab before awaiting the sign-in URL and then navigates it', async () => {
@@ -111,6 +140,42 @@ describe('LinkServiceDrawer', () => {
       expect(openSpy).toHaveBeenCalledWith('about:blank', '_blank')
       expect(popup.close).not.toHaveBeenCalled()
       expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    } finally {
+      openSpy.mockRestore()
+    }
+  })
+
+  it('opens and keeps a loopback HTTP sign-in URL', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)
+    try {
+      render(<LinkServiceDrawer {...baseProps({
+        servers: [server()],
+        onConnect: vi.fn().mockResolvedValue({ authorize_url: 'http://127.0.0.1:8765/callback' }),
+      })} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+      await waitFor(() => expect(popup.location.replace).toHaveBeenCalledWith('http://127.0.0.1:8765/callback'))
+      expect(popup.close).not.toHaveBeenCalled()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    } finally {
+      openSpy.mockRestore()
+    }
+  })
+
+  it('rejects and closes a non-loopback HTTP sign-in URL', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)
+    try {
+      render(<LinkServiceDrawer {...baseProps({
+        servers: [server()],
+        onConnect: vi.fn().mockResolvedValue({ authorize_url: 'http://signin.example.test/authorize' }),
+      })} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+      expect(await screen.findByRole('alert')).toHaveTextContent('The service provided an unsafe sign-in link. Try Connect again.')
+      expect(popup.location.replace).not.toHaveBeenCalled()
+      expect(popup.close).toHaveBeenCalledTimes(1)
     } finally {
       openSpy.mockRestore()
     }

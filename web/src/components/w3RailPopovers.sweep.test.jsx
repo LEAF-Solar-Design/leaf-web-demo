@@ -113,9 +113,14 @@ describe('w3 monitor and account popovers', () => {
   })
 
   it('rechecks reachability after returning without overriding authorization', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(popup)
     const onHealth = vi.fn().mockResolvedValue({ state: 'connecting' })
-    render(<LinkServiceDrawer {...drawerProps} servers={[service]} onHealth={onHealth} />)
+    const onConnect = vi.fn().mockResolvedValue({ authorize_url: 'https://signin.test' })
+    render(<LinkServiceDrawer {...drawerProps} servers={[service]} onConnect={onConnect} onHealth={onHealth} />)
     await waitFor(() => expect(screen.getByText('Connection checked: Reachable')).toBeInTheDocument())
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    await waitFor(() => expect(popup.location.replace).toHaveBeenCalledWith('https://signin.test/'))
     onHealth.mockResolvedValue({ state: 'connected' })
     fireEvent.focus(window)
     await waitFor(() => expect(onHealth).toHaveBeenCalledTimes(2))

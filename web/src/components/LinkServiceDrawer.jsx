@@ -30,8 +30,16 @@ import { humanizeError } from '../errorHumanize.js'
 // off a server record — never a spread, never a raw dump — so an upstream
 // tool name or a credentialed URL riding along in a hostile payload has no
 // path to the DOM even if a record carried one.
-const authorizationState = (server) => (server.state === 'connected' ? 'connected' : 'sign-in-needed')
+const authorizationState = (server) => (
+  server.state === 'connected' ? 'connected'
+    : server.state === 'error' ? 'sign-in-failed'
+      : 'sign-in-needed'
+)
 const reachabilityState = (result) => (result?.state === 'error' ? 'unreachable' : 'reachable')
+const isAllowedAuthorizationUrl = (url) => (
+  url.protocol === 'https:'
+  || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))
+)
 
 export default function LinkServiceDrawer({
   mock,
@@ -43,6 +51,7 @@ export default function LinkServiceDrawer({
   onToggle,
   onRegister,
   onConnect,
+  onRefresh,
   onHealth,
   onUnlink,
 }) {
@@ -52,6 +61,7 @@ export default function LinkServiceDrawer({
   const [connectErrors, setConnectErrors] = useState({})
   const [healthResults, setHealthResults] = useState({})
   const [registerError, setRegisterError] = useState(null)
+  const [refreshedServers, setRefreshedServers] = useState(null)
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const dialogRef = useRef(null)
@@ -60,8 +70,11 @@ export default function LinkServiceDrawer({
   const healthGeneration = useRef({})
   const automaticallyCheckedIds = useRef(new Set())
   const drawerOpenRef = useRef(open)
+  const authorizationTabOpened = useRef(false)
+  const authorizationRefreshInFlight = useRef(false)
+  const registryRefreshRef = useRef(onRefresh)
   const pop = useExit(open)
-  const list = Array.isArray(servers) ? servers : []
+  const list = Array.isArray(refreshedServers) ? refreshedServers : Array.isArray(servers) ? servers : []
   const serverIdsKey = JSON.stringify([...new Set(list.map((server) => server.id))].sort())
   const listFailed = error?.kind === 'list'
   const mutationError = listFailed ? error.mutationError : error
@@ -73,6 +86,11 @@ export default function LinkServiceDrawer({
   const healthContext = useRef(null)
   healthContext.current = { list, onHealth }
   drawerOpenRef.current = open
+  registryRefreshRef.current = onRefresh
+
+  useEffect(() => {
+    setRefreshedServers(null)
+  }, [servers])
 
   useLayoutEffect(() => {
     if (mock) return
@@ -111,8 +129,21 @@ export default function LinkServiceDrawer({
         }
       }
     }
-    const refresh = () => {
+    const refreshHealth = () => {
       healthContext.current.list.forEach((server) => { void check(server) })
+    }
+    const refreshAfterAuthorization = async () => {
+      if (!authorizationTabOpened.current || authorizationRefreshInFlight.current) return
+      authorizationRefreshInFlight.current = true
+      refreshHealth()
+      try {
+        const nextServers = await registryRefreshRef.current?.()
+        if (drawerOpenRef.current && Array.isArray(nextServers)) setRefreshedServers(nextServers)
+      } catch (e) {
+        if (drawerOpenRef.current) setRegisterError(humanizeError(e))
+      } finally {
+        authorizationRefreshInFlight.current = false
+      }
     }
     // Check each row once when it first appears, including rows loaded after opening.
     healthContext.current.list.forEach((server) => {
@@ -120,12 +151,13 @@ export default function LinkServiceDrawer({
       automaticallyCheckedIds.current.add(server.id)
       void check(server)
     })
-    // Recheck reachability when returning from service sign-in.
-    const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
-    window.addEventListener('focus', refresh)
+    // Refresh authorization and reachability when returning from service sign-in.
+    const onFocus = () => { void refreshAfterAuthorization() }
+    const onVisible = () => { if (document.visibilityState === 'visible') void refreshAfterAuthorization() }
+    window.addEventListener('focus', onFocus)
     document.addEventListener('visibilitychange', onVisible)
     return () => {
-      window.removeEventListener('focus', refresh)
+      window.removeEventListener('focus', onFocus)
       document.removeEventListener('visibilitychange', onVisible)
     }
   }, [open, mock, serverIdsKey])
@@ -189,13 +221,21 @@ export default function LinkServiceDrawer({
         if (!popup || popup.closed) {
           setConnectErrors((current) => ({ ...current, [id]: 'The sign-in tab was blocked or closed. Allow pop-ups and try Connect again.' }))
         } else {
-          popup.location.replace(new URL(startUrl, window.location.href).toString())
+          const authorizationUrl = new URL(startUrl, window.location.href)
+          if (!isAllowedAuthorizationUrl(authorizationUrl)) {
+            popup.close()
+            setConnectErrors((current) => ({ ...current, [id]: 'The service provided an unsafe sign-in link. Try Connect again.' }))
+            return
+          }
+          popup.location.replace(authorizationUrl.toString())
+          authorizationTabOpened.current = true
         }
       } else {
         popup?.close()
         setConnectErrors((current) => ({ ...current, [id]: 'The service did not provide a sign-in link. Try Connect again.' }))
       }
     } catch (e) {
+      popup?.close()
       const reason = e?.body?.error?.message || humanizeError(e)
       setConnectErrors((current) => ({ ...current, [id]: reason }))
     }
@@ -244,12 +284,13 @@ export default function LinkServiceDrawer({
 
   const chipClass = (state) => (
     state === 'connected' ? 'done'
-      : state === 'unreachable' ? 'fail'
+      : state === 'unreachable' || state === 'sign-in-failed' ? 'fail'
         : 'sub'
   )
   const chipWord = (state) => (
     state === 'connected' ? 'Connected'
       : state === 'unreachable' ? 'Unreachable'
+        : state === 'sign-in-failed' ? 'Sign-in failed, try again'
         : 'Sign in needed'
   )
 
