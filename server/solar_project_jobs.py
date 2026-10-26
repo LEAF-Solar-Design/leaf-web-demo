@@ -5,6 +5,7 @@ import json
 import math
 import sys
 import threading
+import time
 from types import SimpleNamespace
 from uuid import UUID
 
@@ -251,6 +252,8 @@ class GraphLeaseGuard:
         self._jobs, self._job_id, self._owner, self._attempt = jobs, job_id, owner, attempt
         self._on_renew = on_renew
         self._seconds = lease_seconds
+        self.renewals = 0
+        self.last_renewal_at = None
         self._interval = max(min(lease_seconds / 3, 10), 0.05)
         self._stop, self._lost = threading.Event(), threading.Event()
         self._thread = threading.Thread(target=self._renew, name=f"graph-lease-{job_id}", daemon=True)
@@ -275,6 +278,8 @@ class GraphLeaseGuard:
                     self._job_id, self._owner, self._attempt, lease_seconds=self._seconds):
                     self._lost.set()
                     return
+                self.renewals += 1
+                self.last_renewal_at = time.monotonic()
                 if self._on_renew is not None:
                     self._on_renew()
             except Exception:
@@ -433,14 +438,17 @@ def _cloud_prepare(job, guard):
     return db.run_transaction(lambda conn: prepare_project_graph_job(job, conn=conn))
 
 
-def _emit_unsettled_job_event(job_id, tool_name, attempt, owner, phase, *, exc=None, outcome=None):
+def _emit_unsettled_job_event(job_id, tool_name, attempt, owner, phase, *, exc=None, outcome=None,
+                              prepare_ms, complete_ms, renewals, last_renewal_age_ms):
     """Best-effort worker signal containing only the unsettled-exit allowlist."""
     try:
         reason = getattr(exc, "reason_code", getattr(exc, "code", None))
         event = {"event": "graph_job_unsettled", "phase": phase,
                  "job_id": str(job_id), "tool_name": tool_name, "attempt": attempt,
                  "worker_id": owner, "exception": type(exc).__name__ if exc is not None else None,
-                 "reason_code": reason if isinstance(reason, str) else None, "outcome": outcome}
+                 "reason_code": reason if isinstance(reason, str) else None, "outcome": outcome,
+                 "prepare_ms": prepare_ms, "complete_ms": complete_ms, "renewals": renewals,
+                 "last_renewal_age_ms": last_renewal_age_ms}
         sys.stderr.write("LEAF_GRAPH_JOB_EVENT " + json.dumps(
             event, separators=(",", ":"), sort_keys=True) + "\n")
         sys.stderr.flush()
@@ -455,10 +463,22 @@ def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
     job = jobs.claim_project_graph_job(owner, tool_name=tool_name, lease_seconds=lease_seconds)
     if job is None:
         return False
+    claimed_at = time.monotonic()
     job_id, attempt = UUID(str(job["job_id"])), job["attempt"]
     guard = GraphLeaseGuard(jobs, job_id, owner, attempt, lease_seconds,
                             **({"on_renew": on_renew} if on_renew is not None else {}))
     guard.start()
+    timings = {"complete_ms": None}
+
+    def close_guard():
+        timings["prepare_ms"] = (time.monotonic() - claimed_at) * 1000
+        guard.close()
+        closed_at = time.monotonic()
+        timings["renewals"] = getattr(guard, "renewals", 0)
+        last_renewal_at = getattr(guard, "last_renewal_at", None)
+        timings["last_renewal_age_ms"] = (
+            closed_at - (claimed_at if last_renewal_at is None else last_renewal_at)) * 1000
+
     try:
         if tool_name == solve.TOOL_NAME:
             prepared = solve.prepare_job(job, guard)
@@ -468,27 +488,29 @@ def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
             prepared = platform_link.platform_db().run_transaction(
                 lambda conn: prepare_project_graph_job(job, conn=conn))
     except Exception as exc:
-        guard.close()
+        close_guard()
         if not guard.lost:
             try:
                 outcome = jobs.fail_project_graph_job(job_id, owner, attempt, _preparation_error(exc))
             except Exception as persist_exc:
                 # Failure persistence also recovers through the durable lease.
                 _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
-                                          "fail_persist_error", exc=persist_exc)
+                                          "fail_persist_error", exc=persist_exc, **timings)
             else:
                 if not (isinstance(outcome, str) and outcome in ("failed", "retry", "duplicate")):
                     _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
                                               "fail_not_settled",
-                                              outcome=outcome if isinstance(outcome, str) else None)
+                                              outcome=outcome if isinstance(outcome, str) else None,
+                                              **timings)
         else:
-            _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "lease_lost")
+            _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "lease_lost", **timings)
         return True
-    guard.close()
+    close_guard()
     if guard.lost or prepared is None:
         _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
-                                  "lease_lost" if guard.lost else "prepared_none")
+                                  "lease_lost" if guard.lost else "prepared_none", **timings)
         return True
+    complete_started_at = time.monotonic()
     try:
         if tool_name == solve.TOOL_NAME:
             outcome = platform_link.platform_db().run_transaction(lambda conn:
@@ -496,13 +518,16 @@ def run_once(owner, *, tool_name, lease_seconds=30.0, on_renew=None):
         else:
             outcome = complete_project_graph_job(job_id, owner, attempt, prepared)
     except Exception as exc:
+        timings["complete_ms"] = (time.monotonic() - complete_started_at) * 1000
         # Uncertain persistence is recovered by readback/reclaim, never a false failure.
-        _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "complete_error", exc=exc)
+        _emit_unsettled_job_event(job_id, tool_name, attempt, owner, "complete_error", exc=exc,
+                                  **timings)
     else:
+        timings["complete_ms"] = (time.monotonic() - complete_started_at) * 1000
         paired = isinstance(outcome, (tuple, list)) and len(outcome) == 2
         status = outcome[0] if paired else outcome
         if not (paired and isinstance(status, str) and status in ("applied", "duplicate")):
             _emit_unsettled_job_event(job_id, tool_name, attempt, owner,
                                       "complete_not_settled",
-                                      outcome=status if isinstance(status, str) else None)
+                                      outcome=status if isinstance(status, str) else None, **timings)
     return True
