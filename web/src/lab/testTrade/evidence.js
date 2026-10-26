@@ -3,12 +3,24 @@ const text = value => typeof value === 'string' && value.length > 0 && value.len
 const count = value => Number.isSafeInteger(value) && value >= 0
 const decimal = value => typeof value === 'string' && /^[0-9]{1,30}(?![\s\S])/.test(value)
 export const nsToMs = value => decimal(value) ? Number(value) / 1e6 : null
-const nanoseconds = value => value === null || decimal(value) || count(value)
+const fillCount = value => typeof value === 'string' && /^[0-9]{1,30}(?:\.[0-9]{1,30})?(?![\s\S])/.test(value)
 const timestamp = value => count(value) ? value : text(value) && Number.isFinite(Date.parse(value)) ? value : null
 const stages = ['book_seen', 'decision', 'money_check', 'send', 'exchange_accepted', 'fill', 'result']
 const receiptTime = receipt => {
   const value = receipt.requested_at ?? receipt.finished_at
   return typeof value === 'number' ? value : value === null ? 0 : Date.parse(value)
+}
+const timeOf = value => typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : -Infinity
+// A later update of one receipt keeps its requested_at, so a tie falls to
+// progress (finished, applied, then filled-in fields); a full tie keeps the row
+// already held, whatever order the host sends.
+const progressOf = receipt => [timeOf(receipt.requested_at ?? receipt.finished_at), timeOf(receipt.finished_at),
+  timeOf(receipt.applied_at), ['fill', 'result_status', 'error_code', 'segments'].filter(key => receipt[key] !== null).length]
+const newerReceipt = (candidate, previous) => {
+  const a = progressOf(candidate)
+  const b = progressOf(previous)
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) return a[index] > b[index]
+  return false
 }
 
 function segmentsOf(value) {
@@ -31,45 +43,63 @@ function receiptOf(value) {
   }
   for (const key of ['requested_at', 'applied_at', 'finished_at']) result[key] = timestamp(value[key])
   result.mode = ['live', 'candidate', 'Live', 'Candidate'].includes(value.mode) ? value.mode.toLowerCase() : null
-  result.source_sha = typeof value.source_sha === 'string' && /^(?:[a-f0-9]{7,40}|[a-f0-9]{64})(?![\s\S])/.test(value.source_sha) ? value.source_sha : null
+  result.source_sha = typeof value.source_sha === 'string' && /^[a-f0-9]{40}(?![\s\S])/i.test(value.source_sha) ? value.source_sha : null
   result.unreadable = value.unreadable === true
-  result.fill = object(value.fill) && ['fill_count', 'price_cents', 'fee_cents', 'cost_cents'].every(key => count(value.fill[key]))
+  result.fill = object(value.fill) && fillCount(value.fill.fill_count) && ['price_cents', 'fee_cents', 'cost_cents'].every(key => Number.isSafeInteger(value.fill[key]))
     ? Object.fromEntries(['fill_count', 'price_cents', 'fee_cents', 'cost_cents'].map(key => [key, value.fill[key]])) : null
   return result
 }
 
 function histogramOf(value) {
   if (!object(value) || !text(value.metric) || !text(value.receipt_id)
-    || !['p50_ns', 'p99_ns', 'budget_ns'].every(key => nanoseconds(value[key]))
-    || !count(value.count) || !count(value.observed_count) || typeof value.over_budget !== 'boolean') return null
-  return Object.fromEntries(['metric', 'receipt_id', 'p50_ns', 'p99_ns', 'budget_ns', 'count', 'observed_count', 'over_budget'].map(key => [key, value[key]]))
+    || !['p50_ns', 'p99_ns'].every(key => decimal(value[key]))
+    || !object(value.budget_ns) || !['p50', 'p99'].every(key => decimal(value.budget_ns[key]))
+    || !object(value.over_budget) || !['p50', 'p99'].every(key => typeof value.over_budget[key] === 'boolean')
+    || !count(value.count) || !count(value.observed_count)) return null
+  return { metric: value.metric, receipt_id: value.receipt_id, p50_ns: value.p50_ns, p99_ns: value.p99_ns,
+    count: value.count, observed_count: value.observed_count,
+    budget_ns: { p50: value.budget_ns.p50, p99: value.budget_ns.p99 },
+    over_budget: { p50: value.over_budget.p50, p99: value.over_budget.p99 } }
 }
 
-// Host rows are snapshots; only the newest snapshot is authoritative.
+// The relay supplies one receipt, histogram or controller per host row.
 export function readTestTradeEvidence(provider) {
   const empty = { receipts: [], histograms: [], stale: false, truncated: false }
   try {
     const rows = provider?.rowsOf?.('evidence')
     if (!Array.isArray(rows) || !rows.length) return empty
-    const row = rows.at(-1)
-    const flags = { stale: row?.stale === true, truncated: row?.truncated === true }
-    const data = row?.data
-    if (!object(data)) return { ...empty, ...flags }
-    // Retain only twenty summaries while considering every receipt in the snapshot.
-    const receipts = []
-    if (Array.isArray(data.receipts)) for (const value of data.receipts) {
-      const receipt = receiptOf(value)
-      if (!receipt) continue
-      const index = receipts.findIndex(item => receiptTime(receipt) > receiptTime(item))
-      if (index !== -1) receipts.splice(index, 0, receipt)
-      else if (receipts.length < 20) receipts.push(receipt)
-      if (receipts.length > 20) receipts.pop()
+    const receiptsById = new Map()
+    const histograms = []
+    let stale = false
+    let truncated = false
+    for (const row of rows) {
+      stale ||= row?.stale === true
+      truncated ||= row?.truncated === true
+      const data = row?.data
+      if (!object(data)) continue
+      // Older embedded hosts still announce receipt-only snapshots.
+      if (data.kind === undefined && Array.isArray(data.receipts)) {
+        for (const value of data.receipts) {
+          const receipt = receiptOf(value)
+          if (!receipt) continue
+          const previous = receiptsById.get(receipt.receipt_id)
+          if (!previous || newerReceipt(receipt, previous)) receiptsById.set(receipt.receipt_id, receipt)
+        }
+      }
+      if (data.kind === 'receipt') {
+        const receipt = receiptOf(data)
+        if (!receipt) continue
+        const previous = receiptsById.get(receipt.receipt_id)
+        if (!previous || newerReceipt(receipt, previous)) receiptsById.set(receipt.receipt_id, receipt)
+      } else if (data.kind === 'histogram') {
+        const histogram = histogramOf(data)
+        if (!histogram) continue
+        if (histograms.length < 96) histograms.push(histogram)
+        else truncated = true
+      }
     }
-    const histograms = Array.isArray(data.histograms) ? data.histograms.slice(0, 96).map(histogramOf).filter(Boolean) : []
-    return { receipts, histograms, stale: flags.stale,
-      truncated: flags.truncated || data.truncated_receipts === true || (count(data.truncated_receipts) && data.truncated_receipts > 0)
-        || (Array.isArray(data.receipts) && data.receipts.length > 20)
-        || (Array.isArray(data.histograms) && data.histograms.length > 96) }
+    const receipts = [...receiptsById.values()].sort((a, b) => receiptTime(b) - receiptTime(a)).slice(0, 20)
+    return { receipts, histograms, stale, truncated: truncated || receiptsById.size > 20 }
   } catch { return empty }
 }
 
