@@ -1,6 +1,7 @@
 import ToolsPanel from './ToolsPanel.jsx'
 import { ToolHistoryProvider } from './ToolHistory.jsx'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
+import { humanizeError } from '../errorHumanize.js'
 
 export default function CapabilityCatalog({
   catalog,
@@ -23,6 +24,7 @@ export default function CapabilityCatalog({
   runDisabled = false,
   runDisabledNote = null,
 }) {
+  const fallback = catalog?.source === 'flat-fallback'
   const families = catalog?.families || []
   const loadingPhase = useLoadingPhase(!catalogError && families.length === 0)
   const showSkeleton = !catalogError && (loadingPhase === 'shown' || loadingPhase === 'long')
@@ -35,20 +37,20 @@ export default function CapabilityCatalog({
     <ToolHistoryProvider enabled={catalog?.source === 'endpoint' || catalog?.source === 'flat-fallback'}>
     <div className="capability-catalog">
       <div className="catalog-summary">
-        {families.length} {families.length === 1 ? 'family' : 'families'} · {capabilityCount} capabilities
-        {catalog?.source === 'flat-fallback' ? ' · flat fallback' : ''}
+        {families.length} {families.length === 1 ? 'group' : 'groups'} · {capabilityCount} capabilities
       </div>
+      {fallback && <p role="status">Showing general tools. Availability for this drawing could not be checked. Running tools is paused until availability is confirmed. <button type="button" className="chip-act" onClick={onRetryCatalog}>Retry availability</button></p>}
       {catalogError && (
         <div className="catalog-fallback">
           <div className="inline-error">
-            <span>Couldn’t load capability families · {catalogError}</span>
+            <span>Couldn’t load tool groups. {humanizeError(catalogError)}</span>
             <button type="button" className="chip-act" onClick={onRetryCatalog}>Retry families</button>
           </div>
-          <p className="panel-sub">Showing the flat registered tool list.</p>
+          <p className="panel-sub">Showing general tools. Availability for this drawing could not be checked.</p>
           <ToolsPanel
             tools={tools}
             onCatalogChanged={onCatalogChanged}
-            error={toolsError}
+            error={toolsError ? humanizeError(toolsError) : null}
             onRetry={onRetryTools}
             running={running}
             selectedTool={selectedTool}
@@ -57,8 +59,8 @@ export default function CapabilityCatalog({
             writeLocked={writeLocked}
             writeLockNote={writeLockNote}
             writeEntitled={writeEntitled}
-            runDisabled={runDisabled}
-            runDisabledNote={runDisabledNote}
+            runDisabled
+            runDisabledNote="Availability for this drawing could not be checked. Retry loading the tool groups."
           />
         </div>
       )}
@@ -86,7 +88,7 @@ export default function CapabilityCatalog({
               aria-expanded={open}
               onClick={() => onToggleFamily(family.family_id)}
             >
-              <span>{family.label} <span className="n">· {count}</span></span>
+              <span>{fallback ? 'General tools' : family.label} <span className="n">· {count}</span></span>
               <span className="chev">{open ? 'hide' : 'show'}</span>
             </button>
             {open && (
@@ -94,8 +96,8 @@ export default function CapabilityCatalog({
                 <ToolsPanel
                   tools={family.capabilities || []}
                   onCatalogChanged={onCatalogChanged}
-                  subtitle={family.description}
-                  error={toolsError}
+                  subtitle={fallback ? 'General tools. Availability for this drawing has not been confirmed.' : family.description}
+                  error={toolsError ? humanizeError(toolsError) : null}
                   onRetry={onRetryTools}
                   running={running}
                   selectedTool={selectedTool}
@@ -107,8 +109,8 @@ export default function CapabilityCatalog({
                   writeLocked={writeLocked}
                   writeLockNote={writeLockNote}
                   writeEntitled={writeEntitled}
-                  runDisabled={runDisabled}
-                  runDisabledNote={runDisabledNote}
+                  runDisabled={runDisabled || fallback}
+                  runDisabledNote={fallback ? 'Availability for this drawing could not be checked. Retry availability.' : runDisabledNote}
                 />
               </div>
             )}

@@ -226,7 +226,7 @@ describe('the entitlement rows above it', () => {
 
     const panel = screen.getByRole('region', { name: 'Entitlements' })
     expect(panel).toHaveTextContent('tier team')
-    expect(panel).toHaveTextContent('enforced server-side · policy')
+    expect(panel).toHaveTextContent('Plan checked')
     for (const [label, state] of [
       ['Run read-only tools', 'included'],
       ['Run editing tools', 'included'],
@@ -247,9 +247,9 @@ describe('the entitlement rows above it', () => {
     expect(container.querySelectorAll('.ent-consent .ent-row')).toHaveLength(1)
   })
 
-  it('still shows the honest demo note with no entitlements payload', () => {
-    render(<EntitlementGate mock />)
-    expect(screen.getByText(/demo tier · full access/)).toBeInTheDocument()
+  it('shows unavailable plan details with no entitlements payload', () => {
+    render(<EntitlementGate mock={false} />)
+    expect(screen.getByText(/Your plan could not be loaded/)).toBeInTheDocument()
     expect(switchEl()).toBeInTheDocument()
   })
 })
