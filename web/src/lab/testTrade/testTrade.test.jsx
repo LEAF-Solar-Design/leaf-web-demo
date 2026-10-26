@@ -24,6 +24,18 @@ describe('Test trade host evidence', () => {
     expect(evidence.receipts[0].segments).toHaveLength(6)
   })
 
+  it('keeps the most advanced update when rows share a receipt id and requested time', () => {
+    const pending = receipt({ status: 'pending', finished_at: null, fill: null, segments: null })
+    const filled = receipt()
+    for (const rows of [[filled, pending], [pending, filled]]) {
+      const evidence = readTestTradeEvidence(provider(rows))
+      expect(evidence.receipts).toHaveLength(1)
+      expect(evidence.receipts[0]).toMatchObject({ status: 'filled', fill: { fill_count: '0.25' } })
+    }
+    const evidence = readTestTradeEvidence(provider([{ ...filled, status: 'first' }, { ...filled, status: 'second' }]))
+    expect(evidence.receipts[0].status).toBe('first')
+  })
+
   it('never throws for missing, malformed or throwing providers', () => {
     for (const host of [undefined, {}, { rowsOf: () => { throw Error('unavailable') } },
       { rowsOf: () => null }, provider([null, {}, 3, { kind: 'receipt' }, { kind: 'histogram' }])]) {

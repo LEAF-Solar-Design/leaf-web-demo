@@ -10,6 +10,18 @@ const receiptTime = receipt => {
   const value = receipt.requested_at ?? receipt.finished_at
   return typeof value === 'number' ? value : value === null ? 0 : Date.parse(value)
 }
+const timeOf = value => typeof value === 'number' ? value : typeof value === 'string' ? Date.parse(value) : -Infinity
+// A later update of one receipt keeps its requested_at, so a tie falls to
+// progress (finished, applied, then filled-in fields); a full tie keeps the row
+// already held, whatever order the host sends.
+const progressOf = receipt => [timeOf(receipt.requested_at ?? receipt.finished_at), timeOf(receipt.finished_at),
+  timeOf(receipt.applied_at), ['fill', 'result_status', 'error_code', 'segments'].filter(key => receipt[key] !== null).length]
+const newerReceipt = (candidate, previous) => {
+  const a = progressOf(candidate)
+  const b = progressOf(previous)
+  for (let index = 0; index < a.length; index += 1) if (a[index] !== b[index]) return a[index] > b[index]
+  return false
+}
 
 function segmentsOf(value) {
   if (!Array.isArray(value) || value.length !== 6) return null
@@ -71,14 +83,14 @@ export function readTestTradeEvidence(provider) {
           const receipt = receiptOf(value)
           if (!receipt) continue
           const previous = receiptsById.get(receipt.receipt_id)
-          if (!previous || receiptTime(receipt) >= receiptTime(previous)) receiptsById.set(receipt.receipt_id, receipt)
+          if (!previous || newerReceipt(receipt, previous)) receiptsById.set(receipt.receipt_id, receipt)
         }
       }
       if (data.kind === 'receipt') {
         const receipt = receiptOf(data)
         if (!receipt) continue
         const previous = receiptsById.get(receipt.receipt_id)
-        if (!previous || receiptTime(receipt) >= receiptTime(previous)) receiptsById.set(receipt.receipt_id, receipt)
+        if (!previous || newerReceipt(receipt, previous)) receiptsById.set(receipt.receipt_id, receipt)
       } else if (data.kind === 'histogram') {
         const histogram = histogramOf(data)
         if (!histogram) continue
