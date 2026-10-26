@@ -6,6 +6,7 @@ import * as api from './api.js'
 vi.mock('./api.js')
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
+  noteUnauthorized: vi.fn(),
   authHeaders: () => {
     const token = localStorage.getItem('leaf.jwt')
     return token ? { Authorization: `Bearer ${token}` } : {}

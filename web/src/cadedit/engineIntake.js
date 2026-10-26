@@ -547,6 +547,7 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
   const inserts = []
   let points = 0
   let truncated = 0
+  const omittedDimensions = {}
   const list = Array.isArray(entities) ? entities : Array.isArray(entities?.entities) ? entities.entities : []
   const blocks = Array.isArray(catalogue) ? catalogue : []
   const definitions = new Map(blocks.map((b) => [String(b.name).toUpperCase(), b]))
@@ -606,6 +607,9 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
         if (points + size > MAX_POINTS) { truncated += 1; continue }
         points += size
         polylines.push(...batch)
+      } else {
+        const kind = ['RADIUS', 'DIAMETER', 'ANGULAR', 'ANGULAR3POINT', 'ORDINATE'].includes(entity.dimtype) ? entity.dimtype : 'OTHER'
+        omittedDimensions[kind] = (omittedDimensions[kind] || 0) + 1
       }
       continue
     }
@@ -640,7 +644,20 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     selectable: group.selectable, description: group.description,
     members: (group.memberIds || []).map(hexHandle),
   }))
-  return { source: 'engine', documentId: String(documentId || ''), polylines, inserts, blocks, groups, faces3d: [], points, truncated }
+  const diagnostics = { truncated, omittedDimensions, incompleteInserts: inserts.filter((insert) => insert.incomplete).length }
+  return { source: 'engine', documentId: String(documentId || ''), polylines, inserts, blocks, groups, faces3d: [], points, truncated, diagnostics }
+}
+
+export function projectionWarning(diagnostics) {
+  if (!diagnostics) return ''
+  const parts = []
+  if (diagnostics.truncated) parts.push(`${diagnostics.truncated} drawing part${diagnostics.truncated === 1 ? '' : 's'} omitted because the view limit was reached`)
+  const labels = { RADIUS: 'radius', DIAMETER: 'diameter', ANGULAR: 'angular', ANGULAR3POINT: 'three-point angular', ORDINATE: 'ordinate', OTHER: 'unsupported' }
+  for (const [kind, count] of Object.entries(diagnostics.omittedDimensions || {})) {
+    if (count) parts.push(`${count} ${labels[kind] || 'unsupported'} dimension${count === 1 ? '' : 's'} omitted`)
+  }
+  if (diagnostics.incompleteInserts) parts.push(`${diagnostics.incompleteInserts} block reference${diagnostics.incompleteInserts === 1 ? '' : 's'} shown only in part`)
+  return parts.length ? `Incomplete drawing view: ${parts.join('; ')}. The original DXF is preserved for export.` : ''
 }
 
 /**

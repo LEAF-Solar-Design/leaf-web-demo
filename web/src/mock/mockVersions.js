@@ -11,6 +11,8 @@
 // list() returns the LIVE shape VersionHistory.jsx consumes
 // ({head, latest, versions:[{v, tool, note, created, sha256}]}).
 
+import { humanizeError } from '../errorHumanize.js'
+
 export const DRAWING_ID = 'demo'
 
 // Deterministic content digest stand-in (FNV-1a, 64 hex chars by mixing four
@@ -131,26 +133,23 @@ function headOrNull() {
   return chain.intakes[chain.head - 1] || null
 }
 
-/** The handle applyDelete() would remove by default (last polyline AT HEAD). */
+/** Legacy suggestion for callers that explicitly choose a panel. */
 export function defaultHandle() {
   const pls = headOrNull()?.polylines || []
   return pls.length ? pls[pls.length - 1].handle : null
 }
 
 /**
- * Append a new version = CURRENT HEAD minus the polyline whose handle matches
- * (default: last at head). Any redo tail above head is discarded first, so the
+ * Append a new version = CURRENT HEAD minus the explicitly targeted polyline.
+ * Any redo tail above head is discarded first, so the
  * chain stays a single append-only line of history.
  * Returns {drawing_id, version, parent, removed, intake}.
  */
 export function applyDelete(handle) {
   const cur = headOrNull()
-  if (!cur) throw new Error('mockVersions: seedBase(intake) first')
+  if (!cur) throw new Error(humanizeError('Open a drawing before deleting a panel.'))
   const pls = cur.polylines || []
-  const target = handle != null && pls.some((p) => p.handle === handle)
-    ? handle
-    : defaultHandle()
-  if (target == null) throw new Error('mockVersions: nothing to delete')
+  const target = requireDeleteHandle(cur, handle)
   const next = withPolylines(cur, pls.filter((p) => p.handle !== target))
 
   // Truncate the redo tail (a write after an undo forks from head), then append.
@@ -175,6 +174,17 @@ export function applyDelete(handle) {
     removed: target,
     intake: next,
   }
+}
+
+/** Validate before either a preview or a version write can remove geometry. */
+export function requireDeleteHandle(intake, handle) {
+  if (typeof handle !== 'string' || !handle.trim()) {
+    throw new Error(humanizeError('Select a panel before deleting it.'))
+  }
+  if (!(intake.polylines || []).some((p) => p.handle === handle)) {
+    throw new Error(humanizeError('That panel is not in this drawing. Select a panel and try again.'))
+  }
+  return handle
 }
 
 /** The intake at a version ('head' | 1 | 2 | ...). */

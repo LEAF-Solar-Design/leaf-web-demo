@@ -18,6 +18,13 @@ function firstMatch(re, text) {
   return m ? m[1] : null
 }
 
+export function parseLayer(text) {
+  const raw = String(text || '').trim().replace(/[.!?]+$/, '')
+  return firstMatch(/\blayer\s+["']([^"']+)["']$/i, raw) ||
+    firstMatch(/\b(?:on|in)\s+(?:the\s+)?["']?([^"']+?)["']?\s+layer$/i, raw) ||
+    firstMatch(/\blayer\s+([a-z0-9 _-]+)$/i, raw)
+}
+
 function alternatives(tools, exclude) {
   return tools
     .filter((t) => !exclude.includes(t.name))
@@ -66,17 +73,29 @@ export function matchPrompt(text, tools = []) {
   // ---- RUN lane: match a catalog capability -------------------------------
   // delete / remove a panel -> versioned write tool
   if (has('delete', 'remove') && has('panel', 'module')) {
-    const handle = firstMatch(/\b(?:panel|module|handle)\s*#?\s*([0-9a-fx]{2,})/i, raw) ||
-      firstMatch(/\b([0-9]{3,})\b/, raw)
+    const handle = firstMatch(/\b(?:panel|module|handle)\s*#?\s*([0-9a-f]+)\b(?![-\w])/i, raw)
     return {
       lane: 'run', tool: 'delete-marked-panel', write: true,
       params: handle ? { handle: String(handle) } : {},
       confidence: 0.82,
       rationale: handle
-        ? `Delete one panel (handle ${handle}): a versioned write you can undo.`
-        : 'Delete a marked panel: a versioned write you can undo.',
+        ? 'Delete the specified panel. You can undo this change.'
+        : 'Select a panel before deleting it. You can undo this change.',
       alternatives: alternatives(tools, ['delete-marked-panel']),
     }
+  }
+  // Spatial constraints must not fall through to an unconstrained count.
+  if (has('edge', 'setback', 'within', 'near', 'border', 'perimeter')) {
+    if (!find('highlight-panels-near-edge')) {
+      return {
+        lane: 'build', tool: null, params: {}, confidence: 0.8, alternatives: [],
+        rationale: 'This distance limit needs a new tool. Describe which panels to include.',
+      }
+    }
+    const inches = firstMatch(/(\d+(?:\.\d+)?)\s*(?:in\b|inch|inches|")/i, raw)
+    return runMatch('highlight-panels-near-edge',
+      inches ? { distance_in: Number(inches) } : {}, 0.8,
+      inches ? `Highlight panels within ${inches} in of the roof edge.` : 'Highlight panels near the roof edge.', tools)
   }
   // count per layer
   if (has('count', 'how many', 'tally', 'number of', 'per layer') && find('count-by-layer')) {
@@ -86,16 +105,9 @@ export function matchPrompt(text, tools = []) {
   if (has('area', 'sqft', 'sq ft', 'square', 'coverage', 'measure', 'size of') && find('measure-panel-area')) {
     return runMatch('measure-panel-area', {}, 0.85, 'Measure panel areas and totals; the largest panel is highlighted.', tools)
   }
-  // near edge / setback
-  if (has('edge', 'setback', 'within', 'near', 'border', 'perimeter') && find('highlight-panels-near-edge')) {
-    const inches = firstMatch(/(\d+(?:\.\d+)?)\s*(?:in\b|inch|inches|")/i, raw)
-    return runMatch('highlight-panels-near-edge',
-      inches ? { distance_in: Number(inches) } : {}, 0.8,
-      inches ? `Highlight panels within ${inches} in of the roof edge.` : 'Highlight panels near the roof edge.', tools)
-  }
   // select by layer
   if (has('select', 'show', 'highlight') && has('layer') && find('select-by-layer')) {
-    const layer = firstMatch(/layer\s+["']?([a-z0-9 _-]+?)["']?\s*$/i, raw)
+    const layer = parseLayer(raw)
     return runMatch('select-by-layer',
       layer ? { layer: layer.trim() } : {}, 0.78,
       `Select every entity on the ${layer ? layer.trim() + ' ' : ''}layer.`, tools)

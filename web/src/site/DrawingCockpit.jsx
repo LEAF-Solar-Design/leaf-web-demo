@@ -19,6 +19,7 @@ import ObjectSnapMenu, { SNAP_LIMITED_SENTENCE } from '../cadedit/ObjectSnapMenu
 import { ALL_SNAP_MODES, DEFAULT_SNAP_MODES, isSnapModeMask } from '../cadedit/snapModes.js'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
 import { layerBounds } from '../lib/viewHistory.js'
+import { humanizeError } from '../errorHumanize.js'
 
 const ZOOM_IN = 1.25
 const ZOOM_OUT = 0.8
@@ -490,12 +491,10 @@ export function ViewerGrid({ ground, viewerRef }) {
   )
 }
 
-function requestFullscreen() {
-  if (typeof document === 'undefined') return false
+async function requestFullscreen() {
   const root = document.documentElement
-  if (document.fullscreenElement) { document.exitFullscreen?.(); return true }
-  if (typeof root.requestFullscreen === 'function') { root.requestFullscreen().catch(() => {}); return true }
-  return false
+  if (document.fullscreenElement) await document.exitFullscreen()
+  else await root.requestFullscreen()
 }
 
 // The status bar's right end: the reference's drafting toggles. This viewer
@@ -523,6 +522,8 @@ const requestSnapMode = (kind, enabled) => {
 
 export function StatusToggles() {
   const [state, setState] = useState({ ...OFFLINE_ENGINE, grid: null })
+  const [fullscreenMessage, setFullscreenMessage] = useState('')
+  const fullscreenSupported = typeof document !== 'undefined' && document.fullscreenEnabled !== false && typeof document.documentElement.requestFullscreen === 'function'
   useEffect(() => {
     if (typeof window === 'undefined') return undefined
     const onModes = ({ detail }) => {
@@ -590,9 +591,18 @@ export function StatusToggles() {
           <CockpitIcon id={t.icon} fallback={t.label} size="strip" />
         </button>
       ))}
-      <button type="button" data-toggle="fullscreen" title="Fullscreen" aria-label="Toggle fullscreen" onClick={requestFullscreen}>
+      <button type="button" data-toggle="fullscreen" disabled={!fullscreenSupported}
+        title={fullscreenSupported ? 'Fullscreen' : 'Fullscreen is not available in this browser.'}
+        aria-label="Toggle fullscreen" aria-description={!fullscreenSupported ? 'Fullscreen is not available in this browser.' : undefined}
+        onClick={async () => {
+          setFullscreenMessage('')
+          try { await requestFullscreen() }
+          catch { setFullscreenMessage(humanizeError('Fullscreen could not be opened or closed. Try again.')) }
+        }}>
         <CockpitIcon id="fullscreen" fallback="Full" size="strip" />
       </button>
+      {!fullscreenSupported && 'Fullscreen is not available in this browser.'}
+      {fullscreenMessage && <span role="status">{fullscreenMessage}</span>}
     </span>
   )
 }
@@ -606,7 +616,7 @@ export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle 
       <span className="cockpit-coord">Y <b ref={(el) => { refs.y.current = el }}>—</b></span>
       <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>—</b></span>
       {shown && (
-        <span className="cockpit-count">{shown.polylines.length} entities · {shown.layers.length} layers</span>
+        <span className="cockpit-count">{shown.polylines.length} rendered paths · {shown.layers.length} layers</span>
       )}
       <span className="cockpit-sel" data-selected={selectedHandle ? 'true' : 'false'}>
         {selectedHandle ? `sel ${selectedHandle}` : 'no selection'}

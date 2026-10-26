@@ -26,6 +26,7 @@ describe('ShipStage idle lane', () => {
   it('a non-idle lane keeps its ladder', () => {
     render(<IosSurface enabled ship={{ phase: 'setup-required', readiness: { setupState: 'no-approved-revision' } }} />)
     expect(screen.getByTestId('ios-stage-ladder')).toBeInTheDocument()
-    expect(screen.getByRole('status').textContent).toBe('setup-required')
+    expect(screen.getByRole('status').textContent).toBe('Finish setup before starting a build.')
+    expect(screen.queryByText('setup-required')).not.toBeInTheDocument()
   })
 })

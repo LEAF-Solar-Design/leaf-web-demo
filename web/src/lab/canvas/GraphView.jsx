@@ -1,4 +1,4 @@
-import { lazy, memo, Suspense, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { lazy, memo, Suspense, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { registry } from './registry.js'
 import { pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
@@ -14,6 +14,7 @@ import { createAfterSaveClient } from '../history/afterSaveClient.js'
 import { canonicalJSON } from '../contract.js'
 import { labValueStore, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
 import { openRunStream, submitRun } from '../runs/runStream.js'
+import { formatLabRoute } from '../labRoute.js'
 
 // Both mounts pass the values returned by useLiveGraph to LiveValues. Keep
 // their display context out of the values and the proposal document itself.
@@ -190,7 +191,7 @@ export function setGraphCanvasLoader(loader = loadLabCanvas) {
   LabCanvas = lazy(loader)
 }
 
-export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false, client = labArtifactsClient, renderProbe }) {
+export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false, client = labArtifactsClient, renderProbe, route }) {
   renderProbe?.('graph')
   const [restored, setRestored] = useState(() => ({ graph: client.state.restoredGraph, key: client.state.restoredKey }))
   const [opened, setOpened] = useState(!hidden)
@@ -205,6 +206,18 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const streams = useRef(new Set())
   const mounted = useRef(false)
   const latest = useRef(null)
+  const saveHintId = useId()
+  const draftBaseline = useRef(null)
+  const draftDocument = live.draft?.document
+  if (draftDocument && draftBaseline.current === null) draftBaseline.current = canonicalJSON(draftDocument)
+  const cleanDocument = client.state.lastSaved?.graph || restored.graph || initialDocument
+  const dirty = Boolean(draftDocument && canonicalJSON(draftDocument) !== (cleanDocument ? canonicalJSON(cleanDocument) : draftBaseline.current))
+  useEffect(() => {
+    if (!dirty) return undefined
+    const warn = event => { event.preventDefault(); event.returnValue = '' }
+    window.addEventListener('beforeunload', warn)
+    return () => window.removeEventListener('beforeunload', warn)
+  }, [dirty])
   latest.current = { document: live.draft?.document, head: client.state.head, docId: client.currentDocId() }
   useEffect(() => client.subscribe(() => refreshHead(value => value + 1)), [client])
   useEffect(() => {
@@ -331,8 +344,17 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           <p role="status">{validDocument ? 'Ready' : 'No valid graph'}</p>
           {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
           <button type="button" disabled={!validDocument || (!onRun && (!client.state.headLoaded || client.state.head == null || submitting))}
+            aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
             {onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
+          <a href={formatLabRoute({ view: 'test-trade', params: route?.params ?? {} })}
+            onClick={(event) => {
+              if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+              event.preventDefault()
+              window.history.pushState(null, '', event.currentTarget.href)
+              window.dispatchEvent(new PopStateEvent('popstate'))
+            }}>Test trade evidence</a>
+          {!onRun && client.state.head == null && <p id={saveHintId}>Save this graph before running it</p>}
           {runMessage && <p role="status">{runMessage}</p>}
           {activeRunStatus.endsWith('/auth_expired') && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>

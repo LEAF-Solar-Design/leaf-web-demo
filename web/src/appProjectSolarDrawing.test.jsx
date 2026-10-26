@@ -432,7 +432,7 @@ it('R13G2A-13 project drawing status uses the retained publication retry', async
       'The run published a drawing version, but that version could not be read. Refresh before continuing.'],
   ]
   for (const [mode, reason, notice, publishedVersionId, busy, sentence] of cases) {
-    const runtime = { ...h.result.current.runtime, notice, publishedVersionId, busy, retryReadback: runtimeRetry }
+    const runtime = { ...h.result.current.runtime, notice, publishedVersionId, canRetryReadback: !!publishedVersionId, busy, retryReadback: runtimeRetry }
     const env = { projectMode: true, projectDrawing: { mode }, projectSolar: { scope: { reason } }, projectSolarRuntime: runtime, projectSolarAppReason }
     const el = evaluate(status, env), view = render(el)
     expect(view.container.textContent).toBe(sentence + (publishedVersionId ? publishedVersionId + 'Retry' : ''))

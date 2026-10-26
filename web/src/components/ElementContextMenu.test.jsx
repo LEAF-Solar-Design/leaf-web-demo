@@ -119,8 +119,8 @@ describe('ElementContextMenu (mounted)', () => {
     render(<Scene ctx={{ hasVersions: false }} />)
     fireEvent.contextMenu(screen.getByTestId('version-tile'))
     await screen.findByTestId('element-context-menu')
-    const undo = screen.getByRole('menuitem', { name: 'undo (unavailable: no versioned drawing)' })
-    expect(undo.getAttribute('data-reason')).toBe('no versioned drawing')
+    const undo = screen.getByRole('menuitem', { name: 'undo (unavailable: No saved versions yet)' })
+    expect(undo.getAttribute('data-reason')).toBe('No saved versions yet')
   })
 
   it('opens via Shift+F10 on the focused element', async () => {

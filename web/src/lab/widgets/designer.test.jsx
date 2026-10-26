@@ -13,7 +13,11 @@ import { manifests } from '../canvas/registry.js'
 
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 const click = (name) => fireEvent.click(screen.getByRole('button', { name, exact: true }))
-const edit = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } })
+const edit = (label, value) => {
+  const input = screen.getByLabelText(label)
+  fireEvent.change(input, { target: { value } })
+  if (input.type === 'number') fireEvent.blur(input)
+}
 const response = (body, status = 200) => ({ ok: status >= 200 && status < 300, status, json: async () => body })
 const selected = (state) => state.doc.formats[state.doc.active].els.find((e) => e.id === state.selectedId)
 function seed(format = 'la') {

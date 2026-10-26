@@ -19,6 +19,16 @@ beforeEach(() => {
 })
 
 describe('acceptance #6: LEAF_OPERATOR_ENABLED unset -> hidden, one probe, then none', () => {
+  it('silently hides the entry when a denied probe rejects', async () => {
+    const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+    vi.spyOn(operatorClient, 'probeOperatorConsole').mockRejectedValue({ status: 403 })
+    const { container } = render(<OperatorEntry />)
+    await waitFor(() => expect(operatorClient.probeOperatorConsole).toHaveBeenCalled())
+    expect(container.firstChild).toBeNull()
+    expect(error).not.toHaveBeenCalled()
+    error.mockRestore()
+  })
+
   it('renders nothing when the probe reports disabled', async () => {
     vi.spyOn(operatorClient, 'probeOperatorConsole').mockResolvedValue(false)
     const { container } = render(<OperatorEntry />)

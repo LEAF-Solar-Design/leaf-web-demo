@@ -9,10 +9,11 @@
  * password, or key (acceptance #1) — the only free-text input is the
  * operator's own chat message.
  */
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 import { fmtWhen } from '../JobRail.jsx'
 import * as operatorClient from '../../operatorClient.js'
+import { humanizeError } from '../../errorHumanize.js'
 import { deepRedact, isRedactedField, renderFieldValue } from '../../projects/ReceiptPanel.jsx'
 
 function isScalar(v) {
@@ -60,6 +61,7 @@ export default function SessionPanel({ onSignedOut }) {
   const [draft, setDraft] = useState('')
   const [sending, setSending] = useState(false)
   const [error, setError] = useState(null)
+  const transcriptRequest = useRef({ sessionId: null, generation: 0 })
 
   const active = sessions.find((s) => s.session_id === activeId) || null
 
@@ -67,7 +69,7 @@ export default function SessionPanel({ onSignedOut }) {
     try {
       setSessions(await operatorClient.listSessions())
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'Could not load sessions.')
+      setError(humanizeError(e))
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
     }
   }, [onSignedOut])
@@ -75,13 +77,21 @@ export default function SessionPanel({ onSignedOut }) {
   useEffect(() => { load() }, [load])
 
   const openSession = async (sessionId) => {
+    const generation = ++transcriptRequest.current.generation
+    transcriptRequest.current.sessionId = sessionId
     setActiveId(sessionId)
+    setEvents([])
+    setExpandedEvents({})
+    setDraft('')
     setError(null)
     try {
-      setEvents(await operatorClient.getEvents(sessionId))
+      const nextEvents = await operatorClient.getEvents(sessionId)
+      if (transcriptRequest.current.sessionId !== sessionId || transcriptRequest.current.generation !== generation) return
+      setEvents(nextEvents)
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'Could not load the transcript.')
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
+      if (transcriptRequest.current.sessionId !== sessionId || transcriptRequest.current.generation !== generation) return
+      setError(humanizeError(e))
     }
   }
 
@@ -92,7 +102,7 @@ export default function SessionPanel({ onSignedOut }) {
       await load()
       await openSession(created.session_id)
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'Could not start a session.')
+      setError(humanizeError(e))
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
     }
   }
@@ -100,15 +110,21 @@ export default function SessionPanel({ onSignedOut }) {
   const send = async () => {
     const text = draft.trim()
     if (!text || !activeId || sending) return
+    const sessionId = activeId
+    let generation = transcriptRequest.current.generation
+    const isCurrent = () => transcriptRequest.current.sessionId === sessionId && transcriptRequest.current.generation === generation
     setSending(true)
     setError(null)
     try {
-      await operatorClient.postMessage(activeId, text)
+      await operatorClient.postMessage(sessionId, text)
+      if (!isCurrent()) return
       setDraft('')
-      setEvents(await operatorClient.getEvents(activeId))
+      generation = ++transcriptRequest.current.generation
+      const nextEvents = await operatorClient.getEvents(sessionId)
+      if (isCurrent()) setEvents(nextEvents)
     } catch (e) {
-      setError(e?.body?.detail || e?.message || 'The message did not go through; nothing changed.')
       if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
+      if (isCurrent()) setError(humanizeError(e))
     } finally {
       setSending(false)
     }

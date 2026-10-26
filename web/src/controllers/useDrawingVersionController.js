@@ -43,6 +43,7 @@ export default function useDrawingVersionController({
   const scopeToken = drawingIdentity?.scopeToken
   const isScopeCurrent = drawingIdentity?.isScopeCurrent ?? alwaysCurrent
   const operationGenerationRef = useRef(0)
+  const previewGenerationRef = useRef(0)
   const operationCurrent = useCallback(() => {
     const generation = operationGenerationRef.current
     return () => generation === operationGenerationRef.current && isScopeCurrent()
@@ -157,6 +158,7 @@ export default function useDrawingVersionController({
   }, [])
 
   const resetPreview = useCallback(() => {
+    previewGenerationRef.current += 1
     setHistoryOpen(false)
     setHistory(null)
     setHistoryError(null)
@@ -323,7 +325,9 @@ export default function useDrawingVersionController({
   }, [])
 
   const previewVersion = useCallback(async (version) => {
-    const current = operationCurrent()
+    const generation = ++previewGenerationRef.current
+    const scopeCurrent = operationCurrent()
+    const current = () => scopeCurrent() && generation === previewGenerationRef.current
     if (!current()) return null
     const drawingId = drawingState?.drawing_id
     if (drawingId == null) return null
@@ -367,6 +371,7 @@ export default function useDrawingVersionController({
   }, [operationCurrent, drawingState, formatError, loadHead, loadVersion, onApplyIntake, onError, onResetSelection, releaseLockIfSeated])
 
   const backToHead = useCallback(() => {
+    previewGenerationRef.current += 1
     if (drawingState?.head == null) return null
     return previewVersion(drawingState.head)
   }, [drawingState, previewVersion])
@@ -540,6 +545,9 @@ export default function useDrawingVersionController({
       return seatVersion(view, { drawingId, source: 'restore-repair' })
     } catch (error) {
       if (!current()) return null
+      setUnreadableHead((lock) => lock === unreadableHead
+        ? { ...lock, error, retryAttempts: (lock.retryAttempts || 0) + 1 }
+        : lock)
       onError?.(error, { operation: 'restore-repair' })
       return null
     } finally {
@@ -568,6 +576,9 @@ export default function useDrawingVersionController({
       return view
     } catch (error) {
       if (!current()) return null
+      setRefreshFailure((failure) => failure === refreshFailure
+        ? { ...failure, error, retryAttempts: (failure.retryAttempts || 0) + 1 }
+        : failure)
       onError?.(error, { operation: 'refresh' })
       return null
     } finally {

@@ -6,10 +6,13 @@ import { submitCampaign, createRelease, getRelease, listReleases, transitionRele
 import { downloadReleaseArtifact } from './api.js'
 import { uploadProjectInput } from './api.js'
 import { reviseRelease } from './api.js'
+import { subscribeUnauthorized } from '../api.js'
 
-vi.mock('../api.js', () => ({
+vi.mock('../api.js', async importOriginal => ({
   config: { apiBase: 'https://campaign.test', tenant: 'test-tenant' },
   authHeaders: () => localStorage.getItem('leaf.jwt') ? { Authorization: 'Bearer test-token' } : {},
+  noteUnauthorized: (await importOriginal()).noteUnauthorized,
+  subscribeUnauthorized: (await importOriginal()).subscribeUnauthorized,
 }))
 
 const P = '11111111-1111-1111-1111-111111111111'
@@ -199,9 +202,15 @@ describe('verified authenticated output retrieval', () => {
   })
   it.each([401, 403, 409])('reports server refusal %s without reading output bytes', async status => {
     const read = vi.fn()
+    const notified = vi.fn()
+    const unsubscribe = subscribeUnauthorized(notified)
     fetcher.mockResolvedValue({ ok: false, status, json: async () => ({}), arrayBuffer: read })
-    await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toMatchObject({ status })
-    expect(read).not.toHaveBeenCalled()
+    try {
+      await expect(downloadReleaseArtifact(P, C, E, artifact)).rejects.toMatchObject({ status })
+      expect(read).not.toHaveBeenCalled()
+      expect(localStorage.getItem('leaf.jwt')).toBe(status === 401 ? null : 'test-token')
+      expect(notified).toHaveBeenCalledTimes(status === 401 ? 1 : 0)
+    } finally { unsubscribe() }
   })
   it.each([{ sha256: '0'.repeat(64) }, { byte_count: bytes.length + 1 }])('refuses wrong digest or byte count', async override => {
     await expect(downloadReleaseArtifact(P, C, E, { ...artifact, ...override })).rejects.toThrow(/output|release/)

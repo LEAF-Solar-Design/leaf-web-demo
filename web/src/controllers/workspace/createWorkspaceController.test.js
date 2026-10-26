@@ -104,6 +104,224 @@ describe('workspace open hydration', () => {
   })
 })
 
+describe('workspace null-to-org adoption', () => {
+  function setupUnbound() {
+    const storage = { getItem: vi.fn(() => null), setItem: vi.fn(), removeItem: vi.fn() }
+    const callbacks = { onWorkspaceOpened: vi.fn(), onWorkspaceRehydrated: vi.fn() }
+    return { ...setup({ authLive: true, storage, callbacks }), storage, callbacks }
+  }
+
+  it.each([
+    { project: { project_id: 'p1' } },
+    { project: { project_id: 'p1', org_id: 'o1' } },
+    { org_id: 'o1', project: { project_id: 'p1' } },
+  ])('promotes an in-flight open to the adopted org: %j', async (workspace) => {
+    const { controller, services, storage, callbacks } = setupUnbound()
+    await controller.loadProjects()
+    let resolveOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOpen = resolve }))
+    const opening = controller.openProject('p1')
+    controller.selectCanonicalVersion('v1')
+
+    expect(controller.adoptOrgId('o1')).toBe(true)
+    expect(storage.setItem).toHaveBeenCalledExactlyOnceWith(WORKSPACE_ORG_KEY, 'o1')
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: 'p1', workspace: null,
+      canonicalVersionId: 'v1', workspaceLoading: true, bootstrapState: 'unknown', projectsLoaded: false,
+      projects: [], projectsError: null, projectsLoading: false, orgBusy: false, projectBusy: false })
+    const snapshot = controller.getSnapshot()
+    const rehydrating = controller.rehydrate()
+    expect(controller.getSnapshot()).toBe(snapshot)
+    expect(services.openProject).toHaveBeenCalledExactlyOnceWith('p1', null)
+
+    resolveOpen(workspace)
+    expect(await opening).toBe(workspace)
+    expect(await rehydrating).toBe(workspace)
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: 'p1', workspace,
+      canonicalVersionId: 'v1', workspaceLoading: false })
+    expect(callbacks.onWorkspaceOpened).toHaveBeenCalledExactlyOnceWith({ projectId: 'p1', orgId: 'o1', workspace })
+    expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    { project: { project_id: 'p1', org_id: 'other-org' } },
+    { org_id: 'other-org', project: { project_id: 'p1' } },
+    { org_id: 'o1', project: { project_id: 'p1', org_id: 'other-org' } },
+  ])('drops a promoted open whose payload names another org: %j', async (workspace) => {
+    const { controller, services, callbacks } = setupUnbound()
+    let resolveOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOpen = resolve }))
+    const opening = controller.openProject('p1')
+    controller.adoptOrgId('o1')
+    controller.selectCanonicalVersion('v1')
+    expect(services.openProject).toHaveBeenCalledExactlyOnceWith('p1', null)
+
+    resolveOpen(workspace)
+    expect(await opening).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: null, workspace: null,
+      canonicalVersionId: null, workspaceLoading: false })
+    expect(callbacks.onWorkspaceOpened).not.toHaveBeenCalled()
+    expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
+  })
+
+  it('retains a completed open and rehydrates with the adopted org', async () => {
+    const { controller, services, callbacks } = setupUnbound()
+    let resolveOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOpen = resolve }))
+    const opening = controller.openProject('p1')
+    const workspace = { project: { project_id: 'p1' } }
+    resolveOpen(workspace)
+    expect(await opening).toBe(workspace)
+    controller.selectCanonicalVersion('v1')
+
+    controller.adoptOrgId('o1')
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: 'p1', workspace,
+      canonicalVersionId: 'v1', workspaceLoading: false })
+    const refreshed = { project: { project_id: 'p1', org_id: 'o1' } }
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOpen = resolve }))
+    const rehydrating = controller.rehydrate()
+    expect(services.openProject.mock.calls).toEqual([['p1', null], ['p1', 'o1']])
+    resolveOpen(refreshed)
+    expect(await rehydrating).toBe(refreshed)
+    expect(callbacks.onWorkspaceOpened).toHaveBeenCalledExactlyOnceWith({ projectId: 'p1', orgId: null, workspace })
+    expect(callbacks.onWorkspaceRehydrated).toHaveBeenCalledExactlyOnceWith({ projectId: 'p1', orgId: 'o1', workspace: refreshed })
+  })
+
+  it('publishes a promoted open failure under the adopted org', async () => {
+    const { controller, services, callbacks } = setupUnbound()
+    let rejectOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectOpen = reject }))
+    const opening = controller.openProject('p1')
+    controller.adoptOrgId('o1')
+    expect(services.openProject).toHaveBeenCalledExactlyOnceWith('p1', null)
+
+    rejectOpen(new Error('Open failed.'))
+    expect(await opening).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: 'p1', workspace: null,
+      canonicalVersionId: null, workspaceLoading: false, projectsError: 'Open failed.' })
+    expect(callbacks.onWorkspaceOpened).not.toHaveBeenCalled()
+    expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
+  })
+
+  it('promotes an in-flight rehydrate and reports the adopted org', async () => {
+    const { controller, services, callbacks } = setupUnbound()
+    const previous = await controller.openProject('p1')
+    controller.selectCanonicalVersion('v1')
+    let resolveRefresh
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    const rehydrating = controller.rehydrate()
+    controller.adoptOrgId('o1')
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: 'p1', workspace: previous,
+      canonicalVersionId: 'v1', workspaceLoading: true })
+
+    const workspace = { project: { project_id: 'p1', org_id: 'o1' } }
+    resolveRefresh(workspace)
+    expect(await rehydrating).toBe(workspace)
+    expect(services.openProject.mock.calls).toEqual([['p1', null], ['p1', null]])
+    expect(controller.getSnapshot()).toMatchObject({ workspace, workspaceLoading: false })
+    expect(callbacks.onWorkspaceOpened).toHaveBeenCalledTimes(1)
+    expect(callbacks.onWorkspaceRehydrated).toHaveBeenCalledExactlyOnceWith({ projectId: 'p1', orgId: 'o1', workspace })
+  })
+
+  it('drops a promoted rehydrate that names another org', async () => {
+    const { controller, services, callbacks } = setupUnbound()
+    await controller.openProject('p1')
+    controller.selectCanonicalVersion('v1')
+    let resolveRefresh
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveRefresh = resolve }))
+    const rehydrating = controller.rehydrate()
+    controller.adoptOrgId('o1')
+    resolveRefresh({ org_id: 'other-org', project: { project_id: 'p1' } })
+
+    expect(await rehydrating).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: null, workspace: null,
+      canonicalVersionId: null, workspaceLoading: false })
+    expect(callbacks.onWorkspaceOpened).toHaveBeenCalledTimes(1)
+    expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
+  })
+
+  it('retains the last hydration when a promoted rehydrate fails', async () => {
+    const { controller, services, callbacks } = setupUnbound()
+    const workspace = await controller.openProject('p1')
+    let rejectRefresh
+    services.openProject.mockImplementationOnce(() => new Promise((resolve, reject) => { rejectRefresh = reject }))
+    const rehydrating = controller.rehydrate()
+    controller.adoptOrgId('o1')
+    rejectRefresh(new Error('Refresh failed.'))
+
+    expect(await rehydrating).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: 'p1', workspace,
+      workspaceLoading: false, projectsError: null })
+    expect(callbacks.onWorkspaceOpened).toHaveBeenCalledTimes(1)
+    expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
+  })
+
+  it('ignores an old promoted response after a second org switch and a new open', async () => {
+    const { controller, services, callbacks } = setupUnbound()
+    let resolveFirst
+    let resolveSecond
+    services.openProject
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveFirst = resolve }))
+      .mockImplementationOnce(() => new Promise((resolve) => { resolveSecond = resolve }))
+    const first = controller.openProject('p1')
+    controller.adoptOrgId('o1')
+    controller.adoptOrgId('o2')
+    const second = controller.openProject('p1')
+    const snapshot = controller.getSnapshot()
+    resolveFirst({ project: { project_id: 'p1', org_id: 'other-org' } })
+    expect(await first).toBeNull()
+    expect(controller.getSnapshot()).toBe(snapshot)
+
+    const workspace = { project: { project_id: 'p1', org_id: 'o2' } }
+    resolveSecond(workspace)
+    expect(await second).toBe(workspace)
+    expect(services.openProject.mock.calls).toEqual([['p1', null], ['p1', 'o2']])
+    expect(callbacks.onWorkspaceOpened).toHaveBeenCalledExactlyOnceWith({ projectId: 'p1', orgId: 'o2', workspace })
+  })
+
+  it('invalidates pending org creation on first adoption', async () => {
+    const { controller, services, storage } = setupUnbound()
+    let resolveOrg
+    services.createOrg.mockImplementationOnce(() => new Promise((resolve) => { resolveOrg = resolve }))
+    const creating = controller.createOrg('Old workspace')
+    expect(controller.getSnapshot().orgBusy).toBe(true)
+    controller.adoptOrgId('o1')
+    resolveOrg({ org: { org_id: 'old-org' } })
+
+    expect(await creating).toBeNull()
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', orgBusy: false })
+    expect(storage.setItem).toHaveBeenCalledExactlyOnceWith(WORKSPACE_ORG_KEY, 'o1')
+  })
+
+  it('leaves the workspace untouched for repeated or blank adoption', async () => {
+    const { controller, storage } = setupUnbound()
+    await controller.openProject('p1')
+    controller.adoptOrgId('o1')
+    const snapshot = controller.getSnapshot()
+
+    expect(controller.adoptOrgId('o1')).toBe(true)
+    expect(controller.adoptOrgId('')).toBe(false)
+    expect(controller.adoptOrgId('   ')).toBe(false)
+    expect(controller.getSnapshot()).toBe(snapshot)
+    expect(storage.setItem).toHaveBeenCalledExactlyOnceWith(WORKSPACE_ORG_KEY, 'o1')
+  })
+
+  it('still invalidates an open when switching between non-null orgs', async () => {
+    const callbacks = { onWorkspaceOpened: vi.fn() }
+    const { controller, services } = setup({ authLive: true, callbacks })
+    let resolveOpen
+    services.openProject.mockImplementationOnce(() => new Promise((resolve) => { resolveOpen = resolve }))
+    const opening = controller.openProject('p1')
+    controller.adoptOrgId('o2')
+    resolveOpen({ project: { project_id: 'p1' } })
+
+    expect(await opening).toBeNull()
+    expect(services.openProject).toHaveBeenCalledExactlyOnceWith('p1', 'stored-org')
+    expect(controller.getSnapshot()).toMatchObject({ orgId: 'o2', openProjectId: null, workspace: null,
+      canonicalVersionId: null, workspaceLoading: false })
+    expect(callbacks.onWorkspaceOpened).not.toHaveBeenCalled()
+  })
+})
+
 describe('server workspace bootstrap', () => {
   it('readsPaused publishes the empty snapshot and makes no projects read', async () => {
     const services = { listProjects: vi.fn(async () => []) }

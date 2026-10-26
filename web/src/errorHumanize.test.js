@@ -1,6 +1,18 @@
 import { expect, it } from 'vitest'
 import { humanizeError, MSG_GENERIC, MSG_NETWORK, MSG_SERVICE } from './errorHumanize.js'
 
+it('maps Safari Load failed to the network message', () => {
+  expect(humanizeError(new Error('Load failed'))).toBe(MSG_NETWORK)
+})
+
+it('preserves Upload failed as a readable error', () => {
+  expect(humanizeError(new Error('Upload failed'))).toBe('Upload failed')
+})
+
+it('preserves Download failed as a readable error', () => {
+  expect(humanizeError(new Error('Download failed'))).toBe('Download failed')
+})
+
 it('SSD1-B2 row1', () => {
   const value = JSON.parse('{"toString":0}')
   expect(() => humanizeError(value)).not.toThrow()

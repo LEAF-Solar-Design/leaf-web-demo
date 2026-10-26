@@ -143,7 +143,7 @@ it('cancel restores the initially collapsed preference after a temporary reveal'
 
 it('only explicit Review hands the form values to the existing submit callback', () => {
   const onRun = vi.fn()
-  const onSubmit = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'intent-1' } }))
   render(<RibbonSeat onRun={onRun} onSubmit={onSubmit} />)
   choose(presetList.name)
   fireEvent.change(screen.getByRole('textbox', { name: 'Drawing id' }), { target: { value: 'drawing-1' } })
@@ -157,6 +157,30 @@ it('only explicit Review hands the form values to the existing submit callback',
   expect(onRun).not.toHaveBeenCalled()
   expect(formHost()).toBeNull()
   expect(content()).not.toBeVisible()
+})
+
+it.each([undefined, null, {}, { runIntent: {} }])('keeps the revealed form and its values when Review returns %j without arming a run', (refusal) => {
+  const onRun = vi.fn()
+  const onSubmit = vi.fn(() => refusal)
+  render(<RibbonSeat onRun={onRun} onSubmit={onSubmit} />)
+  choose(presetList.name)
+  fireEvent.change(screen.getByRole('textbox', { name: 'Drawing id' }), { target: { value: 'drawing-1' } })
+  const review = screen.getByRole('button', { name: /Review & run/i })
+  fireEvent.click(review)
+  expect(onSubmit).toHaveBeenCalledTimes(1)
+  expect(onSubmit).toHaveBeenCalledWith(rows.find((row) => row.name === presetList.name), { drawing_id: 'drawing-1' })
+  expect(onRun).not.toHaveBeenCalled()
+  expect(formHost()).toBeVisible()
+  expect(content()).toBeVisible()
+  expect(toggle()).toHaveAttribute('aria-expanded', 'true')
+  expect(screen.getByRole('textbox', { name: 'Drawing id' })).toHaveValue('drawing-1')
+  expect(review).toBeEnabled()
+  fireEvent.click(review)
+  expect(onSubmit).toHaveBeenCalledTimes(2)
+  expect(onSubmit).toHaveBeenLastCalledWith(rows.find((row) => row.name === presetList.name), { drawing_id: 'drawing-1' })
+  expect(formHost()).toBeVisible()
+  expect(content()).toBeVisible()
+  expect(screen.getByRole('textbox', { name: 'Drawing id' })).toHaveValue('drawing-1')
 })
 
 it.each([false, true])('closing via the ribbon restores the prior user preference: expanded=%s', (expanded) => {

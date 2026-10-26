@@ -80,6 +80,26 @@ function useNarrowViewport() {
 // selector: the step falls back to its className target, exactly as before.
 const ANCHOR_ID = /^[a-z][a-z0-9-]{0,63}$/
 
+function restoreWorkspaceFocus(opener) {
+  const candidates = [opener, ...document.querySelectorAll(
+    '[data-testid="command-bar"], .app button, .app input, .app textarea, .app a[href]',
+  )]
+  for (const el of candidates) {
+    if (!el || !el.isConnected || el === document.body || el === document.documentElement
+      || el.closest('.tour-root, [hidden], [inert], [aria-hidden="true"]')
+      || el.matches(':disabled') || typeof el.focus !== 'function') continue
+    let hidden = false
+    for (let parent = el; parent; parent = parent.parentElement) {
+      const style = window.getComputedStyle(parent)
+      if (style.display === 'none' || style.visibility === 'hidden' || style.visibility === 'collapse'
+        || style.opacity === '0') { hidden = true; break }
+    }
+    if (hidden) continue
+    el.focus()
+    if (document.activeElement === el) return
+  }
+}
+
 function resolveSelectorChain(selector) {
   if (!selector) return null
   for (const part of String(selector).split(',')) {
@@ -231,9 +251,12 @@ export default function DemoTour({
   const needsEffect = !!(step && (step.prompt || step.action === 'author' || step.action === 'version'))
   const canAdvance = !busy && (!needsEffect || landed)
   const isLast = index >= steps.length - 1
+  const titleRef = useRef(null)
 
   const next = useCallback(() => {
     if (isLast || step?.action === 'exit') { if (onExit) onExit(); return }
+    // Keep focus in the tour before the next beat can disable Next.
+    titleRef.current?.focus()
     setIndex(index + 1)
   }, [isLast, step, index, setIndex, onExit])
 
@@ -274,8 +297,7 @@ export default function DemoTour({
     restoreRef.current = document.activeElement
     rootRef.current?.focus()
     return () => {
-      const el = restoreRef.current
-      if (el && el.isConnected && typeof el.focus === 'function') el.focus()
+      restoreWorkspaceFocus(restoreRef.current)
     }
   }, [])
 
@@ -367,7 +389,7 @@ export default function DemoTour({
             </button>
           )}
         </div>
-        <div className="tour-card-title">{step.title}</div>
+        <div ref={titleRef} tabIndex={-1} role="heading" aria-level={2} className="tour-card-title">{step.title}</div>
         {(!narrow || coachOpen) && <p className="tour-card-body">{step.body}</p>}
 
         {step.prompt && (!narrow || coachOpen) && (

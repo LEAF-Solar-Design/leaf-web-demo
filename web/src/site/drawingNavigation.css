@@ -66,3 +66,14 @@
     left: calc(var(--ck-pane, 0px) + 8px);
   }
 }
+@media (max-width: 599px) {
+  .drawing-navigation {
+    top: calc(var(--ck-canvas-top, 140px) + 64px);
+    left: 8px;
+    width: calc(100vw - 16px);
+    height: 76px;
+  }
+  .drawing-navigation .drawing-find-field { min-height: 46px; height: auto; }
+  .drawing-navigation .drawing-find-field input { height: 44px; min-height: 44px; }
+  .drawing-navigation .drawing-find-field .drawing-find-submit { height: 44px; min-height: 44px; min-width: 44px; }
+}

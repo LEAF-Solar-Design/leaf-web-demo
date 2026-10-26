@@ -1140,7 +1140,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_repository_source.py"), 8),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py") +
-              ["tests/test_solar_worker_coverage.py"], 20),
+              ["tests/test_solar_worker_coverage.py", "tests/test_leaf_cloud_grants_m2m.py"], 20),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 14),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
@@ -1496,7 +1496,7 @@ def build_suites() -> List[Suite]:
               uses_database=True, database_skip_reasons=(
                   r"DATABASE_URL is required for PostgreSQL job tests",)),
         Suite("server-canonical-worker", "server tests/test_canonical_worker.py", "pytest",
-              SERVER, _py_pytest("tests/test_canonical_worker.py"), 39),  # 2026-10-13: PP-3A1 measured +7, then +5 (posture and ready-after-cycle rows), then +2 (base abbreviations, owner generator).
+              SERVER, _py_pytest("tests/test_canonical_worker.py") + ["tests/test_solar_graph_job_events.py"], 39),  # 2026-10-13: PP-3A1 measured +7, then +5 (posture and ready-after-cycle rows), then +2 (base abbreviations, owner generator).
         Suite("server-marathon-orchestration", "server tests/test_marathon_orchestration.py",
               "pytest", SERVER, _py_pytest("tests/test_marathon_orchestration.py"), 20),
         Suite("server-adapter-inverter", "server tests/test_inverter_placement_adapter.py",
@@ -1619,7 +1619,8 @@ def build_suites() -> List[Suite]:
         Suite("server-sessions-e2e", "server tests/test_sessions_e2e.py", "pytest", SERVER,
               _py_pytest("tests/test_sessions_e2e.py"), 9),
         Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
-              "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py"), 11),
+              "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py") +
+              ["tests/test_capabilities_project_runs_post.py"], 11),
         # The two cross-repo contract checks read the website validator out of a
         # SIBLING checkout that this deliberately hermetic workflow does not have,
         # so they skip on CI and execute only on an operator box that has both

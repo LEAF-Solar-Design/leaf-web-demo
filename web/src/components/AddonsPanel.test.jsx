@@ -42,6 +42,14 @@ afterEach(() => {
 })
 
 describe('Studio Add-ons', () => {
+  it('asks for a workspace without fetching or offering Retry when none is selected', () => {
+    const fetch = mockFetch()
+    panel({ orgId: null })
+    expect(screen.getByText('Choose a workspace to manage add-ons.')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Retry' })).not.toBeInTheDocument()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it('renders all eleven labels with equally styled mode buttons', async () => {
     mockFetch()
     panel()
@@ -106,14 +114,14 @@ describe('Studio Add-ons', () => {
     expect(await row.findByRole('alert')).toHaveTextContent('a; b')
   })
 
-  it('keeps the status text for a failed save with a non-JSON body', async () => {
+  it('humanizes a failed save with a non-JSON body', async () => {
     mockFetch({ put: () => new Response('Internal Server Error', { status: 500 }) })
     panel()
     const row = within(await loadedRow())
     fireEvent.click(row.getByRole('radio', { name: 'Your own' }))
     fireEvent.change(row.getByRole('textbox'), { target: { value: 'my-e2b-key' } })
     fireEvent.click(row.getByRole('button', { name: 'Save' }))
-    expect(await row.findByRole('alert')).toHaveTextContent('PUT /api/orgs/org-1/addons/e2b_exec -> 500')
+    expect(await row.findByRole('alert')).toHaveTextContent('The service had a temporary problem. Try again.')
   })
 
   it('renders managed statement lines, decimal money, totals and placeholder pricing', async () => {

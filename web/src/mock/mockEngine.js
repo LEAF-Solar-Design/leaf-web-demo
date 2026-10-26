@@ -4,6 +4,8 @@
 // (panels measure ~77 x 38.5 -> a standard ~78in x 39in module).
 
 import { centroid, polyArea, bounds } from './geometry.js'
+import { requireDeleteHandle } from './mockVersions.js'
+import { humanizeError } from '../errorHumanize.js'
 
 const SQIN_PER_SQFT = 144
 
@@ -85,10 +87,7 @@ const OPS = {
   // mockVersions.js (which recomputes the same removal deterministically).
   delete_marked_panel(intake, params) {
     const pls = intake.polylines || []
-    const asked = params?.handle || params?.target_handle || null
-    const handle = asked && pls.some((p) => p.handle === asked)
-      ? asked
-      : (pls.length ? pls[pls.length - 1].handle : null)
+    const handle = requireDeleteHandle(intake, params?.handle ?? params?.target_handle)
     const remaining = pls.filter((p) => p.handle !== handle)
     return {
       result: {
@@ -141,6 +140,14 @@ export function runMock(tool, params, intake) {
       error,
     }
   }
-  const { result, overlay } = op(intake, params || {})
-  return envelope(tool, result, overlay, t0)
+  try {
+    const { result, overlay } = op(intake, params || {})
+    return envelope(tool, result, overlay, t0)
+  } catch (error) {
+    return {
+      ok: false, tool: tool.name, version: tool.version || '1.0.0',
+      result: null, overlay: null, timing_ms: 0, cost: null,
+      error: humanizeError(error),
+    }
+  }
 }

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { getArloReviews, saveArloReview } from '../api.js'
+import { humanizeError } from '../errorHumanize.js'
 import './ArloProposalReview.css'
 
 const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
@@ -52,7 +53,7 @@ export default function ArloProposalReview({ envelope, context }) {
       if (cancelled) return
       if (data.job_id !== context.job_id || data.result_sha256 !== envelope.result_sha256) throw new Error('The stored result differs. Reopen this job before reviewing.')
       setReviews(data.reviews); setLoading(false)
-    }).catch(cause => { if (!cancelled) { setError(cause.message || 'Review history could not be loaded.'); setLoading(false) } })
+    }).catch(cause => { if (!cancelled) { setError(humanizeError(cause)); setLoading(false) } })
     return () => { cancelled = true; alive.current = false }
   }, [bound, context?.job_id, envelope.result_sha256])
   const decide = async decision => {
@@ -68,7 +69,7 @@ export default function ArloProposalReview({ envelope, context }) {
       setReviews(previous => [...previous.filter(r => r.operation_id !== row.operation_id), row])
       setSaved(decision === 'accept' ? 'Proposal accepted for the next CAD step.' : 'Proposal rejected.')
       attempt.current = null
-    } catch (cause) { if (alive.current) setError(`Decision not confirmed saved. ${cause.message || 'Try again.'}`) }
+    } catch (cause) { if (alive.current) setError(`Decision not confirmed saved. ${humanizeError(cause)}`) }
     finally { if (alive.current) setSaving(false) }
   }
   if (!proposal) return <div className="arlo-review"><h4>Feeder design incomplete</h4><p>No complete proposal is available to review.</p><details><summary>Solver diagnostics</summary><pre>{JSON.stringify(result?.diagnostics || {}, null, 2)}</pre></details></div>
