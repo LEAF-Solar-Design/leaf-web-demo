@@ -10,6 +10,11 @@ import subprocess
 import base64
 import io
 import zipfile
+import select
+import signal
+import sys
+import textwrap
+import time
 
 import pytest
 
@@ -1774,3 +1779,280 @@ def test_retained_web_composition_refuses_substituted_admitted_output(tmp_path, 
         producer.produce_release(tmp_path, tmp_path / "output", request,
             {"CODEBUILD_SRC_DIR_provider_contract": "contract"}, "cb", "s3")
     assert not (tmp_path / "output").exists()
+
+
+APT_MIRROR_FIXTURES = [
+    "E: Failed to fetch https://mirror.invalid/apt/pkg.deb  hAsH sUm MiSmAtCh\n",
+    "Err:1 https://mirror.invalid/apt stable/main amd64 pkg 1\n"
+    "  File has unexpected size (12 != 34). Mirror sync in progress?\n",
+    "E: Failed to fetch https://mirror.invalid/apt/pkg.deb  Mirror sync in progress\n",
+    "Err:1 https://mirror.invalid/apt stable/main amd64 pkg 1\n  Hash Sum mismatch\n",
+]
+NATIVE_INSTALL_COMMANDS = {
+    "node": ["npx", "--no-install", "playwright", "install", "--with-deps", "chromium"],
+    "python": ["python", "-I", "-m", "playwright", "install", "--with-deps", "chromium"],
+}
+
+
+@pytest.fixture
+def native_install_case(tmp_path):
+    root = tmp_path / "source"
+    for name in (".codebuild", "web", "harness", "scripts"):
+        (root / name).mkdir(parents=True)
+    helper = root / ".codebuild/native-playwright-install.sh"
+    helper.write_bytes((Path(__file__).resolve().parents[1] /
+                        ".codebuild/native-playwright-install.sh").read_bytes())
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    scratch = tmp_path / "scratch"
+    scratch.mkdir()
+    config = tmp_path / "config.json"
+    events = tmp_path / "events.jsonl"
+    # These executables only record argv/cwd and replay synthetic output. No
+    # package manager, installer, provider tool or gate is actually invoked.
+    stub = f"#!{sys.executable}\n" + textwrap.dedent('''\
+        import json, os, signal, sys
+        from pathlib import Path
+        name, args = Path(sys.argv[0]).name, sys.argv[1:]
+        path = Path(os.environ["NATIVE_TEST_EVENTS"])
+        prior = [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+        kind = ("node" if name == "npx" else "python") if "playwright" in args else name
+        event = {"name": name, "kind": kind, "args": args, "cwd": os.getcwd(), "pid": os.getpid()}
+        with path.open("a") as out:
+            out.write(json.dumps(event) + "\\n")
+        if name == "timeout":
+            os.execvp(args[2], args[2:])
+        settings = json.loads(Path(os.environ["NATIVE_TEST_CONFIG"]).read_text())
+        if "playwright" in args or (name == "npm" and args == ["ci"]):
+            outcomes = settings.get(kind, [{}])
+            index = sum(item["name"] == name and
+                        ("playwright" in item["args"] if "playwright" in args else item["args"] == ["ci"])
+                        for item in prior)
+            outcome = outcomes[min(index, len(outcomes) - 1)]
+            sys.stdout.write(outcome.get("output", ""))
+            sys.stdout.flush()
+            if outcome.get("signal"):
+                os.kill(os.getpid(), outcome["signal"])
+            if outcome.get("block"):
+                signal.pause()
+            sys.exit(outcome.get("status", 0))
+        ''')
+    for name in ("npx", "python", "npm", "timeout", "sleep", "node", "aws", "docker"):
+        executable = bin_dir / name
+        executable.write_text(stub, encoding="utf-8")
+        executable.chmod(0o755)
+    env = dict(os.environ, PATH=f"{bin_dir}:{os.environ['PATH']}", TMPDIR=str(scratch),
+               NATIVE_TEST_CONFIG=str(config), NATIVE_TEST_EVENTS=str(events),
+               LEAF_NATIVE_MODE="gate", CODEBUILD_SRC_DIR=str(root))
+
+    def configure(settings):
+        config.write_text(json.dumps(settings), encoding="utf-8")
+
+    def recorded(name=None):
+        calls = [json.loads(line) for line in events.read_text().splitlines()] if events.exists() else []
+        return [call for call in calls if name is None or call["name"] == name]
+
+    def run(kind, settings, extra=()):
+        configure(settings)
+        return subprocess.run(["bash", str(helper), *NATIVE_INSTALL_COMMANDS[kind], *extra],
+                              cwd=root / "web", env=env, capture_output=True, text=True, timeout=10)
+
+    return SimpleNamespace(root=root, helper=helper, bin=bin_dir, scratch=scratch, env=env,
+                           configure=configure, recorded=recorded, run=run)
+
+
+@pytest.mark.parametrize("kind", NATIVE_INSTALL_COMMANDS)
+def test_native_install_success_no_retry(native_install_case, kind):
+    case = native_install_case
+    result = case.run(kind, {kind: [{"output": APT_MIRROR_FIXTURES[0]}]})
+    assert result.returncode == 0 and result.stdout == APT_MIRROR_FIXTURES[0]
+    assert len(case.recorded("timeout")) == 1
+    assert case.recorded("sleep") == [] and list(case.scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", NATIVE_INSTALL_COMMANDS)
+@pytest.mark.parametrize("output", APT_MIRROR_FIXTURES)
+def test_native_install_mirror_retry_once(native_install_case, kind, output):
+    case = native_install_case
+    extra = ["literal spaces ; $() `ignored` ' \""]
+    result = case.run(kind, {kind: [{"status": 100, "output": output},
+                                   {"output": "installed\n"}]}, extra)
+    assert result.returncode == 0 and result.stdout == output + "installed\n"
+    assert result.stderr == ""
+    assert [call["args"] for call in case.recorded("timeout")] == [
+        ["--kill-after=30s", "600s", *NATIVE_INSTALL_COMMANDS[kind], *extra]] * 2
+    installers = case.recorded(NATIVE_INSTALL_COMMANDS[kind][0])
+    assert [call["args"] for call in installers] == [NATIVE_INSTALL_COMMANDS[kind][1:] + extra] * 2
+    assert all(call["cwd"] == str(case.root / "web") for call in installers)
+    assert [call["args"] for call in case.recorded("sleep")] == [["5"]]
+    assert list(case.scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", NATIVE_INSTALL_COMMANDS)
+def test_native_install_mirror_exhaustion(native_install_case, kind):
+    case = native_install_case
+    result = case.run(kind, {kind: [{"status": 100, "output": APT_MIRROR_FIXTURES[1]}]})
+    assert result.returncode == 75
+    assert result.stderr == "infra_unavailable: apt_mirror_sync_exhausted\n"
+    assert result.stdout == APT_MIRROR_FIXTURES[1] * 2
+    assert len(case.recorded("timeout")) == 2 and len(case.recorded("sleep")) == 1
+    assert all("--with-deps" in call["args"] for call in case.recorded("timeout"))
+    assert list(case.scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", NATIVE_INSTALL_COMMANDS)
+@pytest.mark.parametrize("output,status,signum", [
+    ("npm ERR! package install failed\n", 42, None),
+    ("E: Could not get lock /var/lib/dpkg/lock\n", 100, None),
+    ("E: Failed to fetch https://mirror.invalid/pkg 403 Forbidden\n", 100, None),
+    ("E: Failed to fetch https://mirror.invalid/pkg Temporary failure resolving mirror.invalid\n", 100, None),
+    ("E: Unable to locate package missing\n", 100, None),
+    ("E: Failed to fetch https://mirror.invalid/pkg Permission denied\n", 100, None),
+    ("E: The repository https://mirror.invalid/apt is not signed\n", 100, None),
+    ("Browser download failed: Hash Sum mismatch\n", 1, None),
+    ("E: Failed to fetch https://mirror.invalid/pkg 403 Forbidden\n"
+     "Browser download failed: Hash Sum mismatch\n", 1, None),
+    ("File has unexpected size (12 != 34)\n", 100, None),
+    ("Mirror sync in progress\n", 100, None),
+    ("E: Failed to fetch https://mirror.invalid/pkg File has unexpected size\n", 100, None),
+    (APT_MIRROR_FIXTURES[0], 124, None),
+    (APT_MIRROR_FIXTURES[0], 125, None),
+    (APT_MIRROR_FIXTURES[0], 126, None),
+    (APT_MIRROR_FIXTURES[0], 127, None),
+    (APT_MIRROR_FIXTURES[0], 137, None),
+    (APT_MIRROR_FIXTURES[0], 143, signal.SIGTERM),
+])
+def test_native_install_nonmirror_failure(native_install_case, kind, output, status, signum):
+    case = native_install_case
+    result = case.run(kind, {kind: [{"status": status, "output": output, "signal": signum}]})
+    assert result.returncode == status and result.stdout == output
+    assert result.stderr == "" and len(case.recorded("timeout")) == 1
+    assert case.recorded("sleep") == [] and list(case.scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", NATIVE_INSTALL_COMMANDS)
+@pytest.mark.parametrize("status", [2, 124, 143])
+def test_native_install_second_nonmirror_preserves_status(native_install_case, kind, status):
+    case = native_install_case
+    result = case.run(kind, {kind: [{"status": 100, "output": APT_MIRROR_FIXTURES[0]},
+                                   {"status": status, "output": "different failure\n" if status == 2
+                                    else APT_MIRROR_FIXTURES[0]}]})
+    assert result.returncode == status and result.stderr == ""
+    assert len(case.recorded("timeout")) == 2 and len(case.recorded("sleep")) == 1
+    assert list(case.scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("kind", NATIVE_INSTALL_COMMANDS)
+@pytest.mark.parametrize("signum", [signal.SIGHUP, signal.SIGINT, signal.SIGTERM])
+def test_native_install_cleanup_and_status(native_install_case, kind, signum):
+    case = native_install_case
+    secret = "https://fixture-user:fixture-secret@mirror.invalid/apt/pkg"
+    output = APT_MIRROR_FIXTURES[0] + secret + "\n" + "x" * 100000 + "\nready\n"
+    case.configure({kind: [{"status": 100, "output": output, "block": True}]})
+    child = subprocess.Popen(["bash", str(case.helper), *NATIVE_INSTALL_COMMANDS[kind]],
+                             cwd=case.root, env=case.env, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    try:
+        streamed = b""
+        deadline = time.monotonic() + 5
+        while not streamed.endswith(b"ready\n") and time.monotonic() < deadline:
+            if select.select([child.stdout], [], [], 0.1)[0]:
+                chunk = os.read(child.stdout.fileno(), 8192)
+                assert chunk, "helper exited before streaming installer output"
+                streamed += chunk
+        assert streamed.decode() == output
+        log = next(case.scratch.glob("*/install.log"))
+        assert log.stat().st_size <= 65536
+        assert log.parent.stat().st_mode & 0o777 == 0o700
+        child.send_signal(signum)
+        _, stderr = child.communicate(timeout=5)
+        assert child.returncode == 128 + signum and stderr == b""
+        assert list(case.scratch.iterdir()) == []
+        installer = case.recorded(NATIVE_INSTALL_COMMANDS[kind][0])[0]
+        with pytest.raises(ProcessLookupError):
+            os.kill(installer["pid"], 0)
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+
+
+@pytest.mark.parametrize("kind", NATIVE_INSTALL_COMMANDS)
+def test_native_install_bounded_log_keeps_early_diagnostic(native_install_case, kind):
+    case = native_install_case
+    output = APT_MIRROR_FIXTURES[0] + "https://fixture-user:fixture-secret@mirror.invalid/pkg\n" + "x" * 100000
+    result = case.run(kind, {kind: [{"status": 100, "output": output}]})
+    assert result.returncode == 75 and result.stdout == output * 2
+    assert result.stderr == "infra_unavailable: apt_mirror_sync_exhausted\n"
+    assert "fixture-secret" not in result.stderr and list(case.scratch.iterdir()) == []
+
+
+def native_entrypoint_block(entrypoint, case):
+    repo = Path(__file__).resolve().parents[1]
+    if entrypoint == "forge":
+        source = (repo / ".codebuild/native-release-producer.sh").read_text(encoding="utf-8")
+        return source[source.index('if [[ "$LEAF_NATIVE_MODE" == gate ]]; then'):]
+    source = (repo / ".codebuild/release.yml").read_text(encoding="utf-8")
+    install = source.split("  install:\n", 1)[1].split("  pre_build:\n", 1)[0]
+    install = textwrap.dedent(install.split("      - |\n")[2])
+    build = source.split("  build:\n", 1)[1].split("\nartifacts:\n", 1)[0]
+    build = textwrap.dedent(build.split("      - |\n", 1)[1])
+    # Replace only the fixed venv location with an inert interpreter stub.
+    return (install + "\n" + build).replace("/tmp/leaf-native-venv/bin", str(case.bin))
+
+
+@pytest.mark.parametrize("entrypoint", ["forge", "legacy"])
+@pytest.mark.parametrize("failure", [None, "node", "python", "npm", "npm-web"])
+def test_native_entrypoints_use_retry_helper(native_install_case, entrypoint, failure):
+    case = native_install_case
+    failed = {"status": 100, "output": APT_MIRROR_FIXTURES[0]}
+    settings = {"npm": [{}, failed]} if failure == "npm-web" else {failure: [failed]} if failure else {}
+    case.configure(settings)
+    npm_failed = failure in ("npm", "npm-web")
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", native_entrypoint_block(entrypoint, case)],
+                            cwd=case.root, env=case.env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == (100 if npm_failed else 75 if failure else 0)
+    calls = case.recorded()
+    node = [call for call in case.recorded("npx") if "playwright" in call["args"]]
+    python = [call for call in case.recorded("python") if "playwright" in call["args"]]
+    gate = [call for call in calls if call["name"] == "python" and
+            "scripts/ci/native_release_producer.py" in call["args"]]
+    tests = [call for call in case.recorded("python") if "pytest" in call["args"]]
+    assert len(node) == (0 if npm_failed else 2 if failure == "node" else 1)
+    assert len(python) == (0 if npm_failed or failure == "node" else 2 if failure == "python" else 1)
+    assert len(gate) == (0 if failure else 1)
+    assert len(tests) == (1 if entrypoint == "legacy" and not failure else 0)
+    assert len(case.recorded("sleep")) == (1 if failure in ("node", "python") else 0)
+    assert len([call for call in case.recorded("npm") if call["args"] == ["ci"]]) == (1 if failure == "npm" else 2)
+    for call in node + python:
+        assert call["args"][-3:] == ["install", "--with-deps", "chromium"]
+        assert call["cwd"] == str(case.root / "web" if call in node else case.root)
+    assert list(case.scratch.iterdir()) == []
+
+
+@pytest.mark.parametrize("entrypoint", ["forge", "legacy"])
+def test_native_entrypoints_successful_retry_reaches_gate_once(native_install_case, entrypoint):
+    case = native_install_case
+    case.configure({kind: [{"status": 100, "output": APT_MIRROR_FIXTURES[0]}, {}]
+                    for kind in NATIVE_INSTALL_COMMANDS})
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", native_entrypoint_block(entrypoint, case)],
+                            cwd=case.root, env=case.env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0
+    assert len(case.recorded("sleep")) == 2
+    assert len([call for call in case.recorded("python") if
+                "scripts/ci/native_release_producer.py" in call["args"]]) == 1
+    assert len([call for call in case.recorded("npm") if call["args"] == ["ci"]]) == 2
+
+
+@pytest.mark.parametrize("entrypoint", ["forge", "legacy"])
+def test_native_entrypoints_release_mode_unchanged(native_install_case, entrypoint):
+    case = native_install_case
+    case.configure({})
+    env = dict(case.env, LEAF_NATIVE_MODE="release")
+    result = subprocess.run(["bash", "-euo", "pipefail", "-c", native_entrypoint_block(entrypoint, case)],
+                            cwd=case.root, env=env, capture_output=True, text=True, timeout=10)
+    assert result.returncode == 0
+    assert not any("playwright" in call["args"] for call in case.recorded())
+    assert case.recorded("npm") == [] and case.recorded("sleep") == []
+    gate = [call for call in case.recorded("python") if
+            "scripts/ci/native_release_producer.py" in call["args"]]
+    assert len(gate) == 1

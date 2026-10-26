@@ -14,7 +14,7 @@
   padding: 1rem;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--leaf-radius-key);
   color: var(--foreground);
   font-family: var(--font-sans);
 }
@@ -29,7 +29,7 @@
   color: inherit;
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 4px;
+  border-radius: var(--leaf-radius-key);
   padding: 0.625rem;
 }
 
@@ -62,7 +62,7 @@
 .campaign-panel .campaign-results-header { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 0.75rem; min-width: 0; }
 .campaign-panel .campaign-results-header .btn.primary {
   padding: 0.625rem 1rem; font: 600 16px var(--font-sans);
-  background: var(--primary); color: var(--on-accent); border: 1px solid var(--primary); border-radius: 4px;
+  background: var(--primary); color: var(--on-accent); border: 1px solid var(--primary); border-radius: var(--leaf-radius-key);
 }
 .campaign-panel .campaign-results-header .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
 .campaign-panel button,
@@ -74,7 +74,7 @@
 }
 .campaign-panel .campaign-selection { display: flex; flex-wrap: wrap; gap: 0.5rem; min-width: 0; }
 .campaign-panel .campaign-selection button {
-  padding: 0.625rem 0.875rem; border: 1px solid var(--border); border-radius: 4px;
+  padding: 0.625rem 0.875rem; border: 1px solid var(--border); border-radius: var(--leaf-radius-key);
   background: var(--sheet); color: var(--foreground); font: inherit; text-align: left;
 }
 .campaign-panel .campaign-selection button[aria-pressed="true"] {
@@ -84,13 +84,13 @@
 .campaign-panel .campaign-disclosure > summary { padding-block: 0.75rem; font-weight: 600; overflow-wrap: anywhere; }
 .campaign-panel .campaign-disclosure[open] > :not(summary) { margin-block: 0.75rem; }
 .campaign-panel .campaign-status { margin: 0; padding: 0; background: transparent; }
-.campaign-panel .campaign-status h3 { font-size: 22px; line-height: 1.2; }
+.campaign-panel .campaign-status h3 { font-size: var(--leaf-size-subtitle); line-height: 1.2; }
 .campaign-panel .campaign-completion { margin: 0; padding: 0; gap: 0.5rem; }
 .campaign-panel .campaign-outputs { display: flex; flex-wrap: wrap; gap: 8px; list-style: none; padding: 0; }
 .campaign-panel .campaign-outputs li { min-width: 0; max-width: 100%; }
 .campaign-panel .campaign-outputs .btn.primary {
   min-height: 44px; padding: 0.625rem 1rem; font: 600 16px var(--font-sans);
-  background: var(--primary); color: var(--on-accent); border: 1px solid var(--primary); border-radius: 4px;
+  background: var(--primary); color: var(--on-accent); border: 1px solid var(--primary); border-radius: var(--leaf-radius-key);
 }
 .campaign-panel .campaign-outputs .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
 .campaign-panel .campaign-outputs li > span { font-size: 0.875rem; color: var(--muted); }
