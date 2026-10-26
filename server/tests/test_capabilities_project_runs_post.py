@@ -63,6 +63,27 @@ def test_invalid_entries_match_get(lane, entries):
     assert response.json() == expected.json()
 
 
+@pytest.mark.parametrize("name,fields", [
+    ("solar-solve-proposal", {"solve_context": {}}),
+    ("solar-solve-proposal", {"solve_context": "context"}),
+    ("solar-commit-solve", {"proposal_job_id": "not-a-uuid"}),
+], ids=["empty-context", "string-context", "invalid-proposal-id"])
+@pytest.mark.parametrize("method", ["POST", "GET"])
+def test_malformed_solve_fields_are_bad_params(lane, name, fields, method):
+    query, entries = request_parts(lane, params={}, name=name)
+    available = lane.client.get("/api/capabilities", params=query, headers=routes.headers(lane))
+    assert routes.states(available)[name]["engine_ready"]
+    entries[name].update(fields)
+    if method == "POST":
+        response = lane.client.post("/api/capabilities", params=query,
+            json={"project_runs": entries}, headers=routes.headers(lane))
+    else:
+        response = lane.client.get("/api/capabilities",
+            params={**query, "project_runs": json.dumps(entries)}, headers=routes.headers(lane))
+    assert_bad_params(response)
+    assert not lane.a.accepted
+
+
 @pytest.mark.parametrize("content", [
     b"not JSON",
     b'\xff{"project_runs":{}}',
