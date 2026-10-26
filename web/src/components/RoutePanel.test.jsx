@@ -141,6 +141,50 @@ describe('RoutePanel demo refusals and outages', () => {
 })
 
 describe('RoutePanel Enter ownership', () => {
+  it.each(['body', 'command bar'])('ignores repeated Enter after cooldown from the %s', (target) => {
+    const confirm = mount(<textarea data-testid="command" className="bar-field" role="combobox" aria-expanded="false" />)
+    const element = target === 'body' ? document.body : screen.getByTestId('command')
+    element.focus()
+    const event = new KeyboardEvent('keydown', { key: 'Enter', repeat: true, bubbles: true, cancelable: true })
+    const stop = vi.spyOn(event, 'stopPropagation')
+
+    fireEvent(element, event)
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('leaves IME Enter with key code 229 in the collapsed command bar', () => {
+    const confirm = mount(<textarea data-testid="command" className="bar-field" role="combobox" aria-expanded="false" />)
+    const command = screen.getByTestId('command')
+    command.focus()
+    const event = new KeyboardEvent('keydown', {
+      key: 'Enter', keyCode: 229, isComposing: false, bubbles: true, cancelable: true,
+    })
+    const stop = vi.spyOn(event, 'stopPropagation')
+
+    fireEvent(command, event)
+
+    expect(confirm).not.toHaveBeenCalled()
+    expect(stop).not.toHaveBeenCalled()
+    expect(event.defaultPrevented).toBe(false)
+  })
+
+  it('confirms a fresh command bar Enter after cooldown', () => {
+    const confirm = mount(<textarea data-testid="command" className="bar-field" role="combobox" aria-expanded="false" />)
+    const command = screen.getByTestId('command')
+    command.focus()
+
+    fireEvent.keyDown(command, { key: 'Enter', repeat: true })
+    expect(confirm).not.toHaveBeenCalled()
+
+    fireEvent.keyDown(command, { key: 'Enter', repeat: false })
+
+    expect(confirm).toHaveBeenCalledOnce()
+    expect(confirm).toHaveBeenCalledWith(route.runIntent, tools[0], {})
+  })
+
   it.each([
     ['input', <input data-testid="editor" />],
     ['textarea', <textarea data-testid="editor" />],

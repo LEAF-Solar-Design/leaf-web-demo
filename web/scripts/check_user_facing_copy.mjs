@@ -122,6 +122,7 @@ function quotedLiterals(source) {
         break;
       } else if (delimiter !== '`' && (char === '\n' || char === '\r')) {
         // A prose apostrophe in JSX is not a multiline JavaScript string.
+        cursor = offset + 1;
         return;
       } else if (delimiter === '`' && char === '$' && source[cursor] === '{') {
         cursor += 1;

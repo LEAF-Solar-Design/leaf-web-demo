@@ -15,6 +15,11 @@ test('strict mode scans quoted branches inside nested template expressions', () 
   assert.deepEqual(strictMarkersOf('const title = `Saved ${ok ? "—" : "ready"}`;'), ['em dash']);
 });
 
+test('strict mode scans quoted branches after a JSX apostrophe', () => {
+  const source = `<p>Don't {ok ? "Ready" : "Wait — retry"}</p>\n`;
+  assert.deepEqual(strictMarkersOf(source), ['em dash']);
+});
+
 test('plural placeholders in visible copy are a hit', () => {
   assert.deepEqual(markersOf('<p>These placeholders will be replaced</p>'), ['placeholder']);
 });

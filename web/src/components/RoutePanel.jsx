@@ -10,6 +10,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanKey } from '../labels.js'
 import { humanizeError } from '../errorHumanize.js'
 import { MIN_RUN_MATCH_CONF } from '../mock/mockNlPrompt.js'
@@ -144,7 +145,7 @@ export default function RoutePanel({
   useEffect(() => {
     if (!route || exiting) return undefined
     const onKey = (e) => {
-      if (e.isComposing || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
+      if (isCompositionKey(e) || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
       const command = fromCommandBar(e)
       const arrow = e.key === 'ArrowDown' || e.key === 'ArrowUp'
       if (arrow && (e.defaultPrevented || (!command && arrowHeldByEditor(e)))) return
@@ -155,6 +156,7 @@ export default function RoutePanel({
         e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); return
       }
       if (e.key !== 'Enter') return
+      if (e.repeat) return
       if (command) e.preventDefault()
       if (performance.now() < enterArmedAtRef.current) return // dispatch keypress cooling down
       if (!command && e.target instanceof Element && e.target.closest([
