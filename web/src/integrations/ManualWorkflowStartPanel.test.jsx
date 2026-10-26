@@ -26,6 +26,33 @@ async function review() {
 }
 const start = () => fireEvent.click(screen.getByRole('button', { name: 'Start workflow', exact: true }))
 const recover = () => fireEvent.click(screen.getByRole('button', { name: /Recover original request/ }))
+it('fills the separate review fields from a copied workflow reference without starting it', async () => {
+  const { props, client } = setup()
+  render(<ManualWorkflowStartPanel {...props} />)
+  fireEvent.change(screen.getByLabelText('Paste reference'), { target: { value: JSON.stringify(ref) } })
+  expect(screen.getByLabelText('Workflow definition ID')).toHaveValue(ref.id)
+  expect(screen.getByLabelText('Workflow version')).toHaveValue(ref.version)
+  expect(screen.getByLabelText('Workflow digest')).toHaveValue(ref.digest)
+  expect(client.getManualWorkflowDefinition).not.toHaveBeenCalled()
+  fireEvent.click(screen.getByRole('button', { name: 'Load workflow review' }))
+  await screen.findByRole('region', { name: 'Immutable workflow review' })
+  expect(client.getManualWorkflowDefinition).toHaveBeenCalledWith(id, ref, expect.any(Object))
+  expect(client.submitManualWorkflow).not.toHaveBeenCalled()
+})
+it.each(['not JSON', JSON.stringify({ id: 'orders', version: 1 }), JSON.stringify({ ...ref, version: '1' }),
+  JSON.stringify({ ...ref, digest: 'invalid' })])('refuses malformed or partial pasted references: %s', async (value) => {
+  const { props, client } = setup()
+  render(<ManualWorkflowStartPanel {...props} />)
+  await review()
+  fireEvent.change(screen.getByLabelText('Paste reference'), { target: { value } })
+  expect(screen.getByRole('alert')).toHaveTextContent('Paste a complete workflow reference with a valid ID, version and digest copied from a saved workflow.')
+  expect(screen.getByLabelText('Workflow definition ID')).toHaveValue('')
+  expect(screen.getByLabelText('Workflow version')).toHaveValue(null)
+  expect(screen.getByLabelText('Workflow digest')).toHaveValue('')
+  expect(screen.queryByRole('region', { name: 'Immutable workflow review' })).toBeNull()
+  expect(client.getManualWorkflowDefinition).toHaveBeenCalledOnce()
+  expect(client.submitManualWorkflow).not.toHaveBeenCalled()
+})
 it('offers explicit abandonment after changed permissions block original-request recovery', async () => {
   const { props, client } = setup()
   client.submitManualWorkflow.mockRejectedValue(new Error('lost'))

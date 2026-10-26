@@ -41,7 +41,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const resultRef = useRef(null)
   const composeFeedback = useRef(null)
   const [composeError, setComposeError] = useState('')
-  useLayoutEffect(() => { if (composeError) composeFeedback.current?.focus() }, [composeError])
+  const [savedReadback, setSavedReadback] = useState(null)
+  useLayoutEffect(() => { if (composeError || savedReadback) composeFeedback.current?.focus() }, [composeError, savedReadback])
   const generation = useRef(0)
   const context = useRef(null)
   const viewGeneration = useRef(0)
@@ -63,6 +64,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
 
   function invalidate() {
     setComposeError('')
+    setSavedReadback(null)
     setHandoff(null)
     generation.current += 1
     context.current?.action?.controller.abort()
@@ -299,6 +301,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   function compose(event) {
     event.preventDefault()
+    if (savedReadback) return
     operation('Saving view…', async (ctx) => {
       const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
       if (!dataset) throw new Error('Select an authorized dataset.')
@@ -318,8 +321,18 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         elements: [...old.elements.filter((record) => record.element.id !== saved.element.id), saved] }))
       setForm((old) => ({ ...old, editing: saved }))
       resultRef.current?.focus()
-      await readView(saved, false, ctx)
+      await readSavedView(saved, ctx)
     }, true)
+  }
+  async function readSavedView(saved, ctx) {
+    try {
+      await readView(saved, false, ctx)
+      if (current(ctx)) setSavedReadback(null)
+    } catch (error) {
+      if (!current(ctx) || error?.name === 'AbortError') return
+      if ([401, 403].includes(error?.status)) { fail(error, ctx); return }
+      setSavedReadback({ record: saved, error: humanizeError(error) })
+    }
   }
   function editSelected() {
     const saved = state.selected
@@ -411,7 +424,11 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
           </section>
           <form onSubmit={compose} aria-label="Compose native view"><h2>Compose native view</h2>
             {composeError && <p ref={composeFeedback} tabIndex={-1} role="alert">{composeError} Your draft is retained. Review it and save again.</p>}
-            <fieldset disabled={pending}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
+            {savedReadback && <div ref={composeFeedback} tabIndex={-1} role="alert">
+              <p>Your view was saved, but its data could not be loaded. {savedReadback.error}</p>
+              <button type="button" disabled={pending} onClick={() => operation('Loading saved view…', (ctx) => readSavedView(savedReadback.record, ctx))}>Reload view</button>
+            </div>}
+            <fieldset disabled={pending || Boolean(savedReadback)}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
               <label>Dataset<select required value={form.dataset} onChange={(event) => setForm({ ...blankForm(), dataset: event.target.value })}>
                 <option value="">Select dataset</option>{state.datasets.map((item) => <option key={referenceKey(item.reference)} value={referenceKey(item.reference)}>{item.title} · version {item.reference.version}</option>)}
               </select></label>
