@@ -816,13 +816,14 @@ def complete_project_graph_job(job_id, worker_id, attempt, completion, *, publis
         result = {"graph_commit": published, "output_version_id": str(output_id),
                   "history_operation_id": str(operation_id), "history_hash": digest.value,
                   "execution_provenance": provenance}
+        # Custody is the SELECT FOR UPDATE row lock above, with ownership verified under it.
         cur.execute(
             "UPDATE jobs SET status='succeeded', result=%(result)s, output_version_id=%(output)s, "
             "provenance=%(provenance)s, terminal_fingerprint=%(fingerprint)s, error=NULL, "
             "finished_at=clock_timestamp(), updated_at=clock_timestamp(), lease_owner=NULL, lease_expires_at=NULL "
             "WHERE job_id=%(job)s AND status='running' AND kind='run' "
             "AND execution_context->>'schema'=%(schema)s AND deleted_at IS NULL "
-            "AND lease_owner=%(worker)s AND attempt=%(attempt)s AND lease_expires_at>clock_timestamp()",
+            "AND lease_owner=%(worker)s AND attempt=%(attempt)s",
             {"result": Jsonb(result), "output": output_id, "provenance": Jsonb(provenance),
              "fingerprint": fingerprint, "job": job_id, "schema": PROJECT_GRAPH_JOB_SCHEMA,
              "worker": worker_id, "attempt": attempt})
@@ -882,13 +883,14 @@ def complete_project_solve_job(job_id, worker_id, attempt, completion, *, conn):
              "key": f"job:{job_id}:history", **digest.to_dict()})
         _insert_outbox(cur, org, proj, "history_operation", operation_id,
             "history.operation.appended", {"operationId": str(operation_id), "jobId": str(job_id)})
+        # Custody is the SELECT FOR UPDATE row lock above, with ownership verified under it.
         cur.execute(
             "UPDATE jobs SET status='succeeded', result=%(result)s, output_version_id=NULL, "
             "provenance=%(provenance)s, terminal_fingerprint=%(fingerprint)s, error=NULL, "
             "finished_at=clock_timestamp(), updated_at=clock_timestamp(), lease_owner=NULL, lease_expires_at=NULL "
             "WHERE job_id=%(job)s AND status='running' AND kind='run' "
             "AND execution_context->>'schema'=%(schema)s AND deleted_at IS NULL "
-            "AND lease_owner=%(worker)s AND attempt=%(attempt)s AND lease_expires_at>clock_timestamp()",
+            "AND lease_owner=%(worker)s AND attempt=%(attempt)s",
             {"result": Jsonb(completion), "provenance": Jsonb(completion["execution_provenance"]),
              "fingerprint": fingerprint, "job": job_id, "schema": PROJECT_GRAPH_JOB_SCHEMA,
              "worker": worker_id, "attempt": attempt})

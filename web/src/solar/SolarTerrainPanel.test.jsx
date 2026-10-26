@@ -161,7 +161,7 @@ describe('SolarTerrainPanel', () => {
     render(<SolarTerrainPanel drawingId="solar" projectId="p" client={gridless} headSignal={0} />)
     await ready()
     expect(summary()).toEqual({
-      head: H, change: '1 of this drawing', units: 'Meters', crs: 'None', datum: 'Not recorded',
+      head: 'Saved in this drawing', change: '1', units: 'Meters', crs: 'None', datum: 'Not recorded',
       grid: 'This terrain state has no grid', mesh: 'Not recorded', slope: 'Not recorded',
     })
     expect(button(MESH).disabled).toBe(true)
@@ -187,12 +187,15 @@ describe('SolarTerrainPanel', () => {
     expect(fetchImpl.mock.calls[0][0]).toBe('https://studio.test/api/drawings/solar/terrain?project_id=p')
     expect(fetchImpl.mock.calls[0][1].method).toBe('GET')
     expect(summary()).toEqual({
-      head: H, change: '1 of this drawing', units: 'Meters', crs: 'None', datum: 'Not recorded',
+      head: 'Saved in this drawing', change: '1', units: 'Meters', crs: 'None', datum: 'Not recorded',
       grid: '2 by 2 nodes', cell: 'X 10 by Y 10 meters', mesh: 'Not recorded', slope: 'Not recorded',
     })
     expect(panel().getAttribute('data-head')).toBe(H)
     expect(panel().getAttribute('aria-label')).toBe('Terrain preview')
     expect(screen.getByTestId('solar-terrain-summary').getAttribute('aria-label')).toBe('Stored terrain preview')
+    expect(screen.getByTestId('solar-terrain-summary').textContent).toContain('Terrain revision')
+    expect(screen.getByTestId('solar-terrain-summary').textContent).not.toContain(H)
+    expect(screen.getByTestId('solar-terrain-summary').textContent).not.toContain('of this drawing')
     for (const [name] of ACTIONS) {
       expect(button(name).disabled).toBe(false)
       expect(name).toContain('preview')
@@ -242,7 +245,7 @@ describe('SolarTerrainPanel', () => {
       expect(screen.getByTestId('solar-terrain-announce').getAttribute('aria-live')).toBe('polite')
       // Nothing was read between the press and the request, and the summary stays on screen.
       expect(client.getTerrain).toHaveBeenCalledTimes(1)
-      expect(summary().head).toBe(H)
+      expect(summary().head).toBe('Saved in this drawing')
       cleanup()
     }
     // The slope request carries the drafts as numbers, all seven limits.
@@ -279,8 +282,10 @@ describe('SolarTerrainPanel', () => {
       expect(client.getTerrain).toHaveBeenCalledTimes(2)
       // The sentence stays while the refreshed head is reviewed.
       expect(refusalText()).toBe(TERRAIN_ROUTE_REASONS[code])
-      expect(summary().head).toBe(H2)
-      expect(summary().change).toBe('2 of this drawing')
+      expect(summary().head).toBe('Saved in this drawing')
+      expect(summary().change).toBe('2')
+      expect(screen.getByTestId('solar-terrain-summary').textContent).not.toContain(H2)
+      expect(screen.getByTestId('solar-terrain-summary').textContent).not.toContain('of this drawing')
       expect(announcement()).toBe('')
       expect(button(MESH).disabled).toBe(false)
       // The next press names the refreshed head, and only because it was pressed.
@@ -487,7 +492,7 @@ describe('SolarTerrainPanel', () => {
     expect(phase()).toBe('refused')
     for (const [name] of ACTIONS) expect(button(name).disabled).toBe(true)
     expect(lost.getTerrain).toHaveBeenCalledTimes(1)
-    expect(summary().head).toBe(H)
+    expect(summary().head).toBe('Saved in this drawing')
     fireEvent.click(button(REFRESH))
     await waitFor(() => expect(lost.getTerrain).toHaveBeenCalledTimes(2))
     await ready()
@@ -513,7 +518,7 @@ describe('SolarTerrainPanel', () => {
     await ready()
     expect(failing.getTerrain).toHaveBeenCalledTimes(2)
     expect(refusalText()).toBeNull()
-    expect(summary().head).toBe(H)
+    expect(summary().head).toBe('Saved in this drawing')
     expect(failing.runTerrainOperation).not.toHaveBeenCalled()
   }, 60_000)
 
@@ -569,7 +574,7 @@ describe('SolarTerrainPanel', () => {
     }
     await settle()
     expect(client.runTerrainOperation).not.toHaveBeenCalled()
-    expect(summary().head).toBe(H)
+    expect(summary().head).toBe('Saved in this drawing')
     expect(screen.getByLabelText('Columns').value).toBe('10000')
     view.rerender(element({ disabled: true, disabledReason: 'A run is in progress, so wait for it to finish' }))
     expect(reasonText()).toBe('A run is in progress, so wait for it to finish')

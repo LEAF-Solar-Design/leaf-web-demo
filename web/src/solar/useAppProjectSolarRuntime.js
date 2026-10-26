@@ -5,6 +5,7 @@ import { projectSolarAppReason } from './solarProjectAppModel.js'
 import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
 import { projectSolarDrawingView } from './solarProjectDrawingModel.js'
 import { recordProjectSolarFlowRun } from './solarFlowModel.js'
+import { humanizeError } from '../errorHumanize.js'
 
 const refusal = reason => ({ ok: false, status: null, reason, envelope: null })
 const current = predicate => { try { return predicate?.() === true } catch { return false } }
@@ -180,8 +181,9 @@ export function useAppProjectSolarRuntime(props) {
       }) : previous.projectRunMemory,
       busy: outcome.state === 'succeeded', notice: outcome.state === 'outcome_unknown'
         ? PROJECT_SOLAR_RUN_REASONS.outcome_unknown : outcome.state === 'unreadable'
-          ? PROJECT_SOLAR_RUN_REASONS.unreadable_output : outcome.reasonCode
-            ? projectSolarAppReason(outcome.reasonCode) : null }))
+          ? PROJECT_SOLAR_RUN_REASONS.unreadable_output : outcome.message
+            ? humanizeError(outcome.message) : outcome.reasonCode
+              ? humanizeError('This solar request could not be completed. Check the inputs before trying again.') : null }))
     if (outcome.state === 'succeeded') {
       // Dispatch only; App's explicit completion channel calls complete below.
       const completionFailed = () => { const t = m.transition; if (t && t.outcome === outcome) unreadable(t) }
