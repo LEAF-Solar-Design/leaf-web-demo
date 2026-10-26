@@ -273,3 +273,22 @@ def test_import_boundary():
     imported.update(node.module.split(".")[0] for node in ast.walk(tree)
                     if isinstance(node, ast.ImportFrom) and node.module)
     assert not imported & {"tool_loader", "broker"}
+
+
+def test_malformed_capabilities_refuse_one_row_not_the_tenant(monkeypatch):
+    good = read_tool()
+    bad = read_tool(name="bad-tool", capabilities=None)
+    odd = read_tool(name="odd-tool", capability=5)
+    monkeypatch.setattr(deps, "effective_tools_with_provenance",
+                        lambda tenant: [(good, "catalog_seed"), (bad, "catalog_seed"), (odd, "catalog_seed")])
+    by_name = {descriptor.name: descriptor for descriptor in manifests.tenant_tool_projection("tenant-malformed")}
+    assert by_name["bad-tool"].reason == "malformed tool row" and by_name["bad-tool"].manifest is None
+    assert by_name["odd-tool"].reason == "malformed tool row"
+    assert by_name[good["name"]].reason is None
+
+
+def test_title_never_carries_a_path():
+    name = read_tool()["name"]
+    for description in (r"C:\private\tool.py reads layers", "/srv/tools/count.py", "see https://x.test/a", r"..\up"):
+        assert manifests.project_tool(read_tool(description=description), "catalog_seed").manifest["title"] == name
+    assert manifests.project_tool(read_tool(description="Count panels by layer"), "catalog_seed").manifest["title"] == "Count panels by layer"

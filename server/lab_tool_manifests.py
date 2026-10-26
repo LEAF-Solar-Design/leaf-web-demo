@@ -78,6 +78,16 @@ def _pin(schema, *, required=False, output=False):
 
 
 def project_tool(row, source):
+    """Project one row; a malformed row is refused alone, never a tenant-wide failure."""
+    try:
+        return _project_tool(row, source)
+    except Exception:
+        text = lambda key: row.get(key) if isinstance(row, dict) and isinstance(row.get(key), str) else ""
+        return ToolDescriptor(text("name"), text("version"), source, "", None, None,
+                              lab_evaluate._copy({}, frozen=True), "malformed tool row", None)
+
+
+def _project_tool(row, source):
     # Snapshot caller-owned data before constructing cached manifests.
     row = json.loads(json.dumps(row, allow_nan=False))
     name, version = row.get("name"), row.get("version")
@@ -87,6 +97,10 @@ def project_tool(row, source):
         return ToolDescriptor(name, version, source, digest, None, None,
                               lab_evaluate._copy({}, frozen=True), reason, None)
 
+    capabilities, capability = row.get("capabilities", []), row.get("capability")
+    if (not isinstance(capabilities, list) or any(not isinstance(item, str) for item in capabilities)
+            or (capability is not None and not isinstance(capability, str))):
+        return refused("malformed tool row")
     if row.get("engine") == "server-builtin":
         return refused("runs on the project graph, not as a Lab node")
     capabilities = row.get("capabilities", [])
@@ -148,7 +162,9 @@ def project_tool(row, source):
     except Exception:
         return refused("no valid sample")
     description = row.get("description", "")
-    title = description.splitlines()[0].strip()[:120] if description else ""
+    first = description.splitlines()[0].strip()[:120] if isinstance(description, str) and description.strip() else ""
+    # Titles carry plain words only, never a path, URL or drive letter.
+    title = first if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9 ,.'()&+-]*", first) and ".." not in first else ""
     permissions = list(dict.fromkeys(item for item in capabilities if isinstance(item, str)
                                     and re.fullmatch(r"[a-z][a-z0-9]*([.-][a-z0-9]+)*", item)))
     manifest = {
