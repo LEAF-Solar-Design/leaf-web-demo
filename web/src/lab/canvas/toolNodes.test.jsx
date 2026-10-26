@@ -88,6 +88,9 @@ describe('Lab tools transport and registry', () => {
       { ...available, manifest: { ...toolManifest, version: { semver: '9.0.0' } } }]
     await expect(fetchLabTools({ fetchImpl: async () => response(200, body([...invalid, ...tools])) }))
       .resolves.toEqual({ state: 'on', tools, truncated: false })
+    const duplicate = { ...available, version: '9.9.9', manifest: { ...toolManifest, version: { semver: '9.9.9', code_sha256: 'c'.repeat(64) } } }
+    await expect(fetchLabTools({ fetchImpl: async () => response(200, body([...tools, duplicate])) }))
+      .resolves.toEqual({ state: 'on', tools, truncated: false })
   })
 
   it('caps kept tools at 200 and retains the server truncation flag', async () => {

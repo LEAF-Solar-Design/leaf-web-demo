@@ -28,7 +28,9 @@ export async function fetchLabTools({ fetchImpl = globalThis.fetch } = {}) {
     const data = await response.json()
     if (data?.ok !== true || data.schema !== 'leaf.lab-tools.v1'
       || !Array.isArray(data.tools) || typeof data.truncated !== 'boolean') return unavailable
-    const tools = data.tools.filter(validTool)
+    // One tool per id: the palette drags by id, so a later duplicate is dropped.
+    const seen = new Set()
+    const tools = data.tools.filter(tool => validTool(tool) && !seen.has(tool.id) && Boolean(seen.add(tool.id)))
     return { state: 'on', tools: tools.slice(0, 200), truncated: data.truncated || tools.length > 200 }
   } catch {
     return unavailable
