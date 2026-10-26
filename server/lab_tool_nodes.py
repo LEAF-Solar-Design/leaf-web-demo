@@ -11,7 +11,8 @@ import uuid
 import catalog
 import entitlements
 import lab_registry
-from lab_evaluate import RunBudgetExceeded, RunCancelled
+import lab_tool_manifests
+from lab_evaluate import RunBudgetExceeded, RunCancelled, canonical_json
 
 
 _tenant_locks_guard = threading.Lock()
@@ -123,12 +124,29 @@ class ToolNodeAdapter:
         drawing = settings.get("drawing") if isinstance(settings, dict) else None
         if not drawing_valid(drawing):
             return refuse("drawing_required")
-        tool = next((tool for tool in catalog.seed_tools()
-                     if trusted.kind in (tool.get("id"), tool.get("name"))
-                     and tool.get("version", "1.0.0") == trusted.version), None)
+        resolved = lab_tool_manifests.trusted_for(self.tenant, trusted.kind, trusted.version)
+        if resolved is None and manifest.get("id") == trusted.kind:
+            return refuse("tool_changed")
+        if resolved is not None and not self.admissible(resolved):
+            return refuse("effect_refused")
+        trusted = resolved or trusted
+        row = lab_tool_manifests.row_for(self.tenant, trusted.kind, trusted.version,
+                                        manifest.get("version", {}).get("code_sha256"))
+        projected = next((tool for tool in lab_tool_manifests.tenant_tool_projection(self.tenant)
+                          if tool.name == trusted.kind and tool.version == trusted.version
+                          and tool.manifest is not None), None)
+        params_by_port = {}
+        if row is not None:
+            tool, params_by_port = row
+        elif projected is not None:
+            return refuse("tool_changed")
+        else:
+            tool = next((tool for tool in catalog.seed_tools()
+                         if trusted.kind in (tool.get("id"), tool.get("name"))
+                         and tool.get("version", "1.0.0") == trusted.version), None)
         if tool is None:
             return refuse("unknown")
-        params = {port: value.data for port, value in inputs.items()}
+        params = {params_by_port.get(port, port): value.data for port, value in inputs.items()}
         if "drawing_id" in tool.get("params", {}).get("properties", {}):
             if "drawing_id" in params and params["drawing_id"] != drawing["drawing_id"]:
                 return refuse("drawing_mismatch")
@@ -219,6 +237,8 @@ class ToolNodeAdapter:
                 data = envelope["result"]
                 ports = manifest["outputs"]
                 if len(ports) == 1:
+                    if projected is not None and projected.result_encoding == "json-text":
+                        data = canonical_json(data)
                     return {"outputs": {next(iter(ports)): data}}
                 if not isinstance(data, dict):
                     return refuse("output_invalid")
