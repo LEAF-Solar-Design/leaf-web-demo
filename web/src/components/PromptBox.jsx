@@ -728,10 +728,10 @@ export default function PromptBox({
     if (dragDepth.current === 0) setDragging(false)
   }
   const onDrop = (e) => {
-    if (!e.dataTransfer?.files?.length) return
-    e.preventDefault()
     dragDepth.current = 0
     setDragging(false)
+    if (!e.dataTransfer?.files?.length) return
+    e.preventDefault()
     // S22: with image attachments on, the images in a drop become chips and
     // only the rest reaches G2 ingest. A drop of nothing but images is done.
     const files = [...(e.dataTransfer?.files || [])]

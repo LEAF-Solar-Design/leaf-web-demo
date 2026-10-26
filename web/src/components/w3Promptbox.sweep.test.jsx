@@ -76,6 +76,21 @@ it('fix4 accepts an image drag with withheld metadata through dragover and drop'
   expect(screen.queryByRole('alert')).toBeNull()
 })
 
+it('fix5 clears the withheld-metadata drag hint when the drop has no files', () => {
+  render(<Harness imageAttachmentsEnabled />)
+  const metadata = { types: [], files: [] }
+  fireEvent.dragEnter(bar(), { dataTransfer: metadata })
+  expect(document.querySelector('.bar-drop-hint')).toBeTruthy()
+  const over = createEvent.dragOver(bar(), { dataTransfer: metadata })
+  fireEvent(bar(), over)
+  expect(over.defaultPrevented).toBe(true)
+  const drop = createEvent.drop(bar(), { dataTransfer: metadata })
+  fireEvent(bar(), drop)
+  expect(drop.defaultPrevented).toBe(false)
+  expect(document.querySelector('.bar-drop-hint')).toBeNull()
+  expect(screen.queryByTestId('attachment-chip')).toBeNull()
+})
+
 it('fix4 warns for an image plus HTML clipboard markup without plain text', () => {
   render(<Harness imageAttachmentsEnabled={false} />)
   const getData = vi.fn((type) => type === 'text/html' ? '<img src="clipboard.png">' : '')
