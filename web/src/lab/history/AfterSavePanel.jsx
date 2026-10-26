@@ -1,5 +1,6 @@
 import { registry } from '../canvas/registry.js'
 import { formatMoney } from '../widgets/widgetResolve.js'
+import LivePredictionGap from '../changes/LivePredictionGap.jsx'
 
 const money = value => {
   try { return formatMoney(value == null ? null : String(value)) } catch { return 'Not reported' }
@@ -62,6 +63,7 @@ export default function AfterSavePanel({ view, document }) {
       </li>)}</ul>
       {(data.truncated || view.match?.truncated || attribution.length > 50) && <p>truncated</p>}
     </>}
+    <LivePredictionGap comparison={finished ? data : null} />
     {view.status === 'unavailable' && <><p>{data.reason}</p><p>No statistics: tape unavailable.</p></>}
     {view.status === 'failed' && <p>Practice failed: {data.reason || 'Not reported'}</p>}
     {view.status === 'expired' && <p>Practice request expired.</p>}
