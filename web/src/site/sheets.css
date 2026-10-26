@@ -47,8 +47,8 @@
   border-bottom: 1px solid var(--border);
 }
 .sheets-root .sheet-mark { border-radius: 50%; flex: none; }
-.sheets-root .sheet-brand { font-weight: 600; font-size: 14px; white-space: nowrap; }
-.sheets-root .sheet-context { font-size: 12.5px; color: var(--muted-2); }
+.sheets-root .sheet-brand { font-weight: 600; font-size: var(--leaf-size-body); white-space: nowrap; }
+.sheets-root .sheet-context { font-size: var(--leaf-size-dense); color: var(--muted-2); }
 .sheets-root .sheet-nav {
   margin-left: auto;
   display: flex;
@@ -61,7 +61,7 @@
   padding: 0;
   cursor: pointer;
   font-family: inherit;
-  font-size: 12.5px;
+  font-size: var(--leaf-size-dense);
   color: var(--muted);
   white-space: nowrap;
 }
@@ -86,7 +86,7 @@
 .sheets-root .sheet-headline {
   margin: 0;
   font-weight: 600;
-  font-size: 54px;
+  font-size: var(--leaf-size-display);
   line-height: 1.08;
   letter-spacing: -.015em;
   text-wrap: balance;
@@ -99,7 +99,7 @@
 .sheets-root .sheet-sub {
   margin: 0;
   font-weight: 400;
-  font-size: 15.5px;
+  font-size: var(--leaf-size-body);
   line-height: 1.7;
   color: var(--muted);
   max-width: 620px;
@@ -109,7 +109,7 @@
 .sheets-root .sheet-accent-line {
   margin: 0;
   font-weight: 500;
-  font-size: 15.5px;
+  font-size: var(--leaf-size-body);
   color: var(--primary);
 }
 
@@ -117,16 +117,16 @@
 .sheets-root .sheet-bignum-row { display: flex; align-items: baseline; gap: 14px; flex-wrap: wrap; }
 .sheets-root .sheet-bignum {
   font-weight: 600;
-  font-size: 34px;
+  font-size: var(--leaf-size-title);
   font-variant-numeric: tabular-nums;
 }
 .sheets-root .sheet-price {
   font-weight: 600;
-  font-size: 54px;
+  font-size: var(--leaf-size-display);
   letter-spacing: -.015em;
   font-variant-numeric: tabular-nums;
 }
-.sheets-root .sheet-bignum-cap { font-size: 12.5px; color: var(--muted-2); }
+.sheets-root .sheet-bignum-cap { font-size: var(--leaf-size-dense); color: var(--muted-2); }
 
 /* CTA row — .sheet-cta carries the sheet's single halo */
 .sheets-root .sheet-cta-row { display: flex; align-items: center; gap: 18px; flex-wrap: wrap; }
@@ -134,13 +134,13 @@
   display: inline-flex;
   align-items: center;
   border: 0;
-  border-radius: 7px;
+  border-radius: var(--leaf-radius-control);
   background: var(--primary);
   color: var(--on-accent);
   box-shadow: 0 6px 18px rgba(34, 197, 94, .3);  /* the one halo per sheet */
   font-family: inherit;
   font-weight: 500;
-  font-size: 13.5px;
+  font-size: var(--leaf-size-dense);
   padding: 10px 20px;
   cursor: pointer;
 }
@@ -149,7 +149,7 @@
   border: 0;
   font-family: inherit;
   font-weight: 500;
-  font-size: 12.5px;
+  font-size: var(--leaf-size-dense);
   color: var(--primary);
   background: var(--accent-tint);           /* rgba(34,197,94,.08) */
   border-radius: var(--leaf-radius-control);
@@ -157,7 +157,7 @@
   cursor: pointer;
 }
 .sheets-root .sheet-chip:hover { background: var(--accent-tint-hover); }
-.sheets-root .sheet-cta-note { font-size: 12.5px; color: var(--muted-2); }
+.sheets-root .sheet-cta-note { font-size: var(--leaf-size-dense); color: var(--muted-2); }
 
 /* deployed row */
 .sheets-root .sheet-deploy {
@@ -165,7 +165,7 @@
   align-items: center;
   gap: 9px;
   margin-top: 6px;
-  font-size: 12.5px;
+  font-size: var(--leaf-size-dense);
   color: var(--muted);
 }
 
@@ -189,7 +189,7 @@
   display: flex;
   flex-direction: column;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--leaf-radius-card);
   background: var(--card-grad);             /* linear-gradient(180deg,#17171a,#111113) */
   overflow: hidden;
   align-self: start;
@@ -201,7 +201,7 @@
   padding: 14px 18px 10px;
 }
 .sheets-root .sheet-card-head b { font-weight: 600; font-size: var(--leaf-size-dense); }
-.sheets-root .sheet-card-head span { font-size: 11.5px; color: var(--muted-2); }
+.sheets-root .sheet-card-head span { font-size: var(--leaf-size-caption); color: var(--muted-2); }
 .sheets-root .sheet-card-rows { display: flex; flex-direction: column; }
 .sheets-root .sheet-card-row {
   display: flex;
@@ -220,7 +220,7 @@
   border-top: 1px solid var(--border);
 }
 .sheets-root .sheet-card-foot.spread { justify-content: space-between; }
-.sheets-root .foot-note { font-size: 11.5px; color: var(--muted-2); }
+.sheets-root .foot-note { font-size: var(--leaf-size-caption); color: var(--muted-2); }
 .sheets-root .foot-tool {
   display: inline-flex;
   align-items: center;
@@ -235,7 +235,7 @@
   padding: 0;
   cursor: pointer;
   font-family: inherit;
-  font-size: 11.5px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted-2);
 }
 .sheets-root .sheet-print:hover { color: var(--muted); }
@@ -267,13 +267,13 @@
 .sheets-root .sheet-index-row .code {
   font-family: var(--font-mono);
   font-weight: 400;
-  font-size: 11px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted-2);
   width: 52px;
   flex: none;
 }
 .sheets-root .sheet-index-row .label { flex: 1; font-size: var(--leaf-size-dense); color: var(--muted); }
-.sheets-root .sheet-index-row .hint { font-size: 11px; color: #3f3f46; white-space: nowrap; }
+.sheets-root .sheet-index-row .hint { font-size: var(--leaf-size-caption); color: #3f3f46; white-space: nowrap; }
 .sheets-root .sheet-index-row.current {
   background: var(--accent-tint);
   cursor: default;
@@ -302,14 +302,14 @@
 }
 .sheets-root .sheet-row .code {
   font-family: var(--font-mono);
-  font-size: 11px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted-2);
   width: 52px;
   flex: none;
 }
 .sheets-root .sheet-row .txt { flex: 1; font-size: var(--leaf-size-dense); line-height: 1.55; color: var(--muted); }
 .sheets-root .sheet-row .txt.strong { color: var(--foreground); }
-.sheets-root .sheet-row .cap { font-size: 11px; color: var(--muted-2); white-space: nowrap; }
+.sheets-root .sheet-row .cap { font-size: var(--leaf-size-caption); color: var(--muted-2); white-space: nowrap; }
 .sheets-root .sheet-row .step-main {
   flex: 1;
   min-width: 0;
@@ -328,11 +328,11 @@
 }
 .sheets-root .sheet-quote p {
   margin: 0 0 8px;
-  font-size: 15.5px;
+  font-size: var(--leaf-size-body);
   line-height: 1.6;
   color: var(--foreground);
 }
-.sheets-root .sheet-quote footer { font-size: 11.5px; color: var(--muted-2); }
+.sheets-root .sheet-quote footer { font-size: var(--leaf-size-caption); color: var(--muted-2); }
 
 /* receipt strip (E-401 inline evidence bundle) */
 .sheets-root .sheet-receipt {
@@ -342,7 +342,7 @@
   height: 34px;
   padding: 0 16px;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--leaf-radius-card);
   background: var(--rail);                  /* #0c0c0e */
   max-width: 620px;
 }
@@ -352,7 +352,7 @@
 .sheets-root .sheet-hero {
   margin: 0;
   border: 1px solid var(--border);
-  border-radius: 9px;
+  border-radius: var(--leaf-radius-card);
   overflow: hidden;
   display: flex;
   flex-direction: column;
@@ -378,7 +378,7 @@
   margin-left: auto;
   font-family: var(--font-mono);
   font-weight: 400;
-  font-size: 11px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted-2);
   white-space: nowrap;
 }
@@ -428,7 +428,7 @@
 .sheets-root .tb-code {
   font-family: var(--font-mono);
   font-weight: 400;
-  font-size: 11.5px;
+  font-size: var(--leaf-size-caption);
   color: var(--foreground);
 }
 .sheets-root .tb-sub { font-size: var(--leaf-size-caption); color: var(--muted-2); white-space: nowrap; }
@@ -466,8 +466,8 @@
     gap: 36px;
     padding: 44px 32px 36px;
   }
-  .sheets-root .sheet-headline { font-size: 40px; }
-  .sheets-root .sheet-price { font-size: 44px; }
+  .sheets-root .sheet-headline { font-size: var(--leaf-size-display); }
+  .sheets-root .sheet-price { font-size: var(--leaf-size-display); }
   .sheets-root .sheet-hero-wrap { padding: 0 32px 40px; }
   .sheets-root .sheet-card { align-self: stretch; }
   .sheets-root .sheet-context { display: none; }
@@ -477,8 +477,8 @@
   .sheets-root .sheet-head { gap: 10px; padding: 0 14px; }
   .sheets-root .sheet-nav { gap: 12px; overflow-x: auto; }
   .sheets-root .sheet-body { padding: 28px 18px 24px; gap: 26px; }
-  .sheets-root .sheet-headline { font-size: 30px; }
-  .sheets-root .sheet-price { font-size: 36px; }
+  .sheets-root .sheet-headline { font-size: var(--leaf-size-title); }
+  .sheets-root .sheet-price { font-size: var(--leaf-size-title); }
   .sheets-root .sheet-hero-wrap { padding: 0 18px 24px; }
   .sheets-root .sheet-hero-media { max-height: 220px; }
   .sheets-root .sheet-row .cap { white-space: normal; }
