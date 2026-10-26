@@ -79,6 +79,7 @@ export default function LinkServiceDrawer({
   const listFailed = error?.kind === 'list'
   const mutationError = listFailed ? error.mutationError : error
   const shownState = (server) => {
+    if (server.state === 'error') return authorizationState(server)
     const result = healthResults[server.id]
     if (result?.sourceState === server.state && result.reachability === 'unreachable') return 'unreachable'
     return authorizationState(server)

@@ -111,6 +111,27 @@ describe('LinkServiceDrawer', () => {
     expect(screen.queryByText('Sign in needed', { selector: '.state' })).not.toBeInTheDocument()
   })
 
+  it.each(['response', 'rejection'])('keeps registry sign-in failure when health fails by %s', async (failure) => {
+    const onHealth = failure === 'response'
+      ? vi.fn().mockResolvedValue({ state: 'error' })
+      : vi.fn().mockRejectedValue(new TypeError('Failed to fetch'))
+    render(<LinkServiceDrawer {...baseProps({ servers: [server({ state: 'error' })], onHealth })} />)
+
+    expect(await screen.findByText('Connection checked: Unreachable')).toBeInTheDocument()
+    expect(screen.getByText('Sign-in failed, try again', { selector: '.state' })).toBeInTheDocument()
+    expect(screen.queryByText('Unreachable', { selector: '.state' })).not.toBeInTheDocument()
+  })
+
+  it.each(['registered', 'connecting', 'connected'])('shows Unreachable when health fails for a %s service', async (state) => {
+    render(<LinkServiceDrawer {...baseProps({
+      servers: [server({ state })],
+      onHealth: vi.fn().mockResolvedValue({ state: 'error' }),
+    })} />)
+
+    expect(await screen.findByText('Unreachable', { selector: '.state' })).toBeInTheDocument()
+    expect(screen.queryByText('Connected', { selector: '.state' })).not.toBeInTheDocument()
+  })
+
   it('Connect reserves a tab before awaiting the sign-in URL and then navigates it', async () => {
     const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)

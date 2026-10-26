@@ -5,6 +5,7 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import ClaudeAccountPanel from './ClaudeAccountPanel.jsx'
 import JobRail from './JobRail.jsx'
 import LinkServiceDrawer from './LinkServiceDrawer.jsx'
+import SurfaceFrame from '../site/SurfaceFrame.jsx'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
 
@@ -32,6 +33,29 @@ function Monitor({ initialSpine }) {
 }
 
 describe('w3 monitor and account popovers', () => {
+  it('forwards the registry refresh through SurfaceFrame to the linked services drawer', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(popup)
+    const onRefresh = vi.fn().mockResolvedValue([{ ...service, state: 'connected' }])
+    render(
+      <SurfaceFrame scene="console" activeSurface="cad" integrations={{
+        ...drawerProps,
+        servers: [service],
+        onConnect: async () => ({ authorize_url: 'https://signin.test' }),
+        onRefresh,
+      }}>
+        <SurfaceFrame.Integrations />
+      </SurfaceFrame>,
+    )
+
+    expect(onRefresh).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    await waitFor(() => expect(popup.location.replace).toHaveBeenCalledWith('https://signin.test/'))
+    fireEvent.focus(window)
+    expect(await screen.findByText('Connected', { selector: '.state' })).toBeInTheDocument()
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
   it('keeps keyboard focus when expanding the job monitor', () => {
     render(<Monitor initialSpine />)
     const expand = screen.getByRole('button', { name: /Expand the job monitor/ })

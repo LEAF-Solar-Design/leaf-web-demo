@@ -576,6 +576,7 @@ function Integrations() {
       onToggle={wiring.onToggle}
       onRegister={wiring.onRegister}
       onConnect={wiring.onConnect}
+      onRefresh={wiring.onRefresh}
       onHealth={wiring.onHealth}
       onUnlink={wiring.onUnlink}
     />
