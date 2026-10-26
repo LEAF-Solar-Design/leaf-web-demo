@@ -6,6 +6,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -21,14 +22,15 @@ def test_static_scanner_and_shell_contract():
     assert raw.splitlines()[0] == b'#!/usr/bin/env bash'
     source = raw.decode()
     for required in (PIN, "TRIVY_VERSION='0.75.0'", 'public.ecr.aws/aquasecurity/trivy-db:2',
-                     'public.ecr.aws/aquasecurity/trivy-java-db:1', 'python3.12 -I', '--kill-after=30s'):
+                     'public.ecr.aws/aquasecurity/trivy-java-db:1', '"$python_bin" -I', '--kill-after=30s',
+                     'sys.version_info < (3, 12)', r'^3\.12\.[0-9]+$'):
         assert required in source
     for forbidden in ('--push', '--cache-to', '--cache-from', 'github.com', 'ghcr.io',
                       'curl', 'wget', 'set -x', 'describe-images'):
         assert forbidden not in source
 
 
-FAKE = r'''#!/usr/bin/env python3.12
+FAKE = '#!' + sys.executable + r'''
 import json
 import os
 from pathlib import Path
@@ -111,14 +113,14 @@ def case(tmp_path):
     executable(tools / 'aws', FAKE)
     # Keep setup Git real; drive Git through a logging PATH transport.
     real_git = shutil.which('git')
-    executable(tools / 'git', '#!/usr/bin/env python3.12\n'
+    executable(tools / 'git', '#!' + sys.executable + '\n'
                'import json, os, subprocess, sys\n'
                'from pathlib import Path\n'
                "with (Path(os.environ['FAKE_ROOT']) / 'calls.jsonl').open('a') as stream:\n"
                "    stream.write(json.dumps(['git', *sys.argv[1:]]) + '\\n')\n"
                f'sys.exit(subprocess.run([{real_git!r}, *sys.argv[1:]], timeout=9).returncode)\n')
     real_timeout = shutil.which('timeout')
-    executable(tools / 'timeout', '#!/usr/bin/env python3.12\n'
+    executable(tools / 'timeout', '#!' + sys.executable + '\n'
                'import os, sys\n'
                "if os.environ.get('FAKE_FAULT') == 'timeout' and sys.argv[3:5] == ['docker', 'run']:\n"
                '    sys.exit(124)\n'
@@ -160,6 +162,10 @@ def no_publication(output, calls):
 def test_success_exact_build_scan_publish_and_evidence(tmp_path):
     source, output, request, env = case(tmp_path)
     completed, calls = drive(request, env)
+    assert_success(output, request, completed, calls)
+
+
+def assert_success(output, request, completed, calls):
     assert completed.returncode == 0, completed.stderr
     uri = REGISTRY + '/leaf-platform-instant-execution:sha-' + request['source_revision']
     docker = [call[1:] for call in calls if call[0] == 'docker']
@@ -187,6 +193,43 @@ def test_success_exact_build_scan_publish_and_evidence(tmp_path):
                   ignore_unfixed=True, report_sha256=hashlib.sha256(b'{"Results":[]}').hexdigest()))
     mount = next(scan[i + 1][:-6] for i, arg in enumerate(scan) if arg == '--volume' and scan[i + 1].endswith(':/work'))
     assert not Path(mount).exists()
+
+
+def pyenv_fakes(tmp_path, versions):
+    tools = tmp_path / 'tools'
+    executable(tools / 'python3.12', '#!' + sys.executable + '\n'
+               'import os, sys\n'
+               "if os.environ.get('PYENV_VERSION') != '3.12.15':\n"
+               "    print('pyenv: python3.12: command not found', file=sys.stderr)\n"
+               '    sys.exit(127)\n'
+               f'os.execv({sys.executable!r}, [{sys.executable!r}, *sys.argv[1:]])\n')
+    executable(tools / 'python3', '#!' + sys.executable + '\n'
+               'import sys\n'
+               'sys.exit(1)\n')
+    executable(tools / 'pyenv', '#!' + sys.executable + '\n'
+               'import sys\n'
+               "assert sys.argv[1:] == ['versions', '--bare']\n"
+               f'print({versions!r})\n')
+
+
+@POSIX
+def test_pyenv_shim_selects_highest_python312_and_succeeds(tmp_path):
+    source, output, request, env = case(tmp_path)
+    pyenv_fakes(tmp_path, '3.11.9\n3.12.9\n3.12.15')
+    env['PYENV_VERSION'] = '3.12.15'
+    completed, calls = drive(request, env)
+    assert_success(output, request, completed, calls)
+
+
+@POSIX
+def test_no_usable_python_has_no_provider_calls(tmp_path):
+    source, output, request, env = case(tmp_path)
+    pyenv_fakes(tmp_path, '3.11.9')
+    env['PYENV_VERSION'] = '3.12.15'
+    completed, calls = drive(request, env)
+    assert completed.returncode == 2
+    assert list(output.iterdir()) == []
+    assert calls == []
 
 
 @POSIX
@@ -245,7 +288,7 @@ def test_invalid_input_has_no_provider_calls(tmp_path, fault):
         for name in ('bash', 'python3.12', 'timeout', 'mktemp', 'rm'):
             path = tools / name
             if path.exists(): path.unlink()
-            path.symlink_to(shutil.which(name))
+            path.symlink_to(sys.executable if name == 'python3.12' else shutil.which(name))
         env['PATH'] = str(tools)
     completed, calls = drive(request, env, raw, arguments)
     assert completed.returncode != 0

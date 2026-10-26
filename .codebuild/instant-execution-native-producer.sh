@@ -5,12 +5,46 @@ readonly TRIVY_IMAGE='public.ecr.aws/aquasecurity/trivy@sha256:9db099105405c6481
 [[ $# == 0 && ${LEAF_INSTANT_EXECUTION_ENABLED:-} == true ]] || exit 2
 # The bootstrap already supplies an allowlist; also neutralize interpreter overrides.
 for name in $(compgen -e); do
-  case "$name" in PYTHON*|GIT_*|BASH_ENV|ENV|CDPATH|DOCKER_*|AWS_ENDPOINT_URL*|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|LD_*|BASH_FUNC_*) unset "$name" ;; esac
+  case "$name" in PYTHON*|PYENV_*|GIT_*|BASH_ENV|ENV|CDPATH|DOCKER_*|AWS_ENDPOINT_URL*|AWS_PROFILE|AWS_CONFIG_FILE|AWS_SHARED_CREDENTIALS_FILE|LD_*|BASH_FUNC_*) unset "$name" ;; esac
 done
 export PYTHONNOUSERSITE=1 PYTHONDONTWRITEBYTECODE=1
 export GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_GLOBAL=/dev/null GIT_TERMINAL_PROMPT=0
 export AWS_REGION=us-east-1 AWS_DEFAULT_REGION=us-east-1 AWS_MAX_ATTEMPTS=1 AWS_PAGER=''
-for tool in python3.12 timeout git docker aws mktemp rm; do command -v "$tool" >/dev/null || exit 2; done
+for tool in timeout git docker aws mktemp rm; do command -v "$tool" >/dev/null || exit 2; done
+python_bin=''
+for candidate in python3.12 python3; do
+  if command -v "$candidate" >/dev/null && timeout --kill-after=5s 20s "$candidate" -I -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
+    python_bin="$candidate"
+    break
+  fi
+done
+if [[ -z "$python_bin" ]]; then
+  pyenv_bin="$(command -v pyenv || true)"
+  if [[ -z "$pyenv_bin" && -x "${HOME:-}/.pyenv/bin/pyenv" ]]; then
+    pyenv_bin="$HOME/.pyenv/bin/pyenv"
+  fi
+  if [[ -n "$pyenv_bin" ]] && versions="$(timeout --kill-after=5s 20s "$pyenv_bin" versions --bare 2>/dev/null)"; then
+    selected_version=''
+    highest_patch=-1
+    while IFS= read -r version; do
+      if [[ "$version" =~ ^3\.12\.[0-9]+$ ]]; then
+        patch="${version##*.}"
+        if (( 10#$patch > highest_patch )); then
+          selected_version="$version"
+          highest_patch=$((10#$patch))
+        fi
+      fi
+    done <<< "$versions"
+    if [[ -n "$selected_version" ]]; then
+      export PYENV_VERSION="$selected_version"
+      if command -v python3.12 >/dev/null && timeout --kill-after=5s 20s python3.12 -I -c 'import sys; raise SystemExit(sys.version_info < (3, 12))' >/dev/null 2>&1; then
+        python_bin=python3.12
+      fi
+    fi
+  fi
+fi
+[[ -n "$python_bin" ]] || exit 2
+readonly python_bin
 umask 077
 scratch="$(timeout --kill-after=30s 5s mktemp -d /tmp/leaf-instant-producer.XXXXXX)"
 export DOCKER_CONFIG="$scratch/docker-config"
@@ -28,7 +62,7 @@ trap 'exit 143' TERM
 trap 'exit 130' INT
 # Bound files even while a failing tool is producing them (512-byte units).
 ulimit -f 32769
-timeout --kill-after=30s 2150s python3.12 -I - "$scratch" "$TRIVY_VERSION" "$TRIVY_IMAGE" <<'PY'
+timeout --kill-after=30s 2150s "$python_bin" -I - "$scratch" "$TRIVY_VERSION" "$TRIVY_IMAGE" <<'PY'
 import base64
 import hashlib
 import json
