@@ -91,6 +91,29 @@ describe('ARLO review in the existing workspace result panel', () => {
     expect(saveArloReview.mock.calls[1][1]).toEqual(saveArloReview.mock.calls[0][1])
   })
 
+  it('never replays a superseded acceptance key after a later rejection succeeds', async () => {
+    saveArloReview.mockRejectedValueOnce(new Error('Connection lost'))
+    const {container}=render(panel(envelope()))
+    await waitFor(() => expect(screen.getByRole('button',{name:'Accept proposal'})).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Review note'),{target:{value:'First look.'}})
+    fireEvent.click(screen.getByRole('button',{name:'Accept proposal'}))
+    await screen.findByRole('alert')
+    fireEvent.change(screen.getByLabelText('Review note'),{target:{value:'Rejecting for now.'}})
+    fireEvent.click(screen.getByRole('button',{name:'Reject proposal'}))
+    await screen.findByText('Proposal rejected.')
+    fireEvent.change(screen.getByLabelText('Review note'),{target:{value:'Accepted after rework.'}})
+    fireEvent.click(screen.getByRole('button',{name:'Accept proposal'}))
+    await screen.findByText('Proposal accepted for the next CAD step.')
+    expect(saveArloReview).toHaveBeenCalledTimes(3)
+    const keys = saveArloReview.mock.calls.map(call => call[2])
+    expect(new Set(keys).size).toBe(3)
+    expect(saveArloReview.mock.calls[2][1]).toEqual({proposal_id:'proposal-a',result_sha256:'a'.repeat(64),decision:'accept',note:'Accepted after rework.'})
+    const history = container.querySelectorAll('.arlo-review ol > li')
+    expect(history).toHaveLength(2)
+    expect(history[0]).toHaveTextContent('Rejected: Rejecting for now.')
+    expect(history[1]).toHaveTextContent('Accepted: Accepted after rework.')
+  })
+
   it('does not let a stale save response populate a different job', async () => {
     let finish
     saveArloReview.mockImplementationOnce(() => new Promise(resolve => { finish=resolve }))

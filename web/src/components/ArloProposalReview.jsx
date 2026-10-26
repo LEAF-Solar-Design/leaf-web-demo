@@ -62,23 +62,27 @@ export default function ArloProposalReview({ envelope, context }) {
     return () => { cancelled = true; alive.current = false }
   }, [bound, context?.job_id, envelope.result_sha256, historyRetry])
   const decide = async decision => {
-    const attemptId = JSON.stringify([context.org_id, context.project_id, context.job_id, context.input_version_id, envelope.result_sha256, proposal.proposal_id, decision])
-    if (!attempts.current.has(attemptId)) attempts.current.set(attemptId, {
-      body: { proposal_id: proposal.proposal_id, result_sha256: envelope.result_sha256, decision, note }, key: crypto.randomUUID(),
+    // At most one pending attempt per proposal. Only a retry of the same decision reuses its key and original payload;
+    // a different decision replaces it, so a superseded key is never replayed under a later decision.
+    const attemptId = JSON.stringify([context.org_id, context.project_id, context.job_id, context.input_version_id, envelope.result_sha256, proposal.proposal_id])
+    const pending = attempts.current.get(attemptId)
+    if (!pending || pending.decision !== decision) attempts.current.set(attemptId, {
+      decision, body: { proposal_id: proposal.proposal_id, result_sha256: envelope.result_sha256, decision, note }, key: crypto.randomUUID(),
     })
-    // An unconfirmed retry must send the original payload as well as its key.
     const attempt = attempts.current.get(attemptId)
+    const settle = () => { if (attempts.current.get(attemptId) === attempt) attempts.current.delete(attemptId) }
     setSaving(true); setError(''); setSaved('')
     try {
       const response = await saveArloReview(context, attempt.body, attempt.key)
+      // The server answered, so this attempt is settled whatever the row says; the next decision mints a new key.
+      settle()
       if (!alive.current) return
       const row = response.review
       if (row?.payload?.jobId !== context.job_id || row.payload.resultHash !== envelope.result_sha256 || row.payload.proposalId !== proposal.proposal_id || row.payload.decision !== decision) throw new Error('The saved decision did not match this proposal. Reload its history.')
       setReviews(previous => [...previous.filter(r => r.operation_id !== row.operation_id), row])
       setSaved(decision === 'accept' ? 'Proposal accepted for the next CAD step.' : 'Proposal rejected.')
-      attempts.current.delete(attemptId)
     } catch (cause) {
-      if (cause.status >= 400 && cause.status < 500 && cause.status !== 408 && cause.body?.error?.retryable === false) attempts.current.delete(attemptId)
+      if (cause.status >= 400 && cause.status < 500 && cause.status !== 408 && cause.body?.error?.retryable === false) settle()
       if (alive.current) setError(`Decision not confirmed saved. ${humanizeError(cause)}`)
     }
     finally { if (alive.current) setSaving(false) }
