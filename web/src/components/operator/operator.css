@@ -16,7 +16,7 @@
 .operator-console {
   position: fixed; inset: 6vh 8vw; z-index: var(--leaf-layer-modal); display: flex; flex-direction: column;
   background: var(--panel-bg, #101418); color: inherit;
-  border: 1px solid var(--accent-tint); border-radius: 8px;
+  border: 1px solid var(--accent-tint); border-radius: var(--leaf-radius-card);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .45); overflow: hidden;
 }
 .operator-console-head {
@@ -26,7 +26,7 @@
 .operator-console-body { display: flex; gap: 14px; padding: 12px 14px; overflow: auto; flex: 1; }
 
 .operator-profile-badge {
-  font-family: var(--font-mono); font-size: 11px; color: var(--muted);
+  font-family: var(--font-mono); font-size: var(--leaf-size-caption); color: var(--muted);
   border: 1px solid var(--accent-tint); border-radius: var(--leaf-radius-key); padding: 2px 6px;
 }
 
@@ -76,7 +76,7 @@
 }
 
 .operator-job-receipt {
-  font-family: var(--font-mono); font-size: 11px; border: 1px dashed var(--accent-tint);
+  font-family: var(--font-mono); font-size: var(--leaf-size-caption); border: 1px dashed var(--accent-tint);
   border-radius: var(--leaf-radius-key); padding: 6px 8px; overflow-wrap: anywhere;
 }
 .operator-cancel[disabled] { opacity: .45; cursor: default; }
