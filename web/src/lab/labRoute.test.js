@@ -9,6 +9,14 @@ afterEach(() => {
 })
 
 describe('Lab route golden', () => {
+  it.each([
+    ['/app/lab/test-trade', '?embed=1&channel=retained'],
+    ['/app', '?surface=lab&view=test-trade&embed=1&channel=retained'],
+  ])('round-trips the Test trade route %s', (path, search) => {
+    const route = parseLabRoute(path, search)
+    expect(route).toEqual({ view: 'test-trade', params: { embed: '1', channel: 'retained' } })
+    expect(formatLabRoute(route)).toBe('/app/lab/test-trade?embed=1&channel=retained')
+  })
   it('round-trips the inert embed string on direct and surface routes', () => {
     for (const [path, search] of [['/app/lab', '?embed=1'], ['/app', '?surface=lab&embed=1']]) {
       const route = parseLabRoute(path, search)

@@ -82,6 +82,21 @@ afterEach(async () => {
 })
 
 describe('first-click live graph', () => {
+  it('links to Test trade evidence preserving the supplied route parameters', async () => {
+    const original = window.location.href
+    const view = render(<GraphView route={{ view: 'graph', params: { embed: '1', channel: 'retained' } }} />)
+    try {
+      await screen.findByRole('region', { name: 'Strategy palette' })
+      const link = screen.getByRole('link', { name: 'Test trade evidence' })
+      expect(link).toHaveAttribute('href', '/app/lab/test-trade?embed=1&channel=retained')
+      fireEvent.click(link)
+      expect(window.location.pathname).toBe('/app/lab/test-trade')
+      expect(window.location.search).toBe('?embed=1&channel=retained')
+    } finally {
+      view.unmount()
+      window.history.replaceState({}, '', original)
+    }
+  })
   it('F2 renders only the affected memoised block for a value event without rendering GraphView', async () => {
     const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
     const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })

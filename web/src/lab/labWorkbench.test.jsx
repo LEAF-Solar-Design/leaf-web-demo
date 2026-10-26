@@ -67,22 +67,44 @@ const on = { state: 'on', posture: 'local' }
 const route = (view) => ({ view, params: {} })
 
 describe('Lab view registration', () => {
-  it('registers the five views once in order, with frozen glossary labels', () => {
+  it('registers the six views once in order, with frozen labels', () => {
     const first = registerLabViews()
     const second = registerLabViews()
     expect(first).toBe(second)
     expect(first).toBe(LAB_VIEWS)
-    expect(first.map(({ id }) => id)).toEqual(['graph', 'widgets', 'history', 'runs', 'deploys'])
-    expect(new Set(first.map(({ component }) => component)).size).toBe(5)
+    expect(first.map(({ id }) => id)).toEqual(['graph', 'widgets', 'history', 'runs', 'deploys', 'test-trade'])
+    expect(new Set(first.map(({ component }) => component)).size).toBe(6)
     expect(first.find(({ id }) => id === 'widgets').component).toBe(WidgetsView)
     expect(first.map(({ label }) => label)).toEqual(['strategy', 'market', 'test', 'keeper', 'lane']
-      .map((id) => glossary.terms.find((term) => term.id === id).plain))
+      .map((id) => glossary.terms.find((term) => term.id === id).plain).concat('Test trade'))
     expect(Object.isFrozen(first)).toBe(true)
     expect(first.every(Object.isFrozen)).toBe(true)
   })
 })
 
 describe('LabWorkbench', () => {
+  it('refreshes Test trade evidence from host revisions and delegates the request to the bridge', async () => {
+    let callbacks
+    const requestTestTrade = vi.fn().mockResolvedValue({ ok: true })
+    const createHostBridge = next => {
+      callbacks = next
+      return { start: vi.fn().mockResolvedValue(true), stop: vi.fn(), requestTestTrade }
+    }
+    render(<LabWorkbench route={route('test-trade')} status={on} embedded createHostBridge={createHostBridge} />)
+    expect(screen.getByText('No Test trades yet')).toBeVisible()
+    act(() => callbacks.onSource([{ source: 'evidence', as_of: Date.now(), data: {
+      receipts: [{ receipt_id: 'first', status: 'filled', mode: 'live' }], histograms: [],
+    } }]))
+    expect(screen.getByText('Status filled · Mode live')).toBeVisible()
+    act(() => callbacks.onSource([{ source: 'evidence', as_of: Date.now(), stale: true, data: {
+      receipts: [{ receipt_id: 'second', status: 'refused', mode: 'candidate' }], histograms: [],
+    } }]))
+    expect(screen.getByText('Status refused · Mode candidate')).toBeVisible()
+    expect(screen.getByText('stale')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Request Test trade' }))
+    await waitFor(() => expect(requestTestTrade).toHaveBeenCalledTimes(1))
+    expect(await screen.findByText('Requested; the dashboard opens its Test trade card')).toBeVisible()
+  })
   it.each([
     ['hidden', { route: route('graph'), status: on, hidden: true }],
     ['inactive', { route: route('widgets'), status: on }],
@@ -111,14 +133,14 @@ describe('LabWorkbench', () => {
     expect(await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Strategy palette' })).toBeVisible()
     expect(screen.getByRole('region', { name: 'Block inspector' })).toBeVisible()
-    expect(within(screen.getByRole('navigation', { name: 'Lab views' })).getAllByRole('link')).toHaveLength(5)
+    expect(within(screen.getByRole('navigation', { name: 'Lab views' })).getAllByRole('link')).toHaveLength(6)
   }, 20000)
 
   it('retains every view DOM instance through navigation, dormancy and hiding', async () => {
     const { container, rerender } = render(<LabWorkbench route={route('graph')} status={on} />)
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const panels = [...container.querySelectorAll('[data-lab-view]')]
-    expect(panels).toHaveLength(5)
+    expect(panels).toHaveLength(6)
     const editor = container.querySelector('.widgets-view')
     for (const active of LAB_VIEWS) {
       rerender(<LabWorkbench route={route(active.id)} status={on} />)

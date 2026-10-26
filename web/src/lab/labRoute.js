@@ -1,7 +1,7 @@
 import { authHeaders, config, noteUnauthorized } from '../api.js'
 import { fetchWithBudget } from '../fetchBudget.js'
 
-const VIEW_IDS = ['graph', 'widgets', 'history', 'runs', 'deploys']
+const VIEW_IDS = ['graph', 'widgets', 'history', 'runs', 'deploys', 'test-trade']
 
 export function isLabEmbedded(route, win = globalThis.window) {
   return route?.params?.embed === '1' && Boolean(win) && win.self !== win.top
@@ -15,7 +15,7 @@ export function parseLabRoute(path, search = '') {
   const keys = [...query.keys()]
   if (new Set(keys).size !== keys.length) return null
   const surface = query.get('surface')
-  const direct = /^\/app\/lab(?:\/(graph|widgets|history|runs|deploys))?\/?$/.exec(path)
+  const direct = /^\/app\/lab(?:\/(graph|widgets|history|runs|deploys|test-trade))?\/?$/.exec(path)
   const surfaceRoute = /^\/(app|ty)\/?$/.test(path) && surface === 'lab'
   if (!direct && !surfaceRoute) return null
   if (surface !== null && surface !== 'lab') return null
