@@ -22,6 +22,7 @@ import {
   authorCluster,
   catalogClusters,
   catalogTabClusters,
+  humanizeToolName,
   layersCluster,
   profileRibbonTabs,
   profileReason,
@@ -37,6 +38,21 @@ import {
   versionCluster,
   viewCluster,
 } from './ribbonClusters.js'
+
+describe('humanizeToolName', () => {
+  it.each([
+    ['string-autofill-opt', 'String autofill opt'],
+    ['count-by-layer', 'Count by layer'],
+    ['NEC_check', 'NEC check'],
+    ['Already Fine', 'Already Fine'],
+    ['', ''],
+    [undefined, ''],
+    ['a--b__c', 'A b c'],
+    ['  a   b  ', 'A b'],
+  ])('humanizes %j as %j', (name, expected) => {
+    expect(humanizeToolName(name)).toBe(expected)
+  })
+})
 
 describe('solar-ui-rail', () => {
   const A = { entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: ['graph_seed_required'] }
@@ -1171,7 +1187,7 @@ describe('the tool record carries icon, size and tab (slice 3)', () => {
         tools: [{
           id: 'count-by-layer',
           label: 'count-by-layer',
-          text: 'count-by-layer',
+          text: 'Count by layer',
           icon: 'toolbox',
           size: 'large',
           title: 'Counts entities per layer.',
@@ -1187,7 +1203,7 @@ describe('the tool record carries icon, size and tab (slice 3)', () => {
         tools: [{
           id: 'delete-marked-panel',
           label: 'delete-marked-panel',
-          text: 'delete-marked-panel',
+          text: 'Delete marked panel',
           icon: 'toolbox',
           size: 'large',
           title: 'Deletes the marked panel.',

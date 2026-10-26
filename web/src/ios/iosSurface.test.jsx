@@ -50,7 +50,7 @@ it('B4D row17 shows catalog tuples states sync trouble and the empty list', () =
   expect(items[0]).toHaveAttribute('data-state', 'approved')
   expect(items[1]).toHaveAttribute('data-state', 'unapproved')
   expect(items[0]).toHaveAttribute('data-revision', importedSources[0].source_revision)
-  expect(screen.getByTestId('ios-ship-sync')).toHaveTextContent('Provider catalog: provider_unavailable. Showing the stored sources.')
+  expect(screen.getByTestId('ios-ship-sync')).toHaveTextContent('Source updates are unavailable. Showing saved versions. Check again shortly.')
   view.rerender(<IosSurface enabled ship={{ ...ship, sync: { status: 'ok' } }} />)
   expect(screen.queryByTestId('ios-ship-sync')).not.toBeInTheDocument()
   view.rerender(<IosSurface enabled ship={{ ...ship, sources: [] }} />)
@@ -72,7 +72,7 @@ it('B4D row18 owner controls use the source revision and explain busy or missing
   expect(screen.getByText('Only the project owner can approve a source revision')).toBeInTheDocument()
   view.rerender(<IosSurface enabled ship={{ ...ship, revision: null }} />)
   expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
-  expect(screen.getByText('Select a canonical drawing version before approving')).toBeInTheDocument()
+  expect(screen.getByText('Select a drawing version before approving')).toBeInTheDocument()
 })
 
 it('B4D row19 approved and consumed sources have status text and no approval button', () => {
@@ -96,7 +96,7 @@ it('I1 row8 absent ship preserves the existing surface and device render', () =>
   const view = render(<IosSurface enabled contract={contract} />)
   const html = view.container.innerHTML
   expect(screen.getByText('iOS app')).toBeInTheDocument()
-  expect(screen.getByText('Setting up: Mac allocated')).toBeInTheDocument()
+  expect(screen.getByText('Setting up: Build computer ready')).toBeInTheDocument()
   expect(screen.queryByTestId('ios-stage-ladder')).not.toBeInTheDocument()
   view.rerender(<IosSurface enabled contract={contract} ship={undefined} />)
   expect(view.container.innerHTML).toBe(html)
@@ -116,17 +116,17 @@ it('I1 row9 renders setup, provider progress, receipt and launch reason from shi
   const ship = { phase: 'setup-required', readiness: { setupState: 'no-approved-revision', setupAction: 'Approve revision r1' }, execution: null, receipt: null }
   const view = render(<IosSurface enabled ship={ship} onLaunch={() => {}} />)
   expect(view.container.querySelector('[data-rung="source"]')).toHaveAttribute('data-state', 'missing')
-  expect(screen.getByText('Setup required: Approve revision r1')).toBeInTheDocument()
+  expect(screen.getByText('Select a drawing version and ask the project owner to approve it.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Launch TestFlight build' })).toBeDisabled()
-  expect(screen.getByText('Complete the reported setup action before launching.')).toBeInTheDocument()
+  expect(screen.getByText('Finish setup before starting a build.')).toBeInTheDocument()
   const running = { ...ship, phase: 'running', readiness: { setupState: 'none' }, execution: { status: 'running', stage: 'BUILT', updated_at: '2026-09-17T12:00:00Z' } }
   view.rerender(<IosSurface enabled ship={running} />)
-  expect(screen.getByText('BUILT')).toBeInTheDocument()
+  expect(screen.getByText('App built')).toBeInTheDocument()
   expect(screen.getByText('2026-09-17T12:00:00Z')).toBeInTheDocument()
   expect(screen.queryByRole('button')).not.toBeInTheDocument()
   const succeeded = { ...running, phase: 'succeeded', execution: { status: 'succeeded' }, receipt: { kind: 'leaf.ios-testflight-receipt.v1', receipt_id: 'receipt1', bundle_identifier: 'com.leaf.test' } }
   view.rerender(<IosSurface enabled ship={succeeded} />)
-  expect(screen.getByText('succeeded')).toBeInTheDocument()
+  expect(screen.getByText('This build has succeeded.')).toBeInTheDocument()
   expect(screen.getByText('com.leaf.test')).toBeInTheDocument()
   view.unmount()
   const ground = render(<DeviceGround active enabled ship={ship} onLaunch={() => {}} />)
@@ -172,7 +172,7 @@ describe('each derived state has a distinct truthful view', () => {
     render(<IosSurface enabled contract={contractWith({ healthy: true, launchable: false }, 'MAC_ALLOCATED')} />)
     const el = screen.getByLabelText('iOS readiness')
     expect(el).toHaveAttribute('data-state', 'in-progress')
-    expect(screen.getByText(/Setting up: Mac allocated/)).toBeInTheDocument()
+    expect(screen.getByText(/Setting up: Build computer ready/)).toBeInTheDocument()
   })
 
   it('in-progress with a null build_stage: plain label, no invented stage text', () => {

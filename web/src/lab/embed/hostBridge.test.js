@@ -45,6 +45,23 @@ function harness(options = {}) {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('Studio host bootstrap', () => {
+  it('opens the parent Test trade card only after admission, with a closed empty payload', async () => {
+    const h = harness()
+    expect(await h.bridge.requestTestTrade()).toEqual({ ok: false, reason: 'not_admitted' })
+    await h.bridge.start()
+    expect(await h.bridge.requestTestTrade()).toEqual({ ok: false, reason: 'not_admitted' })
+    await h.admit()
+    expect(await h.bridge.requestTestTrade()).toEqual({ ok: true })
+    expect(h.sent()).toHaveLength(1)
+    const message = h.sent()[0]
+    expect(message.kind).toBe('test-trade.open-request')
+    expect(message.payload).toEqual({})
+    expect(() => schema.schema(message, 'lab-embed.v1.schema.json')).not.toThrow()
+    expect(() => schema.schema({ ...message, payload: { trade: true } }, 'lab-embed.v1.schema.json')).toThrow()
+    expect(h.parent.postMessage.mock.calls.at(-1)[1]).toBe(DEFAULT_HOST_ORIGINS[0])
+    h.bridge.stop()
+    expect(await h.bridge.requestTestTrade()).toEqual({ ok: false, reason: 'not_admitted' })
+  })
   it('mints a cryptographic lowercase hex channel and hashes the raw Unicode subject', async () => {
     const random = vi.fn((bytes) => bytes.fill(171))
     expect(mintChannel({ getRandomValues: random })).toBe('ab'.repeat(16))

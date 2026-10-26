@@ -67,6 +67,11 @@ export function loadDemoSolve() {
         if (timer) clearTimeout(timer)
       }
     })().then((solve) => {
+      // A fulfilled error or incomplete payload must not prevent a retry.
+      if (solve?.ok === false || solve?.electrical?.max_modules_per_string == null) {
+        demoSolvePromise = null
+        return solve
+      }
       // P2 wave C-2 (pre-auth allowlisted): the memo means exactly one emit
       // per session, at the moment the demo actually resolved for a viewer.
       // `degraded` is the code's own flag: the intended live solve vs the

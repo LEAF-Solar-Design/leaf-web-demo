@@ -6,7 +6,7 @@
   padding: 16px;
   margin-bottom: 16px;
   border: 1px solid var(--border, currentColor);
-  border-radius: 8px;
+  border-radius: var(--leaf-radius-card);
   overflow-wrap: anywhere;
 }
 
@@ -47,5 +47,19 @@
 @media (max-width: 599px) {
   .studio-ground-board .ground-pane-head {
     flex-direction: column;
+  }
+
+  .studio-ground-board .ground-row-action {
+    min-height: 44px;
+    min-width: 44px;
+    box-sizing: border-box;
+  }
+
+  .studio-ground-board .ground-tile li {
+    white-space: normal;
+    overflow: visible;
+    text-overflow: clip;
+    overflow-wrap: anywhere;
+    min-width: 0;
   }
 }

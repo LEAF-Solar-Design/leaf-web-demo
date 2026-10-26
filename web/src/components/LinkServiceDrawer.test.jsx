@@ -38,6 +38,27 @@ const server = (over = {}) => ({
 })
 
 describe('LinkServiceDrawer', () => {
+  it('closes an unlink confirmation after a readable failure without removing the service', async () => {
+    render(<LinkServiceDrawer {...baseProps({
+      servers: [server()],
+      onUnlink: vi.fn().mockRejectedValue(new TypeError('Failed to fetch')),
+    })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Unlink' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Unlink' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent("Couldn't reach the service.")
+    expect(screen.queryByRole('button', { name: 'Keep' })).not.toBeInTheDocument()
+    expect(screen.getByText('Billing tool')).toBeInTheDocument()
+  })
+
+  it('preserves a readable server reason for a failed connect', async () => {
+    render(<LinkServiceDrawer {...baseProps({
+      servers: [server()],
+      onConnect: vi.fn().mockRejectedValue({ body: { error: { message: 'Sign in to this service first.' } } }),
+    })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('Sign in to this service first.')
+  })
+
   it('renders nothing at all in mock mode, same posture as ClaudeAccountPanel', () => {
     const { container } = render(<LinkServiceDrawer {...baseProps({ mock: true, open: true })} />)
     expect(container).toBeEmptyDOMElement()

@@ -1,7 +1,7 @@
 /**
  * ExportDialog. Card B-U4 acceptance oracle, one describe block per clause:
  *   Export streams/downloads the sanitized artifact; progress bounded with
- *   timeout surfaced as retryable error; receipt id shown.
+ *   timeout surfaced as an unknown outcome; receipt id shown.
  */
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
@@ -70,7 +70,7 @@ describe('acceptance: export streams/downloads the sanitized artifact', () => {
   })
 })
 
-describe('acceptance: progress is bounded with a timeout surfaced as a retryable error', () => {
+describe('acceptance: progress is indeterminate until measured and timeout has an unknown outcome', () => {
   it('renders live progress as the export reports it', async () => {
     const d = deferred()
     let onProgress
@@ -79,6 +79,11 @@ describe('acceptance: progress is bounded with a timeout surfaced as a retryable
 
     fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
     await waitFor(() => expect(onExport).toHaveBeenCalled())
+
+    expect(screen.getByRole('progressbar')).not.toHaveAttribute('value')
+    expect(screen.getByRole('progressbar')).not.toHaveAttribute('aria-valuenow')
+    expect(screen.getByText('Preparing download...')).toBeTruthy()
+    expect(screen.queryByText('0%')).toBeNull()
 
     act(() => { onProgress(0.5) })
     expect(screen.getByRole('progressbar')).toHaveAttribute('aria-valuenow', '50')
@@ -90,7 +95,7 @@ describe('acceptance: progress is bounded with a timeout surfaced as a retryable
     await waitFor(() => expect(screen.getByText('r-done')).toBeTruthy())
   })
 
-  it('aborts and surfaces a retryable timeout error when the export hangs past its bound', async () => {
+  it('aborts and explains the unknown outcome without offering retry when the export hangs', async () => {
     vi.useFakeTimers()
     try {
       let capturedSignal
@@ -105,39 +110,44 @@ describe('acceptance: progress is bounded with a timeout surfaced as a retryable
 
       expect(capturedSignal.aborted).toBe(true)
       const alertEl = screen.getByRole('alert')
-      expect(alertEl.textContent).toMatch(/did not complete within 5000 ms/i)
-      expect(screen.getByRole('button', { name: /retry/i })).toBeTruthy()
+      expect(alertEl.textContent).toMatch(/could not confirm whether the export finished/i)
+      expect(alertEl.textContent).toMatch(/check the project history before exporting again/i)
+      expect(alertEl.textContent).not.toMatch(/5000|\bms\b|failed to fetch/i)
+      expect(screen.queryByRole('button', { name: /retry/i })).toBeNull()
     } finally {
       vi.useRealTimers()
     }
   })
 
-  it('exports the timeout as a named, retryable error class', () => {
+  it('exports the timeout as a named error that does not authorize a retry', () => {
     const err = new ExportTimeoutError(1000)
     expect(err.name).toBe('ExportTimeoutError')
-    expect(err.retryable).toBe(true)
-    expect(err.message).toMatch(/1000 ms/)
+    expect(err.retryable).toBe(false)
+    expect(err.timeoutMs).toBe(1000)
+    expect(err.message).toMatch(/could not confirm whether the export finished/i)
+    expect(err.message).not.toMatch(/1000 ms/)
   })
 
-  it('retrying after a timeout re-invokes the export and can still succeed', async () => {
+  it('keeps the unknown outcome after a late response without starting a duplicate export', async () => {
     vi.useFakeTimers()
     try {
-      const onExport = vi.fn()
-        .mockImplementationOnce(() => new Promise(() => {}))
-        .mockResolvedValueOnce({ receiptId: 'r-retry', blob: new Blob(['y']), filename: 'y.zip' })
+      const pending = deferred()
+      const onExport = vi.fn(() => pending.promise)
       render(<ExportDialog onExport={onExport} timeoutMs={1000} />)
 
       fireEvent.click(screen.getByRole('button', { name: /^export$/i }))
       await act(async () => { await vi.advanceTimersByTimeAsync(1000) })
       expect(screen.getByRole('alert')).toBeTruthy()
+      expect(screen.queryByRole('button', { name: /retry|export again|^export$/i })).toBeNull()
 
       await act(async () => {
-        fireEvent.click(screen.getByRole('button', { name: /retry/i }))
+        pending.resolve({ receiptId: 'r-late', blob: new Blob(['y']), filename: 'y.zip' })
       })
-      expect(onExport).toHaveBeenCalledTimes(2)
-
-      vi.useRealTimers()
-      await waitFor(() => expect(screen.getByText('r-retry')).toBeTruthy())
+      expect(onExport).toHaveBeenCalledTimes(1)
+      expect(screen.getByRole('alert')).toHaveTextContent('could not confirm whether the export finished')
+      expect(screen.queryByText('r-late')).toBeNull()
+      expect(screen.queryByRole('link', { name: /download/i })).toBeNull()
+      expect(URL.createObjectURL).not.toHaveBeenCalled()
     } finally {
       vi.useRealTimers()
     }

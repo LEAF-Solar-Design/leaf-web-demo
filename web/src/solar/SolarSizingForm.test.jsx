@@ -176,7 +176,9 @@ describe('SolarSizingForm', () => {
       expect(screen.getByText('Saved project ZIP: 44224-1234')).toBeTruthy()
       expect(screen.getByText('Saved global string length: 3')).toBeTruthy()
       const catalog = h.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?')).at(-1)
-      const preview = JSON.parse(new URL(catalog[0], 'https://example.test').searchParams.get('project_runs'))
+      expect(catalog[1].method).toBe('POST')
+      expect(new URL(catalog[0], 'https://example.test').searchParams.has('project_runs')).toBe(false)
+      const preview = JSON.parse(catalog[1].body).project_runs
       expect(preview[r9Tool]).toEqual({ params: expected, catalog_digest: r9Digest, idempotency_key: intent.idempotencyKey })
       fireEvent.click(run())
       await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
@@ -804,7 +806,9 @@ describe('SolarSizingForm', () => {
     expect(contexts).toHaveLength(2)
     expect(contexts[0][0]).toContain('/drawing-versions/' + r9Binding.input_version_id + '/context?drawing_id=' + r9Binding.drawing_id)
     const catalog = requests.find(([url]) => url.includes('/api/capabilities?'))
-    const preview = JSON.parse(new URL(catalog[0], 'https://example.test').searchParams.get('project_runs'))
+    expect(catalog[1].method).toBe('POST')
+    expect(new URL(catalog[0], 'https://example.test').searchParams.has('project_runs')).toBe(false)
+    const preview = JSON.parse(catalog[1].body).project_runs
     expect(preview[r9Tool]).toEqual({ params: h.client.catalog.mock.calls[0][0].intents[0].params,
       catalog_digest: r9Digest, idempotency_key: 'r9-key-1' })
     const submitted = requests.find(([url]) => url.endsWith('/api/run'))[1]

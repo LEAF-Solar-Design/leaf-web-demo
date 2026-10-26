@@ -90,6 +90,17 @@ export function clipboardRecord(entity, verb = 'Copy') {
   if (points.length > MAX_CLIPBOARD_POINTS) {
     return { refusal: `${verb} refused: this entity has more than ${MAX_CLIPBOARD_POINTS} points.` }
   }
+  let bulges = null
+  if (kind !== 'LINE' && entity.bulges != null) {
+    // Match the create payload's one-value-per-vertex contract before CUT
+    // can delete the source. Empty lists represent straight polylines.
+    const raw = entity.bulges
+    if (!Array.isArray(raw) || (raw.length !== 0 && raw.length !== points.length)
+      || Array.from(raw).some((b) => !finite(b))) {
+      return { refusal: `${verb} refused: this polyline has unreadable curve information.` }
+    }
+    if (raw.some((b) => b !== 0)) bulges = Object.freeze(Array.from(raw))
+  }
   return {
     record: Object.freeze({
       type: kind,
@@ -101,6 +112,7 @@ export function clipboardRecord(entity, verb = 'Copy') {
       endDeg: null,
       points: Object.freeze(points.map((p) => Object.freeze([p[0], p[1]]))),
       closed: kind !== 'LINE' && entity?.closed === true,
+      ...(bulges ? { bulges } : {}),
     }),
   }
 }
@@ -152,6 +164,7 @@ export function pasteOp(record, bx, by) {
       pts: moved.map((p) => `${p[0]},${p[1]}`).join(' '),
       closed: record.closed ? 'true' : 'false',
       layer,
+      ...(record.bulges ? { bulges: Array.from(record.bulges) } : {}),
     },
   }
 }

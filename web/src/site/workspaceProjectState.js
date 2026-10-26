@@ -89,7 +89,7 @@ function presentId(value) {
  * @param {string?} input.projectsUnavailable why the project list could not load
  * @param {boolean} input.mock                offline demo build (no platform at all)
  * @returns {Readonly<object>} frozen state; `kind` is always one of
- *          'project' | 'drawing-only' | 'empty'
+ *          'project' | 'opening' | 'open-failed' | 'drawing-only' | 'empty'
  */
 export function deriveWorkspaceProjectState({
   openProjectId = null,
@@ -98,6 +98,9 @@ export function deriveWorkspaceProjectState({
   orgId = null,
   projectsUnavailable = null,
   mock = false,
+  workspace,
+  workspaceLoading = false,
+  workspaceError = null,
 } = {}) {
   const drawing = trimmedLabel(drawingName)
   const project = trimmedLabel(projectName)
@@ -107,6 +110,19 @@ export function deriveWorkspaceProjectState({
   // A workspace project is open only when BOTH the id and a name resolve; an id
   // with no name yet is still hydrating, and labelling that "Project —" is how
   // the old chip started lying in the first place.
+  if (projectId && !workspace && (workspaceLoading || workspaceError || workspace === null)) {
+    const opening = workspaceLoading
+    return Object.freeze({
+      kind: opening ? 'opening' : 'open-failed',
+      tag: 'Project',
+      label: opening ? 'Opening project...' : 'Project not open',
+      drawingName: drawing,
+      railLabel: opening ? 'Opening project...' : 'Project not open',
+      headline: opening ? 'Opening project...' : 'Project could not be opened',
+      explainer: opening ? 'Please wait while the project opens.' : 'Retry or close the project below.',
+      action: null,
+    })
+  }
   if (projectId && project) {
     return Object.freeze({
       kind: 'project',

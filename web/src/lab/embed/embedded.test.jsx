@@ -16,7 +16,7 @@ vi.mock('./hostBridge.js', () => ({
 }))
 vi.mock('../useLabSurfaceStatus.js', () => ({ useLabSurfaceStatus: vi.fn() }))
 vi.mock('../views.js', () => ({
-  registerLabViews: () => ['graph', 'widgets', 'history', 'runs', 'deploys'].map((id) => ({
+  registerLabViews: () => ['graph', 'widgets', 'history', 'runs', 'deploys', 'test-trade'].map((id) => ({
     id, label: id, path: id === 'graph' ? '/app/lab' : `/app/lab/${id}`,
     component: ({ hidden }) => <p hidden={hidden}>Standalone {id}</p>,
   })),
@@ -80,6 +80,18 @@ const canvas = async () => {
 }
 
 describe('Lab embedded mode', () => {
+  it('links to Test trade evidence with every embed parameter retained', async () => {
+    framed()
+    window.history.replaceState({}, '', '/app/lab?embed=1&channel=retained')
+    render(<LabGround active />)
+    await canvas()
+    const link = screen.getByRole('link', { name: 'Test trade evidence' })
+    expect(link).toHaveAttribute('href', '/app/lab/test-trade?embed=1&channel=retained')
+    fireEvent.click(link)
+    expect(window.location.pathname).toBe('/app/lab/test-trade')
+    expect(window.location.search).toBe('?embed=1&channel=retained')
+    expect(screen.getByText('Standalone test-trade')).toBeVisible()
+  })
   it('clears values before displaying a second restore and waits for its canvas report', async () => {
     framed()
     render(<LabGround active />)
@@ -149,7 +161,7 @@ describe('Lab embedded mode', () => {
     expect(root.parentNode).toBe(document.body)
     expect(root).toBeVisible()
     const links = within(screen.getByRole('navigation', { name: 'Lab views' })).getAllByRole('link')
-    expect(links).toHaveLength(5)
+    expect(links).toHaveLength(6)
     expect(links.every((link) => new URL(link.href).searchParams.get('embed') === '1')).toBe(true)
     expect(connections).toHaveLength(1)
     expect(connections[0].start).toHaveBeenCalledOnce()

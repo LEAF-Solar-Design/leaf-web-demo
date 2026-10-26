@@ -1,3 +1,5 @@
+import { humanizeError } from '../../errorHumanize.js'
+
 export const WORKSPACE_ORG_KEY = 'leaf.org_id'
 
 function browserStorage() {
@@ -79,6 +81,7 @@ export function createWorkspaceController({
     workspace: null,
     canonicalVersionId: null,
     workspaceLoading: false,
+    workspaceError: null,
     orgBusy: false,
     projectBusy: false,
   }
@@ -90,6 +93,9 @@ export function createWorkspaceController({
   }
   const publish = (patch) => {
     if (disposed) return
+    if (patch.workspaceLoading === true || patch.workspace || patch.openProjectId === null) {
+      patch.workspaceError = null
+    }
     state = { ...state, ...patch }
     listeners.forEach((listener) => listener())
   }
@@ -101,6 +107,18 @@ export function createWorkspaceController({
   const invalidateAll = () => Object.keys(generations).forEach((lane) => { nextGeneration(lane) })
   const explain = (error) => {
     try { return formatError(error) } catch { return defaultFormatError(error) }
+  }
+  // Only null-to-org adoption preserves the workspace generation.
+  const isCurrentWorkspace = (request, projectId, orgId) => isCurrent('workspace', request)
+    && state.openProjectId === projectId && (state.orgId === orgId || orgId === null)
+  const acceptWorkspaceOrg = (workspace, orgId) => {
+    if (orgId !== null || state.orgId === null) return true
+    const mismatched = [workspace?.org_id, workspace?.project?.org_id].some(
+      (id) => typeof id === 'string' && id.length > 0 && id !== state.orgId,
+    )
+    if (!mismatched) return true
+    publish({ openProjectId: null, workspace: null, canonicalVersionId: null, workspaceLoading: false })
+    return false
   }
 
   async function loadProjects() {
@@ -169,13 +187,14 @@ export function createWorkspaceController({
       })
       try {
         const workspace = await services.openProject(projectId, orgId)
-        if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
+        if (!isCurrentWorkspace(request, projectId, orgId) || !acceptWorkspaceOrg(workspace, orgId)) return null
+        const settledOrgId = state.orgId
         publish({ workspace, workspaceLoading: false })
-        invoke(callbacks.onWorkspaceOpened, { projectId, orgId, workspace })
+        invoke(callbacks.onWorkspaceOpened, { projectId, orgId: settledOrgId, workspace })
         return workspace
-      } catch (error) {
-        if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
-        publish({ workspace: null, projectsError: explain(error), workspaceLoading: false })
+      } catch {
+        if (!isCurrentWorkspace(request, projectId, orgId)) return null
+        publish({ workspace: null, workspaceError: humanizeError(null), workspaceLoading: false })
         return null
       }
     }
@@ -184,8 +203,7 @@ export function createWorkspaceController({
   async function rehydrate() {
     const projectId = state.openProjectId
     if (!projectId) return null
-    if (inFlightOpen && isCurrent('workspace', inFlightOpen.request)
-      && inFlightOpen.projectId === projectId && inFlightOpen.orgId === state.orgId) {
+    if (inFlightOpen && isCurrentWorkspace(inFlightOpen.request, inFlightOpen.projectId, inFlightOpen.orgId)) {
       return inFlightOpen.promise
     }
     const request = nextGeneration('workspace')
@@ -193,14 +211,15 @@ export function createWorkspaceController({
     publish({ workspaceLoading: true })
     try {
       const workspace = await services.openProject(projectId, orgId)
-      if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
+      if (!isCurrentWorkspace(request, projectId, orgId) || !acceptWorkspaceOrg(workspace, orgId)) return null
+      const settledOrgId = state.orgId
       publish({ workspace, workspaceLoading: false })
-      invoke(callbacks.onWorkspaceRehydrated, { projectId, orgId, workspace })
+      invoke(callbacks.onWorkspaceRehydrated, { projectId, orgId: settledOrgId, workspace })
       return workspace
     } catch {
-      if (!isCurrent('workspace', request) || state.openProjectId !== projectId || state.orgId !== orgId) return null
+      if (!isCurrentWorkspace(request, projectId, orgId)) return null
       // A transient refresh failure must retain the last good hydration.
-      publish({ workspaceLoading: false })
+      publish({ workspaceLoading: false, ...(!state.workspace ? { workspaceError: humanizeError(null) } : {}) })
       return null
     }
   }
@@ -221,7 +240,12 @@ export function createWorkspaceController({
     const orgId = String(givenOrgId || '').trim()
     if (!orgId) return false
     if (state.orgId === orgId) return true
-    invalidateAll()
+    const adopting = state.orgId === null
+    if (adopting) {
+      nextGeneration('projects')
+      nextGeneration('org')
+      nextGeneration('project')
+    } else invalidateAll()
     writeStoredOrgId(orgId, storage)
     publish({
       orgId,
@@ -231,10 +255,12 @@ export function createWorkspaceController({
       projects: [],
       projectsError: null,
       projectsLoading: false,
-      openProjectId: null,
-      workspace: null,
-      canonicalVersionId: null,
-      workspaceLoading: false,
+      ...(!adopting && {
+        openProjectId: null,
+        workspace: null,
+        canonicalVersionId: null,
+        workspaceLoading: false,
+      }),
       orgBusy: false,
       projectBusy: false,
     })
@@ -316,9 +342,9 @@ export function createWorkspaceController({
         if (!isCurrent('workspace', openRequest) || state.openProjectId !== projectId || state.orgId !== orgId) return project
         publish({ workspace, workspaceLoading: false })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId, workspace })
-      } catch (error) {
+      } catch {
         if (isCurrent('workspace', openRequest) && state.openProjectId === projectId && state.orgId === orgId) {
-          publish({ workspace: null, projectsError: explain(error), workspaceLoading: false })
+          publish({ workspace: null, workspaceError: humanizeError(null), workspaceLoading: false })
         }
       } finally {
         if (isCurrent('project', request)) publish({ projectBusy: false })

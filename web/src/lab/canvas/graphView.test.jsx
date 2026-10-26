@@ -82,6 +82,36 @@ afterEach(async () => {
 })
 
 describe('first-click live graph', () => {
+  it('mounts a collapsed report-only rail beside Live values only when a controller is present', () => {
+    const provider = hostProvider()
+    const view = render(<LiveValues values={[]} provider={provider} />)
+    expect(screen.queryByRole('complementary', { name: 'Tests and Keepers' })).toBeNull()
+    provider.announce([{ source: 'evidence', as_of: now, data: { kind: 'controller', report_only: true,
+      received_at: new Date(now).toISOString(), screen_trials: [], keepers: [],
+      versions: { champion_digest: 'a'.repeat(64), latest: null } } }])
+    view.rerender(<LiveValues values={[]} provider={provider} />)
+    const rail = screen.getByRole('complementary', { name: 'Tests and Keepers' })
+    expect(rail.previousElementSibling).toBe(screen.getByRole('region', { name: 'Values' }))
+    expect(within(rail).getByText('Tests / Keepers').closest('details')).not.toHaveAttribute('open')
+    expect(within(rail).getByText('Report only. Keep, Undo and combine run in the champion rule controller, not here.')).toBeVisible()
+    expect(within(rail).queryAllByRole('button')).toHaveLength(0)
+  })
+
+  it('links to Test trade evidence preserving the supplied route parameters', async () => {
+    const original = window.location.href
+    const view = render(<GraphView route={{ view: 'graph', params: { embed: '1', channel: 'retained' } }} />)
+    try {
+      await screen.findByRole('region', { name: 'Strategy palette' })
+      const link = screen.getByRole('link', { name: 'Test trade evidence' })
+      expect(link).toHaveAttribute('href', '/app/lab/test-trade?embed=1&channel=retained')
+      fireEvent.click(link)
+      expect(window.location.pathname).toBe('/app/lab/test-trade')
+      expect(window.location.search).toBe('?embed=1&channel=retained')
+    } finally {
+      view.unmount()
+      window.history.replaceState({}, '', original)
+    }
+  })
   it('F2 renders only the affected memoised block for a value event without rendering GraphView', async () => {
     const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
     const client = createLabArtifactsClient({ fetchImpl: async () => ({ ok: true, json: async () => ({ revision: 4, graph }) }) })

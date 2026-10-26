@@ -8,9 +8,10 @@
  * either executes it (removed on success) or the operator moves on — it is
  * never persisted, and a signed-out reset (acceptance #4) drops it entirely.
  */
-import { useCallback, useState } from 'react'
+import { useCallback, useRef, useState } from 'react'
 
 import * as operatorClient from '../../operatorClient.js'
+import { humanizeError } from '../../errorHumanize.js'
 import { isRedactedField, renderFieldValue, deepRedact } from '../../projects/ReceiptPanel.jsx'
 import ApprovalCard from './ApprovalCard.jsx'
 import { fieldLabel, normalizeApproval } from './approvalDigest.js'
@@ -98,48 +99,60 @@ export default function RunbooksPanel({ sessionEnvironment, onSignedOut }) {
   const [handle, setHandle] = useState('')
   const [credState, setCredState] = useState(null)
   const [destinations, setDestinations] = useState(null)
-  const [proposals, setProposals] = useState([]) // [{ key, kind, response }]
+  const [proposals, setProposals] = useState([]) // [{ key, kind, target, response }]
   const [error, setError] = useState(null)
+  const tenantRequest = useRef({ value: '', generation: 0 })
+  const credentialRequest = useRef({ value: '', generation: 0 })
 
   const guard = useCallback((e, fallback) => {
-    setError(e?.body?.detail || e?.message || fallback)
+    setError(humanizeError(e || fallback))
     if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
   }, [onSignedOut])
 
   const loadTenant = async () => {
-    if (!TENANT_ID_RE.test(tenantId)) { setError('Enter a valid tenant id.'); return }
+    const target = tenantRequest.current.value
+    const generation = ++tenantRequest.current.generation
+    if (!TENANT_ID_RE.test(target)) { setError('Enter a valid tenant id.'); return }
     setError(null)
     try {
       const [agent, overlay] = await Promise.all([
-        operatorClient.tenantAgentState(tenantId),
-        operatorClient.tenantOverlayState(tenantId),
+        operatorClient.tenantAgentState(target),
+        operatorClient.tenantOverlayState(target),
       ])
+      if (tenantRequest.current.generation !== generation) return
       setTenantState(agent)
       setOverlayState(overlay)
-    } catch (e) { guard(e, 'Could not load tenant state.') }
+    } catch (e) {
+      if (tenantRequest.current.generation === generation || operatorClient.isOperatorDenied(e)) guard(e, 'Could not load tenant state.')
+    }
   }
 
   const proposeTenantVerb = async (verb) => {
     setError(null)
     try {
       const response = await operatorClient.tenantAgentPropose(verb, tenantId)
-      setProposals((p) => [...p, { key: response.authority_id, kind: 'tenant-agent', verb, response }])
+      setProposals((p) => [...p, { key: response.authority_id, kind: 'tenant-agent', verb, target: tenantId, response }])
     } catch (e) { guard(e, `Could not propose ${verb}.`) }
   }
 
   const loadCredential = async () => {
-    if (!HANDLE_RE.test(handle)) { setError('Enter a valid credential handle.'); return }
+    const target = credentialRequest.current.value
+    const generation = ++credentialRequest.current.generation
+    if (!HANDLE_RE.test(target)) { setError('Enter a valid credential handle.'); return }
     setError(null)
     try {
-      setCredState(await operatorClient.credentialState(handle))
-    } catch (e) { guard(e, 'Could not load credential state.') }
+      const state = await operatorClient.credentialState(target)
+      if (credentialRequest.current.generation === generation) setCredState(state)
+    } catch (e) {
+      if (credentialRequest.current.generation === generation || operatorClient.isOperatorDenied(e)) guard(e, 'Could not load credential state.')
+    }
   }
 
   const proposeCredentialRotate = async () => {
     setError(null)
     try {
       const response = await operatorClient.credentialPropose(handle)
-      setProposals((p) => [...p, { key: response.authority_id, kind: 'credential', response }])
+      setProposals((p) => [...p, { key: response.authority_id, kind: 'credential', target: handle, response }])
     } catch (e) { guard(e, 'Could not propose the rotation.') }
   }
 
@@ -151,14 +164,19 @@ export default function RunbooksPanel({ sessionEnvironment, onSignedOut }) {
   }
 
   const executeProposal = async (item) => {
-    if (item.kind === 'tenant-agent') {
-      await operatorClient.tenantAgentExecute(item.verb, tenantId, item.response.authority_id)
-      await loadTenant()
-    } else if (item.kind === 'credential') {
-      await operatorClient.credentialExecute(handle, item.response.authority_id)
-      await loadCredential()
+    try {
+      if (item.kind === 'tenant-agent') {
+        await operatorClient.tenantAgentExecute(item.verb, item.target, item.response.authority_id)
+        if (tenantRequest.current.value === item.target) await loadTenant()
+      } else if (item.kind === 'credential') {
+        await operatorClient.credentialExecute(item.target, item.response.authority_id)
+        if (credentialRequest.current.value === item.target) await loadCredential()
+      }
+      setProposals((p) => p.filter((x) => x.key !== item.key))
+    } catch (e) {
+      if (operatorClient.isOperatorDenied(e)) onSignedOut?.()
+      throw new Error(humanizeError(e))
     }
-    setProposals((p) => p.filter((x) => x.key !== item.key))
   }
 
   return (
@@ -167,7 +185,13 @@ export default function RunbooksPanel({ sessionEnvironment, onSignedOut }) {
 
       <div className="operator-field-row">
         <label htmlFor="operator-tenant-id">Tenant ID</label>
-        <input id="operator-tenant-id" value={tenantId} onChange={(e) => setTenantId(e.target.value)} />
+        <input id="operator-tenant-id" value={tenantId} onChange={(e) => {
+          tenantRequest.current = { value: e.target.value, generation: tenantRequest.current.generation + 1 }
+          setTenantId(e.target.value)
+          setTenantState(null)
+          setOverlayState(null)
+          setError(null)
+        }} />
         <button type="button" className="chip-act" onClick={loadTenant}>Load tenant state</button>
       </div>
       {tenantState && (
@@ -190,7 +214,12 @@ export default function RunbooksPanel({ sessionEnvironment, onSignedOut }) {
 
       <div className="operator-field-row">
         <label htmlFor="operator-credential-handle">Credential handle</label>
-        <input id="operator-credential-handle" value={handle} onChange={(e) => setHandle(e.target.value)} />
+        <input id="operator-credential-handle" value={handle} onChange={(e) => {
+          credentialRequest.current = { value: e.target.value, generation: credentialRequest.current.generation + 1 }
+          setHandle(e.target.value)
+          setCredState(null)
+          setError(null)
+        }} />
         <button type="button" className="chip-act" onClick={loadCredential}>Load credential state</button>
       </div>
       {credState && (

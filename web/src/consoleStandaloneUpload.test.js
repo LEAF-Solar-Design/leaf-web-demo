@@ -8,7 +8,7 @@ import { PROFILE_REASONS, profileRibbonTabs } from './lib/ribbonClusters.js'
 
 const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8').replace(/\r\n/g, '\n')
 const compile = (text) => esbuild.transformSync(text, { loader: 'jsx' }).code
-const adapterCode = compile(source.slice(source.indexOf('function promoteStandaloneUpload('), source.indexOf('function ConsoleDrawingObjects(')))
+const adapterCode = compile(source.slice(source.indexOf('function promoteStandaloneUpload('), source.indexOf('function ConsoleDrawingObjects(')).replace(/^export function /gm, 'function '))
 const contextCode = source.slice(source.indexOf('  const standaloneMounted ='), source.indexOf('  useEffect(() => {', source.indexOf('  const standaloneMounted =')))
 const filesCode = source.slice(source.indexOf('      files: { onUpload:'), source.indexOf('\n', source.indexOf('      files: { onUpload:'))).trim().slice('files: '.length).replace(/,$/, '')
 const controlSource = readFileSync(new URL('./components/DrawingUploadControl.jsx', import.meta.url), 'utf8')

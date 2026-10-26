@@ -1,4 +1,5 @@
 import { FetchTimeoutError, fetchWithBudget } from '../fetchBudget.js'
+import { humanizeError } from '../errorHumanize.js'
 import { validateCivilBody, validateCivilOperation, validateCivilView } from './solarCivilModel.js'
 import { TERRAIN_ROUTE_REASONS, TERRAIN_CLIENT_REASONS } from './solarTerrainClient.js'
 
@@ -21,25 +22,25 @@ export const CIVIL_ROUTE_REASONS = Object.freeze({
   FRAMES_PILES_STALE_BASE: 'The terrain changed, so review the refreshed preview before running again',
   FRAMES_PILES_WRITES_DRAINED: 'Drawing changes are paused, so try the preview again shortly',
   FRAMES_PILES_STORE_UNAVAILABLE: 'The drawing store is unavailable, so try again shortly',
-  FRAMES_PILES_DRAWING_UNITS_INVALID: 'This terrain operation was given input it cannot read',
-  FRAMES_PILES_UNITS_MISMATCH: 'This terrain operation was given input it cannot read',
-  FRAMES_PILES_BOUNDARY_INVALID: 'This terrain operation was given input it cannot read',
-  FRAMES_PILES_PRESET_INVALID: 'This terrain operation was given input it cannot read',
-  FRAMES_PILES_PILE_TEMPLATE_INVALID: 'This terrain operation was given input it cannot read',
-  FRAMES_PILES_RANGE_INVALID: 'This terrain operation was given input it cannot read',
-  CIVIL_GRADE_INPUT_INVALID: 'This terrain operation was given input it cannot read',
+  FRAMES_PILES_DRAWING_UNITS_INVALID: 'Choose metres or feet for the drawing units.',
+  FRAMES_PILES_UNITS_MISMATCH: 'Choose units that match the drawing.',
+  FRAMES_PILES_BOUNDARY_INVALID: 'Enter a boundary with at least three coordinate pairs that enclose an area.',
+  FRAMES_PILES_PRESET_INVALID: 'Enter a preset object with a name and valid frame dimensions.',
+  FRAMES_PILES_PILE_TEMPLATE_INVALID: 'Enter a pile template object with valid pile positions and lengths.',
+  FRAMES_PILES_RANGE_INVALID: 'Set a positive minimum pile length and a maximum no smaller than the minimum.',
+  CIVIL_GRADE_INPUT_INVALID: 'Choose a grading mode and enter a valid elevation or clearance for that mode.',
   FRAMES_PILES_SITE_CONSTRAINTS_UNSUPPORTED: 'The terrain request stopped',
   FRAMES_PILES_PVCASE_UNSUPPORTED: 'The terrain request stopped',
   FRAMES_PILES_LIMIT_EXCEEDED: 'The terrain request stopped',
   TERRAIN_OPERATION_INVALID: 'The terrain request stopped',
-  FRAMES_PILES_NO_FRAMES_FIT: 'The terrain operation could not be completed, so refresh its state',
-  FRAMES_PILES_NO_FRAMES: 'The terrain operation could not be completed, so refresh its state',
-  FRAMES_PILES_NO_PILES: 'The terrain operation could not be completed, so refresh its state',
-  FRAMES_PILES_OFF_TERRAIN: 'The terrain operation could not be completed, so refresh its state',
+  FRAMES_PILES_NO_FRAMES_FIT: 'No frames fit inside this boundary. Enlarge the boundary or reduce the frame dimensions and spacing.',
+  FRAMES_PILES_NO_FRAMES: 'Generate frames before running this operation.',
+  FRAMES_PILES_NO_PILES: 'Generate piles before checking their lengths.',
+  FRAMES_PILES_OFF_TERRAIN: 'Move the boundary and frames onto the terrain grid, or import terrain that covers them.',
   FRAMES_PILES_STATE_INVALID: 'The terrain operation could not be completed, so refresh its state',
-  CIVIL_GRADE_LIMIT_EXCEEDED: 'The terrain operation could not be completed, so refresh its state',
-  CIVIL_GRADE_NO_PAD: 'The terrain operation could not be completed, so refresh its state',
-  CIVIL_GRADE_FAILED: 'The terrain operation could not be completed, so refresh its state',
+  CIVIL_GRADE_LIMIT_EXCEEDED: 'Reduce the grading area or use a smaller terrain grid before trying again.',
+  CIVIL_GRADE_NO_PAD: 'Adjust the grading boundary so it overlaps the terrain grid.',
+  CIVIL_GRADE_FAILED: 'Review the grading boundary, elevation and terrain coverage before trying again.',
 })
 
 const CODE_PATTERN = /^[A-Z][A-Z0-9_]{0,63}$/
@@ -51,11 +52,16 @@ const OPERATION_OPTION_KEYS = Object.freeze(['drawingId', 'projectId', 'body', '
 // Resolves to the sentence for a code; never echoes a malformed or oversized value.
 export function civilReason(code) {
   if (typeof code === 'string') {
-    if (Object.hasOwn(CIVIL_ROUTE_REASONS, code)) return CIVIL_ROUTE_REASONS[code]
-    if (Object.hasOwn(TERRAIN_ROUTE_REASONS, code)) return TERRAIN_ROUTE_REASONS[code]
-    if (Object.hasOwn(TERRAIN_CLIENT_REASONS, code)) return TERRAIN_CLIENT_REASONS[code]
+    if (Object.hasOwn(CIVIL_ROUTE_REASONS, code)) return humanizeError(CIVIL_ROUTE_REASONS[code])
+    if (Object.hasOwn(TERRAIN_ROUTE_REASONS, code)) return humanizeError(TERRAIN_ROUTE_REASONS[code])
+    if (Object.hasOwn(TERRAIN_CLIENT_REASONS, code)) return humanizeError(TERRAIN_CLIENT_REASONS[code])
   }
   return TERRAIN_FALLBACK_SENTENCE
+}
+
+export function civilReadReason(code, fallback) {
+  return humanizeError(typeof code === 'string' && Object.hasOwn(TERRAIN_CLIENT_REASONS, code)
+    ? TERRAIN_CLIENT_REASONS[code] : fallback)
 }
 
 function isPlainObject(value) {

@@ -48,7 +48,11 @@ export default function SolarPresetForm({ tool, onSubmit, onClose, listing, revi
     setAttempted(true)
     if (result.ok && !lock.current) {
       lock.current = true
-      onSubmit(tool, result.params)
+      const armed = onSubmit(tool, result.params)
+      if (!armed?.runIntent?.intentId) {
+        lock.current = false
+        return
+      }
       onClose()
     }
   }

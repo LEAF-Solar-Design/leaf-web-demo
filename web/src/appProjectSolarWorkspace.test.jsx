@@ -86,7 +86,7 @@ const B = {
 const D = 'sha256:' + 'c'.repeat(64)
 const STEP = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
-const GRAPH = ['solar-panels-from-drawing', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
+const GRAPH = ['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
 const READ = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']
 const JOB = '55555555-5555-4555-8555-555555555555'
 const accepted = () => ({ ok: true, status: 202, data: { job_id: JOB, status: 'submitted' } })
@@ -321,6 +321,16 @@ it('R13G2B-09 graph prepares and submits through the runtime with outcome feedba
   expect(last(h.graphs).projectOutcome).toBe(h.runtime.projectOutcome)
   expect(h.runtime.projectOutcome.outcome.reasonCode).toBe('panels_required')
   expect(screen.getByTestId('project-solar-graph-feedback').textContent).toContain('panels_required')
+})
+it('W1C-26 panel groups opens the project graph form from the enabled ribbon control', async () => {
+  const h = await setup({ names: ['solar-panel-groups'] })
+  expect(tool(h, 'solar-panel-groups').disabled).toBe(false)
+  await h.open('solar-panel-groups')
+  expect(screen.getByTestId('project-solar-graph-form')).toBeTruthy()
+  expect(screen.getByRole('heading', { name: 'Panel groups' })).toBeTruthy()
+  expect(last(h.graphs).tool.name).toBe('solar-panel-groups')
+  expect(last(h.graphs).projectClient).toBe(h.client)
+  noLegacy(h)
 })
 it('R13G2B-10 read tools render canonical output without writing', async () => {
   const h = await setup({ names: ['solar-string-data'] }); await h.open('solar-string-data')

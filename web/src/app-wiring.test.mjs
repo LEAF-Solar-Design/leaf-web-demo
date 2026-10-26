@@ -61,6 +61,30 @@ it('main keeps telemetry first and installs the proof bridge once after render u
 
 const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
 
+it('S1-143 refresh failures show the real humanized error and announce each failed retry', () => {
+  const start = appSource.indexOf('{refreshFail && (')
+  assert.notEqual(start, -1)
+  const strip = appSource.slice(start, appSource.indexOf('</div>', start))
+  assert.match(strip, /role="alert"/)
+  assert.match(strip, /aria-atomic="true"/)
+  assert.match(strip, /humanizeError\(refreshFail\.error\)/)
+  assert.match(strip, /Retry \{refreshFail\.retryAttempts\} failed\./)
+  assert.match(strip, /onClick=\{onRetryViewerRefresh\} disabled=\{drawing\.refreshing\}>Retry<\/button>/)
+})
+
+it('S1-143 unreadable drawing failures announce the retry error and keep the recovery control', () => {
+  const start = appSource.indexOf('{unreadableHead && !unreadableHead.pending && (')
+  assert.notEqual(start, -1)
+  const strip = appSource.slice(start, appSource.indexOf('</div>', start))
+  assert.match(strip, /role="alert"/)
+  assert.match(strip, /aria-atomic="true"/)
+  assert.match(strip, /humanizeError\(unreadableHead\.error\)/)
+  assert.match(strip, /Retry \{unreadableHead\.retryAttempts\} failed\./)
+  assert.match(strip, /onClick=\{retryUnreadableHead\} disabled=\{drawing\.refreshing\}/)
+  assert.match(strip, /Retry loading/)
+  assert.match(strip, /unreadableHead\.message/)
+})
+
 const r13Tree = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] })
 function r13Find(predicate, tree = r13Tree) {
   const found = []
@@ -82,11 +106,80 @@ function r13Evaluate(node, env) {
 const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
 const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
 
+it('S1-68 retained Undo refuses a different version or drawing', () => {
+  let calls = 0
+  const noticeTargetRef = { current: { drawingId: 'roof', version: 2, blocked: false } }
+  const makeAction = r13Evaluate(r13Callback('versionUndoAction'), {
+    noticeTargetRef, noticeMountedRef: { current: true }, isScopeCurrent: () => true,
+    onUndo: () => ++calls,
+  })
+  const action = makeAction('roof', 2)
+  action.onClick()
+  assert.equal(calls, 1)
+  noticeTargetRef.current = { drawingId: 'roof', version: 3, blocked: false }
+  assert.ok(action.disabledReason())
+  action.onClick()
+  noticeTargetRef.current = { drawingId: 'other', version: 2, blocked: false }
+  action.onClick()
+  assert.equal(calls, 1)
+})
+
+it('S1-68 retained Undo refuses an unmounted scene and busy drawing', () => {
+  const noticeMountedRef = { current: false }
+  const noticeTargetRef = { current: { drawingId: 'roof', version: 2, blocked: false } }
+  const action = r13Evaluate(r13Callback('versionUndoAction'), {
+    noticeTargetRef, noticeMountedRef, isScopeCurrent: () => true,
+    onUndo: () => assert.fail('stale notice must not undo'),
+  })('roof', 2)
+  assert.ok(action.disabledReason())
+  action.onClick()
+  noticeMountedRef.current = true
+  noticeTargetRef.current.blocked = true
+  assert.ok(action.disabledReason())
+  action.onClick()
+})
+
+it('S1-68 View uses its recorded version with the current preview handler', () => {
+  const calls = []
+  const noticeViewRef = { current: { preview: () => assert.fail('old preview'), show: () => {} } }
+  const action = r13Evaluate(r13Callback('versionViewAction'), {
+    noticeMountedRef: { current: true }, noticeTargetRef: { current: { drawingId: 'roof' } },
+    noticeViewRef, isScopeCurrent: () => true,
+  })('roof', 2)
+  noticeViewRef.current = { preview: version => calls.push(version), show: () => calls.push('show') }
+  action.onClick()
+  assert.deepEqual(calls, [2, 'show'])
+})
+
+it('S1-68 View from another scene requests the recorded drawing and version', () => {
+  const calls = []
+  const isScopeCurrent = () => true
+  const action = r13Evaluate(r13Callback('versionViewAction'), {
+    noticeMountedRef: { current: false }, noticeTargetRef: { current: null },
+    isScopeCurrent, requestNoticeVersionView: (...args) => calls.push(args),
+  })('roof', 2)
+  action.onClick()
+  assert.deepEqual(calls, [['roof', 2, isScopeCurrent]])
+})
+
+it('S1-68 redo notices bind View to the resulting drawing version', async () => {
+  const target = { label: 'View' }, toasts = []
+  await r13Evaluate(r13Callback('onRedo'), {
+    redoDrawingVersion: async () => ({ head: 3 }), drawingState: { drawing_id: 'roof' },
+    track: () => {}, showToast: notice => toasts.push(notice),
+    versionViewAction: (drawingId, version) => {
+      assert.equal(drawingId, 'roof'); assert.equal(version, 3); return target
+    },
+  })()
+  assert.deepEqual(toasts, [{ text: 'Advanced to version 3', action: target }])
+})
+
 it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', () => {
   const adapter = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'ribbonClusters')
   const clusters = [{ tools: [{ id: 'solar-settings', onClick: () => {} }] }]
   assert.equal(r13Evaluate(adapter.init, { projectMode: false, ribbon: { clusters } }), clusters)
-  assert.equal(r13Hash(r13Text(r13ProjectHosts().branch.alternate)), '5685991ca1300d89f42b62dbece15a3a1a7100e9707c6e2829beadd6f51d994e')
+  // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+  assert.equal(r13Hash(r13Text(r13ProjectHosts().branch.alternate)), '712bcb89ad5dbb9c7647ec3cb819d0debadca184b6db17749df250616f9552db')
   for (const [name, hash] of Object.entries({
     'solarSettingsStandalone.main-66759316.json': 'b8c58800aa04c0d5dae638b51efb037a7bec36b229d6a13fde7430d48e684af3',
     'solarStandaloneRequests.main-0c5a044e.json': '78777b38051c0c6bcd5da6973a81c8367bbeccbfc5a7893146e42e45696bb461',
@@ -118,7 +211,7 @@ it('R13G2B-05 workspace props use the existing canonical owners', () => {
   assert.deepEqual(declaration.init.arguments[0].elements.map(element => element.value), [
     'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
     'solar-settings', 'solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
-    'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing',
+    'solar-string-conductors', 'solar-assign-equipment', 'solar-panels-from-drawing', 'solar-panel-groups',
     'solar-homeruns', 'solar-schedule', 'solar-feeders', 'solar-string-data',
     'solar-electrical-schedules', 'solar-cable-export',
   ])
@@ -315,6 +408,7 @@ function r13Fixture({ project = true, context = null, rows = null } = {}) {
     setSettingsRunResult: record('settingsResult'), setSolarFlowRuns: record('flowRuns'),
     solarFlowRunOutcome: (value) => ({ ok: value?.ok === true }), solarFlowRecordRun: record('recordRun'),
     track: record('track'), showToast: record('toast'), onUndo: record('undo'),
+    versionUndoAction: () => ({ label: 'Undo', undo: true, onClick: env.onUndo }),
     loadUsage: record('usage'), rehydrate: record('rehydrate'),
     runToolAsync: record('runToolAsync', envelope), runTool: record('runTool', envelope),
     getDrawingIntake: record('head', envelope), saveEditedDrawingVersion: record('saveEdited'),
@@ -442,7 +536,8 @@ describe('R13F project Solar execution and form ingresses', () => {
       }
       return value.replace(/\r\n/g, '\n')
     })
-    assert.equal(r13Hash(JSON.stringify(predecessor)), '3b88dc119a4b1bc97d78a6da0544341a10ac231ff16d04705328bf509d663d68')
+    // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+    assert.equal(r13Hash(JSON.stringify(predecessor)), 'e431cd546cdc7022a694cc342336a4dadb4a38aa15b7a79a94a9cf599cd12fb9')
     const callback = r13Callback('seatCompletedVersion')
     const arrow = r13Text(callback)
     const header = appSource.slice(callback.start, callback.body.start + 1).replace(/\r\n/g, '\n')
@@ -480,7 +575,10 @@ describe('R13F project Solar execution and form ingresses', () => {
       '      if (solarIdentity) return false',
       '    }',
     ].join('\n'))
-    assert.equal(r13Hash(header + arrow.slice(legacyAt)), 'bf6d53e7bd0aeb8e28201f06753dc0fcb93ae9f6665294fe419651438a032d30')
+    // S1-68 changes only the retained action; keep the rest of the completion pinned.
+    const legacyBody = arrow.slice(legacyAt).replaceAll('versionUndoAction(newVersion.drawing_id, version)',
+      "{ label: 'Undo', undo: true, onClick: onUndo }")
+    assert.equal(r13Hash(header + legacyBody), 'bf6d53e7bd0aeb8e28201f06753dc0fcb93ae9f6665294fe419651438a032d30')
     for (const confirmed of [true, false]) {
       for (const explicit of [true, false]) {
         for (const snapshotDigest of ['snapshot-digest', null]) {
@@ -544,7 +642,7 @@ describe('R13F project Solar execution and form ingresses', () => {
         }
       }
     }
-    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), 'efbcbfe1a68a117368579c9455804ad9b3aae7b848903752ecb351a38a5c033c')
+    assert.equal(r13Hash(r13Text(r13Callback('onRun'))), '688612676474cf1de98e15efd6249ec92f57c9b3ec0809aa2df56fa2fdc320b8')
   })
 
   it('R13F-20 App retains one refusal helper and admits the project workspace', () => {
@@ -595,10 +693,11 @@ describe('R13F project Solar execution and form ingresses', () => {
       onAttachAgentJob: 3, onDispatch: 1 }
     const refusal = (node) => node.type === 'CallExpression' && node.callee.name === 'refuseProjectSolar'
     for (const [name, count] of Object.entries(sites)) assert.equal(r13Find(refusal, r13Callback(name)).length, count, name)
-    assert.equal(r13Find(refusal).length, 20)
+    // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+    assert.equal(r13Find(refusal).length, 21)
     for (const [name, hash] of Object.entries({
-      // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
-      engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
+      // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
+      engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
       onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
@@ -651,10 +750,10 @@ describe('R13F project Solar execution and form ingresses', () => {
     other.callback('onRequestCatalogRun')({ name: 'cad-read' }, other.params)
     assert.equal(other.calls('commit').length, 1)
     assert.deepEqual(other.errors, [])
-    const anchor = '{!running && (runErr || routeErr) && ('
+    const anchor = '{(runErr || routeErr) && ('
     assert.equal(appSource.split(anchor).length - 1, 1)
     const strip = r13One((node) => node.type === 'LogicalExpression' && node.operator === '&&'
-      && node.right.type === 'JSXElement' && appSource.slice(node.start, node.end).startsWith('!running && (runErr || routeErr)'))
+      && node.right.type === 'JSXElement' && appSource.slice(node.start, node.end).startsWith('(runErr || routeErr)'))
     const sentence = r13One((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'span'
       && node.openingElement.attributes.some((attr) => attr.name?.name === 'className' && attr.value?.value === 'strip-sentence'), strip.right)
     const text = sentence.children.find((node) => node.type === 'JSXExpressionContainer').expression
@@ -686,9 +785,9 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.deepEqual(h.errors, [])
     const other = r13Fixture({ rows: [] })
     const missing = { lane: 'run', tool: 'cad-missing' }
-    assert.equal(other.callback('armDecision')(missing), missing)
+    assert.equal(other.callback('armDecision')(missing), undefined)
     assert.equal(other.calls('lookup').length, 1)
-    assert.deepEqual(other.errors, [])
+    assert.deepEqual(other.errors, ['This tool is no longer in your catalog. Choose another tool to run.'])
   })
 
   it('R13F-11 slash dispatch refuses project Solar before routing', () => {
@@ -1110,7 +1209,8 @@ describe('R13F project Solar catalog attachment', () => {
       const callback = r13WorkspaceProp(name)
       assert.equal(refusalCalls.filter((node) => node.start > callback.start && node.end < callback.end).length, 1, name)
     }
-    assert.equal(refusalCalls.length, 20, 'existing ingresses plus the two Solar workspace props')
+    // Re-pinned 2026-10-25 for the solar edge acceptance wiring (SolarWorkspaceTools onStageSolarEdgeAccept, PR #2295).
+    assert.equal(refusalCalls.length, 21, 'existing ingresses plus the two Solar workspace props')
   })
 
   it('R13F-06 catalog context branches on project mode and explicitly restores standalone scope', () => {
@@ -1524,6 +1624,11 @@ describe('S17 version-created toast Undo wiring', () => {
   }
   function assertUndo(object) {
     const action = property(object, 'action')
+    if (action?.type === 'CallExpression') {
+      assert.equal(action.callee.name, 'versionUndoAction')
+      assert.equal(action.arguments.length, 2)
+      return
+    }
     assert.equal(action?.type, 'ObjectExpression')
     assert.equal(action.properties.length, 3)
     assert.ok(action.properties.every((item) => item.type === 'ObjectProperty'))
@@ -1549,12 +1654,12 @@ describe('S17 version-created toast Undo wiring', () => {
       assert.equal(versionToasts.length, surface.directCount, 'all completion branches must announce the version')
       for (const object of versionToasts) assertUndo(object)
       assert.ok(versionToasts.every((object) => object.start > completion.start && object.end < completion.end))
-      assert.ok(completion.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+      assert.ok(completion.init.arguments[1].elements.some((node) => node.name === (seat ? 'versionUndoAction' : 'onUndo')))
       if (seat) {
         assert.equal(seatedToasts.length, 1, 'the successful App seat also announces the new version')
-        assert.equal(textPattern(seatedToasts[0]), '# · #')
+        assert.equal(property(seatedToasts[0], 'text').name, 'note')
         assertUndo(seatedToasts[0])
-        assert.ok(seat.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+        assert.ok(seat.init.arguments[1].elements.some((node) => node.name === 'versionUndoAction'))
       }
     })
 
@@ -2263,7 +2368,7 @@ describe('project board live pane wiring', () => {
     guard('LabWidgetsPreview', 'labEnabled')
     assert.equal(ownerExpression('LabWidgetsPreview').right, labSeat)
     assert.deepEqual(expression(elements('ProjectWorkspacePanels')[0], 'slots').properties.map(csuKey),
-      ['catalog', 'conversation', 'annotations', 'authoring', 'settings'])
+      ['material', 'catalog', 'conversation', 'annotations', 'authoring', 'settings'])
     const actions = expression(elements('SurfaceGrounds')[0], 'actions').consequent
     assert.deepEqual(actions.properties.map(csuKey), ['transferProjectId', 'transferStatus', 'onTransferVersion',
       'onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability', 'onOpenSettings'])
@@ -2660,7 +2765,7 @@ describe('W20-07b combiner workspace wiring', () => {
     const read = body.indexOf("await getDrawingIntake(mock, newVersion.drawing_id, 'head')")
     assert.ok(body.includes('const scopeCurrent = isScopeCurrent'))
     assert.match(body, /const current = \(\) => scopeCurrent\(\)\s+&& \(typeof options\?\.isCurrent !== 'function' \|\| options\.isCurrent\(\)\)/)
-    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete]'))
+    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, versionUndoAction, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete]'))
     const guard = 'if (!current()) return false'
     const entryGuard = body.indexOf(guard)
     assert.ok(entryGuard > body.indexOf('const current =') && entryGuard < body.indexOf('let version ='))
@@ -3744,18 +3849,18 @@ describe('J1 Browser composition', () => {
   it('J1 row5 the mounted material intake binds the open project before upload', () => {
     const live = mount('LiveProjectMaterialIntake')
     assert.match(live, /key:\s*openProjectId/)
-    assert.match(live, /project_id:\s*openProjectId/)
+    assert.match(live, /project:\s*workspace.project/)
     assert.match(live, /onAttached:\s*rehydrate/)
-    assert.match(live, /artifacts:\s*workspace\?\.drawing_artifacts \|\| \[\]/)
+    assert.match(live, /artifacts:\s*workspace\.drawing_artifacts \|\| \[\]/)
     assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 2)
     assert.equal((compiled.match(/= useMaterialIntake\(/g) || []).length, 1)
 
     // Execute only the mounted adapter, with the two IO controllers replaced.
     // This pins ordering and refusal without making an upload or a project write.
-    const begin = appSource.indexOf('function LiveProjectMaterialIntake(')
-    const end = appSource.indexOf('export default function App()', begin)
-    assert.ok(begin >= 0 && end > begin)
-    const adapter = esbuild.transformSync(appSource.slice(begin, end), { loader: 'jsx' }).code
+    const adapterNode = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] }).program.body
+      .find((node) => node.type === 'FunctionDeclaration' && node.id?.name === 'LiveProjectMaterialIntake')
+    assert.ok(adapterNode, 'the mounted material adapter must exist')
+    const adapter = esbuild.transformSync(appSource.slice(adapterNode.start, adapterNode.end), { loader: 'jsx' }).code
     const events = []
     const project = { project_id: 'project-j1', name: 'J1 roof' }
     const artifacts = [{ drawing_id: 'drawing-j1' }]
@@ -3784,11 +3889,12 @@ describe('J1 Browser composition', () => {
     assert.equal(events[0][0], 'begin')
   })
 
-  it('J1 row6 demo material mounts the disabled component without an IO controller', () => {
+  it('J1 row6 demo material mounts its sample state without an IO controller', () => {
     const source = codeOnly(appSource)
-    assert.ok(source.includes("projectPane === 'material' && !standaloneMounted && (mock || !signedIn || !openProjectId"))
+    assert.ok(source.includes('material: mock || !signedIn || !openProjectId'))
     assert.ok(source.includes('? <ProjectMaterialIntake project={null} mock={mock} artifacts={[]} />'))
-    assert.ok(source.includes(': <LiveProjectMaterialIntake'))
+    assert.ok(source.includes(': workspace ? <LiveProjectMaterialIntake'))
+    assert.equal((source.match(/<LiveProjectMaterialIntake/g) || []).length, 1)
     const appBody = source.slice(source.indexOf('export default function App()'))
     assert.doesNotMatch(appBody, /useDrawingUploadController\(/)
     assert.doesNotMatch(appBody, /useMaterialIntake\(/)
@@ -3854,7 +3960,7 @@ describe('J1 Browser composition', () => {
     const names = (props) => props.map((entry) => entry.split(':')[0].trim()).sort()
     for (const [name, expected] of Object.entries({
       CampaignPanel: ['projectId', 'projectName', 'signedIn', 'authorityProvider'],
-      WorkspaceSummary: ['workspace', 'loading', 'selectedVersionId', 'onSelectVersion', 'onClose'],
+      WorkspaceSummary: ['workspace', 'loading', 'error', 'onRetry', 'selectedVersionId', 'onSelectVersion', 'onClose'],
     })) {
       const [inline, board] = placements(name)
       assert.deepEqual(names(inline.props), [...expected].sort(), name + ' inline props')
@@ -4161,12 +4267,12 @@ describe('W4g S08-c: the Details drawer carries sanitized diagnostics', () => {
   })
 
   it('includes served identity and sanitized diagnostics in session details', () => {
-    const start = appSource.indexOf('const openSessionDetails = useCallback(')
+    const start = appSource.indexOf('const sessionDetails = useMemo(')
     assert.notEqual(start, -1)
     const end = appSource.indexOf('}, [', start)
     assert.notEqual(end, -1)
     const body = appSource.slice(start, end)
-    for (const literal of ['served ', 'taskRevisionOf(', 'diagnostics: composeDiagnostics({', 'collectRefusals(document)']) {
+    for (const literal of ['servedSourceSha:', 'taskRevisionOf(', 'diagnostics: composeDiagnostics({', 'collectRefusals(document)']) {
       assert.ok(body.includes(literal), `missing session diagnostics: ${literal}`)
     }
   })
@@ -4196,14 +4302,24 @@ describe('W4g S08-a: an explicit demo starts in mock', () => {
     const promptBox = appSource.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
     assert.ok(promptBox)
     assert.ok(promptBox.includes('mcpDiscoveryEnabled={!mock && !knownGuest}'))
+    assert.ok(promptBox.includes('liveCallsAllowed={signedIn && !mock && !knownGuest && !signedOut}'))
+    assert.ok(promptBox.includes('mock={mock}'))
   })
   it('decides explicit demo mode in the lazy initial state', () => {
     assert.match(appSource, new RegExp('useState\\(\\(\\) => config\\.mockDefault[\\s\\S]{0,200}explicitDemo\\(\\{'))
     assert.match(appSource, new RegExp("import \\{[^}]*\\bexplicitDemo\\b[^}]*\\} from './demoState\\.js'"))
   })
-  it('renders the operator probe once and only outside mock', () => {
+  it('renders the operator probe once and only when signed in outside mock and known guests', () => {
     assert.equal(appSource.split('<OperatorEntry />').length - 1, 1)
-    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && <OperatorEntry />}')))
+    assert.ok(appSource.split('\n').some((line) => line.includes('{!mock && !knownGuest && signedIn && <OperatorEntry />}')))
+  })
+  it('gates add-ons on sign-in and delegates click focus to the dialog-aware guard', () => {
+    assert.ok(appSource.includes('{!mock && !knownGuest && !signedOut && signedIn && <AddonsPanel'))
+    assert.ok(appSource.includes('if (shouldSkipPromptFocus(t)) return'))
+    const stage = readFileSync(new URL('./site/ToolCast.jsx', import.meta.url), 'utf8')
+    const promptBox = stage.match(/<PromptBox\s[\s\S]*?\/>/)?.[0]
+    assert.ok(promptBox?.includes('liveCallsAllowed={isSignedIn() && !transportMock}'))
+    assert.ok(promptBox?.includes('mock={PUBLIC_DEMO}'))
   })
   it('preserves the live session transitions and the 401 auto-demo hatch', () => {
     const identityStart = appSource.indexOf('    getSessionIdentity(false)')
@@ -4658,21 +4774,22 @@ const DECLARED_AND_USED = [
 
 describe('App.jsx wiring', () => {
   it('names the drawing refresh wait when interrupting a finished job', () => {
-    const start = stripped.indexOf('onInterruptRun: () => {')
-    const end = stripped.indexOf('onClearSelection:', start)
+    const start = stripped.indexOf('onStopRun = useCallback')
+    const end = stripped.indexOf('const anyFamilyOpen', start)
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, new RegExp('showToast\\(result != null\\s*\\?\\s*\\{\\s*text:\\s*`Stopped waiting for the drawing to refresh after \\$\\{tool\\}\\.`'))
-    assert.match(stripped, /interruptRun,\s*currentJob\?\.tool,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
+    assert.match(stripped, /interruptRun,\s*selectedTool\?\.label,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
+    assert.match(stripped, /onInterruptRun: onStopRun/)
   })
 
   it('acknowledges interrupting live and mock runs after detaching', () => {
-    const start = stripped.indexOf('onInterruptRun: () => {')
-    const end = stripped.indexOf('onClearSelection:', start)
+    const start = stripped.indexOf('onStopRun = useCallback')
+    const end = stripped.indexOf('const anyFamilyOpen', start)
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, /interruptRun\(\);[\s\S]*showToast\(/)
-    assert.match(handler, /typeof currentJob\?\.tool === "string" && currentJob\.tool\.trim\(\) \? currentJob\.tool : "the run"/)
+    assert.match(handler, /selectedTool\?\.label \|\| "the run"/)
     assert.match(handler, new RegExp('text:\\s*mock\\s*\\?\\s*`Stopped waiting for \\$\\{tool\\}\\.`\\s*:\\s*currentJob\\?\\.job_id\\s*\\?\\s*`Stopped following \\$\\{tool\\}\\. It keeps running; find it in Jobs\\.`\\s*:\\s*`Stopped waiting for \\$\\{tool\\} to be accepted\\. If the server accepts it, it will appear in Jobs\\.`'))
   })
 
@@ -5002,7 +5119,7 @@ describe('App.jsx wiring', () => {
       assert.notEqual(refusal, -1, 'onRun must read engineDirtyRef.current')
       assert.notEqual(run, -1)
       assert.ok(refusal < run, 'the dirty refusal must precede runJob')
-      assert.match(onRunBody.slice(refusal, run), /REASONS\.unsavedEngineEdits[\s\S]*return null/)
+      assert.match(onRunBody.slice(refusal, run), /Save or discard your drawing edits before running[\s\S]*return null/)
     })
 
     it('the ref and the ribbon state are written by the one dirty-change callback the provider gets', () => {
@@ -5025,7 +5142,7 @@ describe('App.jsx wiring', () => {
     it('armDecision and onRun share the one write predicate', () => {
       const armStart = stripped.indexOf('armDecision = useCallback')
       assert.notEqual(armStart, -1)
-      assert.match(stripped.slice(armStart, armStart + 1600), /isWrite = isWriteTool\(catalogTool\)/)
+      assert.match(stripped.slice(armStart, armStart + 2000), /isWrite = isWriteTool\(catalogTool\)/)
       assert.match(onRunBody, /isWrite = isWriteTool\(tool\)/)
     })
 
@@ -5033,7 +5150,8 @@ describe('App.jsx wiring', () => {
       const armStart = stripped.indexOf('armDecision = useCallback')
       assert.notEqual(armStart, -1)
       const armBody = stripped.slice(armStart, armStart + 5200)
-      assert.ok(armBody.includes('if (!mock && session.status !== "active") return'))
+      assert.ok(armBody.includes('if (!mock && session.status !== "active")'))
+      assert.ok(armBody.includes('Sign in to run tools.'))
       assert.equal(armBody.includes('if (!mock && !tenant) return'), false)
       const dependencyStart = armBody.indexOf('[tools, mock, session.status')
       assert.notEqual(dependencyStart, -1)
@@ -5129,7 +5247,7 @@ describe('Conversion surface wiring', () => {
     assert.match(form, /drawingVersion: catalogRunContext\?\.drawingVersion \?\? null/)
   })
 
-  it('CW2 the result card gets the Solar refusal sentence behind the engine flag and Details keeps the raw code', () => {
+  it('CW2 the result card gets the Solar refusal sentence behind the engine flag and Details humanizes errors', () => {
     const live = esbuild.transformSync(appSource, { loader: 'jsx' }).code
     const panel = live.search(/React\.createElement\(\s*ResultPanel,/)
     assert.ok(panel >= 0)
@@ -5137,6 +5255,7 @@ describe('Conversion surface wiring', () => {
     assert.match(live, /const shownResult = useMemo\(\s*\(\) => ENV_CAD_EDIT \? solarRefusalEnvelope\(result, selectedTool\) : result,\s*\[result, selectedTool\]\s*\)/)
     const details = live.slice(live.indexOf('const openRunDetails = useCallback'), live.indexOf('const shownResult = useMemo'))
     assert.match(details, /const env = result;/)
+    assert.match(details, /humanizeError\(env.error\)/)
   })
 })
 describe('RAIL overview yields to the expanded job monitor', () => {
@@ -5207,7 +5326,7 @@ describe('S24 the URL keeps tool, drawer, own selection and camera view', () => 
     assert.ok(appSource.includes('useCameraViewParam(viewerRef, ' + LB + ' ready: drawingIntake != null ' + RB + ')'))
     const start = appSource.indexOf('const openSessionDetails = useCallback(')
     const body = appSource.slice(start, appSource.indexOf(RB + ', [', start))
-    assert.ok(body.includes("urlKey: 'details',"), 'the session Details drawer is the one the URL names')
+    assert.ok(body.includes("urlKey: 'details'"), 'the session Details drawer is the one the URL names')
     // The bounded in-memory default stays; a URL drawer arrives through the seat's restore.
     assert.ok(appSource.includes("const [studioDrawer, setStudioDrawer] = useState('none')"))
   })
@@ -5515,9 +5634,9 @@ describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
 it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () => {
   const hashes = {
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
-    onRedo: '6061cdf05fef2e3119473e0e3639a1a6997c90e4d2b73c7b514508468853ecff',
-    // SCB3e adds suspension guards so retained saves cannot write while AutoCAD owns the canvas.
-    engineSaveTarget: '554d758464edee7a4a66e37073b5644e4cd6d6a4023b2a07a34061c118a70702',
+    onRedo: '8ead5e6dbeecad3503382bc09117b3e90f8198dade34d75c9aca5c00b1bd94c8',
+    // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
+    engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
     onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',

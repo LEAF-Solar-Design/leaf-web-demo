@@ -2,7 +2,7 @@
   position: fixed;
   top: calc(var(--ck-canvas-top, 140px) + 26px);
   left: 8px;
-  z-index: 30;
+  z-index: var(--leaf-layer-header);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -10,14 +10,14 @@
   /* A stable occluder: expanding results must not trigger Viewer's safe-rect camera shift. */
   height: 52px;
   color: #f1f5f9;
-  font-size: 12px;
+  font-size: var(--leaf-size-caption);
   pointer-events: none;
 }
 .drawing-find-field, .drawing-find-status > *, .drawing-find-results {
   min-height: 0;
   padding: 0 4px;
   border: 1px solid #626c79;
-  border-radius: 4px;
+  border-radius: var(--leaf-radius-key);
   background: #202832;
   pointer-events: auto;
 }
@@ -65,4 +65,15 @@
     top: calc(var(--ck-canvas-top, 0px) + 26px);
     left: calc(var(--ck-pane, 0px) + 8px);
   }
+}
+@media (max-width: 599px) {
+  .drawing-navigation {
+    top: calc(var(--ck-canvas-top, 140px) + 64px);
+    left: 8px;
+    width: calc(100vw - 16px);
+    height: 76px;
+  }
+  .drawing-navigation .drawing-find-field { min-height: 46px; height: auto; }
+  .drawing-navigation .drawing-find-field input { height: 44px; min-height: 44px; }
+  .drawing-navigation .drawing-find-field .drawing-find-submit { height: 44px; min-height: 44px; min-width: 44px; }
 }

@@ -9,6 +9,14 @@ afterEach(() => {
 })
 
 describe('Lab route golden', () => {
+  it.each([
+    ['/app/lab/test-trade', '?embed=1&channel=retained'],
+    ['/app', '?surface=lab&view=test-trade&embed=1&channel=retained'],
+  ])('round-trips the Test trade route %s', (path, search) => {
+    const route = parseLabRoute(path, search)
+    expect(route).toEqual({ view: 'test-trade', params: { embed: '1', channel: 'retained' } })
+    expect(formatLabRoute(route)).toBe('/app/lab/test-trade?embed=1&channel=retained')
+  })
   it('round-trips the inert embed string on direct and surface routes', () => {
     for (const [path, search] of [['/app/lab', '?embed=1'], ['/app', '?surface=lab&embed=1']]) {
       const route = parseLabRoute(path, search)
@@ -65,12 +73,25 @@ describe('fetchLabStatus', () => {
     expect(fetchImpl.mock.calls[1][1].headers.Authorization).toBe('Bearer second-token')
   })
 
-  it.each([[404, 'off'], [503, 'auth-off'], [401, 'signed-out'], [403, 'signed-out'],
+  it.each([[404, 'off'], [401, 'signed-out'], [403, 'signed-out'],
     [500, 'unavailable']])('maps HTTP %s to %s without reading its body', async (code, state) => {
     const result = response(code)
     result.json = vi.fn(() => { throw new Error('must not parse an error body') })
     expect(await fetchLabStatus({ fetchImpl: async () => result })).toEqual({ state, posture: null })
     expect(result.json).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ["{'ok': False, 'status': 'refused', 'reason': 'lab_auth_live_required'}", 'auth-off'],
+    ['lab_store_unavailable', 'unavailable'],
+  ])('maps HTTP 503 reason %s to %s', async (message, state) => {
+    const fetchImpl = async () => response(503, { ok: false, error: { error_code: 'INTERNAL', message, retryable: true } })
+    expect(await fetchLabStatus({ fetchImpl })).toEqual({ state, posture: null })
+  })
+
+  it('maps HTTP 503 with a non-JSON body to unavailable', async () => {
+    const fetchImpl = async () => ({ ...response(503), json: async () => { throw new SyntaxError('bad JSON') } })
+    expect(await fetchLabStatus({ fetchImpl })).toEqual({ state: 'unavailable', posture: null })
   })
 
   it.each(['local', 'staging', 'production'])('accepts the %s posture', async (posture) => {

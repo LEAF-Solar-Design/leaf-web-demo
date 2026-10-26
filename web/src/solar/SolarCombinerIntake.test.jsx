@@ -14,7 +14,7 @@ const importButton = () => screen.getByRole('button', { name: 'Import' })
 const runButton = () => screen.getByRole('button', { name: 'Run placement' })
 const fileInput = () => screen.getByLabelText('Combiner intake file')
 const hardware = { model: ' Combiner ', max_dc_voltage: '480', max_ac_power_kw: '10' }
-const labels = { model: 'Model', max_dc_voltage: 'DC voltage', max_ac_power_kw: 'AC power' }
+const labels = { model: 'Model', max_dc_voltage: 'DC voltage (V)', max_ac_power_kw: 'AC power (kW)' }
 function typeHardware(values = hardware) {
   for (const [field, text] of Object.entries(values)) fireEvent.change(screen.getByLabelText(labels[field]), { target: { value: text } })
 }
@@ -160,6 +160,7 @@ describe('SolarCombinerIntake', () => {
     await importAndWait()
     for (const label of Object.values(labels)) {
       const input = screen.getByLabelText(label)
+      fireEvent.blur(input)
       expect(input.getAttribute('aria-invalid')).toBe('true')
       expect(document.getElementById(input.getAttribute('aria-describedby')).textContent).toBeTruthy()
     }

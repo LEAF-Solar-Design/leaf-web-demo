@@ -34,12 +34,12 @@ it('J2 row1 the device stage receives and invokes the ready controller launch', 
 
 it('J2 row3 all four setup states reach the disabled tool and device stage', () => {
   const states = [
-    ['no-approved-revision', PROFILE_REASONS.shipNoRevision, 'source', 'missing'],
-    ['grant-not-ready', PROFILE_REASONS.shipGrant, 'grant', 'missing'],
-    ['executor-busy', PROFILE_REASONS.shipExecutorBusy, 'executor', 'busy'],
-    ['executor-unavailable', PROFILE_REASONS.shipExecutorUnavailable, 'executor', 'unavailable'],
+    ['no-approved-revision', PROFILE_REASONS.shipNoRevision, 'source', 'missing', 'Select a drawing version and ask the project owner to approve it.'],
+    ['grant-not-ready', PROFILE_REASONS.shipGrant, 'grant', 'missing', 'Ask the project owner to connect the Apple account before starting a build.'],
+    ['executor-busy', PROFILE_REASONS.shipExecutorBusy, 'executor', 'busy', 'Another build is using the build computer. Check again when it finishes.'],
+    ['executor-unavailable', PROFILE_REASONS.shipExecutorUnavailable, 'executor', 'unavailable', 'The build computer is unavailable. Ask support to reconnect it, then check again.'],
   ]
-  for (const [setupState, sentence, rung, state] of states) {
+  for (const [setupState, sentence, rung, state, setupSentence] of states) {
     const ship = { controllerLive: true, phase: 'setup-required', readiness: { setupState, setupAction: sentence }, onLaunch: null }
     ship.launchReason = shipLaunchReason(ship)
     const tool = profileRibbonTabs('ship', { ship })[0].clusters.flatMap((group) => group.tools).find((item) => item.id === 'ship:launch')
@@ -48,7 +48,7 @@ it('J2 row3 all four setup states reach the disabled tool and device stage', () 
     const { container, unmount } = render(<SurfaceGrounds surface="ios" iosEnabled ship={ship} onLaunch={ship.onLaunch} />)
     const device = container.querySelector('[data-ground="ios"]')
     expect(device.hidden).toBe(false)
-    expect(device.textContent).toContain(`Setup required: ${sentence}`)
+    expect(device.textContent).toContain(setupSentence)
     expect(device.querySelector(`[data-rung="${rung}"]`).dataset.state).toBe(state)
     unmount()
   }
@@ -586,7 +586,7 @@ describe('DeviceGround', () => {
 
     rerender(<DeviceGround active enabled contract={contract({ healthy: true, launchable: false }, 'MAC_ALLOCATED')} revision="rev-1" />)
     expect(screen.getByRole('region', { name: 'iOS ship lane' }).dataset.state).toBe('in-progress')
-    expect(screen.getByText('Mac allocated')).toBeTruthy()
+    expect(screen.getByText('Build computer ready')).toBeTruthy()
     expect(within(screen.getByRole('list', { name: 'Ship lane' })).getAllByRole('listitem').map((li) => li.dataset.lit))
       .toEqual(['true', 'true', 'false'])
     // No percentage, no bar: the contract has no progress field.

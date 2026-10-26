@@ -69,6 +69,7 @@ function WorkerStatus({ mock, fetchImpl }) {
     return () => { controller.abort(); clearInterval(timer) }
   }, [fetchImpl, mock, status])
   const health = status?.worker || worker
+  if (health?.state === 'unavailable') return <p>Lab worker status is unavailable right now.</p>
   const offline = health && !health.workers?.some(item => Number.isFinite(item.heartbeat_age_s) && item.heartbeat_age_s <= 60)
   return <>
     {offline && <p>Worker offline</p>}

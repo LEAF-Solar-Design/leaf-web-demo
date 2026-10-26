@@ -260,5 +260,10 @@ def test_store_failures_are_sanitized(rig, monkeypatch, operation):
         raise RuntimeError("postgres://private-host/secret")
     monkeypatch.setattr(store, "create" if operation == "create" else "worker_status", fail)
     response = create(rig) if operation == "create" else rig.http.get("/api/lab/status")
-    assert response.status_code == 503
-    assert response.json() == {"detail": "lab_store_unavailable"}
+    if operation == "status":
+        assert response.status_code == 200
+        assert response.json()["worker"] == {"state": "unavailable", "reason": "lab_store_unavailable"}
+        assert "private-host" not in response.text
+    else:
+        assert response.status_code == 503
+        assert response.json() == {"detail": "lab_store_unavailable"}

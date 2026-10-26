@@ -130,6 +130,60 @@ describe('DraftingRibbon', () => {
     expect(copy.closest('.ribbon-cluster').hidden).toBe(true)
   })
 
+  describe('measured fit', () => {
+    afterEach(() => {
+      cleanup()
+      vi.restoreAllMocks()
+    })
+
+    const renderMeasured = (widths) => {
+      const originalRect = HTMLElement.prototype.getBoundingClientRect
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        const rect = originalRect.call(this)
+        if (this.classList.contains('ribbon-more')) return { ...rect, width: 100 }
+        if (this.classList.contains('ribbon-cluster')) {
+          const groups = [...this.parentElement.querySelectorAll('.ribbon-cluster')]
+          return { ...rect, width: widths[groups.indexOf(this)] }
+        }
+        return rect
+      })
+      render(<DraftingRibbon clusters={widths.map((_, index) => ({
+        id: `cluster-${index}`,
+        label: `Cluster ${index}`,
+        tools: [{ id: `tool-${index}`, label: `Tool ${index}` }],
+      }))} />)
+      const ribbon = screen.getByRole('toolbar', { name: 'Drafting tools' })
+      Object.defineProperty(ribbon, 'clientWidth', { configurable: true, value: 1440 })
+      fireEvent(window, new Event('resize'))
+      return {
+        groups: [...ribbon.querySelectorAll('.ribbon-cluster')],
+        more: ribbon.querySelector('.ribbon-more'),
+      }
+    }
+
+    it('skips an oversize cluster so later clusters can fit', () => {
+      const { groups, more } = renderMeasured([100, 1500, 600, 100, 100])
+      expect(groups.map(group => group.hidden)).toEqual([false, true, false, false, false])
+      expect(more.hidden).toBe(false)
+      fireEvent.click(more)
+      expect(groups.map(group => group.hidden)).toEqual([false, false, false, false, false])
+      expect([...document.querySelectorAll('.ribbon-cluster')]).toEqual(groups)
+      expect(screen.getByRole('button', { name: 'Tool 1' })).toBeTruthy()
+    })
+
+    it('shows every cluster and hides More when all clusters fit', () => {
+      const { groups, more } = renderMeasured([100, 200, 300, 100, 100])
+      expect(groups.map(group => group.hidden)).toEqual([false, false, false, false, false])
+      expect(more.hidden).toBe(true)
+    })
+
+    it('skips multiple oversize clusters while retaining later clusters', () => {
+      const { groups, more } = renderMeasured([100, 1500, 1500, 100, 100])
+      expect(groups.map(group => group.hidden)).toEqual([false, true, true, false, false])
+      expect(more.hidden).toBe(false)
+    })
+  })
+
   describe('ROV the overflow closes on tool activation only', () => {
     const overflowClusters = (handlers = {}) => [
       { id: 'draw', label: 'Draw', tools: [{ id: 'line', label: 'Line', onClick: handlers.line }] },
@@ -501,6 +555,68 @@ describe('DraftingRibbon', () => {
       card.parentElement.insertBefore(document.createElement('div'), card)
       await Promise.resolve()
       expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('260px')
+    })
+
+    it('publishes the narrow stack top from the document band beside the Studio ribbon portal host', () => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 })
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+        callback(0)
+        return 1
+      })
+      const originalRect = HTMLElement.prototype.getBoundingClientRect
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        return this.classList.contains('viewer-toolbar')
+          ? { ...originalRect.call(this), bottom: 257 }
+          : originalRect.call(this)
+      })
+      const { container } = render(
+        <div className="studio-shell">
+          <div className="app">
+            <div className="studio-chrome-host">
+              <DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {} })} />
+            </div>
+            <div className="workspace-card">
+              <div className="viewer-toolbar" />
+            </div>
+          </div>
+        </div>,
+      )
+      const shell = container.querySelector('.studio-shell')
+      expect(shell.style.getPropertyValue('--cockpit-stack-top')).toBe('257px')
+      expect(shell.style.getPropertyValue('--cockpit-band-bottom')).toBe('')
+    })
+
+    it('publishes the narrow stack top once the document toolbar mounts after the ribbon', () => {
+      Object.defineProperty(window, 'innerWidth', { configurable: true, value: 390 })
+      Object.defineProperty(window, 'innerHeight', { configurable: true, value: 844 })
+      vi.spyOn(window, 'requestAnimationFrame').mockImplementation(callback => {
+        callback(0)
+        return 1
+      })
+      const originalRect = HTMLElement.prototype.getBoundingClientRect
+      vi.spyOn(HTMLElement.prototype, 'getBoundingClientRect').mockImplementation(function () {
+        return this.classList.contains('viewer-toolbar')
+          ? { ...originalRect.call(this), bottom: 257 }
+          : originalRect.call(this)
+      })
+      const { container } = render(
+        <div className="studio-shell">
+          <div className="app">
+            <div className="studio-chrome-host">
+              <DraftingRibbon clusters={catalogClusters(FAMS, { onRequestRun: () => {} })} />
+            </div>
+            <div className="workspace-card" />
+          </div>
+        </div>,
+      )
+      const shell = container.querySelector('.studio-shell')
+      expect(shell.style.getPropertyValue('--cockpit-stack-top')).toBe('')
+      const toolbar = document.createElement('div')
+      toolbar.className = 'viewer-toolbar'
+      container.querySelector('.workspace-card').appendChild(toolbar)
+      window.dispatchEvent(new Event('resize'))
+      expect(shell.style.getPropertyValue('--cockpit-stack-top')).toBe('257px')
     })
 
     it('republishes when a sibling inserted above the band pushes it down', async () => {

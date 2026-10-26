@@ -11,8 +11,8 @@
   overflow-wrap: anywhere;
 }
 
-.leaf-platform h1 { margin: 0 0 20px; font-size: 22px; line-height: 1.2; }
-.leaf-platform-context { margin: 0 0 6px; font-size: 13px; }
+.leaf-platform h1 { margin: 0 0 20px; font-size: var(--leaf-size-subtitle); line-height: 1.2; }
+.leaf-platform-context { margin: 0 0 6px; font-size: var(--leaf-size-dense); }
 .leaf-platform section { display: grid; gap: 14px; }
 .leaf-platform p { margin: 0 0 12px; }
 .leaf-platform-status { min-height: 1.5em; }
@@ -25,7 +25,7 @@
   min-height: 44px;
   padding: 9px 12px;
   border: 1px solid #7c877e;
-  border-radius: 6px;
+  border-radius: var(--leaf-radius-control);
   font: inherit;
 }
 .leaf-platform select { background: #fff; color: #202622; }

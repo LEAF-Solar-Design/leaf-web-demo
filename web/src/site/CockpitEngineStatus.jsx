@@ -3,12 +3,14 @@ import { createPortal } from 'react-dom'
 
 import { useEngineSessionOptional } from '../cadedit/EngineSessionProvider.jsx'
 import LiveRegion from '../components/LiveRegion.jsx'
+import { humanizeError } from '../errorHumanize.js'
 
 // Consume the workspace's one session; the command dock lives outside its
 // provider, so App supplies a slot there rather than reading context itself.
 export default function CockpitEngineStatus({ importOpen = false, slotId = null }) {
   const context = useEngineSessionOptional()
-  const status = context?.session.status || ''
+  const rawStatus = context?.session.status || ''
+  const status = rawStatus.replace(/^(Save (?:failed|refused): )([\s\S]*)$/, (_, prefix, error) => prefix + humanizeError(error))
   const [slot, setSlot] = useState(null)
   const [message, setMessage] = useState('')
   useEffect(() => {

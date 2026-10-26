@@ -1,8 +1,9 @@
-import { useEffect, useId, useLayoutEffect, useRef } from 'react'
+import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react'
 import { hexHandle } from './engineIntake.js'
 import { clickIntent, isToggleKey, LONG_PRESS_MS, LONG_PRESS_SLOP_PX, rangeIds } from './selection.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
 import { useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
+import { humanizeError } from '../errorHumanize.js'
 import './drawingObjectList.css'
 
 const DRAWING_OBJECT_REASONS = Object.freeze({
@@ -14,6 +15,21 @@ const DRAWING_OBJECT_REASONS = Object.freeze({
 const fmt = (n) => Number.isInteger(n) ? String(n) : n.toFixed(2)
 const modified = (event) => event.shiftKey || event.ctrlKey || event.metaKey
 
+export function objectGeometryDescription(entity) {
+  const count = entity.vertices?.length ?? 0
+  if (['CIRCLE', 'ARC', 'ELLIPSE'].includes(entity.type)) return 'Center point'
+  if (entity.type === 'INSERT') return 'Insertion point'
+  if (['TEXT', 'MTEXT', 'POINT', 'DIMENSION', 'MLEADER'].includes(entity.type)) return 'Anchor point'
+  return `${count} ${count === 1 ? 'vertex' : 'vertices'}`
+}
+
+function focusFailure(reason) {
+  if (reason === 'viewer not ready' || reason === "scene not showing this index's drawing") return humanizeError('The drawing view is still loading. Try Focus again in a moment.')
+  if (reason === 'unknown id') return humanizeError(DRAWING_OBJECT_REASONS.missing)
+  if (reason === 'no bounds') return humanizeError(DRAWING_OBJECT_REASONS.bounds)
+  return humanizeError(DRAWING_OBJECT_REASONS.refused)
+}
+
 // Selection has no checkbox column: the radio selects only its row, Shift
 // click selects a range from the anchor in session.entities order, Ctrl or
 // Cmd click toggles one row in or out, X toggles the row holding keyboard
@@ -21,6 +37,7 @@ const modified = (event) => event.shiftKey || event.ctrlKey || event.metaKey
 // the selection is empty again).
 export default function DrawingObjectList({ session, announce }) {
   const objects = useDrawingObjects()
+  const [focusResult, setFocusResult] = useState(null)
   const prefix = useId()
   const keyboardFocus = useRef(null)
   const anchor = useRef(null)
@@ -65,6 +82,7 @@ export default function DrawingObjectList({ session, announce }) {
     // A separate form owner keeps the legacy radios with the same name in
     // their own native group; both lists still reflect the one selection.
     <form onSubmit={(event) => event.preventDefault()}>
+    {focusResult?.documentId === session.documentId && <p className="drawing-object-reason">{focusResult.text}</p>}
     <ul className="drawing-object-list" aria-label="Drawing objects"
       onFocusCapture={(event) => { keyboardFocus.current = event.target }}
       onBlurCapture={(event) => { if (event.relatedTarget) keyboardFocus.current = null }}>
@@ -78,13 +96,17 @@ export default function DrawingObjectList({ session, announce }) {
         const focusReasonId = `${prefix}-${identity}-focus`
         const canFocus = !!record && validObjectBounds(record.bounds) && typeof objects?.focus === 'function'
         const focusObject = () => {
+          const report = (text) => {
+            setFocusResult({ documentId: session.documentId, text })
+            announce?.(text)
+          }
           if (!canFocus) {
-            announce?.(record ? DRAWING_OBJECT_REASONS.bounds : DRAWING_OBJECT_REASONS.missing)
+            report(humanizeError(record ? DRAWING_OBJECT_REASONS.bounds : DRAWING_OBJECT_REASONS.missing))
             return
           }
           const result = objects.focus(record.id)
-          if (result?.ok) announce?.(`Focused ${record.name}`)
-          else announce?.(result?.reason ? `Focus unavailable: ${result.reason}` : DRAWING_OBJECT_REASONS.refused)
+          if (result?.ok) report(`Focused ${record.name}`)
+          else report(focusFailure(result?.reason))
         }
         return (
           <li key={identity} data-object-id={identity}
@@ -154,7 +176,7 @@ export default function DrawingObjectList({ session, announce }) {
                 }}
               />
               Select only: {entity.type} on layer {entity.layer}
-              {' '}· {entity.vertices?.length ?? 0} vertices{entity.closed ? ' · closed' : ''}
+              {' '}· {objectGeometryDescription(entity)}{entity.closed ? ' · closed' : ''}
               {entity.vertices?.length > 0 && (
                 <span className="cad-edit-entity-verts">
                   {' '}({entity.vertices.slice(0, 2).map((v) => `${fmt(v[0])},${fmt(v[1])}`).join(' → ')}

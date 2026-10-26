@@ -31,7 +31,7 @@ export default function LocalCadConnect({ status = 'stopped', drawing, summary, 
     <button type="button" className="chip-act" data-testid="local-cad-connect"
       style={{ flexShrink: 0 }}
       onClick={connect ? onConnect : onDisconnect}>{connect ? 'Connect AutoCAD' : 'Disconnect'}</button>
-    <span aria-live="polite" style={{ fontSize: 'var(--leaf-size-caption)', minWidth: 0, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+    <span aria-live="polite" style={{ fontSize: 'var(--leaf-size-caption)', minWidth: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
       <span data-testid="local-cad-status">{label}</span>
       {error && !(status === 'unreachable' && UNREACHED.test(error)) && <span>{`. The last update failed: ${error}`}</span>}
       {(textPending || (error && /text|font|glyph|label/i.test(error))) && <span> · labels unavailable</span>}

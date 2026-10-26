@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { openProject } from '../api.js'
+import { humanizeError } from '../errorHumanize.js'
 import ArloProposalReview from './ArloProposalReview.jsx'
 
 // Use the authenticated canonical workspace read, never the legacy job store.
@@ -23,7 +24,7 @@ export default function ArloProjectJob({ project, job }) {
       setOpened({ envelope:fresh.result, context:{org_id:fresh.org_id, project_id:fresh.project_id,
         job_id:fresh.job_id, input_version_id:fresh.input_version_id} })
     } catch (cause) {
-      if (attempt === request.current) setError(cause.message || 'Could not open this proposal.')
+      if (attempt === request.current) setError(humanizeError(cause))
     } finally {
       if (attempt === request.current) setLoading(false)
     }

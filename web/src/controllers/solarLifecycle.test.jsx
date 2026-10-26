@@ -406,7 +406,7 @@ describe('CORR1 a real sign-in expiry keeps the run', () => {
     expect(hook.result.current.pendingRun?.tool).toBe(TOOL)
   })
 
-  it('CORR1 Review and run takes the pending run only after the catalog loads', async () => {
+  it('CORR1 Review and run takes the pending run only after arming succeeds', async () => {
     const record = () => JSON.stringify({ v: 1, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1000 })
     const storage = memoryStorage({ [PENDING_RUN_KEY]: record() })
     const hook = mountHook({ storage })
@@ -416,6 +416,9 @@ describe('CORR1 a real sign-in expiry keeps the run', () => {
     })
     expect(prepared.tool).toEqual({ name: TOOL })
     expect(prepared.pending.params).toEqual({ zone: 'A' })
+    expect(storage.map.has(PENDING_RUN_KEY)).toBe(true)
+    expect(hook.result.current.pendingRun?.tool).toBe(TOOL)
+    act(() => prepared.complete())
     expect(storage.map.has(PENDING_RUN_KEY)).toBe(false)
     expect(hook.result.current.pendingRun).toBeNull()
 
@@ -539,7 +542,7 @@ describe('wiring pins', () => {
     expect(body.includes('if (mock) return')).toBe(true)
     expect(body.includes('getTools(false)')).toBe(true)
     expect(body.includes("onRequestCatalogRun(tool, pending.params, null, 'catalog', { complete: true })")).toBe(true)
-    expect(body.includes('is no longer in your catalog. Your saved inputs were discarded.')).toBe(true)
+    expect(body.includes('is no longer in your catalog. Your saved inputs were kept.')).toBe(true)
     expect(body.includes('onRun(')).toBe(false)
   })
 
