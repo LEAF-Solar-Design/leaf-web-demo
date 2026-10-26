@@ -165,7 +165,7 @@ test('@flag-off the iOS surface stays dormant and sends no readiness, status, so
   await expect(dormant).toContainText(/iOS setup status isn.t available yet\./)
   await expect(page.locator('section.ios-surface:not(.ios-surface-dormant)')).toHaveCount(0)
   await expect(device).toHaveAttribute('data-state', 'idle')
-  await expect(device.getByTestId('device-state')).toHaveText('idle')
+  await expect(device.getByTestId('device-state')).toHaveText('Not started')
   await expect(launchButton(device)).toHaveCount(0)
   await expect(ribbonLaunch(page)).toBeDisabled()
 
@@ -220,7 +220,7 @@ test('@flag-on a launch progresses from running through the build stage to a del
 
   await launchButton(device).click()
   await expect(device).toHaveAttribute('data-state', 'running', { timeout: 15_000 })
-  await expect(device.locator('.device-stage')).toHaveText('MAC_ALLOCATED')
+  await expect(device.locator('.device-stage')).toHaveText('Build computer ready')
   await expect(device.locator('[data-rung="build"]')).toHaveAttribute('data-state', 'busy')
   await expect(device.locator('[data-rung="delivery"]')).toHaveAttribute('data-state', 'busy')
   await expect(launchButton(device)).toHaveCount(0)
@@ -236,7 +236,7 @@ test('@flag-on a launch progresses from running through the build stage to a del
 
   // The follower polls; the stage advances only as the lane reports it.
   execution.current = { status: 'running', stage: 'BUILT' }
-  await expect(device.locator('.device-stage')).toHaveText('BUILT', { timeout: 15_000 })
+  await expect(device.locator('.device-stage')).toHaveText('App built', { timeout: 15_000 })
   await expect(device).toHaveAttribute('data-state', 'running')
 
   execution.current = { status: 'succeeded', stage: 'RECEIPT', receipt_id: RECEIPT.receipt_id }
