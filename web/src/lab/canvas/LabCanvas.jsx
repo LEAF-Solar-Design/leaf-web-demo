@@ -9,6 +9,7 @@ import { contract, resolveManifest, registry } from './registry.js'
 import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, roundTrip, updateSettings, validateGraph } from './graphDoc.js'
 import { connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
+import { humanizeError } from '../../errorHumanize.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
@@ -23,7 +24,6 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const [selected, setSelected] = useState(null)
   const [pending, setPending] = useState(null)
   const [message, setMessage] = useState('')
-  const [layoutMs, setLayoutMs] = useState(null)
   const [layoutBusy, setLayoutBusy] = useState(false)
   const request = useRef(0)
   const lastRefusal = useRef('')
@@ -59,16 +59,15 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       const id = next.blocks.at(-1).id
       setPositions(previous => ({ ...previous, [id]: centre }))
       commit(next); setSelected(id); setMessage(`${manifest.title} added`)
-    } catch (error) { setMessage(error.message) }
+    } catch (error) { setMessage(humanizeError(error)) }
   }
   const runLayout = useCallback(async (layoutDocument, dimensions) => {
     const token = ++request.current
-    const started = performance.now()
     try {
       const next = await layoutRunner.run(layoutDocument, dimensions)
       if (token !== request.current) return
-      setPositions(next); setLayoutMs(performance.now() - started); setMessage('Layout updated')
-    } catch (error) { if (token === request.current) setMessage(error.message) }
+      setPositions(next); setMessage('Layout updated')
+    } catch (error) { if (token === request.current) setMessage(humanizeError(error)) }
     finally { if (token === request.current) setLayoutBusy(false) }
   }, [layoutRunner])
   const relayout = () => {
@@ -115,7 +114,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   }}>
     <Palette entries={entries} onAdd={add} searchRef={search} />
     <section className="lab-canvas-region" aria-label="Dependency canvas">
-      <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} onClick={relayout}>Relayout</button>
+      <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} title={layoutBusy ? 'Arranging the blocks. Please wait.' : undefined} onClick={relayout}>Relayout</button>
         <button type="button" onClick={() => flow.fitView({ padding: 0.2 })}>Fit cards</button></header>
       <div className="lab-flow" ref={canvas} onDragOver={event => { event.preventDefault(); event.dataTransfer.dropEffect = 'copy' }}
         onDrop={event => {
@@ -148,18 +147,16 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
           isValidConnection={connection => {
             let status
             try { status = connectionStatus(document, asPipe(connection), entries) }
-            catch (error) { status = { ok: false, reason: error.message } }
+            catch (error) { status = { ok: false, reason: humanizeError(error) } }
             lastRefusal.current = status.reason
             return status.ok
           }}
-          onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(error.message) } }}>
+          onConnect={connection => { try { connect(asPipe(connection)) } catch (error) { setMessage(humanizeError(error)) } }}>
           <Background color="var(--leaf-color-border)" /><Controls />
         </ReactFlow>
       </div>
       {!document.blocks.length && <p>Add a block from the palette to begin.</p>}
-      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : `Not ready: ${validation.message}`}</p>
-        <span className="leaf-timing">Layout {layoutMs === null ? 'not measured' : `${layoutMs.toFixed(2)} ms`}</span>{' · '}
-        <span className="leaf-timing">Validation {validation.ms.toFixed(2)} ms</span></footer>
+      <footer><p role="status">{message}</p><p>{validation.ready ? 'Ready' : 'Review the blocks and connections before continuing.'}</p></footer>
     </section>
     <Inspector block={document.blocks.find(block => block.id === selected)} document={document} entries={entries} upstream={upstream} codeEvidence={codeEvidence}
       onSettings={settings => commit(updateSettings(current.current, selected, settings, entries))}

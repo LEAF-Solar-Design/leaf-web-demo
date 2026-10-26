@@ -300,7 +300,9 @@ describe('canvas authoring', () => {
     expect(changed.mock.calls.at(-1)[0].document.blocks[0]).not.toHaveProperty('position')
     fireEvent.click(screen.getByRole('button', { name: 'Relayout' }))
     await waitFor(() => expect(screen.getByTestId('adjust-none-1')).not.toHaveAttribute('data-position', JSON.stringify({ x: 777, y: 888 })))
-    expect(screen.getByText(/Validation .* ms/)).toHaveClass('leaf-timing')
+    expect(container.querySelector('footer')).toHaveTextContent('Layout updated')
+    expect(container.querySelector('footer')).toHaveTextContent(/Ready|Review the blocks and connections before continuing/)
+    expect(container.querySelector('footer')).not.toHaveTextContent(/\bms\b|not measured/)
   })
   it('supports palette drag/drop and keeps Strategy limited to Signals and Rules', async () => {
     const { container } = render(<LabCanvas />)

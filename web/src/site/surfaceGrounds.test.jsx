@@ -55,17 +55,21 @@ it('J2 row3 all four setup states reach the disabled tool and device stage', () 
 })
 
 it('J2 row4 running and terminal execution updates reach the device without a remount', () => {
-  const running = { phase: 'running', execution: { execution_id: 'j2', status: 'running', stage: 'archive' } }
+  const running = { phase: 'running', execution: { execution_id: 'j2', status: 'running', stage: 'BUILT' } }
   const { container, rerender } = render(<SurfaceGrounds surface="ios" iosEnabled ship={running} />)
   const device = container.querySelector('[data-ground="ios"]')
   expect(device.dataset.state).toBe('running')
-  expect(device.textContent).toContain('archive')
+  expect(within(device).getByTestId('device-state')).toHaveTextContent(/^Building$/)
+  expect(device.querySelector('.device-stage')).toHaveTextContent('App built')
+  expect(device.textContent).not.toContain('BUILT')
   for (const phase of ['succeeded', 'failed']) {
-    const ship = { phase, execution: { execution_id: 'j2', status: phase, stage: 'delivery' } }
+    const ship = { phase, execution: { execution_id: 'j2', status: phase, stage: 'RECEIPT', failed_stage: phase === 'failed' ? 'SIGNING_READY' : null } }
     rerender(<SurfaceGrounds surface="ios" iosEnabled ship={ship} />)
     expect(container.querySelector('[data-ground="ios"]')).toBe(device)
     expect(device.dataset.state).toBe(phase)
-    expect(device.textContent).toContain(phase)
+    expect(within(device).getByTestId('device-state')).toHaveTextContent(phase === 'succeeded' ? 'Build complete' : 'Build failed')
+    expect(device.querySelector('.device-stage')).toHaveTextContent(phase === 'succeeded' ? 'Build confirmation ready' : 'App signing ready')
+    expect(device.textContent).not.toMatch(/RECEIPT|SIGNING_READY/)
   }
 })
 
@@ -573,7 +577,8 @@ describe('DeviceGround', () => {
     const stage = screen.getByRole('region', { name: 'iOS ship lane' })
     expect(stage.dataset.state).toBe('dormant')
     expect(screen.getByTestId('device-state').textContent).toBe('Not available yet')
-    expect(within(stage).queryByText(/receipt/)).toBeNull()
+    expect(within(stage).queryByText(/Build status recorded/)).toBeNull()
+    expect(stage).not.toHaveTextContent('rcpt-0123456789abcdef')
     for (const li of within(stage).getAllByRole('listitem')) expect(li.dataset.lit).toBe('false')
   })
 
@@ -597,8 +602,9 @@ describe('DeviceGround', () => {
     expect(screen.getByRole('region', { name: 'iOS ship lane' }).dataset.state).toBe('ready')
     expect(within(screen.getByRole('list', { name: 'Ship lane' })).getAllByRole('listitem').map((li) => li.dataset.lit))
       .toEqual(['true', 'true', 'true'])
-    expect(screen.getByText(/receipt rcpt-0123456/)).toBeTruthy()
-    expect(screen.getByText('North Yard · rev-1')).toBeTruthy()
+    expect(screen.getByText('Build status recorded · 2026-09-02T03:00:00Z')).toBeTruthy()
+    expect(screen.getByRole('region', { name: 'iOS ship lane' })).not.toHaveTextContent('rcpt-0123456')
+    expect(screen.getByText('North Yard · Revision selected')).toBeTruthy()
 
     rerender(<DeviceGround active enabled contract={contract({ healthy: false, launchable: false })} />)
     expect(screen.getByRole('region', { name: 'iOS ship lane' }).dataset.state).toBe('unavailable')

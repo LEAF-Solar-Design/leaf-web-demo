@@ -231,9 +231,9 @@ export function authorMock(description) {
     : op === 'select_by_layer' ? params.properties.layer.default : params.properties?.distance_in?.default
   const code = tmpl.code(name, codeArg)
   const preview = isWrite
-    ? `Generated a "${op}" script tool from your description.\n` +
+    ? `Created a tool from your description.\n` +
       `It creates a new undoable version of the drawing when you run it on Leaf.`
-    : `Generated a "${op}" script tool from your description.\n` +
+    : `Created a tool from your description.\n` +
       `It runs read-only on the drawing and is ready to run on Leaf.`
   // `source: 'harness'` + `run_id` are the honest agent-authored signals the
   // AuthorPanel reads (readProvenance / authoredProvLine). The demo's authoring
