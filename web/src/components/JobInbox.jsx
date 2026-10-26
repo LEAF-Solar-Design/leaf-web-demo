@@ -16,6 +16,26 @@ import './rails.css'
 
 import { fmtWhen } from './JobRail.jsx'
 import { useNotices } from '../lib/notifications.js'
+import { navigate } from '../site/router.js'
+
+// A notice can survive its scene. Keep one requested preview until the console
+// has mounted and loaded the same drawing, without reloading demo history.
+let pendingVersionView = null
+export function requestNoticeVersionView(drawingId, version, isCurrent = () => true) {
+  pendingVersionView = { drawingId, version, isCurrent }
+  navigate('/app')
+}
+export function peekNoticeVersionView() {
+  if (pendingVersionView && !pendingVersionView.isCurrent()) pendingVersionView = null
+  return pendingVersionView
+}
+export function takeNoticeVersionView(drawingId) {
+  peekNoticeVersionView()
+  if (pendingVersionView?.drawingId !== drawingId) return null
+  const request = pendingVersionView
+  pendingVersionView = null
+  return request
+}
 
 const KIND_DOT = { error: 'dot red', warn: 'dot square', success: 'dot' }
 
@@ -26,6 +46,7 @@ const NO_ACTION_REASON = 'This notice recorded no follow-up action, so there is 
 function InboxRow({ notice, onDismiss }) {
   const when = fmtWhen(notice.time)
   const hasAction = !!(notice.action && typeof notice.action.onClick === 'function')
+  const reason = hasAction ? notice.action.disabledReason?.() : NO_ACTION_REASON
   return (
     <div className="inbox-row">
       <div className="inbox-row-top">
@@ -39,16 +60,16 @@ function InboxRow({ notice, onDismiss }) {
         <button
           type="button"
           className="chip-act"
-          disabled={!hasAction}
-          onClick={hasAction ? () => notice.action.onClick() : undefined}
+          disabled={!hasAction || !!reason}
+          onClick={hasAction ? () => { if (!notice.action.disabledReason?.()) notice.action.onClick() } : undefined}
         >
-          {notice.action?.label ? `Retry · ${notice.action.label}` : 'Retry'}
+          {notice.action?.label || 'Retry'}
         </button>
         <button type="button" className="chip-act" onClick={() => onDismiss(notice.id)}>
           Dismiss
         </button>
       </div>
-      {!hasAction && <p className="lock-note">{NO_ACTION_REASON}</p>}
+      {reason && <p className="lock-note">{reason}</p>}
     </div>
   )
 }

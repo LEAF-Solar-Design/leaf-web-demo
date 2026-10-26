@@ -51,6 +51,29 @@ describe('front door exact Stage color roles (LS-T1)', () => {
     }
   })
 
+  it('converges status hues and zinc text onto Stage roles outside Paper scopes', () => {
+    expect(declarations.length).toBeGreaterThan(0)
+    for (const [property, value] of declarations) {
+      expect(value, `landing.css ${property}: ${value}`)
+        .not.toMatch(/#(?:facc15|fbbf24|e24947|fca5a5|43b2e1|d4d4d8)\b|rgba\(\s*(?:251\s*,\s*191\s*,\s*36|245\s*,\s*158\s*,\s*11|226\s*,\s*73\s*,\s*71)\s*,/i)
+    }
+  })
+
+  it('uses the semantic error and info roles in the Stage alias block', () => {
+    const aliasRules = stageRules.filter(({ selector, body }) => selector === '.stage-root'
+      && /(?:^|;)\s*--background\s*:/.test(body))
+    expect(aliasRules).toHaveLength(1)
+    expect(aliasRules[0].body).toMatch(/(?:^|;)\s*--status-danger\s*:\s*var\(--leaf-error\)\s*;/)
+    expect(aliasRules[0].body).toMatch(/(?:^|;)\s*--status-info\s*:\s*var\(--leaf-info\)\s*;/)
+  })
+
+  it('preserves the pinned coral and studio accent colors', () => {
+    expect(css).toMatch(/#f0997b\b/i)
+    expect(css).toMatch(/rgba\(\s*240\s*,\s*153\s*,\s*123\s*,\s*\.12\s*\)/i)
+    expect(css).toMatch(/rgba\(\s*240\s*,\s*153\s*,\s*123\s*,\s*\.35\s*\)/i)
+    expect(css).toMatch(/#7fd6a6\b/i)
+  })
+
   it('replaces translucent neutral ink outside Paper scopes', () => {
     expect(declarations.length).toBeGreaterThan(0)
     for (const [property, value] of declarations) {

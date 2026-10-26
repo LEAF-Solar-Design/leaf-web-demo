@@ -1619,7 +1619,8 @@ def build_suites() -> List[Suite]:
         Suite("server-sessions-e2e", "server tests/test_sessions_e2e.py", "pytest", SERVER,
               _py_pytest("tests/test_sessions_e2e.py"), 9),
         Suite("server-capabilities-promotion", "server tests/test_capabilities_promotion.py",
-              "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py"), 11),
+              "pytest", SERVER, _py_pytest("tests/test_capabilities_promotion.py") +
+              ["tests/test_capabilities_project_runs_post.py"], 11),
         # The two cross-repo contract checks read the website validator out of a
         # SIBLING checkout that this deliberately hermetic workflow does not have,
         # so they skip on CI and execute only on an operator box that has both

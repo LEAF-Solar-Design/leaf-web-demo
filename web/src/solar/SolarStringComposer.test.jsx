@@ -888,7 +888,9 @@ describe('canonical SolarStringComposer', () => {
     expect(contextCalls[0].url).toBe('/api/projects/' + canonicalBinding.project_id + '/drawing-versions/' +
       canonicalBinding.input_version_id + '/context?drawing_id=' + canonicalBinding.drawing_id)
     const catalog = calls.find(({ url }) => url.startsWith('/api/capabilities?'))
-    const entries = JSON.parse(new URLSearchParams(catalog.url.split('?')[1]).get('project_runs'))
+    expect(catalog.options.method).toBe('POST')
+    expect(new URLSearchParams(catalog.url.split('?')[1]).has('project_runs')).toBe(false)
+    const entries = JSON.parse(catalog.options.body).project_runs
     const intent = props.onProjectSubmit.mock.calls[0][0]
     expect(entries).toEqual({ [STRING_ADD_TOOL]: { params: intent.params,
       catalog_digest: canonicalDigest, idempotency_key: intent.idempotencyKey } })

@@ -31,8 +31,8 @@ phases:
             -r scripts/requirements-ci.txt -r executor/control_plane/requirements.txt \
             -r executor/runtime/requirements.txt
           (cd harness && npm ci)
-          (cd web && npm ci && npx playwright install --with-deps chromium)
-          /tmp/leaf-native-venv/bin/python -m playwright install --with-deps chromium
+          (cd web && npm ci && bash ../.codebuild/native-playwright-install.sh npx playwright install --with-deps chromium)
+          bash .codebuild/native-playwright-install.sh /tmp/leaf-native-venv/bin/python -m playwright install --with-deps chromium
           (cd scripts && PYTHONPATH="$CODEBUILD_SRC_DIR/scripts" /tmp/leaf-native-venv/bin/python -m pytest test_native_release_producer.py -q)
         fi
   pre_build:

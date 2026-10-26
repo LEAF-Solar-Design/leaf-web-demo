@@ -40,6 +40,7 @@ export default function ProjectSwitcher({
   const [orgName, setOrgName] = useState('My workspace')
   const [projectDraft, setProjectDraft] = useState('')
   const rootRef = useRef(null)
+  const triggerRef = useRef(null)
   const menu = useExit(open) // 180 ms M1 exit fade on close
   const hasBootstrapState = bootstrapState !== undefined
   const bound = hasBootstrapState ? bootstrapState === 'bound' : !!orgId
@@ -87,6 +88,7 @@ export default function ProjectSwitcher({
     onOpenProject(pid)
     remember(addRecentProject(history, pid))
     setOpen(false)
+    triggerRef.current?.focus()
   }
 
   const submit = async (kind, name) => {
@@ -138,7 +140,7 @@ export default function ProjectSwitcher({
         }
         return
       }
-      if (e.target?.closest?.('button') && e.key === 'Enter') return
+      if (e.target?.closest?.('button') && e.target !== triggerRef.current && e.key === 'Enter') return
       const n = menuProjects.length
       if (unavailable || !bound || n === 0) return
       if (e.key === 'ArrowDown') { e.preventDefault(); setHi((h) => (h + 1) % n) }
@@ -215,6 +217,7 @@ export default function ProjectSwitcher({
       <button
         type="button"
         className="proj-chip"
+        ref={triggerRef}
         aria-label={`Projects: change project. ${tag} ${label}`}
         onClick={() => setOpen((o) => !o)}
         aria-expanded={open}
@@ -232,8 +235,9 @@ export default function ProjectSwitcher({
             <div className="proj-empty">
               <div className="proj-note">{formatProjectsUnavailable(unavailable)}</div>
               <div className="proj-sub">
-                Showing the current drawing: <b>{projectName}</b>. The demo keeps working without workspace projects.
+                Showing the current drawing: <b>{projectName}</b>. You can keep viewing it while projects are unavailable. Retry to load your projects.
               </div>
+              <button type="button" onClick={onLoadProjects} disabled={loading}>Retry projects</button>
             </div>
           ) : unbound ? (
             <div className="proj-empty">

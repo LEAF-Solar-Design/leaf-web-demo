@@ -20,7 +20,7 @@ describe('JobInbox', () => {
     bus.push({ text: 'Version 4 created', action: { label: 'View', onClick } })
     render(<JobInbox bus={bus} />)
     expect(screen.getByText('Version 4 created')).toBeInTheDocument()
-    const retry = screen.getByRole('button', { name: /Retry/ })
+    const retry = screen.getByRole('button', { name: 'View' })
     expect(retry).toBeEnabled()
     fireEvent.click(retry)
     expect(onClick).toHaveBeenCalledTimes(1)
