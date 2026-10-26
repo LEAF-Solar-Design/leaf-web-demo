@@ -35,6 +35,7 @@ import { WorkspaceControllerProvider } from '../controllers/WorkspaceControllerP
 import { consoleWorkspaceMount } from '../controllers/workspaceMount.js'
 import { handleRedirectCallback, isSignedIn, login } from '../auth.js'
 import { humanizeError } from '../errorHumanize.js'
+import { useAsyncScope } from '../lib/urlState.js'
 import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
 import {
   DRAWING_MODE_CONSOLE,
@@ -99,26 +100,28 @@ export default function SiteRoot() {
   // to React. null until the shell mounts — and null forever with the rail
   // off, which IS the rollback contract (consumers render inline on null).
   const [studioGround, setStudioGround] = useState(null)
+  const beginSignIn = useAsyncScope([path])
 
   useEffect(() => {
     if (!authCallbackPending) return
+    const current = beginSignIn()
     let live = true
     const fail = () => {
-      if (!live) return
+      if (!live || !current()) return
       live = false
       clearTimeout(timer)
       setAuthError(humanizeError("Sign-in couldn't be completed."))
       setAuthCallbackPending(false)
     }
     const timer = setTimeout(fail, 20000)
-    Promise.resolve().then(() => handleRedirectCallback()).then((signedIn) => {
-      if (!live) return
+    Promise.resolve().then(() => handleRedirectCallback({ isCurrent: () => live && current() })).then((signedIn) => {
+      if (!live || !current()) return
       clearTimeout(timer)
       if (signedIn) { live = false; setAuthError(''); window.location.reload() }
       else fail()
     }).catch(fail)
     return () => { live = false; clearTimeout(timer) }
-  }, [authCallbackPending])
+  }, [authCallbackPending, beginSignIn])
 
   // Keyboard recasts — ONLY in scenes site|tool (listener not registered in
   // scene app/sheets), and never when focus is in an editable element.
@@ -206,13 +209,15 @@ export default function SiteRoot() {
   if (authError) return <div className="site-auth-callback">
     <p role="alert">{authError}</p>
     <button type="button" onClick={async () => {
+      const current = beginSignIn()
       try {
         const url = new URL(window.location.href)
         url.searchParams.delete('code')
         url.searchParams.delete('state')
         window.history.replaceState(window.history.state, '', `${url.pathname}${url.search}${url.hash}`)
-        await login()
+        await login({ isCurrent: current })
       } catch {
+        if (!current()) return
         setAuthError(humanizeError("Sign-in couldn't start. Check your connection and try again."))
       }
     }}>Sign in</button>

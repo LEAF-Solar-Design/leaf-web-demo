@@ -5192,7 +5192,7 @@ describe('S24 the URL keeps tool, drawer, own selection and camera view', () => 
   })
 
   it('seats the drawer, the opened tool, the own selection and the camera in App (live code, not a comment)', () => {
-    assert.match(appSource, /import \x7b pushOnOpen, useCameraViewParam, useViewParamSeat \x7d from \x27\.\/lib\/urlState\.js\x27/)
+    assert.match(appSource, /import \x7b pushOnOpen, useAsyncScope, useCameraViewParam, useViewParamSeat \x7d from \x27\.\/lib\/urlState\.js\x27/)
     for (const call of ["useViewParamSeat('drawer', " + LB, "useViewParamSeat('tool', " + LB, "useViewParamSeat('sel', " + LB]) {
       assert.ok(appSource.includes(call), `App must call ${call}`)
     }
@@ -5266,7 +5266,9 @@ describe('S24 the URL keeps tool, drawer, own selection and camera view', () => 
     const router = readFileSync(new URL('./site/router.js', import.meta.url), 'utf8')
     const siteRoot = readFileSync(new URL('./site/SiteRoot.jsx', import.meta.url), 'utf8')
     assert.doesNotMatch(router, /urlState/)
-    assert.doesNotMatch(siteRoot, /urlState/)
+    const scopeImport = "import { useAsyncScope } from '../lib/urlState.js'"
+    assert.ok(siteRoot.includes(scopeImport))
+    assert.doesNotMatch(siteRoot.replace(scopeImport, ''), /urlState/)
     assert.ok(router.includes('return ' + LB + ' path: window.location.pathname, hash: window.location.hash ' + RB))
     assert.doesNotMatch(urlStateSource, /[\x27\x22]drawing[\x27\x22]/)
   })

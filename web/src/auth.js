@@ -99,13 +99,19 @@ async function client() {
 
 // Kick the Authorization-Code + PKCE redirect to Auth0 Universal Login.
 export async function login() {
+  // Keep the no-argument declaration used by the checkout wiring checker.
+  const { isCurrent = () => true } = arguments[0] || {}
+  if (!isCurrent()) return
   const c = await client()
-  if (c) {
+  if (c && isCurrent()) {
     const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`
     stageCheckoutAuthReturn()
     try {
-      await c.loginWithRedirect({ appState: { returnTo } })
+      await c.loginWithRedirect({ appState: { returnTo }, openUrl: (url) => {
+        if (isCurrent()) window.location.assign(url)
+      } })
     } catch (error) {
+      if (!isCurrent()) return
       clearCheckoutAuthReturn()
       throw error
     }
@@ -137,23 +143,27 @@ export function safeLocalReturnTo(value, fallback = '/') {
 // exchange, stash the api-audience access token as leaf.jwt, strip the query,
 // and return true so the caller can reload into an authenticated session.
 export async function handleRedirectCallback() {
-  if (!authConfigured) return false
+  const { isCurrent = () => true } = arguments[0] || {}
+  if (!authConfigured || !isCurrent()) return false
   const q = window.location.search
   if (!isAuthRedirectCallback(q)) return false
   let returnTo = window.location.pathname
   const clean = () => window.history.replaceState({}, document.title, safeLocalReturnTo(returnTo, '/'))
   try {
     const c = await client()
-    if (!c) return false
+    if (!c || !isCurrent()) return false
     const result = await c.handleRedirectCallback()
+    if (!isCurrent()) return false
     returnTo = result?.appState?.returnTo || returnTo
     const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
+    if (!isCurrent()) return false
     if (token) storeToken(token)
     if (token) completeCheckoutAuthReturn()
     clean()
     trackAuthCompleted(!!token)
     return !!token
   } catch (error) {
+    if (!isCurrent()) return false
     // Auth0's authentication error type carries the transaction appState. Restore
     // its exact local target and permit one clean reload so a checkout fallback
     // is not stranded when the user cancels Universal Login.

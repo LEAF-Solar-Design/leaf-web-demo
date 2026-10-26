@@ -23,21 +23,121 @@ function transferCallback(node = appTree) {
   }
   return null
 }
-function dropHarness(resolveTransfer = resolveVersionTransfer) {
+function namedCallback(name, node = appTree) {
+  if (!node || typeof node.type !== 'string') return null
+  if (node.type === 'VariableDeclarator' && node.id.name === name) return node.init.arguments[0]
+  for (const value of Object.values(node)) {
+    for (const child of Array.isArray(value) ? value : [value]) {
+      if (child && typeof child.type === 'string') {
+        const found = namedCallback(name, child)
+        if (found) return found
+      }
+    }
+  }
+  return null
+}
+function dropHarness(resolveTransfer = resolveVersionTransfer, preview = () => ({ version: ref.seq })) {
   const boardTransferScopeRef = { current: { projectId: ref.projectId, drawingId: ref.drawingId } }
-  const onPreviewVersionTracked = vi.fn(() => ({ version: ref.seq }))
+  const onPreviewVersionTracked = vi.fn(preview)
   const setBoardTransferStatus = vi.fn()
+  let request
+  const beginBoardTransfer = () => {
+    const captured = request = {}
+    return () => request === captured
+  }
   const bindings = {
     openProjectId: ref.projectId, workspace: { drawing_versions: context.versions },
     drawingState: { drawing_id: ref.drawingId }, boardTransferScopeRef,
     boardPreviewRunRef: { current: null }, resolveVersionTransfer: resolveTransfer,
     createPreviewRunner, onPreviewVersionTracked, setBoardTransferStatus,
+    beginBoardTransfer,
   }
   const callback = transferCallback()
   expect(callback).not.toBeNull()
   const drop = new Function(...Object.keys(bindings), `return (${appSource.slice(callback.start, callback.end)})`)(...Object.values(bindings))
-  return { drop, boardTransferScopeRef, onPreviewVersionTracked, setBoardTransferStatus }
+  const back = namedCallback('onBackToHeadTracked')
+  const backToHead = new Function(...Object.keys(bindings), 'closeStartForChange', 'onBackToHead',
+    `return (${appSource.slice(back.start, back.end)})`)(...Object.values(bindings), () => {}, () => {})
+  return { drop, boardTransferScopeRef, onPreviewVersionTracked, setBoardTransferStatus,
+    backToHead, retire: () => { request = null } }
 }
+
+it('retires preview status as soon as Back to head is requested while loading', async () => {
+  let complete
+  const h = dropHarness(resolveVersionTransfer, () => new Promise(resolve => { complete = resolve }))
+  await h.drop(encodeVersionRef(ref))
+  h.backToHead()
+  expect(h.setBoardTransferStatus).toHaveBeenLastCalledWith('')
+  h.setBoardTransferStatus.mockClear()
+  complete({ version: 2 })
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+})
+
+it('ignores an earlier drop when a newer drop completes first', async () => {
+  const completions = []
+  const h = dropHarness(() => new Promise(resolve => { completions.push(resolve) }))
+  const earlier = h.drop('earlier')
+  const newer = h.drop('newer')
+  completions[1]({ ok: false, message: 'Choose a version again.' })
+  await newer
+  h.setBoardTransferStatus.mockClear()
+  completions[0]({ ok: true, seq: 2 })
+  await earlier
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+  expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+})
+
+it.each([true, false])('retires a pending drop on repeated Back to head actions (ok=%s)', async ok => {
+  let complete
+  const h = dropHarness(() => new Promise(resolve => { complete = resolve }))
+  h.backToHead()
+  const pending = h.drop('pending after leaving a preview')
+  h.backToHead()
+  h.setBoardTransferStatus.mockClear()
+  complete({ ok, seq: 2, message: 'Choose a version again.' })
+  await pending
+  await Promise.resolve()
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+  expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+})
+
+it.each([true, false])('ignores drop completion after navigation or unmount (ok=%s)', async ok => {
+  let complete
+  const h = dropHarness(() => new Promise(resolve => { complete = resolve }))
+  const pending = h.drop('pending')
+  h.retire()
+  complete({ ok, seq: 2, message: 'Choose a version again.' })
+  await pending
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+  expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+})
+
+it.each([true, false])('ignores preview status after its scope is retired (success=%s)', async success => {
+  let complete, reject
+  const h = dropHarness(resolveVersionTransfer, () => new Promise((resolve, fail) => { complete = resolve; reject = fail }))
+  await h.drop(encodeVersionRef(ref))
+  expect(h.onPreviewVersionTracked).toHaveBeenCalledTimes(1)
+  h.retire()
+  h.setBoardTransferStatus.mockClear()
+  if (success) complete({ version: 2 }); else reject(new Error('late failure'))
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+})
+
+it('does not retire an accepted preview for another drop while it is loading', async () => {
+  let complete
+  const h = dropHarness(resolveVersionTransfer, () => new Promise(resolve => { complete = resolve }))
+  await h.drop(encodeVersionRef(ref))
+  await h.drop(encodeVersionRef({ ...ref, seq: 3 }))
+  expect(h.onPreviewVersionTracked).toHaveBeenCalledTimes(1)
+  complete({ version: 2 })
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(h.setBoardTransferStatus).toHaveBeenLastCalledWith('Previewing v2 in the drawing')
+})
 
 it('ignores a successful board drop resolved after switching project or drawing', async () => {
   for (const change of [{ projectId: 'project2' }, { drawingId: 'drawing2' }]) {

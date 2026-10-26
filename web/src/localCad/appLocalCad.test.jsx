@@ -423,3 +423,16 @@ it('never starts on an eligible surface without a click or remembered choice', a
   await act(async () => {})
   expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
 })
+
+it('retires a queued remembered reconnect on surface change and unmount', async () => {
+  localStorage.setItem('leaf.localCad.connect', '1')
+  const view = render(<Harness />)
+  view.rerender(<Harness drafting={false} />)
+  await act(async () => {})
+  expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+  view.rerender(<Harness drafting />)
+  view.unmount()
+  await act(async () => {})
+  expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+  expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
+})

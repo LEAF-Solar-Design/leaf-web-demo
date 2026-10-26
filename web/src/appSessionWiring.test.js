@@ -225,9 +225,10 @@ describe('App.jsx session controller adoption', () => {
     expect(callback).toContain('if (stored) { live = false; window.location.reload() }')
     expect(callback).toContain('setTimeout(fail, 20000)')
     expect(callback).toContain('.catch(fail)')
+    expect(callback).toContain('isCurrent: () => live && current()')
     expect(callback).toContain('else fail()')
     expect(callback).toContain("Sign-in couldn't be completed.")
-    expect(stripped).not.toMatch(/handleRedirectCallback\(\)[\s\S]{0,120}sessionActions/)
+    expect(stripped).not.toMatch(/handleRedirectCallback\([^)]*\)[\s\S]{0,120}sessionActions/)
   })
 
   it('ends a session through the controller so sign-out is not read as an expiry', () => {

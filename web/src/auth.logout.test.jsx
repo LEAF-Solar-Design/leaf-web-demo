@@ -5,6 +5,89 @@ import { afterEach, expect, it, vi } from 'vitest'
 
 const DRAWING_KEY = 'leaf.cat.workbench.id.v1'
 let originalAddress, identity
+
+async function scopedAuth(sdk, createClient = async () => sdk) {
+  vi.resetModules()
+  for (const key of ['DOMAIN', 'CLIENT_ID', 'AUDIENCE']) vi.stubEnv(`VITE_AUTH0_${key}`, 'configured')
+  vi.doMock('@auth0/auth0-spa-js', () => ({ createAuth0Client: createClient }))
+  originalAddress = window.location.pathname + window.location.search + window.location.hash
+  window.history.replaceState(null, '', '/app?surface=cad&code=x&state=y#drawing')
+  return import('./auth.js')
+}
+
+it('does not start an Auth0 redirect after the SDK finishes loading in a retired scope', async () => {
+  let complete
+  const sdk = { loginWithRedirect: vi.fn() }
+  const createClient = vi.fn(() => new Promise(resolve => { complete = resolve }))
+  const auth = await scopedAuth(sdk, createClient)
+  let current = true
+  const pending = auth.login({ isCurrent: () => current })
+  await vi.waitFor(() => expect(createClient).toHaveBeenCalledOnce())
+  current = false
+  complete(sdk)
+  await pending
+  expect(sdk.loginWithRedirect).not.toHaveBeenCalled()
+})
+
+it('does not navigate after Auth0 finishes preparing an obsolete redirect', async () => {
+  let complete
+  const sdk = { loginWithRedirect: vi.fn(options => new Promise(resolve => {
+    complete = () => { options.openUrl('https://example.com/authorize'); resolve() }
+  })) }
+  const auth = await scopedAuth(sdk)
+  let current = true
+  const assign = vi.fn()
+  const browserWindow = window
+  vi.stubGlobal('window', new Proxy(browserWindow, {
+    get(target, key) { return key === 'location' ? { pathname: '/app', search: '', hash: '', assign } : Reflect.get(target, key, target) },
+  }))
+  const pending = auth.login({ isCurrent: () => current })
+  await vi.waitFor(() => expect(sdk.loginWithRedirect).toHaveBeenCalledOnce())
+  current = false
+  complete()
+  await pending
+  expect(assign).not.toHaveBeenCalled()
+})
+
+it.each(['exchange', 'token'])('does not store a token or restore old history after scope changes during %s', async step => {
+  let complete
+  const deferred = new Promise(resolve => { complete = resolve })
+  const sdk = {
+    handleRedirectCallback: vi.fn(() => step === 'exchange' ? deferred : Promise.resolve({ appState: { returnTo: '/old' } })),
+    getTokenSilently: vi.fn(() => deferred),
+  }
+  const auth = await scopedAuth(sdk)
+  const stored = vi.fn()
+  const off = auth.subscribeTokenStored(stored)
+  let current = true
+  const pending = auth.handleRedirectCallback({ isCurrent: () => current })
+  await vi.waitFor(() => expect(step === 'exchange' ? sdk.handleRedirectCallback : sdk.getTokenSilently).toHaveBeenCalledOnce())
+  current = false
+  window.history.replaceState(null, '', '/app?surface=solar')
+  const replace = vi.spyOn(window.history, 'replaceState')
+  complete(step === 'exchange' ? { appState: { returnTo: '/old' } } : 'old-token')
+  expect(await pending).toBe(false)
+  expect(replace).not.toHaveBeenCalled()
+  expect(localStorage.getItem('leaf.jwt')).toBeNull()
+  expect(stored).not.toHaveBeenCalled()
+  expect(window.location.search).toBe('?surface=solar')
+  off()
+})
+
+it('does not clean history on an SDK rejection from a retired callback', async () => {
+  let reject
+  const sdk = { handleRedirectCallback: vi.fn(() => new Promise((resolve, fail) => { reject = fail })) }
+  const auth = await scopedAuth(sdk)
+  let current = true
+  const pending = auth.handleRedirectCallback({ isCurrent: () => current })
+  await vi.waitFor(() => expect(sdk.handleRedirectCallback).toHaveBeenCalledOnce())
+  current = false
+  const replace = vi.spyOn(window.history, 'replaceState')
+  reject(new Error('late callback failure'))
+  expect(await pending).toBe(false)
+  expect(replace).not.toHaveBeenCalled()
+})
+
 afterEach(() => {
   cleanup()
   vi.unstubAllGlobals()

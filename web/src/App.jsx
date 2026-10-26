@@ -38,7 +38,7 @@ import useDockRise from './lib/useDockRise.js'
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
-import { pushOnOpen, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
+import { pushOnOpen, useAsyncScope, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
 import { readNavExpanded, writeNavExpanded } from './lib/navExpandedPreference.js'
 import { useLoadingPhase } from './lib/loadingTiming.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
@@ -503,7 +503,10 @@ export default function App() {
   const [activeSurface, setActiveSurface] = useState(() => {
     try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
   })
+  const committedSurfaceRef = useRef(activeSurface)
+  committedSurfaceRef.current = activeSurface
   const onCommit = useCallback((id) => {
+    committedSurfaceRef.current = id
     setActiveSurface(id)
     try {
       const next = searchForProductSurface(window.location.search, id)
@@ -553,16 +556,22 @@ export default function App() {
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
   useEffect(() => {
+    const cancelSurfaceSwitch = () => request(committedSurfaceRef.current)
     const restoreSurface = () => {
+      // Requesting the committed tab clears the transition timer without a commit.
+      cancelSurfaceSwitch()
       const value = new URLSearchParams(window.location.search).get('surface')
       const surface = productSurfaceFromSearch(window.location.search, labStatus)
       if (value && value !== surface) return
-      settle()
       setActiveSurface(surface)
     }
     window.addEventListener('popstate', restoreSurface)
-    return () => window.removeEventListener('popstate', restoreSurface)
-  }, [labStatus, settle])
+    window.addEventListener('leaf:navigate', cancelSurfaceSwitch)
+    return () => {
+      window.removeEventListener('popstate', restoreSurface)
+      window.removeEventListener('leaf:navigate', cancelSurfaceSwitch)
+    }
+  }, [labStatus, request])
   useEffect(() => { setActiveSurface(window.location.pathname.startsWith('/app/lab') && parseLabRoute(window.location.pathname, window.location.search) ? 'lab' : productSurfaceFromSearch(window.location.search, labStatus)) }, [labStatus])
   const [loadErr, setLoadErr] = useState(null)
   const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
@@ -1021,6 +1030,10 @@ export default function App() {
     selectCanonicalVersion,
   } = workspaceController
   useDrawingScopeReset(openProjectId)
+  useLayoutEffect(() => {
+    // A project or drawing change retires any queued product-tab switch.
+    request(committedSurfaceRef.current)
+  }, [openProjectId, REQUESTED_DRAWING_ID, labStatus, request])
   const [projectPane, setProjectPane] = useState(null)
   const [conversationSource, setConversationSource] = useState(null)
   const [conversationDestination, setConversationDestination] = useState(null)
@@ -1035,16 +1048,32 @@ export default function App() {
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
   const boardTransferScopeRef = useRef(null)
+  const beginBoardTransfer = useAsyncScope([openProjectId, drawingState?.drawing_id, REQUESTED_DRAWING_ID, activeSurface])
   useLayoutEffect(() => {
     const previous = boardTransferScopeRef.current
     if (!previous || previous.projectId !== openProjectId || previous.drawingId !== drawingState?.drawing_id
-      || previous.requestedDrawingId !== REQUESTED_DRAWING_ID || (previous.previewing && !previewing)) {
+      || previous.requestedDrawingId !== REQUESTED_DRAWING_ID || previous.surface !== activeSurface || (previous.previewing && !previewing)) {
       boardTransferScopeRef.current = { projectId: openProjectId, drawingId: drawingState?.drawing_id,
-        requestedDrawingId: REQUESTED_DRAWING_ID, previewing }
+        requestedDrawingId: REQUESTED_DRAWING_ID, surface: activeSurface, previewing }
       boardPreviewRunRef.current = null
       setBoardTransferStatus('')
     } else previous.previewing = previewing
-  }, [openProjectId, drawingState?.drawing_id, REQUESTED_DRAWING_ID, previewing])
+  }, [openProjectId, drawingState?.drawing_id, REQUESTED_DRAWING_ID, activeSurface, previewing])
+  useEffect(() => {
+    const retireBoardTransfer = () => {
+      boardTransferScopeRef.current = { ...boardTransferScopeRef.current }
+      boardPreviewRunRef.current = null
+      setBoardTransferStatus('')
+    }
+    window.addEventListener('popstate', retireBoardTransfer)
+    window.addEventListener('leaf:navigate', retireBoardTransfer)
+    return () => {
+      window.removeEventListener('popstate', retireBoardTransfer)
+      window.removeEventListener('leaf:navigate', retireBoardTransfer)
+      boardTransferScopeRef.current = null
+      boardPreviewRunRef.current = null
+    }
+  }, [])
   useEffect(() => {
     setProjectPane(null)
     setBoardJob(null)
@@ -1613,17 +1642,20 @@ export default function App() {
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
   // the token and land a 200 session (no gate). No-op in mock / when unconfigured.
+  const beginSignIn = useAsyncScope([openProjectId, REQUESTED_DRAWING_ID, drawingState?.drawing_id, activeSurface, projectMode])
   useEffect(() => {
     if (mock || !isAuthRedirectCallback()) return
+    const current = beginSignIn()
     let live = true
     const fail = () => {
-      if (!live) return
+      if (!live || !current()) return
       live = false
+      clearTimeout(timer)
       showToast({ text: humanizeError("Sign-in couldn't be completed."), action: { label: 'Sign in', onClick: onLogin } })
     }
     const timer = setTimeout(fail, 20000)
-    Promise.resolve().then(() => handleRedirectCallback()).then((stored) => {
-      if (!live) return
+    Promise.resolve().then(() => handleRedirectCallback({ isCurrent: () => live && current() })).then((stored) => {
+      if (!live || !current()) return
       clearTimeout(timer)
       if (stored) { live = false; window.location.reload() }
       else fail()
@@ -1673,6 +1705,7 @@ export default function App() {
   // on the way to sign-in lands unknown + read-failed, which is fail-closed.
   // Byte-identical to /try's signInWithCheckoutRelease.
   const onLogin = useCallback(async () => {
+    const current = beginSignIn()
     try {
     if (projectModeRef.current) {
       const captured = projectSolarLoginRef.current
@@ -1710,24 +1743,28 @@ export default function App() {
         try {
           await client.releaseCheckout()
         } catch {
+          if (!current() || !stillCurrent()) return
           showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
         }
       }
-      if (!stillCurrent()) throw new Error('Sign-in scope changed')
+      if (!current() || !stillCurrent()) return
     } else if (checkout.actions.getCapability()) {
       try {
         await checkout.actions.release()
       } catch {
+        if (!current()) return
         showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
       }
     }
 
     // ONE sign-in path: both branches end their checkout authority above, then log in here.
-    await login()
+    if (!current()) return
+    await login({ isCurrent: current })
     } catch {
+      if (!current()) return
       showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
     }
-  }, [checkout.actions, showToast])
+  }, [checkout.actions, showToast, beginSignIn])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -2253,6 +2290,10 @@ export default function App() {
   }, [onPreviewVersion, closeStartForChange])
 
   const onBackToHeadTracked = useCallback((...args) => {
+    // Retire the drop immediately, even if its preview has not loaded yet.
+    boardTransferScopeRef.current = { ...boardTransferScopeRef.current }
+    boardPreviewRunRef.current = null
+    setBoardTransferStatus('')
     closeStartForChange()
     return onBackToHead(...args)
   }, [onBackToHead, closeStartForChange])
@@ -4926,19 +4967,22 @@ export default function App() {
               transferProjectId: openProjectId || '',
               transferStatus: boardTransferStatus,
               onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? async (raw) => {
+                // A declined drop must not retire the preview already loading.
+                if (boardPreviewRunRef.current?.isPending()) return
+                const current = beginBoardTransfer()
                 const scope = boardTransferScopeRef.current
                 const result = await resolveVersionTransfer(raw, {
                   projectId: openProjectId,
                   drawingId: drawingState.drawing_id,
                   versions: workspace.drawing_versions || [],
                 })
-                if (boardTransferScopeRef.current !== scope) return
+                if (!current() || boardTransferScopeRef.current !== scope) return
                 if (result.ok) {
                   boardPreviewRunRef.current ??= createPreviewRunner()
                   boardPreviewRunRef.current(result.seq, (seq) => {
-                    if (boardTransferScopeRef.current === scope) return onPreviewVersionTracked(seq)
+                    if (current() && boardTransferScopeRef.current === scope) return onPreviewVersionTracked(seq)
                   }, (message) => {
-                    if (boardTransferScopeRef.current === scope) setBoardTransferStatus(message)
+                    if (current() && boardTransferScopeRef.current === scope) setBoardTransferStatus(message)
                   })
                 } else {
                   setBoardTransferStatus(result.message)
