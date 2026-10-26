@@ -66,11 +66,11 @@ describe('demo and Lab user-facing copy', () => {
     expect(screen.getByText('Sample stringing results')).toBeInTheDocument()
   })
 
-  it('points to the available pricing sheet', async () => {
+  it('explains that pricing is coming soon', async () => {
     render(<LandingCast />)
     await screen.findByText('24')
-    expect(screen.getByText('Free to try. See the Pricing sheet for plan details.')).toBeInTheDocument()
-    expect(document.body).not.toHaveTextContent('Pricing coming soon')
+    expect(screen.getByText('Free to try. Pricing coming soon.')).toBeInTheDocument()
+    expect(document.body).not.toHaveTextContent('See the Pricing sheet for plan details.')
   })
 
   it('describes device setup and build stages in plain words', () => {

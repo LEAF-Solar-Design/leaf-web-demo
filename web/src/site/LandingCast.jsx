@@ -95,7 +95,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
         </div>
         <div className="lp-cta-row">
           <button type="button" className="lp-cta" onClick={onTryDemo}>Try Branch on the sample rooftop</button>
-          <span className="lp-price">Free to try. See the Pricing sheet for plan details.</span>
+          <span className="lp-price">Free to try. Pricing coming soon.</span>
         </div>
         <form onSubmit={registerInterest} aria-label="Register interest">
           <label htmlFor="front-door-email">Want a workspace that uses your own API key?</label>
