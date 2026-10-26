@@ -8,6 +8,7 @@ import {
   stageCheckoutReloadHandoff,
 } from '../../checkoutIdentity.js'
 import createCheckoutController from './createCheckoutController.js'
+import { readActiveScope, subscribeActiveScope } from '../../auth/activeScope.js'
 
 const defaultServices = {
   loadVersions: (drawingId) => getDrawingVersions(false, drawingId),
@@ -104,8 +105,9 @@ export default function useCheckoutController({
   onHolderRemint = null,
   services = defaultServices,
 } = {}) {
+  const activeScope = useSyncExternalStore(subscribeActiveScope, readActiveScope, readActiveScope)
   const controllerRef = useRef(null)
-  if (!controllerRef.current) controllerRef.current = createCheckoutController({ mock, drawingId, holder, services })
+  if (!controllerRef.current) controllerRef.current = createCheckoutController({ mock, drawingId, holder, activeScope, services })
   const controller = controllerRef.current
   // Minted with the store, so it names THIS instance for its whole life. A
   // surface can stamp it and an e2e walk can then prove, at runtime, that one
@@ -174,9 +176,9 @@ export default function useCheckoutController({
   }, [controller])
 
   useEffect(() => {
-    controller.setScope({ mock, drawingId, holder })
+    controller.setScope({ mock, drawingId, holder, activeScope })
     controller.refresh()
-  }, [controller, drawingId, holder, mock])
+  }, [controller, drawingId, holder, mock, activeScope])
 
   useEffect(() => {
     // Deferred: the authority effect starts the claim from whichever branch
@@ -200,7 +202,7 @@ export default function useCheckoutController({
       authorityScopeRef.current = null
       return undefined
     }
-    const scope = `${holder}\u0000${drawingId}`
+    const scope = JSON.stringify([activeScope, holder, drawingId])
     if (authorityScopeRef.current && authorityScopeRef.current !== scope) {
       authorityRef.current?.stop()
       authorityRef.current = null
@@ -244,7 +246,7 @@ export default function useCheckoutController({
     // release gap; explicit checkout release and scope changes stop it.
     return undefined
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [controller, drawingId, holder, mock, services, startClaim, abandonInheritedHolder])
+  }, [controller, drawingId, holder, mock, activeScope, services, startClaim, abandonInheritedHolder])
 
   useEffect(() => {
     if (mock || !drawingId || !holder) return undefined
@@ -286,7 +288,7 @@ export default function useCheckoutController({
         return safeStale
       }
       if (result?.acquired && result.checkout_capability && drawingId && holder) {
-        const scope = `${holder}\u0000${drawingId}`
+        const scope = JSON.stringify([activeScope, holder, drawingId])
         authorityRef.current?.stop()
         acquiredAuthority = await secureTakenCheckoutAuthority({
           controller, result, drawingId, holder, services, scopeGeneration: scopeGenAtStart,
@@ -324,7 +326,7 @@ export default function useCheckoutController({
       release,
       getCapability: controller.getCapability,
     }
-  }, [controller, drawingId, holder])
+  }, [controller, drawingId, holder, activeScope])
 
   return { ...state, instanceId: instanceIdRef.current, actions }
 }

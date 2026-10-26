@@ -6,7 +6,8 @@ import CheckoutControls from '../../components/CheckoutControls.jsx'
 import AuthorPanel from '../../components/AuthorPanel.jsx'
 import NavRail from '../../site/NavRail.jsx'
 import { createCheckoutController } from './createCheckoutController.js'
-import { secureTakenCheckoutAuthority } from './useCheckoutController.js'
+import useCheckoutController, { secureTakenCheckoutAuthority } from './useCheckoutController.js'
+import { setStoredOrgId } from '../../api.js'
 import useJobController, { PENDING_RUN_KEY, readPendingRun, savePendingRun } from '../useJobController.js'
 import * as auth from '../../auth.js'
 
@@ -15,6 +16,41 @@ afterEach(() => { cleanup(); localStorage.clear(); vi.restoreAllMocks() })
 const services = () => ({ loadVersions: vi.fn().mockResolvedValue({ checkout: null }),
   take: vi.fn(), release: vi.fn() })
 const controllerFor = (api) => createCheckoutController({ drawingId: 'drawing', holder: 'holder', services: api })
+
+it('voids an in-flight checkout mutation on a same-tab org switch with the same token and drawing', async () => {
+  localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'account-a' }))}.signature`)
+  setStoredOrgId('org1')
+  const api = services()
+  let rejectTake
+  api.take.mockImplementation(() => new Promise((resolve, reject) => { rejectTake = reject }))
+  const hook = renderHook(() => useCheckoutController({ drawingId: 'drawing', holder: 'holder', services: api }))
+  await act(async () => {})
+  let oldTake
+  act(() => { oldTake = hook.result.current.actions.take() })
+  expect(hook.result.current.busy).toBe(true)
+  await act(async () => { setStoredOrgId('org2') })
+  expect(hook.result.current.busy).toBe(false)
+  expect(hook.result.current.error).toBeNull()
+  const reads = api.loadVersions.mock.calls.length
+  await act(async () => { setStoredOrgId('org2') })
+  expect(api.loadVersions).toHaveBeenCalledTimes(reads)
+  await act(async () => { rejectTake(new Error('Failed to fetch')); await oldTake })
+  expect(hook.result.current.busy).toBe(false)
+  expect(hook.result.current.error).toBeNull()
+  expect(api.loadVersions).toHaveBeenCalledTimes(reads)
+})
+
+it('refreshes saved runs on a same-tab organization change', () => {
+  localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'account-a' }))}.signature`)
+  setStoredOrgId('org1')
+  savePendingRun('tool-a', { value: 1 })
+  const hook = renderHook(() => useJobController({ storage: localStorage, readsPaused: true }))
+  expect(hook.result.current.pendingRun?.tool).toBe('tool-a')
+  act(() => setStoredOrgId('org2'))
+  expect(hook.result.current.pendingRun).toBeNull()
+  act(() => setStoredOrgId('org1'))
+  expect(hook.result.current.pendingRun?.tool).toBe('tool-a')
+})
 
 it('retains a humanized Take failure after refreshing the edit lock', async () => {
   const api = services()

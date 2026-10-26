@@ -29,6 +29,7 @@ import { track, trackErrorShown } from './telemetry.js'
 import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
+import { notifyActiveScopeChanged } from './auth/activeScope.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
@@ -124,6 +125,7 @@ export function noteUnauthorized(response, source = 'api', sentAuth = undefined,
   try { stored = localStorage.getItem(AUTH_KEY) } catch { /* storage unavailable */ }
   if (!sentToken || !stored || sentToken !== stored) return response
   try { localStorage.removeItem(AUTH_KEY) } catch { /* storage unavailable */ }
+  notifyActiveScopeChanged()
   for (const listener of unauthorizedListeners) {
     try { listener(source) } catch { /* observers cannot change transport behavior */ }
   }
@@ -476,6 +478,7 @@ export function getStoredOrgId() {
 }
 export function setStoredOrgId(id) {
   try { if (id) localStorage.setItem(ORG_KEY, id); else localStorage.removeItem(ORG_KEY) } catch { /* noop */ }
+  notifyActiveScopeChanged()
 }
 // X-Org-Id header for the stored org (or {} when none — a no-op off-workspace).
 function orgHeaders(orgId) {

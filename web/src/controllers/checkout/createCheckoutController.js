@@ -83,7 +83,7 @@ export function deriveCheckout(
   }
 }
 
-export function createCheckoutController({ mock = false, drawingId = null, holder = null, services, now = Date.now } = {}) {
+export function createCheckoutController({ mock = false, drawingId = null, holder = null, activeScope = null, services, now = Date.now } = {}) {
   if (!services) throw new TypeError('createCheckoutController requires services')
   let state = {
     mock: !!mock,
@@ -99,6 +99,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
   // Issued once by a successful take. It is a bearer credential, so keep it
   // outside snapshots and React state, and never persist it.
   let capability = null
+  let currentActiveScope = activeScope
   let disposed = false
   let refreshSeq = 0
   // Monotonic per setScope CHANGE: async work fences itself on this so a
@@ -216,7 +217,9 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
       const changed =
         next.drawingId !== state.drawingId ||
         next.holder !== state.holder ||
+        (next.activeScope ?? null) !== currentActiveScope ||
         !!next.mock !== state.mock
+      currentActiveScope = next.activeScope ?? null
       if (changed) refreshSeq += 1
       if (changed) capability = null
       if (changed) scopeGeneration += 1

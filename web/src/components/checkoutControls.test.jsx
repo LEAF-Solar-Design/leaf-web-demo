@@ -3,6 +3,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import CheckoutControls from './CheckoutControls.jsx'
 import { DrawingIdentityProvider, useDrawingIdentity } from '../drawing/DrawingIdentityProvider.jsx'
+import { setStoredOrgId } from '../api.js'
 
 afterEach(cleanup)
 
@@ -54,7 +55,7 @@ describe('checkout controls account changes', () => {
   afterEach(() => localStorage.removeItem('leaf.jwt'))
 
   it.each([true, false])('handles a pending refusal with account changed: %s', async (changeAccount) => {
-    localStorage.setItem('leaf.jwt', 'account-a')
+    localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ sub: 'account-a' }))}.signature`)
     let rejectTake
     const onTake = vi.fn(() => new Promise((resolve, reject) => { rejectTake = reject }))
     const view = render(<CheckoutControls drawingKey="drawing-d" onTake={onTake} />)
@@ -65,7 +66,7 @@ describe('checkout controls account changes', () => {
 
     if (changeAccount) {
       act(() => {
-        localStorage.setItem('leaf.jwt', 'account-b')
+        localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ sub: 'account-b' }))}.signature`)
         window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt' }))
       })
     }
@@ -82,6 +83,30 @@ describe('checkout controls account changes', () => {
     } else {
       expect(screen.getByRole('alert')).toBeTruthy()
     }
+  })
+})
+
+describe('checkout controls organization changes', () => {
+  afterEach(() => { localStorage.removeItem('leaf.jwt'); localStorage.removeItem('leaf.org_id') })
+
+  it.each([true, false])('handles a deferred Take rejection with org changed: %s', async (changeOrg) => {
+    const token = `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'account-a', org_id: 'org1' }))}.signature`
+    localStorage.setItem('leaf.jwt', token)
+    setStoredOrgId('org1')
+    let rejectTake
+    render(<CheckoutControls drawingKey="drawing-d" onTake={() => new Promise((resolve, reject) => { rejectTake = reject })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Take edit lock' }))
+    expect(screen.getByRole('button').disabled).toBe(true)
+
+    if (changeOrg) act(() => setStoredOrgId('org2'))
+    expect(localStorage.getItem('leaf.jwt')).toBe(token)
+    expect(screen.getByRole('button').disabled).toBe(!changeOrg)
+    expect(screen.queryByRole('alert')).toBeNull()
+
+    await act(async () => { rejectTake(new Error('Failed to fetch')) })
+    expect(screen.getByRole('button').disabled).toBe(false)
+    if (changeOrg) expect(screen.queryByRole('alert')).toBeNull()
+    else expect(screen.getByRole('alert')).toBeTruthy()
   })
 })
 

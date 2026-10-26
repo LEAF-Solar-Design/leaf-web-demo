@@ -10,6 +10,7 @@ import {
 } from '../api.js'
 import { track } from '../telemetry.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 
 export const INFLIGHT_JOB_KEY = 'leaf.inflightJob'
 
@@ -68,13 +69,7 @@ export function clearPendingRun(storage = browserStorage()) {
 }
 
 export function pendingRunAccount(storage = browserStorage()) {
-  try {
-    const token = storage?.getItem('leaf.jwt')
-    if (!token) return null
-    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
-    const org = storage?.getItem('leaf.org_id') || ''
-    return typeof payload.sub === 'string' && payload.sub ? JSON.stringify([payload.iss || '', payload.sub, org]) : null
-  } catch { return null }
+  return readActiveScope(storage)
 }
 
 // Anonymous records are browser-wide, so every signed-out tab may see them.
@@ -239,12 +234,12 @@ export default function useJobController({
     })
     const refresh = subscribeTokenStored(refreshSaved)
     const unauthorized = subscribeUnauthorized(refreshSaved)
+    const activeScope = subscribeActiveScope(refreshSaved)
     const onStorage = event => {
       if (event.key === PENDING_RUN_LOGOUT_KEY || event.key === null) clearSaved()
-      else if (event.key === 'leaf.jwt' || event.key === 'leaf.org_id') refreshSaved()
     }
     window.addEventListener('storage', onStorage)
-    return () => { clear(); refresh(); unauthorized(); window.removeEventListener('storage', onStorage) }
+    return () => { clear(); refresh(); unauthorized(); activeScope(); window.removeEventListener('storage', onStorage) }
   }, [publishPendingRun])
 
   const sequenceRef = useRef(0)
