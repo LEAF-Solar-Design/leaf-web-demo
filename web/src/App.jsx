@@ -142,7 +142,7 @@ import { useSurfaceContract } from './site/useSurfaceContract.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
 // session (useSessionController defaults endSession to auth.js logout).
-import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
+import { authConfigured, login as authLogin, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
@@ -529,8 +529,17 @@ export default function App() {
     committedSurfaceRef.current = id
     setActiveSurface(id)
     try {
-      const next = searchForProductSurface(window.location.search, id)
-      window.history.pushState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
+      const labPath = /^\/app\/lab(?:\/|$)/.test(window.location.pathname)
+      const pathname = id === 'lab' ? (labPath ? window.location.pathname : '/app/lab')
+        : labPath ? '/app' : window.location.pathname
+      const next = id === 'lab' ? (() => {
+        const params = new URLSearchParams(window.location.search)
+        params.delete('surface')
+        params.delete('view')
+        const query = params.toString()
+        return query ? `?${query}` : ''
+      })() : searchForProductSurface(window.location.search, id)
+      window.history.pushState(null, '', `${pathname}${next}${window.location.hash}`)
     } catch { /* URL sync is a convenience; state alone still switches the tab */ }
   }, [])
   const { phase, request, settle, exitPending } = useStudioTransition({
@@ -1735,9 +1744,10 @@ export default function App() {
   // capability. The controller's release does better than that: it re-reads
   // /versions, so the control shows the SERVER's answer, and a read that 401s
   // on the way to sign-in lands unknown + read-failed, which is fail-closed.
-  // Byte-identical to /try's signInWithCheckoutRelease.
+  // Like /try's signInWithCheckoutRelease, release before starting Auth0.
   const onLogin = useCallback(async () => {
     const current = beginSignIn()
+    const login = () => authLogin({ isCurrent: current })
     try {
     if (projectModeRef.current) {
       const captured = projectSolarLoginRef.current
@@ -1793,7 +1803,7 @@ export default function App() {
 
     // ONE sign-in path: both branches end their checkout authority above, then log in here.
     if (!current()) return
-    await login({ isCurrent: current })
+    await login()
     } catch {
       if (!current()) return
       showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })

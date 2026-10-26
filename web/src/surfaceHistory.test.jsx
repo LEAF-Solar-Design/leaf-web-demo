@@ -55,7 +55,7 @@ function Harness({ animated = false, project = 'a' }) {
     return Function('setActiveSurface', 'appSurfaceFromLocation', 'labStatus', 'request', 'committedSurfaceRef',
       `return (${text(restore.arguments[0])})()`)(setActiveSurface, appSurfaceFromLocation, undefined, request, committedSurfaceRef)
   }, [request])
-  return <><output>{surface}</output><button onClick={() => request('solar')}>Solar</button><button onClick={() => request('browser')}>Browser</button></>
+  return <><output>{surface}</output><button onClick={() => request('solar')}>Solar</button><button onClick={() => request('browser')}>Browser</button><button onClick={() => request('cad')}>CAD</button><button onClick={() => request('lab')}>Lab</button></>
 }
 afterEach(() => {
   cleanup(); vi.restoreAllMocks(); vi.useRealTimers()
@@ -151,4 +151,42 @@ it('restores the Lab deep link without a surface query after switching to Solar 
   expect(window.location.search).toBe('')
   expect(screen.getByText('lab')).toBeTruthy()
   expect(screen.queryByText('cad')).toBeNull()
+})
+
+it('switches a Lab deep link to Solar on an app URL that restores after reload', () => {
+  window.history.replaceState(null, '', '/app/lab/graph?drawing=roof#design')
+  const push = vi.spyOn(window.history, 'pushState')
+  const view = render(<Harness />)
+  fireEvent.click(screen.getByText('Solar'))
+  expect(push).toHaveBeenLastCalledWith(null, '', '/app?drawing=roof&surface=solar#design')
+  expect(appSurfaceFromLocation(window.location)).toBe('solar')
+  view.unmount()
+  render(<Harness />)
+  expect(screen.getByText('solar')).toBeTruthy()
+})
+
+it('switches a Lab deep link to CAD on an app URL that restores after reload', () => {
+  window.history.replaceState(null, '', '/app/lab/widgets')
+  const push = vi.spyOn(window.history, 'pushState')
+  const view = render(<Harness />)
+  fireEvent.click(screen.getByText('CAD'))
+  expect(push).toHaveBeenLastCalledWith(null, '', '/app?surface=cad')
+  expect(appSurfaceFromLocation(window.location)).toBe('cad')
+  view.unmount()
+  render(<Harness />)
+  expect(screen.getByText('cad')).toBeTruthy()
+})
+
+it('switches back to a Lab path that restores after reload', () => {
+  window.history.replaceState(null, '', '/app/lab/graph?drawing=roof&view=graph#design')
+  const view = render(<Harness />)
+  fireEvent.click(screen.getByText('Solar'))
+  fireEvent.click(screen.getByText('Lab'))
+  expect(window.location.pathname).toBe('/app/lab')
+  expect(window.location.search).toBe('?drawing=roof')
+  expect(window.location.hash).toBe('#design')
+  expect(appSurfaceFromLocation(window.location)).toBe('lab')
+  view.unmount()
+  render(<Harness />)
+  expect(screen.getByText('lab')).toBeTruthy()
 })

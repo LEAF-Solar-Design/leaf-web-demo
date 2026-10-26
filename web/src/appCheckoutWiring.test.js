@@ -94,6 +94,21 @@ const RETIRED = [
 ]
 
 describe('App.jsx checkout controller adoption', () => {
+  it('keeps checkout release before login in the native CI callback extraction', () => {
+    const body = (appSource.match(/const onLogin = useCallback\(async[\s\S]*?\n  \}, \[[^\]]*\]\)/) || [null])[0]
+    expect(body).not.toBeNull()
+    const release = body.indexOf('checkout.actions.release()')
+    const login = body.indexOf('await login()')
+    expect(release).toBeGreaterThanOrEqual(0)
+    expect(login).toBeGreaterThan(release)
+  })
+
+  it('keeps the scope guard on the no-argument login used by native CI', () => {
+    const body = appText(loginCallback())
+    expect(body).toContain('const login = () => authLogin({ isCurrent: current })')
+    expect(body).toContain('if (!current()) return\n    await login()')
+  })
+
   it('mounts exactly one checkout controller', () => {
     // SiteRoot renders the console (scene 'app') and StageScene -> ToolCast
     // (scenes site|tool) in mutually exclusive arms of one ternary, so the
@@ -182,7 +197,7 @@ describe('App.jsx checkout controller adoption', () => {
     expect(appText(release.block.body[0])).toBe('await checkout.actions.release()')
     expect(appText(release.handler)).toContain('showToast')
     expect(appText(statements[1])).toBe('if (!current()) return')
-    expect(appText(statements[2])).toBe('await login({ isCurrent: current })')
+    expect(appText(statements[2])).toBe('await login()')
   })
 
   it.each([
@@ -206,7 +221,7 @@ describe('App.jsx checkout controller adoption', () => {
     const checkout = { actions: { getCapability: vi.fn(() => 'capability'), release } }
     const login = vi.fn().mockResolvedValue(undefined)
     const showToast = vi.fn()
-    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
+    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'authLogin',
       'sameSolarDrawingBinding', 'showToast', 'humanizeError', 'beginSignIn', `return (${appText(loginCallback())})`)(
       { current: projectMode }, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, showToast, String, () => () => true)
 
@@ -266,7 +281,7 @@ describe('App.jsx checkout controller adoption', () => {
     const capability = vi.fn(() => 'legacy capability')
     const checkout = { actions: { getCapability: capability, release: legacyRelease } }
     const login = vi.fn(async () => { sequence.push('login') })
-    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
+    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'authLogin',
       'sameSolarDrawingBinding', 'showToast', 'humanizeError', 'beginSignIn', `return (${appText(loginCallback())})`)(
       projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, vi.fn(), String, () => () => true)
     const binding = { kind: 'project',
@@ -410,7 +425,7 @@ describe('App.jsx checkout controller adoption', () => {
       const projectSolarLoginRef = { current: { projectSolar: owner, generation: 7, controller } }
       const login = vi.fn(async () => {})
       const checkout = { actions: { getCapability: vi.fn(() => null), release: vi.fn(async () => {}) } }
-      const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
+      const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'authLogin',
         'sameSolarDrawingBinding', 'showToast', 'humanizeError', 'beginSignIn', `return (${appText(loginCallback())})`)(
         projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, vi.fn(), String, () => () => true)
       const pending = onLogin()

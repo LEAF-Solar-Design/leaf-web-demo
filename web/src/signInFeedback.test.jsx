@@ -42,7 +42,7 @@ it('shows feedback when starting sign-in fails', async () => {
   function Harness() {
     const [message, setMessage] = useState('')
     const beginSignIn = useAsyncScope([])
-    const onLogin = Function('projectModeRef', 'checkout', 'login', 'showToast', 'humanizeError', 'beginSignIn',
+    const onLogin = Function('projectModeRef', 'checkout', 'authLogin', 'showToast', 'humanizeError', 'beginSignIn',
       `return (${loginBody})`)({ current: false }, { actions: { getCapability: () => null } },
       login, ({ text }) => setMessage(text), humanizeError, beginSignIn)
     return <><button onClick={onLogin}>Sign in</button><p role="alert">{message}</p></>
@@ -158,7 +158,7 @@ function LoginHarness({ scope = 'first', release, login, showToast, retry = fals
   const beginSignIn = useAsyncScope([scope])
   const onClick = retry
     ? Function('beginSignIn', 'login', 'setAuthFailure', 'humanizeError', 'callbackPathRef', `return (${retryBody})`)(beginSignIn, login, showToast, humanizeError, { current: scope })
-    : Function('projectModeRef', 'checkout', 'login', 'showToast', 'humanizeError', 'beginSignIn', `return (${loginBody})`)(
+    : Function('projectModeRef', 'checkout', 'authLogin', 'showToast', 'humanizeError', 'beginSignIn', `return (${loginBody})`)(
       { current: false }, { actions: { getCapability: () => true, release } }, login, showToast, humanizeError, beginSignIn)
   return <button onClick={onClick}>Sign in</button>
 }
