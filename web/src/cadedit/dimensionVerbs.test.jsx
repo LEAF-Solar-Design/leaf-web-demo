@@ -210,7 +210,7 @@ describe('W4g-7b-04c-8: dimension style names obey the plan contract before the 
     const select = screen.getByRole('combobox', { name: 'ribbon style' })
     expect([...select.options].map((option) => option.value)).toContain('Стандарт')
     fireEvent.change(select, { target: { value: 'Стандарт' } })
-    const refusal = 'Dimension refused: dimension style Стандарт carries characters the plan contract does not admit'
+    const refusal = 'Dimension refused: dimension style Стандарт has unsupported characters. Choose another style.'
     expect(buildCreatePayload('dimLinear', { ...points, style: 'Стандарт' }, [], ['Стандарт'])).toEqual({ refusal })
     expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe(refusal)
     expect(screen.getByTestId('cockpit-prompt-run').disabled).toBe(true)
