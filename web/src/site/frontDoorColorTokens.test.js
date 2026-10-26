@@ -25,11 +25,39 @@ describe('front door exact Stage color roles (LS-T1)', () => {
     expect(css).not.toMatch(/(?:^|[;{}])\s*--leaf-(?:ink|ink-muted|error|cad-select-warm)\s*:/)
   })
 
+  it('converges the old neutrals and greens onto Stage roles outside Paper scopes', () => {
+    for (const [property, value] of declarations) {
+      expect(value, `landing.css ${property}: ${value}`)
+        .not.toMatch(/#(?:0a0a0a|050605|0c0c0e|0d100e|0f0f11|101013|111113|141416|151b18|16181d|17171a|18181b|1c1c20|1f1f23|27272a|fff|ffffff|e4e4e7|949494|71717a|22c55e|4ade80)\b/i)
+    }
+  })
+
+  it('uses the semantic success and primary roles in the Stage alias block', () => {
+    const aliasRules = stageRules.filter(({ selector, body }) => selector === '.stage-root'
+      && /(?:^|;)\s*--background\s*:/.test(body))
+    expect(aliasRules).toHaveLength(1)
+    expect(aliasRules[0].body).toMatch(/(?:^|;)\s*--status-success\s*:\s*var\(--leaf-ok\)\s*;/)
+    expect(aliasRules[0].body).toMatch(/(?:^|;)\s*--primary\s*:\s*var\(--leaf-accent\)\s*;/)
+  })
+
+  it('has no reciprocal custom property aliases anywhere in the file', () => {
+    const aliases = [...css.matchAll(/(?:^|[;{}])\s*(--[\w-]+)\s*:\s*var\(\s*(--[\w-]+)\s*\)\s*(?=;|})/g)]
+      .map(([, property, target]) => [property, target])
+    expect(aliases.length).toBeGreaterThan(0)
+    const edges = new Set(aliases.map(([property, target]) => `${property}:${target}`))
+    for (const [property, target] of aliases) {
+      if (!target.startsWith('--leaf-')) continue
+      expect(edges.has(`${target}:${property}`), `landing.css ${property} and ${target} form an alias cycle`).toBe(false)
+    }
+  })
+
   it('preserves the light alias block', () => {
     const lightRules = rules.filter(({ selector }) => selector === '.leaf-light')
     expect(lightRules).toHaveLength(1)
     expect(lightRules[0].body).toMatch(/(?:^|;)\s*--background\s*:\s*#e9e7e0\s*;/)
     expect(lightRules[0].body).toMatch(/(?:^|;)\s*--card\s*:\s*#ffffff\s*;/)
+    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--border\s*:\s*#d6d4cb\s*;/)
+    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--primary\s*:\s*#1e6b45\s*;/)
   })
 
   it('reads the muted ink role in at least forty declarations', () => {
