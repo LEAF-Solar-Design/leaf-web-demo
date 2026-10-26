@@ -225,7 +225,10 @@ it('R11-11 both project hosts preview and hand off one frozen R7 intent on the c
     const query = `drawing_id=${b.drawing_id}&project_id=${b.project_id}&input_version_id=${b.input_version_id}`
     const packed = JSON.stringify({ [PROJECT_EQUIPMENT_TOOL]: { params: intent.params,
       catalog_digest: projectEquipmentDigest, idempotency_key: intent.idempotencyKey } })
-    expect(url).toBe('/api/capabilities?' + query + '&project_runs=' + encodeURIComponent(packed))
+    expect(url).toBe('/api/capabilities?' + query)
+    expect(options.method).toBe('POST')
+    expect(new URL(url, 'https://synthetic.invalid').searchParams.has('project_runs')).toBe(false)
+    expect(JSON.parse(options.body)).toEqual({ project_runs: JSON.parse(packed) })
     expect(options.headers).toMatchObject({ Authorization: 'Bearer synthetic', 'X-Org-Id': b.organization_id,
       'X-Tenant-Id': b.organization_id, 'X-Project-Id': b.project_id, 'X-Checkout-Capability': 'lco1.' + 'c'.repeat(64) })
     expect(h.fetchImpl.mock.calls.find(([path]) => path.includes('/context?'))[0])
@@ -555,7 +558,10 @@ it('R11-24 empty equipment IDs and array order survive preparation preview and i
   await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
   expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
   expect(h.props.onProjectSubmit.mock.calls[1][0]).toBe(intent)
-  const packed = JSON.parse(new URL('https://synthetic.invalid' + equipmentPreviewCalls(h).at(-1)[0]).searchParams.get('project_runs'))
+  const [previewUrl, previewOptions] = equipmentPreviewCalls(h).at(-1)
+  expect(previewOptions.method).toBe('POST')
+  expect(new URL(previewUrl, 'https://synthetic.invalid').searchParams.has('project_runs')).toBe(false)
+  const packed = JSON.parse(previewOptions.body).project_runs
   expect(packed[PROJECT_EQUIPMENT_TOOL].params.equipment).toEqual(equipment)
   expect(Object.keys(packed[PROJECT_EQUIPMENT_TOOL].params).sort()).toEqual(['assignments', 'drawing_id', 'equipment', 'expected_rev'])
   // This is transport preservation; no server creation or execution is inferred from the fixture.
