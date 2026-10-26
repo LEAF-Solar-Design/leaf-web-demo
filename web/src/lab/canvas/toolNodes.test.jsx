@@ -82,6 +82,7 @@ describe('Lab tools transport and registry', () => {
   it('drops invalid tool fields and manifest identity or version mismatches', async () => {
     const invalid = [null, {}, { ...available, id: '' }, { ...available, version: ' ' },
       { ...available, title: null }, { ...available, available: 1 }, { ...available, reason: undefined },
+      { ...available, source: 42 }, { ...available, source: 'other' }, { ...available, effect: null }, { ...available, effect: '' },
       { ...available, manifest: [] }, { ...available, manifest: 'manifest' },
       { ...available, manifest: { ...toolManifest, id: 'other' } },
       { ...available, manifest: { ...toolManifest, version: { semver: '9.0.0' } } }]
@@ -155,6 +156,19 @@ describe('Tools palette', () => {
     expect(within(screen.getByRole('region', { name: 'Strategies' })).queryByRole('button', { name: available.title })).toBeNull()
     expect(within(screen.getByRole('region', { name: 'Strategies' })).queryByRole('button', { name: toolManifest.title })).toBeNull()
     expect(group).toHaveAttribute('data-palette-tools')
+  })
+
+  it('never hides a built-in block behind a tool that reuses its id', async () => {
+    const base = manifests[0]
+    const colliding = { ...available, id: base.id, version: '9.9.9', title: 'Colliding tool',
+      manifest: { ...toolManifest, id: base.id, version: { semver: '9.9.9', code_sha256: 'b'.repeat(64) } } }
+    const entries = withTools(registry, [colliding])
+    expect(entries[`${base.id}@9.9.9`]).toBeUndefined()
+    const { container } = render(<Palette entries={entries} tools={[colliding]} onAdd={vi.fn()} onLoadTools={async () => ({ state: 'on', tools: [colliding], truncated: false })} />)
+    await openTools()
+    const visible = () => [...container.querySelectorAll('button')].filter(button => !button.closest('[data-palette-tools]'))
+    expect(visible().length).toBe([...render(<Palette entries={registry} onAdd={vi.fn()} />).container.querySelectorAll('button')].length)
+    expect(within(screen.getAllByLabelText('Tools')[0]).queryByRole('button', { name: 'Colliding tool' })).toBeNull()
   })
 
   it('omits Tools without a loader callback, even when tools are supplied', () => {

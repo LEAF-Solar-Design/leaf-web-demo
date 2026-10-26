@@ -20,9 +20,12 @@ export default function Palette({ entries, onAdd, searchRef, tools = [], onLoadT
       if (active.current) setToolsState(result?.state === 'on' ? 'on' : 'unavailable')
     }).catch(() => { if (active.current) setToolsState('unavailable') })
   }
-  const toolIds = new Set(tools.map(tool => tool.id))
-  const shown = Object.values(entries).filter(manifest => !toolIds.has(manifest.id) && `${blockLabel(manifest)} ${laneLabel(manifest.lane)} ${strategySection(manifest) || ''}`.toLowerCase().includes(query.toLowerCase()))
-  const shownTools = tools.filter(tool => `${tool.title} ${tool.id}`.toLowerCase().includes(query.toLowerCase()))
+  // A tool whose id names a non-tool entry never hides it: base entries win (withTools).
+  const toolManifests = new Set(tools.map(tool => tool.manifest).filter(Boolean))
+  const baseIds = new Set(Object.values(entries).filter(manifest => !toolManifests.has(manifest)).map(manifest => manifest.id))
+  const usableTools = tools.filter(tool => !baseIds.has(tool.id))
+  const shown = Object.values(entries).filter(manifest => !toolManifests.has(manifest) && `${blockLabel(manifest)} ${laneLabel(manifest.lane)} ${strategySection(manifest) || ''}`.toLowerCase().includes(query.toLowerCase()))
+  const shownTools = usableTools.filter(tool => `${tool.title} ${tool.id}`.toLowerCase().includes(query.toLowerCase()))
   const entry = (manifest, label = blockLabel(manifest)) => <button type="button" draggable key={manifest.id} onClick={() => onAdd(manifest)}
     onDragStart={event => { event.dataTransfer.setData(BLOCK_MIME, manifest.id); event.dataTransfer.effectAllowed = 'copy' }}>
     {label}

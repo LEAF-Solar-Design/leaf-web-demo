@@ -5,6 +5,8 @@ function validTool(tool) {
   return tool && typeof tool.id === 'string' && Boolean(tool.id.trim())
     && typeof tool.version === 'string' && Boolean(tool.version.trim())
     && typeof tool.title === 'string' && typeof tool.available === 'boolean'
+    && (tool.source === 'shipped' || tool.source === 'tenant')
+    && typeof tool.effect === 'string' && tool.effect.length > 0 && tool.effect.length <= 32
     && (tool.reason === null || typeof tool.reason === 'string')
     && (tool.manifest === null || (typeof tool.manifest === 'object' && !Array.isArray(tool.manifest)
       && tool.manifest.id === tool.id && tool.manifest.version?.semver === tool.version))
