@@ -44,6 +44,67 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  const sizingModules = () => ({ schema_version: 1,
+    catalog: { source: 'pvlib.CeCMod', pvlib_version: '0.13', count: 1, sha256: 'a'.repeat(64) },
+    modules: [{ key: 'Canadian_Solar_CS6U', stc_w: 330, n_s: 72, v_oc_ref: null, length_m: 1.9, width_m: null }],
+    truncated: false })
+
+  it('searches the sizing catalog with trimmed query, default limit and guarded auth', async () => {
+    const data = sizingModules(), { client, fetchImpl } = setup(data)
+    expect(await client.searchSizingModules({ q: ' cs6u ', grantRef: 'grant_1' })).toMatchObject({ ok: true, data })
+    expect(url(fetchImpl)).toBe('https://api.test/api/solar/sizing-modules?q=cs6u&limit=20&grant_ref=grant_1')
+    expect(init(fetchImpl)).toMatchObject({ method: 'GET', cache: 'no-store',
+      headers: { Authorization: 'Bearer synthetic', 'X-Org-Id': O, 'X-Project-Id': P } })
+    await client.searchSizingModules({ q: 'CS6U 330+', limit: 50, grantRef: 'grant-2' })
+    expect(new URL(url(fetchImpl)).searchParams.get('q')).toBe('CS6U 330+')
+    expect(new URL(url(fetchImpl)).searchParams.get('limit')).toBe('50')
+  })
+
+  it('aborts a sizing search through the caller signal and refuses stale scopes', async () => {
+    const { client, fetchImpl } = setup()
+    fetchImpl.mockImplementation(() => new Promise(() => {}))
+    const controller = new AbortController()
+    const pending = client.searchSizingModules({ q: 'cs6u', grantRef: 'grant_1', signal: controller.signal })
+    expect(init(fetchImpl).signal.aborted).toBe(false)
+    controller.abort()
+    expect(init(fetchImpl).signal.aborted).toBe(true)
+    expect((await pending).reason).toBe('SIP_R7_ABORTED')
+    const stale = client.searchSizingModules({ q: 'cs6u', grantRef: 'grant_1' })
+    client.setScope(binding, 'session-2')
+    expect((await stale).reason).toBe('SIP_R7_SCOPE_STALE')
+  })
+
+  it('refuses invalid sizing search arguments before fetching', async () => {
+    const { client, fetchImpl } = setup(sizingModules())
+    const good = { q: 'cs6u', grantRef: 'grant_1' }
+    for (const changes of [{ q: '' }, { q: ' a ' }, { q: 'x'.repeat(65) }, { q: 12 },
+      { limit: 0 }, { limit: 51 }, { limit: 1.5 }, { limit: '20' }, { limit: null },
+      { grantRef: '' }, { grantRef: 'g'.repeat(65) }, { grantRef: 'grant\n' }, { grantRef: 'bad ref' }, { grantRef: null }]) {
+      expect((await client.searchSizingModules({ ...good, ...changes })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect((await client.searchSizingModules(null)).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect((await client.searchSizingModules({ q: 'ab', limit: 1, grantRef: 'g'.repeat(64) })).ok).toBe(true)
+    expect((await client.searchSizingModules({ q: 'x'.repeat(64), grantRef: 'g' })).ok).toBe(true)
+  })
+
+  it('refuses malformed sizing module bodies and preserves HTTP refusals', async () => {
+    const { client, fetchImpl } = setup()
+    const base = sizingModules()
+    for (const data of [{ ...base, schema_version: 2 }, { ...base, catalog: { ...base.catalog, source: 'other' } },
+      { ...base, modules: [{ ...base.modules[0], stc_w: '330' }] },
+      { ...base, modules: [{ ...base.modules[0], width_m: '1' }] },
+      { ...base, modules: [{ ...base.modules[0], extra: 'unexpected' }] },
+      { ...base, modules: Array(51).fill(base.modules[0]) },
+      { schema_version: 1, catalog: base.catalog, modules: base.modules }]) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect((await client.searchSizingModules({ q: 'cs6u', grantRef: 'grant_1' })).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+    fetchImpl.mockResolvedValueOnce(response(refusal('cloud_upstream_failure'), 502))
+    expect(await client.searchSizingModules({ q: 'cs6u', grantRef: 'grant_1' })).toMatchObject({ ok: false,
+      status: 502, reason: 'cloud_upstream_failure' })
+  })
+
   it('W1C6 previews carry the same optional solve and commit fields as run bodies', async () => {
     const { client, fetchImpl, intent } = setup(acquired())
     await client.acquireCheckout()
