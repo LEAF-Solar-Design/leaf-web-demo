@@ -2012,4 +2012,8 @@
   .lp-index .lp-tab { white-space: nowrap; }
   .lp-stats { flex-wrap: wrap; gap: 16px; }
   .stage-loading { left: 16px; bottom: 96px; }
+  .lp-stmt .lp-cta-row button { min-height: 44px; box-sizing: border-box; }
+  .lp-stmt form input, .lp-stmt form button { min-height: 44px; box-sizing: border-box; }
+  .lp-index .lp-tab { min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; }
+  .tc-product-tabs button { min-height: 44px; box-sizing: border-box; }
 }
