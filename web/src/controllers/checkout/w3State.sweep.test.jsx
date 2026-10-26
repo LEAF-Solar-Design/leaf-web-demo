@@ -1,5 +1,6 @@
 // @vitest-environment jsdom
 import { act, cleanup, fireEvent, render, renderHook, screen } from '@testing-library/react'
+import { useSyncExternalStore } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import CheckoutControls from '../../components/CheckoutControls.jsx'
 import AuthorPanel from '../../components/AuthorPanel.jsx'
@@ -64,6 +65,54 @@ it('reports local authority refusal after releasing the unproven lease', async (
   expect(api.release).toHaveBeenCalledWith('drawing', 'secret')
   expect(controller.getSnapshot().error).toContain('could not be secured in this tab')
   expect(controller.getCapability()).toBeNull()
+})
+
+it.each([false, true])('scopes a deferred local authority refusal to its starting drawing (switch: %s)', async (switchDrawing) => {
+  const api = services()
+  api.take.mockResolvedValue({ acquired: true, checkout_capability: 'secret' })
+  const controller = controllerFor(api)
+  let rejectAcquisition
+  const acquired = new Promise((resolve, reject) => { rejectAcquisition = reject })
+  const stop = vi.fn()
+  const holdAuthority = vi.fn(() => ({ active: true, acquired, stop }))
+  function Controls() {
+    const state = useSyncExternalStore(controller.subscribe, controller.getSnapshot)
+    const take = async () => {
+      const scopeGeneration = controller.getScopeGeneration()
+      const result = await controller.takeDeferred()
+      const authority = await secureTakenCheckoutAuthority({ controller, result,
+        drawingId: 'drawing', holder: 'holder', services: api, holdAuthority, scopeGeneration })
+      return { acquired: !!authority }
+    }
+    return <>
+      <CheckoutControls {...state} drawingKey={state.drawingId} onTake={take} />
+      {state.error && <span role="alert">{state.error}</span>}
+    </>
+  }
+  await controller.refresh()
+  render(<Controls />)
+  await act(async () => fireEvent.click(screen.getByRole('button', { name: 'Take edit lock' })))
+  expect(holdAuthority).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('button', { name: 'Take edit lock' }).disabled).toBe(true)
+  if (switchDrawing) {
+    await act(async () => {
+      controller.setScope({ drawingId: 'drawing-b', holder: 'holder' })
+      await controller.refresh()
+    })
+    expect(screen.getByRole('button', { name: 'Take edit lock' }).disabled).toBe(false)
+  }
+  await act(async () => rejectAcquisition(new Error('Local authority refused')))
+  expect(api.release).toHaveBeenCalledWith('drawing', 'secret')
+  expect(stop).toHaveBeenCalledTimes(1)
+  expect(screen.getByRole('button', { name: 'Take edit lock' }).disabled).toBe(false)
+  if (switchDrawing) {
+    expect(controller.getSnapshot().drawingId).toBe('drawing-b')
+    expect(controller.getSnapshot().error).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+  } else {
+    expect(controller.getSnapshot().error).toContain('could not be secured in this tab')
+    expect(screen.getByText(/could not be secured in this tab/)).toBeTruthy()
+  }
 })
 
 it('keeps internal error codes and ids out of the edit lock read failure', () => {

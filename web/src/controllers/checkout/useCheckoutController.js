@@ -22,6 +22,7 @@ export async function secureTakenCheckoutAuthority({
   holder,
   services,
   holdAuthority = holdCheckoutReloadAuthority,
+  scopeGeneration = controller.getScopeGeneration(),
 } = {}) {
   const capability = result?.checkout_capability
   if (!result?.acquired || !capability || !drawingId || !holder) return null
@@ -41,23 +42,26 @@ export async function secureTakenCheckoutAuthority({
     authority = holdAuthority({
       handoff: { capability, holder, drawingId, createdAtMs: Date.now() },
       onAcquired: (owned) => {
-        if (!controller.restoreCapability(owned.capability)) {
+        if (controller.getScopeGeneration() !== scopeGeneration || !controller.restoreCapability(owned.capability)) {
           refused = true
           authority?.stop()
           Promise.resolve(services.release(drawingId, owned.capability)).catch(() => { /* fail closed */ })
         }
       },
-      onError: () => controller.clearCapability(),
+      onError: () => {
+        if (controller.getScopeGeneration() === scopeGeneration) controller.clearCapability()
+      },
     })
     acquired = authority.active && await authority.acquired
   } catch { /* release the server lease if local locking fails */ }
   if (acquired && !refused) return authority
 
   authority?.stop()
-  controller.clearCapability()
+  if (controller.getScopeGeneration() === scopeGeneration) controller.clearCapability()
   try { await services.release(drawingId, capability) } catch { /* fail closed */ }
+  if (controller.getScopeGeneration() !== scopeGeneration) return null
   await controller.refresh()
-  controller.reportAuthorityFailure?.()
+  if (controller.getScopeGeneration() === scopeGeneration) controller.reportAuthorityFailure?.()
   return null
 }
 
@@ -285,18 +289,19 @@ export default function useCheckoutController({
         const scope = `${holder}\u0000${drawingId}`
         authorityRef.current?.stop()
         acquiredAuthority = await secureTakenCheckoutAuthority({
-          controller, result, drawingId, holder, services,
+          controller, result, drawingId, holder, services, scopeGeneration: scopeGenAtStart,
         })
         if (acquiredAuthority && controller.getScopeGeneration() !== scopeGenAtStart) {
           // Voided while the authority was being secured: never install a
           // stale scope's authority into the live refs.
           acquiredAuthority.stop()
-          controller.clearCapability()
           Promise.resolve(services.release(drawingId, result.checkout_capability)).catch(() => { /* fail closed */ })
           acquiredAuthority = null
         }
-        authorityRef.current = acquiredAuthority
-        authorityScopeRef.current = authorityRef.current ? scope : null
+        if (controller.getScopeGeneration() === scopeGenAtStart) {
+          authorityRef.current = acquiredAuthority
+          authorityScopeRef.current = authorityRef.current ? scope : null
+        }
       }
       if (!result) return result
       const safeResult = { ...result }
