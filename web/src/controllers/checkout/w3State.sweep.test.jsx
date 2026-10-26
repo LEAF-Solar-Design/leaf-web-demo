@@ -72,10 +72,24 @@ it('keeps internal error codes and ids out of the edit lock read failure', () =>
   expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy()
 })
 
-it('does not restore another account’s pending inputs', () => {
-  savePendingRun('count', { private: 'roof' }, localStorage, 100, 'account-a')
-  expect(readPendingRun(localStorage, 101, 'account-b')).toBeNull()
-  expect(localStorage.getItem(PENDING_RUN_KEY)).toBeNull()
+it('hides another account’s pending inputs at mount and keeps them for its return', () => {
+  const tokenA = `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'account-a' }))}.signature`
+  const tokenB = `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'account-b' }))}.signature`
+  localStorage.setItem('leaf.jwt', tokenA)
+  const pending = savePendingRun('count', { private: 'roof' }, localStorage)
+  const saved = localStorage.getItem(PENDING_RUN_KEY)
+  localStorage.setItem('leaf.jwt', tokenB)
+  expect(readPendingRun(localStorage)).toBeNull()
+  const hook = renderHook(() => useJobController({ storage: localStorage, readsPaused: true }))
+  expect(hook.result.current.pendingRun).toBeNull()
+  expect(localStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
+  expect(JSON.parse(saved).account).toBe('studio:account-a')
+  act(() => {
+    localStorage.setItem('leaf.jwt', tokenA)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: tokenA }))
+  })
+  expect(hook.result.current.pendingRun).toEqual(pending)
+  expect(localStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
 })
 
 it('rejects legacy pending inputs with no account scope', () => {

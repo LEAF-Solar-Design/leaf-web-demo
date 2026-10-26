@@ -98,6 +98,8 @@ export function readPendingRun(storage = browserStorage(), now = Date.now(), acc
     clearPendingRun(storage)
     return null
   }
+  // Another account may return later for its saved inputs.
+  if (typeof record.account === 'string' && typeof account === 'string' && record.account !== account) return null
   // An expired token cannot identify the returning account yet. Keep its
   // bounded record private until sign-in establishes who is returning.
   if (account === null && record.account !== null) return null
