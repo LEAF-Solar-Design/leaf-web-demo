@@ -27,6 +27,19 @@ const OpsWorkspaceGround = lazy(() => import('../integrations/OpsWorkspaceGround
   .then((module) => ({ default: module.OpsWorkspaceGround })))
 const LabGround = lazy(() => import('../lab/LabGround.jsx'))
 
+// The left tools column overlays the non-drawing grounds, so each ground's window starts right of it.
+const GROUND_TOOLS_OCCLUDER = Object.freeze(['#project-workspace-tools', 'left'])
+const GROUND_OCCLUDERS = new WeakMap()
+
+function withGroundToolsOccluder(occluders) {
+  let groundOccluders = GROUND_OCCLUDERS.get(occluders)
+  if (!groundOccluders) {
+    groundOccluders = Object.freeze([...occluders, GROUND_TOOLS_OCCLUDER])
+    GROUND_OCCLUDERS.set(occluders, groundOccluders)
+  }
+  return groundOccluders
+}
+
 function LazyLabGround(props) {
   const [activated, setActivated] = useState(props.active)
   if (props.active && !activated) setActivated(true)
@@ -110,6 +123,9 @@ export default function SurfaceGrounds({
   iosEnabled, iosContract, revision, ship, onLaunch,
   projectId, session, signedIn, accountScope,
 }) {
+  // This component is also invoked directly by its prop-contract tests, so
+  // identity memoization lives outside React while retaining useMemo semantics.
+  const groundOccluders = withGroundToolsOccluder(occluders)
   const projectLabel = workspaceProject?.kind === 'project'
     ? workspaceProject.label
     : workspaceProject?.drawingName || null
@@ -125,7 +141,7 @@ export default function SurfaceGrounds({
         leavingGround={leavingGround}
         contained={studioShell || (boardVisible === true && groundShowsDrawing(surface))}
         themeable={!groundShowsDrawing(surface)}
-        occluders={occluders}
+        occluders={groundOccluders}
         onReturnToDrawing={onReturnToDrawing}
         onCreateProject={onCreateProject}
         actions={actions}
@@ -144,7 +160,7 @@ export default function SurfaceGrounds({
         active={!boardVisible && surfaceGround(surface) === 'device-stage'}
         leavingGround={leavingGround}
         studioShell={studioShell}
-        occluders={occluders}
+        occluders={groundOccluders}
         enabled={iosEnabled}
         contract={iosContract}
         projectLabel={projectLabel}
@@ -153,7 +169,7 @@ export default function SurfaceGrounds({
         onLaunch={onLaunch}
       />
       <LazyLabGround active={!boardVisible && surfaceGround(surface) === 'lab'}
-        mock={mock} studioShell={studioShell} occluders={occluders} />
+        mock={mock} studioShell={studioShell} occluders={groundOccluders} />
       <LazyOpsGround
         active={!boardVisible && surfaceGround(surface) === 'integrations'}
         projectId={projectId}
@@ -164,7 +180,7 @@ export default function SurfaceGrounds({
         mock={mock}
         leavingGround={leavingGround}
         studioShell={studioShell}
-        occluders={occluders}
+        occluders={groundOccluders}
       />
     </>
   )
