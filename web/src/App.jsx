@@ -1770,6 +1770,7 @@ export default function App() {
         } catch {
           if (!current() || !stillCurrent()) return
           showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+          return
         }
       }
       if (!current() || !stillCurrent()) return
@@ -1779,6 +1780,7 @@ export default function App() {
       } catch {
         if (!current()) return
         showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+        return
       }
     }
 

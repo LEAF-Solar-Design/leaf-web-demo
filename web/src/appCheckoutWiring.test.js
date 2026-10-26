@@ -185,14 +185,18 @@ describe('App.jsx checkout controller adoption', () => {
     expect(appText(statements[2])).toBe('await login({ isCurrent: current })')
   })
 
-  it.each([false, true])('continues sign-in once with feedback when checkout release rejects (projectMode=%s)', async (projectMode) => {
+  it.each([
+    [false, true], [true, true], [false, false], [true, false],
+  ])('only starts sign-in after checkout release succeeds (projectMode=%s, releaseFails=%s)', async (projectMode, releaseFails) => {
     const binding = { kind: 'project',
       organization_id: '11111111-1111-1111-1111-111111111111',
       project_id: '22222222-2222-2222-2222-222222222222',
       drawing_id: '33333333-3333-3333-3333-333333333333',
       input_version_id: '44444444-4444-4444-4444-444444444444' }
     const snapshot = { binding, authorityKey: 'authority' }
-    const release = vi.fn().mockRejectedValue(new Error('Release failed'))
+    const release = releaseFails
+      ? vi.fn().mockRejectedValue(new Error('Release failed'))
+      : vi.fn().mockResolvedValue(undefined)
     const client = { getSnapshot: () => snapshot, releaseCheckout: release }
     const controller = { getSnapshot: () => ({ generation: 7 }) }
     const projectSolarLoginRef = { current: { generation: 7, controller, projectSolar: {
@@ -209,10 +213,15 @@ describe('App.jsx checkout controller adoption', () => {
     await onLogin()
 
     expect(release).toHaveBeenCalledExactlyOnceWith()
-    expect(showToast).toHaveBeenCalledExactlyOnceWith({
-      text: "Sign-in couldn't start. Check your connection and try again.",
-    })
-    expect(login).toHaveBeenCalledExactlyOnceWith({ isCurrent: expect.any(Function) })
+    if (releaseFails) {
+      expect(showToast).toHaveBeenCalledExactlyOnceWith({
+        text: "Sign-in couldn't start. Check your connection and try again.",
+      })
+      expect(login).not.toHaveBeenCalled()
+    } else {
+      expect(showToast).not.toHaveBeenCalled()
+      expect(login).toHaveBeenCalledExactlyOnceWith({ isCurrent: expect.any(Function) })
+    }
   })
 
   it.each([false, true])('R13F-07 project mode deactivates both legacy checkout inputs and preserves standalone inputs (knownGuest=%s)', (knownGuest) => {
