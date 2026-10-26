@@ -190,6 +190,7 @@ function mountCompletion() {
       projectModeRef: { current: false }, projectSolarRuntime: { complete: vi.fn() },
       intake: h.controller.intake, mock: false, mockVersions: h.mockVersions,
       getDrawingIntake: h.getDrawingIntake, showToast: h.showToast, onUndo: () => {},
+      versionUndoAction: () => ({ label: 'Undo', undo: true, onClick: context.onUndo }),
       markRefreshFailure: h.controller.actions.markRefreshFailure,
       recordCommittedUnreadableHead: (value) => {
         h.unreadable(value)
@@ -321,6 +322,7 @@ function completionHarness(project, variant = {}, product = source) {
     },
     projectModeRef: { current: project }, projectSolarRuntime: runtime,
     intake: { dwg: 'base-intake' }, onUndo: completionUndo,
+    versionUndoAction: () => ({ label: 'Undo', undo: true, onClick: completionUndo }),
     mockVersions: {
       isSeeded: record('isSeeded', false), seedBase: record('seedBase'),
       applyDelete: vi.fn((...args) => {

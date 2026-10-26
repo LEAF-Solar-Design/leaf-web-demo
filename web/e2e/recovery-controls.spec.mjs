@@ -108,7 +108,7 @@ test.describe('JobInbox recovery', () => {
     // takes the pointer over the expanded inbox, so the row is driven the way
     // JobInbox.jsx:12 documents for keyboard users: focus plus Enter on the
     // native button, which fires the same onClick a pointer press would.
-    const retry = retryRow.getByRole('button', { name: 'Retry · Re-run count-panels', exact: true })
+    const retry = retryRow.getByRole('button', { name: 'Re-run count-panels', exact: true })
     await expect(retry).toBeEnabled()
     await expect(retryRow.locator('.lock-note')).toHaveCount(0)
     await retry.press('Enter')

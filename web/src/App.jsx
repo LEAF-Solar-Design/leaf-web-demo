@@ -25,6 +25,7 @@ import { createViewHistory } from './lib/viewHistory.js'
 // rail it used to spell inline. Every shared chrome gate lives there now.
 import SurfaceFrame from './site/SurfaceFrame.jsx'
 import { useToastBus } from './lib/notifications.js'
+import { requestNoticeVersionView, peekNoticeVersionView, takeNoticeVersionView } from './components/JobInbox.jsx'
 import { createPreviewRunner, resolveVersionTransfer } from './lib/boardTransfer.js'
 import NavRail from './site/NavRail.jsx'
 import CockpitTopBand from './site/CockpitTopBand.jsx'
@@ -492,7 +493,7 @@ export default function App() {
   // this change moves ownership and nothing else. The console keeps its
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes an upload only through the standalone adapter below.
-  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload, isScopeCurrent } = useDrawingIdentity()
+  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload, selectNoticeDrawing, isScopeCurrent } = useDrawingIdentity()
   const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
   // The same load fence carries local-source ownership and its generation.
   requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
@@ -2098,16 +2099,66 @@ export default function App() {
     viewer.setView({ center: { x: (resultBounds.minX + resultBounds.maxX) / 2, y: (resultBounds.minY + resultBounds.maxY) / 2 }, zoom })
   }, [resultBounds, studioGround, pushViewSnapshot])
 
-  // Toast actions outlive the render that created the version; use the current undo handler.
+  // Ribbon Undo follows the current version; retained notices also check their original target.
   const undoActionRef = useRef(null)
   const onUndo = useCallback(() => undoActionRef.current?.(), [])
+  const noticeTargetRef = useRef(null)
+  noticeTargetRef.current = { drawingId: drawingState?.drawing_id, version: drawingState?.head,
+    blocked: !canUndo || versionBusy || running || previewing || drawingMutationsBlocked }
+  const noticeMountedRef = useRef(false)
+  useEffect(() => {
+    noticeMountedRef.current = true
+    return () => { noticeMountedRef.current = false }
+  }, [])
+  const versionUndoAction = useCallback((drawingId, version) => {
+    const disabledReason = () => {
+      const current = noticeTargetRef.current
+      if (!noticeMountedRef.current || !isScopeCurrent() || current?.drawingId !== drawingId)
+        return 'Open the original drawing to undo this change.'
+      if (version == null || current.version !== version)
+        return 'This is no longer the current version. Open version history to review it.'
+      if (current.blocked) return 'Undo is unavailable while the drawing is busy or being previewed.'
+      return null
+    }
+    return { label: 'Undo', undo: true, disabledReason,
+      onClick: () => { if (!disabledReason()) return onUndo() } }
+  }, [isScopeCurrent, onUndo])
+  const noticeViewRef = useRef(null)
+  noticeViewRef.current = { preview: onPreviewVersion, show: viewViewer }
+  const versionViewAction = useCallback((drawingId, version) => {
+    const disabledReason = () => !drawingId || version == null
+      ? 'This notice has no saved drawing or version to view.' : null
+    return { label: 'View', disabledReason, onClick: () => {
+      if (disabledReason() || !isScopeCurrent()) return
+      if (!noticeMountedRef.current || noticeTargetRef.current?.drawingId !== drawingId) {
+        requestNoticeVersionView(drawingId, version, isScopeCurrent)
+        if (noticeMountedRef.current) selectNoticeDrawing(drawingId)
+        return
+      }
+      void noticeViewRef.current.preview(version)
+      noticeViewRef.current.show()
+    } }
+  }, [isScopeCurrent, selectNoticeDrawing])
+  useEffect(() => {
+    const pending = peekNoticeVersionView()
+    if (!pending) return
+    if (REQUESTED_DRAWING_ID !== pending.drawingId) {
+      selectNoticeDrawing(pending.drawingId)
+      return
+    }
+    if (drawingState?.drawing_id !== pending.drawingId || versionBusy) return
+    const request = takeNoticeVersionView(drawingState.drawing_id)
+    if (!request) return
+    void onPreviewVersion(request.version)
+    viewViewer()
+  }, [REQUESTED_DRAWING_ID, selectNoticeDrawing, drawingState, versionBusy, onPreviewVersion, viewViewer])
 
   // Swap the viewer + panels to a drawing version (§11). The completed event
   // ("Version 2 created" / "Reverted to version 1") fires the NT2 toast.
   const seatVersion = useCallback((view, drawingId, note) => {
     seatDrawingVersion(view, { drawingId, source: 'version' })
-    if (note) showToast({ text: `${note} · ${drawingId}`, action: { label: 'Undo', undo: true, onClick: onUndo } })
-  }, [onUndo, seatDrawingVersion, showToast])
+    if (note) showToast({ text: note, action: versionUndoAction(drawingId, view.head) })
+  }, [versionUndoAction, seatDrawingVersion, showToast])
 
   const seatCompletedVersion = useCallback(async (newVersion, envelope, options) => {
     let canonical = false
@@ -2150,7 +2201,7 @@ export default function App() {
         version = commit.version
       } catch {
         if (!current()) return false
-        if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
+        if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: versionUndoAction(newVersion.drawing_id, version) })
         markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
         return false
       }
@@ -2158,7 +2209,7 @@ export default function App() {
     if (envelope?.result?.new_version_readable === false) {
       if (!current()) return false
       recordCommittedUnreadableHead(newVersion)
-      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: versionUndoAction(newVersion.drawing_id, version) })
       return false
     }
     try {
@@ -2168,11 +2219,11 @@ export default function App() {
       return true
     } catch {
       if (!current()) return false
-      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: { label: 'Undo', undo: true, onClick: onUndo } })
+      if (options?.announce !== false) showToast({ text: `Version ${version} created`, action: versionUndoAction(newVersion.drawing_id, version) })
       markRefreshFailure({ drawing_id: newVersion.drawing_id, version })
       return false
     }
-  }, [intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete])
+  }, [intake, isScopeCurrent, markRefreshFailure, mock, versionUndoAction, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete])
   completedVersionRef.current = seatCompletedVersion
 
   // P2 wave C-2: engagement depth (real CAD work). ONE event for the four
@@ -2182,18 +2233,18 @@ export default function App() {
     const view = await undoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'undo' })
-      showToast({ text: `Reverted to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+      showToast({ text: `Reverted to version ${view.head}`, action: versionViewAction(drawingState?.drawing_id, view.head) })
     }
-  }, [drawingState, showToast, undoDrawingVersion, viewViewer])
+  }, [drawingState, showToast, undoDrawingVersion, versionViewAction])
   undoActionRef.current = undoCurrentVersion
 
   const onRedo = useCallback(async () => {
     const view = await redoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'redo' })
-      showToast({ text: `Advanced to version ${view.head} · ${drawingState?.drawing_id}`, action: { label: 'View', onClick: viewViewer } })
+      showToast({ text: `Advanced to version ${view.head}`, action: versionViewAction(drawingState?.drawing_id, view.head) })
     }
-  }, [drawingState, redoDrawingVersion, showToast, viewViewer])
+  }, [drawingState, redoDrawingVersion, showToast, versionViewAction])
 
   const onToggleHistoryTracked = useCallback(() => {
     returnToDrawing()

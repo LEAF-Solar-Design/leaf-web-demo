@@ -222,6 +222,13 @@ export function DrawingIdentityProvider({
       : Object.freeze({ ...current, [mode]: next })))
   }, [mode])
 
+  const selectNoticeDrawing = useCallback((id) => {
+    if (!isScopeCurrent() || !id) return null
+    const next = Object.freeze({ drawingId: id, source: id, origin: 'stored' })
+    setActiveIdentity(next)
+    return next
+  }, [isScopeCurrent, setActiveIdentity])
+
   // The upload promotion, unchanged from SiteRoot's promoteOperatorDrawing:
   // a receipt with no drawing id promotes nothing, and only an ACCOUNT tenant
   // earns a remembered id (a guest drawing must not outlive its session).
@@ -289,11 +296,12 @@ export function DrawingIdentityProvider({
     tenantKind: identity.tenantKind ?? null,
     setFromUpload,
     setFromQuery,
+    selectNoticeDrawing,
     reset,
     resetAll,
     scopeToken,
     isScopeCurrent,
-  }), [identity, mode, reset, resetAll, setFromQuery, setFromUpload, scopeToken, isScopeCurrent])
+  }), [identity, mode, reset, resetAll, setFromQuery, setFromUpload, selectNoticeDrawing, scopeToken, isScopeCurrent])
 
   return (
     <DrawingIdentityContext.Provider value={value}>

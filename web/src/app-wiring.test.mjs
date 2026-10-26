@@ -106,6 +106,74 @@ function r13Evaluate(node, env) {
 const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
 const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
 
+it('S1-68 retained Undo refuses a different version or drawing', () => {
+  let calls = 0
+  const noticeTargetRef = { current: { drawingId: 'roof', version: 2, blocked: false } }
+  const makeAction = r13Evaluate(r13Callback('versionUndoAction'), {
+    noticeTargetRef, noticeMountedRef: { current: true }, isScopeCurrent: () => true,
+    onUndo: () => ++calls,
+  })
+  const action = makeAction('roof', 2)
+  action.onClick()
+  assert.equal(calls, 1)
+  noticeTargetRef.current = { drawingId: 'roof', version: 3, blocked: false }
+  assert.ok(action.disabledReason())
+  action.onClick()
+  noticeTargetRef.current = { drawingId: 'other', version: 2, blocked: false }
+  action.onClick()
+  assert.equal(calls, 1)
+})
+
+it('S1-68 retained Undo refuses an unmounted scene and busy drawing', () => {
+  const noticeMountedRef = { current: false }
+  const noticeTargetRef = { current: { drawingId: 'roof', version: 2, blocked: false } }
+  const action = r13Evaluate(r13Callback('versionUndoAction'), {
+    noticeTargetRef, noticeMountedRef, isScopeCurrent: () => true,
+    onUndo: () => assert.fail('stale notice must not undo'),
+  })('roof', 2)
+  assert.ok(action.disabledReason())
+  action.onClick()
+  noticeMountedRef.current = true
+  noticeTargetRef.current.blocked = true
+  assert.ok(action.disabledReason())
+  action.onClick()
+})
+
+it('S1-68 View uses its recorded version with the current preview handler', () => {
+  const calls = []
+  const noticeViewRef = { current: { preview: () => assert.fail('old preview'), show: () => {} } }
+  const action = r13Evaluate(r13Callback('versionViewAction'), {
+    noticeMountedRef: { current: true }, noticeTargetRef: { current: { drawingId: 'roof' } },
+    noticeViewRef, isScopeCurrent: () => true,
+  })('roof', 2)
+  noticeViewRef.current = { preview: version => calls.push(version), show: () => calls.push('show') }
+  action.onClick()
+  assert.deepEqual(calls, [2, 'show'])
+})
+
+it('S1-68 View from another scene requests the recorded drawing and version', () => {
+  const calls = []
+  const isScopeCurrent = () => true
+  const action = r13Evaluate(r13Callback('versionViewAction'), {
+    noticeMountedRef: { current: false }, noticeTargetRef: { current: null },
+    isScopeCurrent, requestNoticeVersionView: (...args) => calls.push(args),
+  })('roof', 2)
+  action.onClick()
+  assert.deepEqual(calls, [['roof', 2, isScopeCurrent]])
+})
+
+it('S1-68 redo notices bind View to the resulting drawing version', async () => {
+  const target = { label: 'View' }, toasts = []
+  await r13Evaluate(r13Callback('onRedo'), {
+    redoDrawingVersion: async () => ({ head: 3 }), drawingState: { drawing_id: 'roof' },
+    track: () => {}, showToast: notice => toasts.push(notice),
+    versionViewAction: (drawingId, version) => {
+      assert.equal(drawingId, 'roof'); assert.equal(version, 3); return target
+    },
+  })()
+  assert.deepEqual(toasts, [{ text: 'Advanced to version 3', action: target }])
+})
+
 it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', () => {
   const adapter = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'ribbonClusters')
   const clusters = [{ tools: [{ id: 'solar-settings', onClick: () => {} }] }]
@@ -340,6 +408,7 @@ function r13Fixture({ project = true, context = null, rows = null } = {}) {
     setSettingsRunResult: record('settingsResult'), setSolarFlowRuns: record('flowRuns'),
     solarFlowRunOutcome: (value) => ({ ok: value?.ok === true }), solarFlowRecordRun: record('recordRun'),
     track: record('track'), showToast: record('toast'), onUndo: record('undo'),
+    versionUndoAction: () => ({ label: 'Undo', undo: true, onClick: env.onUndo }),
     loadUsage: record('usage'), rehydrate: record('rehydrate'),
     runToolAsync: record('runToolAsync', envelope), runTool: record('runTool', envelope),
     getDrawingIntake: record('head', envelope), saveEditedDrawingVersion: record('saveEdited'),
@@ -506,7 +575,10 @@ describe('R13F project Solar execution and form ingresses', () => {
       '      if (solarIdentity) return false',
       '    }',
     ].join('\n'))
-    assert.equal(r13Hash(header + arrow.slice(legacyAt)), 'bf6d53e7bd0aeb8e28201f06753dc0fcb93ae9f6665294fe419651438a032d30')
+    // S1-68 changes only the retained action; keep the rest of the completion pinned.
+    const legacyBody = arrow.slice(legacyAt).replaceAll('versionUndoAction(newVersion.drawing_id, version)',
+      "{ label: 'Undo', undo: true, onClick: onUndo }")
+    assert.equal(r13Hash(header + legacyBody), 'bf6d53e7bd0aeb8e28201f06753dc0fcb93ae9f6665294fe419651438a032d30')
     for (const confirmed of [true, false]) {
       for (const explicit of [true, false]) {
         for (const snapshotDigest of ['snapshot-digest', null]) {
@@ -1552,6 +1624,11 @@ describe('S17 version-created toast Undo wiring', () => {
   }
   function assertUndo(object) {
     const action = property(object, 'action')
+    if (action?.type === 'CallExpression') {
+      assert.equal(action.callee.name, 'versionUndoAction')
+      assert.equal(action.arguments.length, 2)
+      return
+    }
     assert.equal(action?.type, 'ObjectExpression')
     assert.equal(action.properties.length, 3)
     assert.ok(action.properties.every((item) => item.type === 'ObjectProperty'))
@@ -1577,12 +1654,12 @@ describe('S17 version-created toast Undo wiring', () => {
       assert.equal(versionToasts.length, surface.directCount, 'all completion branches must announce the version')
       for (const object of versionToasts) assertUndo(object)
       assert.ok(versionToasts.every((object) => object.start > completion.start && object.end < completion.end))
-      assert.ok(completion.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+      assert.ok(completion.init.arguments[1].elements.some((node) => node.name === (seat ? 'versionUndoAction' : 'onUndo')))
       if (seat) {
         assert.equal(seatedToasts.length, 1, 'the successful App seat also announces the new version')
-        assert.equal(textPattern(seatedToasts[0]), '# · #')
+        assert.equal(property(seatedToasts[0], 'text').name, 'note')
         assertUndo(seatedToasts[0])
-        assert.ok(seat.init.arguments[1].elements.some((node) => node.name === 'onUndo'))
+        assert.ok(seat.init.arguments[1].elements.some((node) => node.name === 'versionUndoAction'))
       }
     })
 
@@ -2688,7 +2765,7 @@ describe('W20-07b combiner workspace wiring', () => {
     const read = body.indexOf("await getDrawingIntake(mock, newVersion.drawing_id, 'head')")
     assert.ok(body.includes('const scopeCurrent = isScopeCurrent'))
     assert.match(body, /const current = \(\) => scopeCurrent\(\)\s+&& \(typeof options\?\.isCurrent !== 'function' \|\| options\.isCurrent\(\)\)/)
-    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, onUndo, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete]'))
+    assert.ok(body.includes('[intake, isScopeCurrent, markRefreshFailure, mock, versionUndoAction, recordCommittedUnreadableHead, seatVersion, showToast, projectSolarRuntime.complete]'))
     const guard = 'if (!current()) return false'
     const entryGuard = body.indexOf(guard)
     assert.ok(entryGuard > body.indexOf('const current =') && entryGuard < body.indexOf('let version ='))
@@ -5554,7 +5631,7 @@ describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
 it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () => {
   const hashes = {
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
-    onRedo: '6061cdf05fef2e3119473e0e3639a1a6997c90e4d2b73c7b514508468853ecff',
+    onRedo: '8ead5e6dbeecad3503382bc09117b3e90f8198dade34d75c9aca5c00b1bd94c8',
     // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
     engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
     onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',

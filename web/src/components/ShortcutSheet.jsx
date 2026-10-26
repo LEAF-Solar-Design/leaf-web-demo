@@ -13,6 +13,16 @@ import useEscapeOwner from '../lib/useEscapeOwner.js'
 // its own Escape / outside-click pair rather than trapping focus.
 export default function ShortcutSheet({ open, onClose }) {
   const rootRef = useRef(null)
+  const openerRef = useRef(null)
+  const close = () => {
+    openerRef.current?.focus()
+    onClose?.()
+  }
+  useEffect(() => {
+    if (!open) return
+    openerRef.current = document.activeElement
+    rootRef.current?.querySelector('[role="switch"]')?.focus()
+  }, [open])
   // S25: the single-key switch (WCAG 2.1.4). Readers (the ladder, ResultPanel)
   // read the stored value at keystroke time, so writing it is the whole effect.
   const [singleKeyOn, setSingleKeyOn] = useState(() => readSingleKeyShortcuts())
@@ -28,10 +38,10 @@ export default function ShortcutSheet({ open, onClose }) {
   // closes this sheet before a drawer under it and the global ladder never
   // also reads the key. An outside mousedown still dismisses it like every
   // other resolver on this bar.
-  useEscapeOwner('shortcuts', open, () => onClose?.(), { layer: 'sheet', scope: rootRef })
+  useEscapeOwner('shortcuts', open, close, { layer: 'sheet', scope: rootRef })
   useEffect(() => {
     if (!open) return undefined
-    const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) onClose?.() }
+    const onDoc = (e) => { if (rootRef.current && !rootRef.current.contains(e.target)) close() }
     document.addEventListener('mousedown', onDoc)
     return () => document.removeEventListener('mousedown', onDoc)
   }, [open, onClose])
@@ -52,19 +62,8 @@ export default function ShortcutSheet({ open, onClose }) {
     >
       <div className="resolver-header">
         Keyboard shortcuts
-        <EscCap type="button" onClick={onClose} label="Close" />
+        <EscCap type="button" onClick={close} label="Close" />
       </div>
-      {rows.map((row) => {
-        const off = row.singleKey && !singleKeyOn
-        return (
-          <div className="resolver-row" key={row.id} data-testid="shortcut-row" data-shortcut-id={row.id} aria-disabled={off || undefined}>
-            <span className="lbar" aria-hidden="true" />
-            <span className="label">{row.label}</span>
-            <span className="context" data-testid="shortcut-context">{off ? `${row.context} (off)` : row.context}</span>
-            <span className="key hot">{row.kbd}</span>
-          </div>
-        )
-      })}
       <button
         type="button"
         className="resolver-row"
@@ -78,6 +77,17 @@ export default function ShortcutSheet({ open, onClose }) {
         <span className="label">Single-key shortcuts</span>
         <span className="key" aria-hidden="true">{singleKeyOn ? 'On' : 'Off'}</span>
       </button>
+      {rows.map((row) => {
+        const off = row.singleKey && !singleKeyOn
+        return (
+          <div className="resolver-row" key={row.id} data-testid="shortcut-row" data-shortcut-id={row.id} aria-disabled={off || undefined}>
+            <span className="lbar" aria-hidden="true" />
+            <span className="label">{row.label}</span>
+            <span className="context" data-testid="shortcut-context">{off ? `${row.context} (off)` : row.context}</span>
+            <span className="key hot">{row.kbd}</span>
+          </div>
+        )
+      })}
       {/* Honest gap (slice 10b spec): sheets anchors and receipts have no
           index today. Named here rather than rendered as a row nothing
           backs. */}
