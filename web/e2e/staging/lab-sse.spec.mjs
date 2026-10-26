@@ -1,4 +1,5 @@
 import { createHash } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 import { performance } from 'node:perf_hooks'
 import { setTimeout as delay } from 'node:timers/promises'
 import { isDeepStrictEqual } from 'node:util'
@@ -17,14 +18,38 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 
 const SAMPLE_COUNT = 20
 const DOCUMENT = 'lab-sse-proof'
-// Minimal pure graph from server/tests/test_lab_artifacts.py's GRAPH and
-// test_http_save_restore_publish_diff_and_tenant_boundary. Unlike the evaluator's constant-number case, this
-// needs no stubbed registry. The run POST body follows test_lab_runs.py.
-const GRAPH = {
-  schema: 'leaf.lab-graph.v1',
-  blocks: [],
-  pipes: [],
-  outputs: {},
+function proofGraph() {
+  // server/lab_evaluate.py dispatches through lab_ops.has_operator:
+  // this is server/lab_ops.py's OPERATOR_IDS set.
+  const knownBuiltins = new Set([
+    'constant', 'identity', 'field', 'select', 'filter', 'sort', 'take', 'count',
+    'sum', 'mean', 'min', 'max', 'add', 'subtract', 'multiply', 'divide',
+    'latest', 'window', 'collect',
+  ])
+  // server/tests/test_lab_worker.py::test_finishes_values_pins_and_status
+  // evaluates operator-chain (including constant) and asserts durable value events.
+  const fixture = JSON.parse(readFileSync(new URL('../../../contract/fixtures/lab/blocks.json', import.meta.url), 'utf8'))
+  const manifest = fixture.manifests.find((item) =>
+    item.effect === 'pure' && item.kind === 'builtin' && knownBuiltins.has(item.id) &&
+    Object.values(item.inputs).every((input) => !input.required || input.has_default) &&
+    Object.keys(item.outputs).length > 0)
+  if (!manifest) {
+    throw new Error('Lab SSE proof requires a pure known builtin in contract/fixtures/lab/blocks.json with no required inputs lacking defaults and at least one output; no eligible manifest found')
+  }
+  const settings = Object.fromEntries(Object.entries(manifest.settings_schema.properties || {})
+    .filter(([, schema]) => Object.hasOwn(schema, 'default'))
+    .map(([name, schema]) => [name, schema.default]))
+  const output = Object.keys(manifest.outputs)[0]
+  return {
+    schema: 'leaf.lab-graph.v1',
+    blocks: [{
+      id: 'block-0',
+      registry: { id: manifest.id, version: manifest.version.semver, code_sha256: manifest.version.code_sha256 },
+      settings,
+    }],
+    pipes: [],
+    outputs: { [output]: { node: 'block-0', port: output } },
+  }
 }
 
 let token, origin, identity, tenantHash, revision, finishedRun
@@ -198,6 +223,7 @@ test.describe('SEL-220 authenticated staging Lab fetch-SSE proof', () => {
   })
 
   test('20 run samples have POST-to-first-run-frame p95 <= 1000 ms', async () => {
+    const GRAPH = proofGraph()
     const head = await call(`/api/lab/docs/${DOCUMENT}/head`)
     expect([200, 404]).toContain(head.status)
     const expectedHead = head.status === 404 ? null : (await head.json()).revision
@@ -208,10 +234,10 @@ test.describe('SEL-220 authenticated staging Lab fetch-SSE proof', () => {
     expect(Number.isInteger(revision) && revision > 0).toBe(true)
     const samples = []
     for (let index = 0; index < SAMPLE_COUNT; index += 1) {
+      const postStarted = performance.now()
       const response = await call('/api/lab/runs', {
         method: 'POST', body: JSON.stringify({ doc_id: DOCUMENT, graph_revision: revision }),
       })
-      const postReturned = performance.now()
       expect(response.status).toBe(202)
       const run = await response.json()
       expect(typeof run.run_id === 'string' && run.run_id.length > 0).toBe(true)
@@ -220,7 +246,7 @@ test.describe('SEL-220 authenticated staging Lab fetch-SSE proof', () => {
         for await (const frame of stream.frames) {
           if (frame.comments.length) continue
           runFrame(frame, run.run_id)
-          samples.push(frame.at - postReturned)
+          samples.push(frame.at - postStarted)
           break
         }
       } finally { await stream.close() }
