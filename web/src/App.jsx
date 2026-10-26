@@ -3350,13 +3350,13 @@ export default function App() {
       const env = recordToEnvelope(rec)
       const rows = [
         `job ${job.job_id}`,
-        `tool ${rec.tool || job.tool || '—'}`,
+        `tool ${rec.tool || job.tool || 'not set'}`,
         `status ${rec.status}`,
         // On the mock path the engine's new_version.version is a hardcoded 2 —
         // the chain owns the real head, so read it there.
         `version ${env?.result?.new_version
           ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
-          : (env?.version ?? '—')}`,
+          : (env?.version ?? 'unknown')}`,
         `timing ${rec.elapsed_ms != null ? `${rec.elapsed_ms} ms` : (env?.timing_ms != null ? `${env.timing_ms} ms` : '·')}`,
         `cost ${env?.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
         `Processing: ${(env?.degraded_mode || rec.degraded_mode) ? 'Local backup' : 'Normal'}`,
@@ -3389,13 +3389,13 @@ export default function App() {
     if (!result) return
     const env = result
     const rows = [
-      `job ${currentJobId || '—'}`,
-      `tool ${env.tool || selectedTool?.name || '—'}`,
+      `job ${currentJobId || 'not set'}`,
+      `tool ${env.tool || selectedTool?.name || 'not set'}`,
       // Mock path: the engine hardcodes new_version.version to 2; the chain
       // (seeded only in mock) owns the real head.
       `version ${env.result?.new_version
         ? (mockVersions.isSeeded() ? mockVersions.list().head : env.result.new_version.version)
-        : (env.version ?? '—')}`,
+        : (env.version ?? 'unknown')}`,
       `timing ${env.timing_ms != null ? `${env.timing_ms} ms` : '·'}`,
       `cost ${env.cost && env.cost.usd_est != null ? `$${Number(env.cost.usd_est).toFixed(4)}` : '·'}`,
       `Processing: ${env.degraded_mode ? 'Local backup' : 'Normal'}`,
@@ -6163,7 +6163,7 @@ export default function App() {
           {running
             ? `Running ${selectedTool?.name || 'tool'}`
             : result?.ok
-              ? `${result.tool} complete${result.result?.total != null ? ` — total ${Number(result.result.total).toLocaleString()}` : ''}`
+              ? `${result.tool} complete${result.result?.total != null ? `, total ${Number(result.result.total).toLocaleString()}` : ''}`
               : ''}
         </LiveRegion>
 
