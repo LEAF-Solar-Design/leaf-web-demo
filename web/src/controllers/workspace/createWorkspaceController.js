@@ -1,3 +1,5 @@
+import { humanizeError } from '../../errorHumanize.js'
+
 export const WORKSPACE_ORG_KEY = 'leaf.org_id'
 
 function browserStorage() {
@@ -79,6 +81,7 @@ export function createWorkspaceController({
     workspace: null,
     canonicalVersionId: null,
     workspaceLoading: false,
+    workspaceError: null,
     orgBusy: false,
     projectBusy: false,
   }
@@ -90,6 +93,9 @@ export function createWorkspaceController({
   }
   const publish = (patch) => {
     if (disposed) return
+    if (patch.workspaceLoading === true || patch.workspace || patch.openProjectId === null) {
+      patch.workspaceError = null
+    }
     state = { ...state, ...patch }
     listeners.forEach((listener) => listener())
   }
@@ -186,9 +192,9 @@ export function createWorkspaceController({
         publish({ workspace, workspaceLoading: false })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId: settledOrgId, workspace })
         return workspace
-      } catch (error) {
+      } catch {
         if (!isCurrentWorkspace(request, projectId, orgId)) return null
-        publish({ workspace: null, projectsError: explain(error), workspaceLoading: false })
+        publish({ workspace: null, workspaceError: humanizeError(null), workspaceLoading: false })
         return null
       }
     }
@@ -213,7 +219,7 @@ export function createWorkspaceController({
     } catch {
       if (!isCurrentWorkspace(request, projectId, orgId)) return null
       // A transient refresh failure must retain the last good hydration.
-      publish({ workspaceLoading: false })
+      publish({ workspaceLoading: false, ...(!state.workspace ? { workspaceError: humanizeError(null) } : {}) })
       return null
     }
   }
@@ -336,9 +342,9 @@ export function createWorkspaceController({
         if (!isCurrent('workspace', openRequest) || state.openProjectId !== projectId || state.orgId !== orgId) return project
         publish({ workspace, workspaceLoading: false })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId, workspace })
-      } catch (error) {
+      } catch {
         if (isCurrent('workspace', openRequest) && state.openProjectId === projectId && state.orgId === orgId) {
-          publish({ workspace: null, projectsError: explain(error), workspaceLoading: false })
+          publish({ workspace: null, workspaceError: humanizeError(null), workspaceLoading: false })
         }
       } finally {
         if (isCurrent('project', request)) publish({ projectBusy: false })
