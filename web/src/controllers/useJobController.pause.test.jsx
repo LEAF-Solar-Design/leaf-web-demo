@@ -2,6 +2,8 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
 import useJobController, { PENDING_RUN_KEY, PENDING_RUN_LOGOUT_KEY, readInflightJob, readPendingRun, savePendingRun } from './useJobController.js'
+import controllerSource from './useJobController.js?raw'
+import * as api from '../api.js'
 import * as auth from '../auth.js'
 
 afterEach(() => { cleanup(); vi.restoreAllMocks() })
@@ -78,7 +80,7 @@ it('clears saved inputs when another tab broadcasts explicit logout', () => {
   expect(hook.result.current.pendingRun).toBeNull()
 })
 
-it('deletes saved account inputs when a different account signs in after token expiry', () => {
+it('keeps saved account inputs hidden when a different account signs in after token expiry', () => {
   const storage = memoryStorage()
   storage.setItem('leaf.jwt', accountToken('designer-a'))
   savePendingRun('count', { panels: 8 }, storage)
@@ -92,8 +94,78 @@ it('deletes saved account inputs when a different account signs in after token e
     storage.setItem('leaf.jwt', token)
     window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
   })
-  expect(storage.getItem(PENDING_RUN_KEY)).toBeNull()
+  expect(storage.getItem(PENDING_RUN_KEY)).not.toBeNull()
   expect(hook.result.current.pendingRun).toBeNull()
+})
+
+it('keeps same-tab pending inputs visible after a 401', async () => {
+  let unauthorized
+  vi.spyOn(api, 'subscribeUnauthorized').mockImplementation(callback => { unauthorized = callback; return () => {} })
+  const storage = memoryStorage()
+  const token = accountToken('designer-a')
+  storage.setItem('leaf.jwt', token)
+  const pending = deferred()
+  const hook = renderController({ services: { listJobs: vi.fn(async () => []) }, storage })
+  let run
+  act(() => {
+    run = hook.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { panels: 8 } },
+    })
+  })
+  act(() => {
+    storage.removeItem('leaf.jwt')
+    unauthorized()
+  })
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  const saved = storage.getItem(PENDING_RUN_KEY)
+  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+  expect(JSON.parse(saved).account).toBe('studio:designer-a')
+  act(() => {
+    storage.setItem('leaf.jwt', token)
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
+  })
+  expect(hook.result.current.pendingRun.params).toEqual({ panels: 8 })
+})
+
+it('shows an anonymous 401 save only in the same tab', async () => {
+  const sameTabStorage = memoryStorage()
+  const pending = deferred()
+  const sameTab = renderController({ services: { listJobs: vi.fn(async () => []) }, storage: sameTabStorage })
+  let run
+  act(() => {
+    run = sameTab.result.current.runJob({
+      toolName: 'count', execute: () => pending.promise, submission: { params: { panels: 6 } },
+    })
+  })
+  await act(async () => {
+    pending.reject(Object.assign(new Error('expired'), { status: 401 }))
+    await run
+  })
+  expect(sameTab.result.current.pendingRun.params).toEqual({ panels: 6 })
+
+  const crossTabStorage = memoryStorage()
+  savePendingRun('count', { panels: 10 }, crossTabStorage)
+  const crossTab = renderController({ services: {}, storage: crossTabStorage, readsPaused: true })
+  expect(crossTab.result.current.pendingRun.params).toEqual({ panels: 10 })
+  act(() => {
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: null }))
+  })
+  expect(crossTab.result.current.pendingRun).toBeNull()
+  expect(crossTabStorage.getItem(PENDING_RUN_KEY)).not.toBeNull()
+})
+
+it('routes every non-null pending-run publication through the identity guard', () => {
+  const source = controllerSource
+  const guardStart = source.indexOf('const publishPendingRun')
+  const guardEnd = source.indexOf('\n  useEffect(', guardStart)
+  const publications = [...source.matchAll(/setPendingRun\((?!null\))/g)].map(match => match.index)
+  expect(guardStart).toBeGreaterThan(-1)
+  expect(publications).toHaveLength(1)
+  expect(publications[0]).toBeGreaterThan(guardStart)
+  expect(publications[0]).toBeLessThan(guardEnd)
 })
 
 it('masks signed-in job data on the first paused render', async () => {

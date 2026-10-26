@@ -65,8 +65,8 @@ it('keeps an anonymous run bound to its first account when another account signs
     window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: other }))
   })
   expect(hook.result.current.pendingRun).toBeNull()
-  expect(readPendingRun(storage)).toBeNull()
-  expect(storage.getItem(PENDING_RUN_KEY)).toBeNull()
+  expect(readPendingRun(storage, Date.now(), 'studio:designer-a')?.params).toEqual({ panels: 6 })
+  expect(storage.getItem(PENDING_RUN_KEY)).not.toBeNull()
 })
 
 it('does not bind an anonymous submission in a browser session that did not save it', async () => {

@@ -184,9 +184,29 @@ export default function useJobController({
   const [pollGeneration, setPollGeneration] = useState(0)
   const [staleResults, setStaleResults] = useState([])
   const [pendingRun, setPendingRun] = useState(() => (mock ? null : readPendingRun(storage)))
+  const storageRef = useRef(storage)
+  storageRef.current = storage
   const pendingAccountRef = useRef(pendingRunAccount(storage))
   const currentAccount = pendingRunAccount(storage)
   if (currentAccount) pendingAccountRef.current = currentAccount
+  const publishPendingRun = useCallback((expectedAccount = null, { sameTab = false } = {}) => {
+    const target = storageRef.current ?? browserStorage()
+    const account = pendingRunAccount(target) ?? expectedAccount
+    let owner = null
+    try {
+      owner = JSON.parse(target?.getItem(PENDING_RUN_KEY) || 'null')?.account ?? null
+    } catch { /* readPendingRun validates and clears malformed records below */ }
+    let scoped = null
+    if (!account) {
+      if (sameTab && owner === null) scoped = readPendingRun(target, Date.now(), null)
+    } else if (typeof owner === 'string' && owner !== account) {
+      readPendingRun(target, Date.now(), owner)
+    } else {
+      scoped = readPendingRun(target, Date.now(), account)
+    }
+    setPendingRun(scoped)
+    return scoped
+  }, [])
   useEffect(() => {
     const clearSaved = () => {
       pendingIntentRef.current += 1
@@ -198,7 +218,7 @@ export default function useJobController({
       const nextAccount = pendingRunAccount(storageRef.current)
       if (nextAccount && pendingAccountRef.current !== nextAccount) pendingIntentRef.current += 1
       if (nextAccount) pendingAccountRef.current = nextAccount
-      setPendingRun(readPendingRun(storageRef.current))
+      publishPendingRun()
     }
     const clear = subscribeBeforeLogout(() => {
       // Only explicit logout publishes this marker. A 401 removes the token
@@ -217,7 +237,7 @@ export default function useJobController({
     }
     window.addEventListener('storage', onStorage)
     return () => { clear(); refresh(); unauthorized(); window.removeEventListener('storage', onStorage) }
-  }, [])
+  }, [publishPendingRun])
 
   const sequenceRef = useRef(0)
   // Bumped by reset(): a result from before a reset belongs to a context this
@@ -226,7 +246,6 @@ export default function useJobController({
   const runningSinceRef = useRef(null)
   const callbacksRef = useRef({ formatError, onCompleteVersion, onNotice, onAuthRequired })
   const servicesRef = useRef(services)
-  const storageRef = useRef(storage)
   const drawingKeyRef = useRef(drawingKey)
   drawingKeyRef.current = drawingKey
   // Read at entry points and after every await: while a known guest's reads are paused, nothing reads,
@@ -247,7 +266,6 @@ export default function useJobController({
   const [reattachGeneration, setReattachGeneration] = useState(0)
   callbacksRef.current = { formatError, onCompleteVersion, onNotice, onAuthRequired }
   servicesRef.current = { ...defaultServices, ...services }
-  storageRef.current = storage
 
   const setJobId = useCallback((jobId) => {
     setCurrentJobId(jobId)
@@ -472,7 +490,7 @@ export default function useJobController({
     if (readsPausedRef.current) {
       if (submission && pendingIntentRef.current === intent) {
         const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
-        if (saved) setPendingRun(saved)
+        if (saved) publishPendingRun(runAccount, { sameTab: true })
       }
       setAuth(true)
       return null
@@ -508,7 +526,7 @@ export default function useJobController({
         keepPointer = true
       } else if ((sequenceRef.current === sequence || supersededByPause) && pendingIntentRef.current === intent && submission) {
         const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
-        if (saved) setPendingRun(saved)
+        if (saved) publishPendingRun(runAccount, { sameTab: true })
       }
       setAuth(true)
     }
@@ -563,7 +581,7 @@ export default function useJobController({
       if (submittedJobId && !keepPointer) clearInflightJob(submittedJobId, storageRef.current)
       if (!mock) refreshJobs()
     }
-  }, [acceptStatus, finishEnvelope, mock, refreshJobs, resetActivity, setAuth, setJobId])
+  }, [acceptStatus, finishEnvelope, mock, publishPendingRun, refreshJobs, resetActivity, setAuth, setJobId])
 
   const takePendingRun = useCallback(() => {
     if (readsPausedRef.current) return null
