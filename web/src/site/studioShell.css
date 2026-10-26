@@ -127,6 +127,36 @@
   --cad-properties-pane: var(--ck-pane);
   --cad-status-bar: var(--ck-status);
 }
+/* The grounds are portaled outside .app, so they take the cockpit's dark mapping of the legacy variables here. */
+.studio-shell:has(.app[data-studio-shell="cockpit"]) .studio-ground {
+  color: var(--leaf-ink);
+  --background: var(--leaf-surface);
+  --card: var(--leaf-ground);
+  --border: var(--leaf-line);
+  --primary: var(--leaf-accent);
+  --primary-hover: var(--leaf-accent-hover);
+  --on-accent: var(--leaf-on-accent);
+  --foreground: var(--leaf-ink);
+  --muted: var(--leaf-ink-muted);
+  --muted-2: var(--leaf-ink-muted);
+  --card-grad: linear-gradient(180deg, var(--leaf-surface), var(--leaf-surface));
+  --accent-tint: var(--leaf-accent-tint);
+  --accent-tint-hover: var(--leaf-accent-tint-strong);
+  --rule-strong: var(--leaf-cad-ink-off);
+  --hover-tint: var(--leaf-hover-tint);
+  --hover-tint-strong: var(--leaf-hover-tint-strong);
+  --well: var(--leaf-ground);
+  --well-border: var(--leaf-line);
+  --well-chip: var(--leaf-raised);
+  --well-text: var(--leaf-ink);
+  --well-dim: var(--leaf-ink-muted);
+  --well-faint: var(--leaf-cad-ink-off);
+  --well-accent: var(--leaf-accent);
+  --well-accent-tint: var(--leaf-accent-tint);
+  --ink: var(--foreground);
+  --ink-2: var(--muted);
+  --rule: var(--border);
+}
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] header.top {
   height: var(--ck-top); min-height: 0; box-sizing: border-box;
   padding: 0 4px 0 6px; gap: 4px; flex-wrap: nowrap; overflow: hidden;
