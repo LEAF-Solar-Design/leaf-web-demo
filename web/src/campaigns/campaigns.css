@@ -94,7 +94,7 @@
 }
 .campaign-panel .campaign-outputs .btn.primary:hover:not(:disabled) { background: var(--primary-hover); }
 .campaign-panel .campaign-outputs li > span { font-size: 0.875rem; color: var(--muted); }
-@media (max-width: 480px) {
+@media (max-width: 599px) {
   .campaign-panel { padding: 0.75rem; }
   .campaign-panel .campaign-selection button { width: 100%; }
   .campaign-panel .campaign-release-controls { flex-direction: column; align-items: stretch; }

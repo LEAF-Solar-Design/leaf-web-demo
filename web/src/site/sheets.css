@@ -457,10 +457,10 @@
   .sheets-root .pulse { animation: none; }
 }
 
-/* ---------------- responsive fallback (<1280px) ----------------
+/* ---------------- responsive fallback (<1440px) ----------------
    Authored, not from the mock — the sheets mock is a fixed 1600px drawing;
    this single-column stack is flagged for design review. */
-@media (max-width: 1280px) {
+@media (max-width: 1439px) {
   .sheets-root .sheet-body {
     grid-template-columns: 1fr;
     gap: 36px;
@@ -472,7 +472,7 @@
   .sheets-root .sheet-card { align-self: stretch; }
   .sheets-root .sheet-context { display: none; }
 }
-@media (max-width: 720px) {
+@media (max-width: 1023px) {
   .sheets-root { padding: 12px 10px 24px; gap: 16px; }
   .sheets-root .sheet-head { gap: 10px; padding: 0 14px; }
   .sheets-root .sheet-nav { gap: 12px; overflow-x: auto; }
