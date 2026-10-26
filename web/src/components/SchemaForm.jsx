@@ -78,7 +78,8 @@ function ParamField({ property, fieldKey, value, present, required, onChange, on
   const stale = present && (choices ? !choices.some((choice) => enumValuesEqual(choice, value))
     : declared && !valueMatchesSchemaType(value, property))
   const staleError = stale ? `${label} has a value this tool no longer accepts. Choose or enter a new one.` : ''
-  const error = json ? jsonError || staleError
+  const missing = required && (!present || value === undefined || (typeof value === 'string' && !value.trim()))
+  const error = missing ? `${label} is required.` : json ? jsonError || staleError
     : numeric && range.invalid(value) ? `${label} is outside its allowed range.` : staleError
   useEffect(() => {
     input.current?.setCustomValidity(error)

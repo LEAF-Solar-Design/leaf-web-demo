@@ -1,5 +1,6 @@
-import { lazy, memo, Suspense, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
-import { registry } from './registry.js'
+import { lazy, memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
+import { registry, withTools } from './registry.js'
+import { fetchLabTools } from './toolNodes.js'
 import { pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
@@ -15,6 +16,8 @@ import { canonicalJSON } from '../contract.js'
 import { labValueStore, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
 import { openRunStream, submitRun } from '../runs/runStream.js'
 import { formatLabRoute } from '../labRoute.js'
+import { readController } from '../changes/controller.js'
+import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
 
 // Both mounts pass the values returned by useLiveGraph to LiveValues. Keep
 // their display context out of the values and the proposal document itself.
@@ -114,6 +117,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
 export function LiveValues({ values, provider, saveBar = true, runId = 'local', store = labValueStore, renderProbe }) {
   const state = provider.state
   const context = displayContexts.get(values)
+  const controller = readController(provider)
   return <>
     {context && <AfterSaveDisplay provider={provider} context={context} saveBar={saveBar} />}
     <p data-sources-state>{!state.framed ? 'Studio sources: jobs, capabilities'
@@ -123,6 +127,7 @@ export function LiveValues({ values, provider, saveBar = true, runId = 'local', 
       {[...new Set(values.map(value => value.id))].map(id => <StoredBlockValues key={id} id={id} runId={runId}
         store={store} templates={values.filter(value => value.id === id)} renderProbe={renderProbe} />)}
     </section>
+    {controller && <TestsKeepersRail controller={controller} collapsed />}
   </>
 }
 
@@ -191,6 +196,11 @@ export function setGraphCanvasLoader(loader = loadLabCanvas) {
   LabCanvas = lazy(loader)
 }
 
+let loadLabTools = fetchLabTools
+export function setLabToolsLoader(loader = fetchLabTools) {
+  loadLabTools = loader
+}
+
 export default function GraphView({ hidden = false, initialDocument, entries, onRun, provider: supplied, revision, operator = false, client = labArtifactsClient, renderProbe, route }) {
   renderProbe?.('graph')
   const [restored, setRestored] = useState(() => ({ graph: client.state.restoredGraph, key: client.state.restoredKey }))
@@ -198,7 +208,26 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const [localRevision, setRevision] = useState(0)
   const [local] = useState(() => createHostProvider({ framed: false, operator, onChange: () => setRevision(value => value + 1) }))
   const provider = supplied || local
-  const live = useLiveGraph({ provider, registry: entries || registry, revision: supplied ? revision : localRevision, artifacts: client })
+  const [tools, setTools] = useState([])
+  const toolsRequest = useRef(null)
+  const toolsActive = useRef(true)
+  useEffect(() => {
+    toolsActive.current = true
+    return () => { toolsActive.current = false }
+  }, [])
+  const onLoadTools = useCallback(() => {
+    if (!toolsRequest.current) {
+      const loader = loadLabTools
+      toolsRequest.current = Promise.resolve().then(() => loader()).then(result => {
+        if (result?.state !== 'on' || !Array.isArray(result.tools)) return { state: 'unavailable' }
+        if (toolsActive.current) setTools(result.tools)
+        return result
+      }).catch(() => ({ state: 'unavailable' }))
+    }
+    return toolsRequest.current
+  }, [])
+  const toolEntries = useMemo(() => withTools(entries || registry, tools), [entries, tools])
+  const live = useLiveGraph({ provider, registry: toolEntries, revision: supplied ? revision : localRevision, artifacts: client })
   const [, refreshHead] = useState(0)
   const [runMessage, setRunMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
@@ -361,7 +390,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
         <LiveValues values={live.values} provider={provider} saveBar={false} runId={onRun ? 'local' : valueRunId} renderProbe={renderProbe} />
         <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>
-          <LabCanvas key={restored.key} initialDocument={restored.graph || initialDocument} entries={live.entries} measurements={localTiming?.measurements || live.measurements} upstream={live.upstream} onChange={live.onChange} codeEvidence={block => evidenceFor(provider, block)} />
+          <LabCanvas key={restored.key} initialDocument={restored.graph || initialDocument} entries={live.entries} tools={tools} onLoadTools={onLoadTools} measurements={localTiming?.measurements || live.measurements} upstream={live.upstream} onChange={live.onChange} codeEvidence={block => evidenceFor(provider, block)} />
         </Suspense>
       </> : <p data-graph-placeholder>Open Strategy to load the dependency canvas.</p>}
     </div>

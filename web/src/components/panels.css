@@ -8,13 +8,13 @@
    ========================================================================== */
 
 /* widget-card tier status: dot + sentence-case word, right of the title row */
-.tier-status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: 12px; white-space: nowrap; }
+.tier-status { margin-left: auto; display: inline-flex; align-items: center; gap: 6px; font-size: var(--leaf-size-caption); white-space: nowrap; }
 .tier-status.trusted { color: var(--primary); }        /* solid green dot + word */
 .tier-status.sandboxed { color: var(--muted); }        /* hollow dot, neutral word */
 .tier-status.advisory { color: var(--status-warning); white-space: normal; } /* amber square dot */
 
 /* mono provenance footer line (run · sha · grants · reviewer) on sandboxed cards */
-.prov-line { font-family: var(--font-mono); font-size: 11px; font-weight: 400; color: var(--muted-2); margin-top: 2px; overflow-wrap: anywhere; text-align: left; }
+.prov-line { font-family: var(--font-mono); font-size: var(--leaf-size-caption); font-weight: 400; color: var(--muted-2); margin-top: 2px; overflow-wrap: anywhere; text-align: left; }
 
 /* content-shaped loading stacks — the rows themselves are the contract .skeleton-row */
 .skeleton-stack { display: flex; flex-direction: column; gap: 8px; margin: 4px 0; }
@@ -29,23 +29,23 @@ button.chip-act, button.chip-neutral { border: 0; font-family: inherit; }
 .chip-act:disabled:hover { background: var(--accent-tint); } /* freeze hover while disabled */
 
 /* F1: 12px muted label above the author textarea */
-.field-label { display: block; font-size: 12px; color: var(--muted); margin: 0 0 5px; }
+.field-label { display: block; font-size: var(--leaf-size-caption); color: var(--muted); margin: 0 0 5px; }
 
 /* quiet note inside an X1 strip ("your description is preserved") */
-.err-note { font-size: 11px; color: var(--muted-2); }
+.err-note { font-size: var(--leaf-size-caption); color: var(--muted-2); }
 
 /* R5/R6 customization lifecycle: staged bytes are calm, explicit, and never
    presented as runnable until the publish response succeeds. */
-.customization-state { display: flex; align-items: center; gap: 6px; margin: 8px 0; font-size: 12px; color: var(--muted); }
+.customization-state { display: flex; align-items: center; gap: 6px; margin: 8px 0; font-size: var(--leaf-size-caption); color: var(--muted); }
 .customization-state.error { color: var(--status-warning); }
-.customization-detail { margin: 8px 0; font-size: 11px; color: var(--muted); }
+.customization-detail { margin: 8px 0; font-size: var(--leaf-size-caption); color: var(--muted); }
 .customization-detail > span { display: block; margin-bottom: 3px; }
 .customization-detail pre { margin: 0; max-height: 144px; overflow: auto; white-space: pre-wrap; }
 
 
 /* O2 resolver header inside the project menu: count sits right, muted */
 .proj-menu .resolver-header { display: flex; align-items: baseline; gap: 8px; }
-.proj-count { margin-left: auto; font-size: 11px; color: var(--muted-2); font-variant-numeric: tabular-nums; }
+.proj-count { margin-left: auto; font-size: var(--leaf-size-caption); color: var(--muted-2); font-variant-numeric: tabular-nums; }
 
 /* TM1 relative horizons render with tabular numerals */
 .t-rel { font-variant-numeric: tabular-nums; }

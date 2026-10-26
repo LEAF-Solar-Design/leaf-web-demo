@@ -12,7 +12,7 @@
 .rail-day {
   display: flex; align-items: center; height: 26px;
   border-top: 1px solid var(--border);
-  font-size: 11px; color: var(--muted-2);
+  font-size: var(--leaf-size-caption); color: var(--muted-2);
 }
 .rail-row {
   display: flex; align-items: center; gap: 8px;
@@ -29,18 +29,18 @@ button.rail-row { cursor: pointer; }
 }
 .rail-ev {
   flex: 1; min-width: 0; display: flex; align-items: baseline; gap: 6px;
-  font-size: 12.5px; color: var(--muted); white-space: nowrap; overflow: hidden;
+  font-size: var(--leaf-size-dense); color: var(--muted); white-space: nowrap; overflow: hidden;
 }
-.rail-tool { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--foreground); }
+.rail-tool { font-family: var(--font-mono); font-size: var(--leaf-size-caption); font-weight: 500; color: var(--foreground); }
 .rail-detail { color: var(--muted-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* status word tinted the state color (hollow states keep neutral words) */
-.rail-word { font-size: 12px; white-space: nowrap; }
+.rail-word { font-size: var(--leaf-size-caption); white-space: nowrap; }
 .rail-word.ok { color: var(--primary); }
 .rail-word.warn { color: var(--status-warning); }
 .rail-word.err { color: var(--status-danger); }
 .rail-word.mut { color: var(--muted); }
 .rail-when, .rail-cost {
-  font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
+  font-family: var(--font-mono); font-size: var(--leaf-size-caption); color: var(--muted-2);
   font-variant-numeric: tabular-nums; white-space: nowrap;
 }
 /* Fixed slot: content ranges from "now"/"5 m" up to a clock ("12:45 PM") or
@@ -72,7 +72,7 @@ button.rail-row { cursor: pointer; }
 /* --- workspace summary: ONE big number, demoted sibling stats --- */
 .ws-stats {
   align-self: flex-end; padding-bottom: 5px;
-  font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
+  font-size: var(--leaf-size-dense); color: var(--muted); font-variant-numeric: tabular-nums;
 }
 
 /* --- JobInbox (slice 13a): the right spine's "what you missed" card. Reuses
@@ -99,9 +99,9 @@ aside.job-inbox {
 
 .banner-rest { color: var(--muted); min-width: 0; }
 .banner-tail { margin-left: auto; display: flex; align-items: center; gap: 10px; white-space: nowrap; }
-.banner-since { font-size: 11px; color: var(--muted-2); }
+.banner-since { font-size: var(--leaf-size-caption); color: var(--muted-2); }
 .banner-reason {
-  font-family: var(--font-mono); font-size: 11px; color: var(--muted-2);
+  font-family: var(--font-mono); font-size: var(--leaf-size-caption); color: var(--muted-2);
   max-width: 340px; overflow: hidden; text-overflow: ellipsis;
 }
 
@@ -113,7 +113,7 @@ aside.job-inbox {
 .bq-card { display: flex; flex-direction: column; }
 .bq-stages { display: inline-flex; align-items: center; gap: 2px; margin-left: 4px; }
 .bq-mark {
-  font-family: var(--font-mono); font-size: 11px; line-height: 1;
+  font-family: var(--font-mono); font-size: var(--leaf-size-caption); line-height: 1;
   color: var(--muted-2); opacity: .45; font-variant-numeric: tabular-nums;
 }
 .bq-mark.on { opacity: 1; }
@@ -121,7 +121,7 @@ aside.job-inbox {
 .bq-mark.promoted.on { color: var(--primary-hover); }
 .bq-meta {
   display: flex; flex-wrap: wrap; align-items: baseline; gap: 8px;
-  padding: 0 2px 6px 18px; font-size: 11px; color: var(--muted-2);
+  padding: 0 2px 6px 18px; font-size: var(--leaf-size-caption); color: var(--muted-2);
   font-family: var(--font-mono); font-variant-numeric: tabular-nums;
 }
 .bq-meta b { font-weight: 500; color: var(--muted); }
@@ -131,8 +131,8 @@ aside.job-inbox {
 /* --- slice 11a: the running-count badge in the console toolbar --- */
 .builds-badge {
   display: inline-flex; align-items: center; gap: 6px;
-  height: 22px; padding: 0 8px; border-radius: 11px;
-  font-family: var(--font-mono); font-size: 11px; font-variant-numeric: tabular-nums;
+  height: 22px; padding: 0 8px; border-radius: 999px;
+  font-family: var(--font-mono); font-size: var(--leaf-size-caption); font-variant-numeric: tabular-nums;
   color: var(--primary-hover); background: var(--accent-tint); white-space: nowrap;
 }
 .builds-badge::before {

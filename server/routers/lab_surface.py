@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from datetime import datetime, timezone
 from typing import Any
 
@@ -101,6 +102,10 @@ def status(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
     return response
 
 
+_TOOL_ID = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*")
+_TOOL_VERSION = re.compile(r"[0-9A-Za-z.+-]{1,64}")
+
+
 @router.get("/api/lab/tools")
 def tools(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
     try:
@@ -109,8 +114,13 @@ def tools(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
     except Exception:
         raise HTTPException(status_code=503, detail="lab_tools_unavailable") from None
 
+    # Only rows whose name is a Lab id and whose version is a plain version string
+    # are listed, so no path or other raw text reaches the response; the rest are counted.
+    listed = [tool for tool in projection
+              if isinstance(tool.name, str) and _TOOL_ID.fullmatch(tool.name)
+              and isinstance(tool.version, str) and _TOOL_VERSION.fullmatch(tool.version)]
     result = []
-    for tool in projection[:200]:
+    for tool in listed[:200]:
         source = "tenant" if tool.source in {"tenant_repo", "authored"} else "shipped"
         reason = tool.reason
         if reason is None and os.environ.get("LEAF_LAB_TOOL_NODES") != "1":
@@ -134,4 +144,4 @@ def tools(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
             "available": reason is None, "reason": reason,
         })
     return {"ok": True, "schema": "leaf.lab-tools.v1", "tools": result,
-            "truncated": len(projection) > 200}
+            "truncated": len(listed) > 200, "omitted": len(projection) - len(listed)}

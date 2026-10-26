@@ -2,36 +2,46 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { IntegrationActionCatalogV1, IntegrationManualWorkflowDefinitionV1, IntegrationRefV1 } from '../../../vendor/assistant-contract/src/integration'
 import { boundedIntegrationBody } from './client.js'
 import { WorkflowScheduleDraftPanel } from './WorkflowScheduleDraftPanel.jsx'
+import { humanizeError } from '../errorHumanize.js'
 
 const blank = () => ({ id: '', title: '', version: '1', steps: [{ key: 1, id: 'step-1', action: null, fields: {} }] })
 const actionKey = (action) => JSON.stringify([action.connection_id, action.connector_ref, action.operation_ref])
+const validation = (message, field) => Object.assign(new Error(message), { validationField: field })
 
 function definitionFrom(draft) {
+  const slug = (value) => /^[a-z0-9]+(?:[-_][a-z0-9]+)*$/.test(value) && value.length <= 128
+  if (!draft.title.trim() || draft.title.length > 120) throw validation('Enter a workflow title of up to 120 characters.', 'title')
+  if (!slug(draft.id)) throw validation('Use lowercase letters, numbers, hyphens or underscores for the workflow ID.', 'id')
+  if (!Number.isSafeInteger(Number(draft.version)) || Number(draft.version) < 1) throw validation('Enter a positive whole number for the workflow version.', 'version')
   return IntegrationManualWorkflowDefinitionV1.parse({ schema_version: 1, id: draft.id, title: draft.title,
-    version: Number(draft.version), trigger: 'manual', authority_mode: 'caller_bound', steps: draft.steps.map((step) => {
-      if (!step.action) throw new Error('Choose a catalog action for every step.')
+    version: Number(draft.version), trigger: 'manual', authority_mode: 'caller_bound', steps: draft.steps.map((step, index) => {
+      if (!step.action) throw validation(`Step ${index + 1}: Choose a catalog action.`, `action-${step.key}`)
+      if (!slug(step.id) || draft.steps.some((other) => other.key !== step.key && other.id === step.id)) {
+        throw validation(`Step ${index + 1}: Enter a unique ID using lowercase letters, numbers, hyphens or underscores.`, `step-${step.key}`)
+      }
       const args = {}
       for (const field of step.action.form.fields) {
+        const invalidField = (message) => validation(`Step ${index + 1}: ${message}`, `field-${step.key}-${field.id}`)
         const input = step.fields[field.id]
         if (input.mode === 'omit') {
-          if (field.required) throw new Error('Required field omitted.')
+          if (field.required) throw invalidField('Enter the required value.')
           continue
         }
         if (input.mode === 'null') {
-          if (!field.nullable) throw new Error('Field cannot be null.')
+          if (!field.nullable) throw invalidField('Enter a value for this field.')
           args[field.id] = null
           continue
         }
         let value = input.value
         if (field.kind === 'number') {
-          if (!value.trim()) throw new Error('Enter a number.')
+          if (!value.trim()) throw invalidField('Enter a number.')
           value = Number(value)
           if (!Number.isFinite(value) || (field.integer && !Number.isSafeInteger(value)) ||
-              (field.minimum !== undefined && value < field.minimum) || (field.maximum !== undefined && value > field.maximum)) throw new Error('Number outside bounds.')
+              (field.minimum !== undefined && value < field.minimum) || (field.maximum !== undefined && value > field.maximum)) throw invalidField('Enter a number within the allowed range.')
         } else if (field.kind === 'boolean') value = value === 'true'
         else if (field.kind === 'choice') {
-          if (!field.choices.some((choice) => choice.value === value)) throw new Error('Choose a permitted value.')
-        } else if (value.length < (field.min_length ?? 0) || value.length > (field.max_length ?? 4096)) throw new Error('Text outside bounds.')
+          if (!field.choices.some((choice) => choice.value === value)) throw invalidField('Choose a permitted value.')
+        } else if (value.length < (field.min_length ?? 0) || value.length > (field.max_length ?? 4096)) throw invalidField('Enter text within the allowed length.')
         args[field.id] = value
       }
       return { id: step.id, kind: 'action', connection_id: step.action.connection_id,
@@ -48,6 +58,8 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
   const [result, setResult] = useState(null)
   const binding = useRef(null)
   const feedback = useRef(null)
+  const formRef = useRef(null)
+  const invalidControl = useRef(null)
   useLayoutEffect(() => {
     const ctx = { controller: new AbortController(), busy: false, intent: null, nextStep: 2, cursors: new Set() }
     binding.current = ctx
@@ -60,13 +72,18 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
     if (signal.aborted) clear()
     return () => { ctx.controller.abort(); ctx.intent = null; signal.removeEventListener('abort', clear); if (binding.current === ctx) binding.current = null }
   }, [client, projectId, signal])
-  useLayoutEffect(() => { if (error || result) feedback.current?.focus() }, [error, result])
+  useLayoutEffect(() => {
+    if (error || result) {
+      const control = [...(formRef.current?.querySelectorAll('[data-validation]') || [])].find((node) => node.dataset.validation === invalidControl.current)
+      ;(control || feedback.current)?.focus()
+    }
+  }, [error, result, pending])
 
   async function operate(kind) {
     const ctx = binding.current
     if (!ctx || ctx.busy || ctx.controller.signal.aborted || result || (ctx.intent && kind !== 'Retry')) return
     if (kind === 'Next' && (!catalog?.next_cursor || ctx.cursors.has(catalog.next_cursor) || ctx.cursors.size >= 20)) return
-    ctx.busy = true; setPending(kind); setError('')
+    ctx.busy = true; setPending(kind); setError(''); invalidControl.current = null
     const controller = new AbortController()
     const abort = () => controller.abort()
     ctx.controller.signal.addEventListener('abort', abort, { once: true })
@@ -127,8 +144,9 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
         setError('Save outcome unknown. Retry only the identical definition retained in this page session.')
       } else {
         ctx.intent = null
-        setError(kind === 'Open' || kind === 'Next' ? 'The action catalog could not be verified. Retry the catalog read.' :
-          'The definition was not saved. Check the title, lowercase slug IDs, positive safe-integer version, unique steps and field bounds.')
+        invalidControl.current = failure.validationField || null
+        setError(failure.validationField ? humanizeError(failure) : kind === 'Open' || kind === 'Next' ? 'The action catalog could not be verified. Retry the catalog read.' :
+          'The definition was not saved. Check the entered values and try again.')
       }
     } finally {
       clearTimeout(timer); controller.signal.removeEventListener('abort', cancel)
@@ -149,15 +167,15 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
     <p>Fields are saved business data. Credentials belong in connection setup. The host validates business semantics. Saving a definition does not start a run.</p>
     <button disabled={locked} onClick={() => operate('Open')}>Open action catalog</button>
     {catalog && <>
-      {!catalog.actions.length && <p>No actions are available on this catalog page. Saving is disabled.</p>}
+      {!catalog.actions.length && <p>No actions are available on this catalog page. Choose an action before saving.</p>}
       {catalog.next_cursor && <button disabled={locked || binding.current?.cursors.has(catalog.next_cursor) || binding.current?.cursors.size >= 20}
         onClick={() => operate('Next')}>Next action catalog page</button>}
     </>}
-    <form noValidate onSubmit={(event) => { event.preventDefault(); if (catalog?.actions.length) operate('Save') }}>
+    <form ref={formRef} noValidate onSubmit={(event) => { event.preventDefault(); operate('Save') }}>
       <fieldset disabled={locked} style={{ minWidth: 0 }}><legend>Workflow definition</legend>
         <div className="integration-setup-grid">{['title', 'id', 'version'].map((field) => <label key={field}>
           {({ title: 'Definition title', id: 'Definition stable ID', version: 'Definition version' })[field]}
-          <input style={{ maxWidth: '100%', minWidth: 0 }} value={draft[field]} type={field === 'version' ? 'number' : 'text'}
+          <input data-validation={field} style={{ maxWidth: '100%', minWidth: 0 }} value={draft[field]} type={field === 'version' ? 'number' : 'text'}
             min={field === 'version' ? 1 : undefined} step={field === 'version' ? 1 : undefined} maxLength={field === 'title' ? 120 : 128}
             onChange={(event) => setDraft({ ...draft, [field]: event.target.value })} />
         </label>)}</div>
@@ -165,8 +183,8 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
           const choices = [...(catalog?.actions || [])]
           if (step.action && !choices.some((action) => actionKey(action) === actionKey(step.action))) choices.unshift(step.action)
           return <li key={step.key}>
-            <label>Step {index + 1} stable ID<input maxLength={128} value={step.id} onChange={(event) => updateStep(step.key, { id: event.target.value })} /></label>
-            <label>Step {index + 1} action<select style={{ maxWidth: '100%' }} value={step.action ? actionKey(step.action) : ''} onChange={(event) => {
+            <label>Step {index + 1} stable ID<input data-validation={`step-${step.key}`} maxLength={128} value={step.id} onChange={(event) => updateStep(step.key, { id: event.target.value })} /></label>
+            <label>Step {index + 1} action<select data-validation={`action-${step.key}`} style={{ maxWidth: '100%' }} value={step.action ? actionKey(step.action) : ''} onChange={(event) => {
               const action = choices.find((entry) => actionKey(entry) === event.target.value)
               updateStep(step.key, { action: action || null, fields: Object.fromEntries((action?.form.fields || []).map((field) =>
                 [field.id, { mode: field.required ? 'value' : 'omit', value: field.kind === 'boolean' ? 'false' : '' }])) })
@@ -182,9 +200,9 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
                   {field.nullable && <option value="null">Null</option>}
                 </select></label>
                 {input.mode === 'value' && <label>{label}{field.required ? ' (required)' : ''}
-                  {field.kind === 'boolean' || field.kind === 'choice' ? <select value={input.value} onChange={(event) => change({ value: event.target.value })}>
+                  {field.kind === 'boolean' || field.kind === 'choice' ? <select data-validation={`field-${step.key}-${field.id}`} value={input.value} onChange={(event) => change({ value: event.target.value })}>
                     {field.kind === 'boolean' ? <><option value="false">False</option><option value="true">True</option></> : <><option value="">Choose value</option>{field.choices.map((choice) => <option key={choice.value} value={choice.value}>{choice.label}</option>)}</>}
-                  </select> : <input type={field.kind === 'number' ? 'number' : 'text'} value={input.value}
+                  </select> : <input data-validation={`field-${step.key}-${field.id}`} type={field.kind === 'number' ? 'number' : 'text'} value={input.value}
                     min={field.minimum} max={field.maximum} step={field.kind === 'number' ? field.integer ? 1 : 'any' : undefined}
                     maxLength={field.kind === 'text' ? field.max_length ?? 4096 : undefined}
                     onChange={(event) => change({ value: event.target.value })} />}
@@ -201,15 +219,19 @@ export function ManualWorkflowDefinitionPanel({ client, projectId, signal, guard
           const key = binding.current.nextStep++
           setDraft({ ...draft, steps: [...draft.steps, { key, id: `step-${key}`, action: null, fields: {} }] })
         }}>Add step</button>
-        <button disabled={!catalog?.actions.length}>Save workflow definition</button>
+        <button disabled={Boolean(pending)}>Save workflow definition</button>
       </fieldset>
     </form>
     <div ref={feedback} tabIndex={-1} style={{ minWidth: 0 }}>
       <p role="status" aria-live="polite">{pending ? `${pending} in progress…` : result ? 'Workflow definition saved. Saving has not started a run.' :
         catalog ? `Action catalog loaded. ${catalog.actions.length} actions on this page.` : ''}</p>
-      {error && <p role="alert">{error}</p>}
+      {error && <p role="alert">{humanizeError(error)}</p>}
       {result && <section aria-label="Saved immutable definition">
         <p>Copy this immutable reference into the existing Start review.</p>
+        <button type="button" onClick={async () => {
+          try { await navigator.clipboard.writeText(JSON.stringify(result.reference)) }
+          catch { setError(humanizeError('Copy is unavailable. Select the saved reference fields and copy them.')) }
+        }}>Copy workflow reference</button>
         {['id', 'version', 'digest'].map((field) => <label key={field}>Saved workflow {field}<input readOnly value={result.reference[field]} /></label>)}
         <ol>{result.definition.steps.map((step) => <li key={step.id}>{step.id} · {step.connection_id} · {step.operation_ref.id}<pre style={{ whiteSpace: 'pre-wrap', overflowWrap: 'anywhere' }}>{JSON.stringify(step, null, 2)}</pre></li>)}</ol>
         <WorkflowScheduleDraftPanel client={client} projectId={projectId} signal={signal} guard={guard} onForbidden={onForbidden}

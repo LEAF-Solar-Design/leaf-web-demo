@@ -8,7 +8,7 @@
   color: var(--foreground, #18181b);
   background: var(--card, #fff);
   border: 1px solid var(--border, #d4d4d8);
-  border-radius: 8px;
+  border-radius: var(--leaf-radius-card);
   overflow-wrap: anywhere;
 }
 .lab-preview-panel { min-width: 0; margin-top: 12px; }
@@ -22,7 +22,7 @@
   color: inherit;
   background: var(--card, #fff);
   border: 1px solid var(--border, #a1a1aa);
-  border-radius: 6px;
+  border-radius: var(--leaf-radius-control);
   cursor: pointer;
 }
 .lab-preview [aria-selected="true"], .lab-preview-toggle[aria-expanded="true"] {
