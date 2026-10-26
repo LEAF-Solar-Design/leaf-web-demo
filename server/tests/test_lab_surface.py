@@ -369,9 +369,9 @@ def test_tools_contract_and_availability(monkeypatch, flag, source, authored, ti
     response = _client().get("/api/lab/tools")
     assert response.status_code == 200
     body = response.json()
-    assert set(body) == {"ok", "schema", "tools", "truncated"}
+    assert set(body) == {"ok", "schema", "tools", "truncated", "omitted"}
     assert body["ok"] is True and body["schema"] == "leaf.lab-tools.v1"
-    assert body["truncated"] is False and seen == ["tenant-a"]
+    assert body["truncated"] is False and body["omitted"] == 0 and seen == ["tenant-a"]
     entry, = body["tools"]
     assert entry == {"id": tool.name, "version": tool.version,
                      "title": tool.manifest["title"] if tool.manifest else tool.name,
@@ -401,6 +401,21 @@ def test_tools_availability_reads_environment_per_request(monkeypatch):
     response = client.get("/api/lab/tools")
     assert response.json()["tools"][0]["reason"] == "sandbox not armed"
     assert "private sandbox path" not in response.text
+
+
+def test_tools_never_list_a_raw_name_or_version(monkeypatch):
+    from dataclasses import replace
+    from test_lab_tool_manifests import read_tool
+
+    tool = lab_surface.lab_tool_manifests.project_tool(read_tool(), "tenant_repo")
+    unsafe = (replace(tool, name=r"C:\private\tool.py", manifest=None, reason="tool name or version is not a Lab id"),
+              replace(tool, name="ok-name", version="/srv/tools/v1", manifest=None, reason="tool name or version is not a Lab id"))
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", lambda tenant: (tool, *unsafe))
+    response = _client().get("/api/lab/tools")
+    body = response.json()
+    assert [entry["id"] for entry in body["tools"]] == [tool.name]
+    assert body["omitted"] == 2
+    assert "private" not in response.text and "/srv/tools" not in response.text
 
 
 @pytest.mark.parametrize("count,truncated", [(200, False), (201, True)])
