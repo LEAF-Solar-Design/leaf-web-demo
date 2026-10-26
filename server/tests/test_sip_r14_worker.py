@@ -298,9 +298,10 @@ def test_R14C_13_send_time_grant(monkeypatch):
 
 
 def test_R14C_14_known_http_refusals(monkeypatch):
-    """R14C-14 HTTP 401, 403 and other errors retain durable known refusal classifications."""
+    """R14C-14 HTTP errors retain durable known refusal classifications."""
     for status, code in ((401, "cloud_auth_missing"), (403, "cloud_tenant_unauthorized"),
-                         (400, "cloud_upstream_failure"), (503, "cloud_upstream_failure")):
+                         (400, "cloud_request_invalid"), (422, "cloud_request_invalid"),
+                         (503, "cloud_upstream_failure")):
         with monkeypatch.context() as patch:
             w = World(patch)
             post = w.post
@@ -312,6 +313,20 @@ def test_R14C_14_known_http_refusals(monkeypatch):
             w.run()
             assert w.exchange["state"] == "refused" and w.exchange["refusal_code"] == code
             assert w.row["error"]["reason_code"] == code.upper() and not w.history
+
+
+def test_R14C_14_http_500_upstream_refusal(monkeypatch):
+    """HTTP 500 remains a durable upstream failure refusal for a canonical run."""
+    w = World(monkeypatch)
+    post = w.post
+    def response(*args, **kwargs):
+        result = post(*args, **kwargs)
+        result.status_code = 500
+        return result
+    monkeypatch.setattr(cloud.requests, "post", response)
+    w.run()
+    assert w.exchange["state"] == "refused" and w.exchange["refusal_code"] == "cloud_upstream_failure"
+    assert w.row["error"]["reason_code"] == "CLOUD_UPSTREAM_FAILURE" and not w.history
 
 
 def test_R14C_15_transport_ambiguity(monkeypatch):
