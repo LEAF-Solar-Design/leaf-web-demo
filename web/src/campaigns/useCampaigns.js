@@ -127,6 +127,7 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       context.enrollments = enrollment.enrollments
       context.completion = completion
       update({ campaigns, selectedId, selected, completion, questions, answers, status: 'ready', refreshing: false,
+        error: null, errorAction: null,
         capabilities, capabilityError, submissions, invocationResults, recoveryUnavailable: storageUnavailableRef.current,
         enrollments: enrollment.enrollments, allowedMachines: enrollment.allowed_machines, enrollmentError,
         executionLoading: !silent && !!selectedId, ...(changedSelection || !selectedId ? { execution: null, executionError: null } : {}) })
