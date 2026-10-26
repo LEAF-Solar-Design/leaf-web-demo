@@ -32,12 +32,14 @@ export function createActionRecorder({ maxRequests = 40, maxActions = 20,
   }
 }
 
-export function classifyStagingOutcome({ error = null, skipped = null, network = [] } = {}) {
-  const status = typeof skipped === 'string' && skipped.length ? 'skipped' : error !== null ? 'failed' : 'passed'
+export function classifyStagingOutcome({ error = null, skipped = null, network = [], delivery } = {}) {
+  const deliverySkip = skipped === 'infra_stale_delivery' && delivery?.decision === 'stale' && error === null
+  const status = skipped === 'infra_stale_delivery' ? (deliverySkip ? 'skipped' : error !== null ? 'failed' : 'passed')
+    : typeof skipped === 'string' && skipped.length ? 'skipped' : error !== null ? 'failed' : 'passed'
   const barrierFailure = status === 'failed' ? String(error?.message ?? error).split(/[\r\n]/)[0].slice(0, 200) : null
   const observations = network.filter(entry => {
     if (entry.status >= 200 && entry.status < 400) return false
     return entry.status >= 400 || entry.error_code != null || entry.status === null || entry.status === 'failed'
   }).slice(0, 20).map(({ method, path, status, error_code }) => ({ method, path, status, error_code }))
-  return { status, barrierFailure, observations }
+  return { status, barrierFailure, observations, ...(deliverySkip ? { reasonCode: 'infra_stale_delivery' } : {}) }
 }
