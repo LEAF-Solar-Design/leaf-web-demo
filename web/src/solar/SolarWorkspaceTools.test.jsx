@@ -1036,7 +1036,7 @@ describe('F3 SolarEdge workspace integration', () => {
     p.transport.fetchImpl.mockResolvedValueOnce(guest())
     const file = f3Choose(); fireEvent.click(f3UploadButton())
     await waitFor(() => expect(screen.getByRole('status').textContent).toBe(
-      'Upload failed. A guest session cannot use the SolarEdge import, so sign in to an account'))
+      'Upload failed. A guest session cannot use the SolarEdge import, so sign in to an account.'))
     expect(f3File().files[0]).toBe(file)
     fireEvent.click(f3UploadButton())
     await screen.findByLabelText('Alignment tolerance')
@@ -1045,7 +1045,7 @@ describe('F3 SolarEdge workspace integration', () => {
     fireEvent.change(screen.getByLabelText('Alignment tolerance'), { target: { value: '0.5' } })
     fireEvent.click(f3BuildButton())
     await waitFor(() => expect(screen.getByRole('status').textContent).toBe(
-      'Report failed. A guest session cannot use the SolarEdge import, so sign in to an account'))
+      'Report failed. A guest session cannot use the SolarEdge import, so sign in to an account.'))
     expect(screen.getByLabelText('Alignment tolerance').value).toBe('0.5')
     expect(screen.getByLabelText('Selection order').value).toBe('recorded')
     expect(f3File().files[0]).toBe(file)

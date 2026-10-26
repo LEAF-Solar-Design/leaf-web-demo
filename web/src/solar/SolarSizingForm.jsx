@@ -9,6 +9,20 @@ import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingB
 
 const projectReasonCode = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}(?![\\s\\S])')
 const projectJobId = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])')
+const previewTimeoutSentence = 'The catalog preview did not finish in time. Select Refresh preview to try again.'
+
+export const MODULE_PARAMETER_LABELS = Object.freeze({
+  V_oc_ref: 'Open circuit voltage at reference conditions (V)',
+  I_sc_ref: 'Short circuit current at reference conditions (A)',
+  V_mp_ref: 'Maximum power voltage at reference conditions (V)',
+  I_mp_ref: 'Maximum power current at reference conditions (A)',
+  alpha_sc: 'Short circuit current temperature coefficient (A/°C)',
+  beta_oc: 'Open circuit voltage temperature coefficient (V/°C)',
+  STC: 'Power at standard test conditions (W)',
+  gamma_r: 'Power temperature coefficient (%/°C)',
+  T_NOCT: 'Nominal operating cell temperature (°C)',
+  N_s: 'Cells in series',
+})
 
 export function projectSizingConductorFeedback(outcome, admission = null, phase = 'submission') {
   const code = [admission?.error?.reason_code, outcome?.envelope?.error?.reason_code, outcome?.reason]
@@ -46,7 +60,10 @@ export function projectSizingConductorFeedback(outcome, admission = null, phase 
     || typeof outcome !== 'object' || outcome === null || Array.isArray(outcome) || typeof outcome.ok !== 'boolean'
     || (phase === 'submission' && outcome.ok && (outcome.status !== 202 || outcome.data?.status !== 'submitted'
       || typeof outcome.data.job_id !== 'string' || !projectJobId.test(outcome.data.job_id))) ) reason = 'request_invalid'
-  return { outcome, admission, reason, text: projectSizingConductorReason(reason), code }
+  return { outcome, admission, reason, phase,
+    text: reason === 'request_timeout' && phase === 'preview' ? previewTimeoutSentence
+      : reason === 'request_timeout' && phase === 'context' ? 'The drawing check did not finish in time.'
+        : projectSizingConductorReason(reason), code }
 }
 
 // The two project forms share the exact-intent lifecycle; standalone components never enter it.
@@ -161,7 +178,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           contextSettled = true
           setLoaded({ scope, state: outcome.ok ? deriveState({ binding, contextView: outcome.data })
             : { mode: 'refused', reason: 'context_unreadable' } })
-          if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome) })
+          if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome, null, 'context') })
         } catch {
           if (current.isCurrent()) {
             contextSettled = true
@@ -296,7 +313,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           || checked.graphSha256 !== state.graphSha256 || checked.rev !== state.rev
           || !sameSolarDrawingBinding(checked.binding, state.binding)) {
         scope.armed = null
-        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome) })
+        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome, null, 'context') })
         setPublication({ scope, generation: scope.generation,
           reason: checked.reason === 'not_current_head' ? 'not_current_head' : 'scope_stale' })
         return
@@ -402,7 +419,7 @@ function ProjectSolarSizingForm(props) {
       .every((key) => Number.isFinite(cold[key]))
     && Number.isInteger(cold.standard_string_length) && Number.isInteger(cold.suggested_string_length)
     && cold.suggested_string_length >= 1 && cold.suggested_string_length < cold.standard_string_length ? cold : null
-  const sentence = projectSizingConductorReason(reason)
+  const sentence = (reason === 'request_timeout' && runMessage?.phase === 'preview' ? previewTimeoutSentence : projectSizingConductorReason(reason))
     || projectSizingCloudReason(reason)
     || (reason === 'sizing_module_unconfirmed' ? SOLAR_SIZING_REASONS.sizing_module_unconfirmed : null)
     || (reason === 'sizing_zip_required' ? SOLAR_SIZING_REASONS.sizing_zip_required
@@ -440,7 +457,8 @@ function ProjectSolarSizingForm(props) {
     </>}
     {sentence && <p role="status">{sentence}</p>}
     {runMessage && <p role="status" data-testid="project-solar-sizing-feedback">
-      {runMessage.text}{runMessage.code ? ` (${runMessage.code})` : ''}
+      {humanizeError(runMessage.reason === 'request_timeout' && runMessage.phase === 'submission'
+        ? 'The submission was not confirmed. Retry the same request to check its status.' : runMessage.text)}
     </p>}
     {suggestion && <div role="status">
       <p>At {suggestion.standard_string_length} modules the cold-weather open-circuit voltage is {suggestion.string_voltage.toFixed(1)} V, above the {suggestion.max_dc_voltage.toFixed(1)} V limit. {suggestion.suggested_string_length} modules stay within it.</p>
@@ -561,7 +579,7 @@ function SizingCloudFields({ mode, draft, change, chooseModule, projectClient, s
     {boolean('open_circuit_rise', 'Open circuit rise')}{input('grant_ref', 'Grant reference')}
     <label><input type="checkbox" checked={draft.use_module_parameters === true} disabled={busy}
       onChange={(event) => change('use_module_parameters', event.target.checked)} />Use module parameters</label>
-    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, key))}
+    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, MODULE_PARAMETER_LABELS[key]))}
   </>
 }
 

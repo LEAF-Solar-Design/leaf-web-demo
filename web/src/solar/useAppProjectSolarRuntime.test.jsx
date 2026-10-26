@@ -61,6 +61,27 @@ beforeEach(() => {
 })
 afterEach(cleanup)
 
+it('S1-123 keeps the specific panel-group refusal in the run notice', async () => {
+  const h = await setup()
+  await h.submit()
+  await h.finish({ status: 'failed', result: null, output_version_id: null,
+    error: { error_code: 'GRAPH_JOB_FAILED', reason_code: 'pvg_no_panel_groups', retryable: false } })
+  expect(h.result.current.notice).toBe('Choose a G33 capture that contains panel groups')
+  expect(h.result.current.notice).not.toContain('reported code')
+  expect(h.result.current.busy).toBe(false)
+  h.unmount()
+})
+
+it('S1-123 gives a readable fallback for an unlisted refusal', async () => {
+  const h = await setup()
+  await h.submit()
+  await h.finish({ status: 'failed', result: null, output_version_id: null,
+    error: { error_code: 'GRAPH_JOB_FAILED', reason_code: 'new_internal_refusal', retryable: false } })
+  expect(h.result.current.notice).toBe('The server refused this solar tool')
+  expect(h.result.current.notice).not.toMatch(/new_internal_refusal|reported code/)
+  h.unmount()
+})
+
 it('W1C5 releases a proposal run lock, preserves review, and starts commit as a new run', async () => {
   const h = await setup({ toolName: 'solar-solve-proposal' })
   expect(await h.submit()).toEqual(accepted)

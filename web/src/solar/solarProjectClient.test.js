@@ -44,6 +44,17 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  it('S1-121 clears a release error after a successful checkout reread', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(refusal('CHECKOUT_STALE'), 409))
+    expect((await client.releaseCheckout()).ok).toBe(false)
+    expect(client.getSnapshot().error).toBe('CHECKOUT_STALE')
+    fetchImpl.mockResolvedValueOnce(response({ ...identity, checkout: null }))
+    expect((await client.readCheckout()).ok).toBe(true)
+    expect(client.getSnapshot()).toMatchObject({ error: null, checkout: null, ownsCheckout: false })
+  })
+
   const sizingModules = () => ({ schema_version: 1,
     catalog: { source: 'pvlib.CeCMod', pvlib_version: '0.13', count: 1, sha256: 'a'.repeat(64) },
     modules: [{ key: 'Canadian_Solar_CS6U', stc_w: 330, n_s: 72, v_oc_ref: null, length_m: 1.9, width_m: null }],
