@@ -1087,24 +1087,23 @@
   --leaf-font-mono: var(--font-mono);
 }
 
-/* .leaf-light: Browser board's opt-in light scope over the ratified paper identity. */
+/* .leaf-light: Browser board's opt-in light scope; it reads the v1 Paper roles, which [data-leaf-theme="paper"] sets on the same element. */
 .leaf-light {
-  --background: #e9e7e0;
-  --foreground: #191d1a;
-  --card: #ffffff;
-  --border: #d6d4cb;
-  --primary: #1e6b45;
-  --primary-hover: #175437;
-  --on-accent: #f5faf6;
-  --muted: #4f5851;
-  --muted-2: #5d645d;
+  --background: var(--leaf-ground);
+  --foreground: var(--leaf-ink);
+  --card: var(--leaf-surface);
+  --border: var(--leaf-line);
+  --primary: var(--leaf-accent-text);
+  --primary-hover: var(--leaf-accent);
+  --on-accent: var(--leaf-surface);
+  --muted: var(--leaf-ink-muted);
+  --muted-2: var(--leaf-ink-muted);
   --leaf-background: var(--background);
   --leaf-foreground: var(--foreground);
   --leaf-card: var(--card);
   --leaf-border: var(--border);
   --leaf-primary: var(--primary);
   --leaf-primary-hover: var(--primary-hover);
-  --leaf-on-accent: var(--on-accent);
   --leaf-muted: var(--muted);
   --leaf-muted-2: var(--muted-2);
 }
