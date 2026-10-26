@@ -15,6 +15,7 @@ import { WebhookReceiptPanel } from './WebhookReceiptPanel.jsx'
 import { WorkflowScheduleDraftBrowser } from './WorkflowScheduleDraftBrowser.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from '../site/groundWindow.js'
 import './ops-workspace.css'
+import { humanizeError } from '../errorHumanize.js'
 
 const empty = () => ({ scope: null, datasets: [], elements: [], datasetCursor: null, elementCursor: null, selected: null, read: null, action: null, historical: false, pending: '', error: '', notice: '' })
 const blankForm = () => ({ dataset: '', id: '', title: '', kind: 'table', columns: [], x: '', y: '', editing: null })
@@ -38,6 +39,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const [handoff, setHandoff] = useState(null)
   const boardRef = useRef(null)
   const resultRef = useRef(null)
+  const composeFeedback = useRef(null)
+  const [composeError, setComposeError] = useState('')
+  const [savedReadback, setSavedReadback] = useState(null)
+  useLayoutEffect(() => { if (composeError || savedReadback) composeFeedback.current?.focus() }, [composeError, savedReadback])
   const generation = useRef(0)
   const context = useRef(null)
   const viewGeneration = useRef(0)
@@ -58,6 +63,8 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   const win = useGroundWindow(active || leaving, studioShell, boardRef, shellOccluders)
 
   function invalidate() {
+    setComposeError('')
+    setSavedReadback(null)
     setHandoff(null)
     generation.current += 1
     context.current?.action?.controller.abort()
@@ -95,7 +102,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
       setState({ ...empty(), identity, error: 'You do not have permission to view these integrations.' })
       setForm(blankForm())
       setRevision('')
-    } else setState((old) => ({ ...old, pending: '', error: error?.message || 'Integrations are unavailable. Please retry.' }))
+    } else setState((old) => ({ ...old, pending: '', error: humanizeError(error), retryable: error?.retryable !== false && ![401, 403, 404, 409, 422].includes(error?.status) }))
   }
   useLayoutEffect(() => {
     invalidate()
@@ -122,12 +129,16 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     return invalidate
   }, [identity, retry, client])
 
-  async function operation(label, action) {
+  async function operation(label, action, composing = false) {
     const ctx = context.current
     if (!ctx || !current(ctx) || busy.current) return
     busy.current = true
     setState((old) => ({ ...old, pending: label, error: '', notice: '' }))
-    try { await action(ctx) } catch (error) { fail(error, ctx) }
+    if (composing) setComposeError('')
+    try { await action(ctx) } catch (error) {
+      if (composing && current(ctx) && error?.name !== 'AbortError' && ![401, 403].includes(error?.status)) setComposeError(humanizeError(error))
+      else fail(error, ctx)
+    }
     finally {
       if (current(ctx)) {
         busy.current = false
@@ -290,6 +301,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
   }
   function compose(event) {
     event.preventDefault()
+    if (savedReadback) return
     operation('Saving view…', async (ctx) => {
       const dataset = state.datasets.find((item) => referenceKey(item.reference) === form.dataset)
       if (!dataset) throw new Error('Select an authorized dataset.')
@@ -309,8 +321,18 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
         elements: [...old.elements.filter((record) => record.element.id !== saved.element.id), saved] }))
       setForm((old) => ({ ...old, editing: saved }))
       resultRef.current?.focus()
+      await readSavedView(saved, ctx)
+    }, true)
+  }
+  async function readSavedView(saved, ctx) {
+    try {
       await readView(saved, false, ctx)
-    })
+      if (current(ctx)) setSavedReadback(null)
+    } catch (error) {
+      if (!current(ctx) || error?.name === 'AbortError') return
+      if ([401, 403].includes(error?.status)) { fail(error, ctx); return }
+      setSavedReadback({ record: saved, error: humanizeError(error) })
+    }
   }
   function editSelected() {
     const saved = state.selected
@@ -345,10 +367,10 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     data-studio-shell={studioShell ? 'cockpit' : undefined} aria-label="Ops workspace" aria-hidden={leaving ? 'true' : undefined}
     inert={leaving ? '' : undefined} data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}>
     <div className="ops-workspace" style={windowStyle(win)}>
-      <h1>Ops workspace</h1><p>{projectLabel || 'Project'}{projectId ? ` · ${projectId}` : ''}</p>
+      <h1>Ops workspace</h1><p>{projectLabel?.trim() || (projectId ? 'Project name unavailable' : 'No project open')}</p>
       {message ? <p role="status">{message}</p> : visible && <>
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
-        {state.error && <div role="alert"><p>{state.error}</p><button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button></div>}
+        {state.error && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
         {state.scope && <>
           {['owner', 'editor'].includes(state.scope.projectRole) && context.current && <WorkflowScheduleDraftBrowser
             key={JSON.stringify(['schedule-drafts', identity.key, context.current.cacheIdentity])}
@@ -391,7 +413,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
             onDatasetReady={refreshSetupDataset} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
-            {!state.datasets.length && <p>No connection or dataset is available. Integration setup is needed.</p>}
+            {!state.datasets.length && <p>{state.scope.projectRole === 'owner'
+              ? 'No datasets are available yet. Use integration setup to connect your data.'
+              : 'No datasets are available yet. Ask the project owner to connect your data.'}</p>}
             <ul>{state.datasets.map((item) => <li key={`${item.reference.id}:${item.reference.version}`}>{item.title} · version {item.reference.version}</li>)}</ul>
             {state.datasetCursor && <button disabled={pending} onClick={() => loadMore('datasets')}>Load more datasets</button>}
           </section>
@@ -401,7 +425,12 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             {state.elementCursor && <button disabled={pending} onClick={() => loadMore('elements')}>Load more saved views</button>}
           </section>
           <form onSubmit={compose} aria-label="Compose native view"><h2>Compose native view</h2>
-            <fieldset disabled={pending}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
+            {composeError && <p ref={composeFeedback} tabIndex={-1} role="alert">{composeError} Your draft is retained. Review it and save again.</p>}
+            {savedReadback && <div ref={composeFeedback} tabIndex={-1} role="alert">
+              <p>Your view was saved, but its data could not be loaded. {savedReadback.error}</p>
+              <button type="button" disabled={pending} onClick={() => operation('Loading saved view…', (ctx) => readSavedView(savedReadback.record, ctx))}>Reload view</button>
+            </div>}
+            <fieldset disabled={pending || Boolean(savedReadback)}><legend>{form.editing ? `Update revision ${form.editing.revision}` : 'Create a view'}</legend>
               <label>Dataset<select required value={form.dataset} onChange={(event) => setForm({ ...blankForm(), dataset: event.target.value })}>
                 <option value="">Select dataset</option>{state.datasets.map((item) => <option key={referenceKey(item.reference)} value={referenceKey(item.reference)}>{item.title} · version {item.reference.version}</option>)}
               </select></label>

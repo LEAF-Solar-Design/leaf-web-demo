@@ -62,6 +62,48 @@ def test_explicit_no_tool_adapter_keeps_effect_refusal(monkeypatch):
         evaluate_graph(tool.graph, tool.registry, tool_adapter=None)
 
 
+def test_custom_trusted_lookup_resolves_unregistered_block(monkeypatch):
+    from test_lab_tool_nodes import projected_graph
+    tool = projected_graph(monkeypatch)
+    assert evaluator.lab_registry.lookup(tool.descriptor.name, tool.descriptor.version) is None
+    calls = []
+
+    def lookup(block_id, version):
+        calls.append((block_id, version))
+        return tool.trusted
+
+    class Adapter:
+        def admissible(self, trusted):
+            return trusted == tool.trusted
+
+        def __call__(self, block_id, trusted, manifest, inputs, settings, **kwargs):
+            assert trusted == tool.trusted
+            return {"outputs": {"result": 7}}
+
+    result = evaluate_graph(tool.graph, tool.registry, trusted_lookup=lookup,
+                            tool_adapter=Adapter())
+    assert calls == [(tool.descriptor.name, tool.descriptor.version)]
+    assert result["outputs"]["result"].data == 7
+    assert result["outputs"]["result"].error is None
+
+
+@pytest.mark.parametrize("options", [{}, {"trusted_lookup": None}])
+def test_default_trusted_lookup_uses_registry(monkeypatch, options):
+    graph, registry = case("constant-number")
+    original = evaluator.lab_registry.lookup
+    calls = []
+
+    def lookup(block_id, version):
+        calls.append((block_id, version))
+        return original(block_id, version)
+
+    monkeypatch.setattr(evaluator.lab_registry, "lookup", lookup)
+    result = evaluate_graph(graph, registry, **options)
+    ref = graph["blocks"][0]["registry"]
+    assert calls == [(ref["id"], ref["version"])]
+    assert result["outputs"]["result"].data == 7
+
+
 def test_integer_output_name_is_refused_before_execution():
     graph, registry = case("constant-number")
     manifest = registry["constant@1.0.0"]

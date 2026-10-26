@@ -21,6 +21,7 @@ import { useEffect, useLayoutEffect, useRef } from 'react'
 import { useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { applyPick, buildSnapIndex, currentStep, ghostFor, orthoAnchor, orthoPoint, snapPoint, startPicking, wantsPick } from './pointPicking.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
+import { humanizeError } from '../errorHumanize.js'
 
 const CLICK_MOVE_PX = 5
 const CLICK_MAX_MS = 500
@@ -44,7 +45,9 @@ function focusRun() {
 export default function CanvasPointPicker({ viewerRef = null, ground = null, onPicking = null, canvasSelector = null }) {
   const canvasSelectorRef = useRef(canvasSelector)
   canvasSelectorRef.current = canvasSelector
-  const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapLimited, highlightedIds } = useEngineSessionContext()
+  const { session, inputs, setInput, armed, ortho, setOrtho, osnap, setOsnap, snapModes, setSnapLimited, highlightedIds, refuse } = useEngineSessionContext()
+  const refuseRef = useRef(refuse)
+  refuseRef.current = refuse
   useEffect(() => {
     viewerRef?.current?.setHighlight?.(Array.from(highlightedIds || []))
     return () => viewerRef?.current?.setHighlight?.([])
@@ -235,8 +238,12 @@ export default function CanvasPointPicker({ viewerRef = null, ground = null, onP
       if (busyRef.current) return false
       const step = currentStep(m)
       const { state, writes } = applyPick(m, px, py, inputsRef.current, context)
-      if (!writes.length && state === m) return false
+      if (!writes.length && state === m) {
+        if (step?.kind === 'edge') refuseRef.current(humanizeError('No other edge found there. Click closer to a different edge and try again.'))
+        return false
+      }
       machine.current = state
+      if (step?.kind === 'edge') refuseRef.current('')
       for (const [key, value] of writes) setInput(key, value)
       // Preserve click-only Run behavior; a bar entry submits a mixed LINE.
       state.barPoint = typed || m.barPoint

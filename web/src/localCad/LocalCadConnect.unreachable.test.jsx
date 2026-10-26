@@ -3,6 +3,7 @@ import React from 'react'
 import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import LocalCadConnect from './LocalCadConnect.jsx'
+import { humanizeError } from '../errorHumanize.js'
 
 afterEach(cleanup)
 
@@ -42,7 +43,8 @@ describe('LocalCadConnect unreachable', () => {
       render(<LocalCadConnect status="unreachable" error={error} />)
 
       expect(screen.getByTestId('local-cad-status').closest('[aria-live]').textContent)
-        .toContain(`. The last update failed: ${error}`)
+        .toContain(`. The last update failed: ${humanizeError(error)}`)
+      expect(screen.getByTestId('local-cad-status').closest('[aria-live]').textContent).not.toContain(error)
       cleanup()
     }
   })

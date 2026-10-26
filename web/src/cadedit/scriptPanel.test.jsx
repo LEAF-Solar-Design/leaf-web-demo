@@ -146,7 +146,7 @@ describe('W4g-7a the script runner', () => {
     fireEvent.click(runButton())
     expect(posts()).toHaveLength(1)
     workers[0].emit({ type: 'editApplied', op: 'createLine', ok: false, reason: 'line_zero_length' })
-    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 1: Edit refused (createLine): line_zero_length'), { timeout: 5000 })
+    await waitFor(() => expect(status().textContent).toBe('Script stopped at line 1: The line needs two different endpoints. Choose another point and retry.'), { timeout: 5000 })
     expect(posts()).toHaveLength(1)
   })
 
@@ -238,8 +238,8 @@ describe('W4g-7a the script runner', () => {
   })
 
   it.each([
-    ['INSERT', 'an INSERT is placed, not edited, in this round'],
-    ['DIMENSION', 'a dimension is placed, not edited, in this round'],
+    ['INSERT', 'A block can be placed here but not edited.'],
+    ['DIMENSION', 'A dimension can be placed here but not edited.'],
   ])('C1: repeated bare EXPLODE on %s stops immediately on both runs', async (type, sentence) => {
     vi.useFakeTimers({ shouldAdvanceTime: true })
     mount()

@@ -5,7 +5,7 @@
 .object-snap-trigger {
   min-width: 16px; padding: 0 3px; margin-right: 4px;
   font: inherit; line-height: 1; color: inherit;
-  background: transparent; border: 1px solid var(--ck-edge, #3f3f3f); border-radius: 2px; cursor: pointer;
+  background: transparent; border: 1px solid var(--ck-edge, #3f3f3f); border-radius: var(--leaf-radius-key); cursor: pointer;
 }
 .object-snap-trigger[aria-expanded="true"] { border-color: var(--ck-active, #4fb3e8); }
 .object-snap-trigger:focus-visible { outline: 2px solid var(--ck-sel, currentColor); outline-offset: 1px; }
@@ -32,7 +32,7 @@
 .object-snap-help { color: var(--ck-ink-off, #b8bec6); }
 /* The status bar's polite limitation line beside the live OSNAP master; it
    stays mounted (empty) so a change is announced, and takes no room empty. */
-.cockpit-osnap-limited { align-self: center; padding: 0 4px; font-size: 10.5px; white-space: nowrap; color: var(--ck-warn, #c9a86a); }
+.cockpit-osnap-limited { align-self: center; padding: 0 4px; font-size: var(--leaf-size-caption); white-space: nowrap; color: var(--ck-warn, #c9a86a); }
 .cockpit-osnap-limited:empty { padding: 0; }
 @media (pointer: coarse) {
   .object-snap-trigger { min-width: 44px; min-height: 44px; }

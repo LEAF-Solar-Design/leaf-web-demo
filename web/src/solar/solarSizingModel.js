@@ -13,6 +13,7 @@ export const SOLAR_SIZING_REASONS = Object.freeze({
   sizing_fields_invalid: 'Check the marked sizing fields before submitting.',
   sizing_too_many_targets: 'Size at most 4096 targets at once.',
   sizing_manual_length_required: 'Save a whole-number string length from 1 to 4096 in Solar settings.',
+  sizing_module_unconfirmed: 'Choose a module from the sizer catalog.',
 })
 
 export const MODULE_PARAMETER_KEYS = Object.freeze([
@@ -135,7 +136,7 @@ export function sizingTargets(graph, mode) {
   return { ok: true, targets: graph.zones.map((zone) => zone.id) }
 }
 
-export function buildSizingParams({ graph, mode, draft = {} }) {
+export function buildSizingParams({ graph, mode, draft = {}, moduleCatalog = true }) {
   if (!graph?.ok) return fail('sizing_graph_unavailable')
   if (mode === 'manual-global') {
     const targets = sizingTargets(graph, mode)
@@ -149,6 +150,9 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
   const targets = sizingTargets(graph, mode)
   if (!targets.ok) return targets
   const invalid = []
+  const acceptedLength = mode === 'global' && Object.hasOwn(draft, 'accepted_string_length')
+  if (acceptedLength && (!Number.isInteger(draft.accepted_string_length)
+      || draft.accepted_string_length < 1 || draft.accepted_string_length > 4096)) invalid.push('accepted_string_length')
   const requireText = (key) => { if (!text(draft[key])) invalid.push(key) }
   const requireBoolean = (key) => { if (typeof draft[key] !== 'boolean') invalid.push(key) }
   if (mode === 'global') ['module_name', 'full_inverter_name'].forEach(requireText)
@@ -172,6 +176,10 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
       else moduleParameters[key] = numeric
     }
   }
+  if (moduleCatalog && mode === 'global' && (!draft.module_name || !draft.module_confirmed || draft.module_confirmed !== draft.module_name)) {
+    if (!invalid.includes('module_name')) invalid.push('module_name')
+    return fail('sizing_module_unconfirmed', invalid)
+  }
   if (invalid.length) return fail('sizing_fields_invalid', invalid)
   const racking = { racking_type: draft.racking_type, surface_tilt: draft.surface_tilt,
     surface_azimuth: draft.surface_azimuth, albedo: draft.albedo }
@@ -186,7 +194,8 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
     open_circuit_rise: draft.open_circuit_rise, zip_code: graph.zip,
     ...(draft.use_module_parameters ? { module_parameters: { ...moduleParameters } } : {}),
   }]))
-  return { ok: true, params: { expected_rev: graph.rev, mode, requests, grant_ref: draft.grant_ref, confirm: true } }
+  return { ok: true, params: { expected_rev: graph.rev, mode, requests, grant_ref: draft.grant_ref, confirm: true,
+    ...(acceptedLength ? { accepted_string_length: draft.accepted_string_length } : {}) } }
 }
 
 export const PROJECT_SIZING_CONDUCTOR_REASONS = Object.freeze({
@@ -202,6 +211,7 @@ export const PROJECT_SIZING_CONDUCTOR_REASONS = Object.freeze({
   preview_required: 'Checking whether this change can be applied to this project drawing.',
   preview_refused: 'This change cannot be applied. Review the refusal and try again.',
   submit_unavailable: 'Project Solar submission is not available in this view.',
+  run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
   request_invalid: 'This request could not be prepared. Review the inputs and try again.',
   manual_only: 'Project string sizing supports the saved global length only.',
   project_adapter_unavailable: 'Conductor changes are not available for project drawings on this server.',
@@ -226,6 +236,7 @@ export function projectSizingConductorReason(reason) {
     case 'preview_required': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_required
     case 'preview_refused': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused
     case 'submit_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.submit_unavailable
+    case 'run_in_progress': return PROJECT_SIZING_CONDUCTOR_REASONS.run_in_progress
     case 'request_invalid': return PROJECT_SIZING_CONDUCTOR_REASONS.request_invalid
     case 'manual_only': return PROJECT_SIZING_CONDUCTOR_REASONS.manual_only
     case 'project_adapter_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.project_adapter_unavailable

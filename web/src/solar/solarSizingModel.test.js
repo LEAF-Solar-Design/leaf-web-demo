@@ -19,7 +19,7 @@ const raw = () => ({ rev: 7, settings: { id: 'S', extra: {} }, project: { zip_co
     { id: 'ZB', panel_refs: ['P2'], module_model: 'Module B', inverter_model_a: 'Inverter B' },
   ] })
 const read = (graph = raw()) => sizingGraph({ version: 3, intake: { solar_design_graph: graph } }, 3)
-const draft = () => ({ module_name: 'Module', full_inverter_name: 'Inverter', bifacial: false,
+const draft = () => ({ module_name: 'Module', module_confirmed: 'Module', full_inverter_name: 'Inverter', bifacial: false,
   bifacial_coefficient: '.7', racking_type: 'fixed_tilt', surface_tilt: '5', surface_azimuth: '180', albedo: '.25',
   max_voltage: '1500', thermal_model_type: 'close mount glass glass', open_circuit_rise: false, grant_ref: 'grant_1' })
 const build = (changes = {}, graph = read(), mode = 'global') => buildSizingParams({ graph, mode, draft: { ...draft(), ...changes } })
@@ -35,6 +35,56 @@ const r9Oracle = JSON.parse(readFileSync(`${process.cwd()}/src/solar/__fixtures_
 const r9Manual = () => ({ ...raw(), settings: { ...raw().settings, panels_in_sequence: 3 }, project: { zip_code: '' }, electrical_zones: [] })
 
 describe('solarSizingModel', () => {
+  it('allows an unconfirmed standalone module but still requires a nonempty name', () => {
+    const args = { graph: read(), mode: 'global', draft: { ...draft(), module_confirmed: undefined } }
+    const result = buildSizingParams({ ...args, moduleCatalog: false })
+    expect(result.ok).toBe(true)
+    expect(result.params.requests.S.module_name).toBe('Module')
+    expect(JSON.stringify(result.params)).not.toContain('module_confirmed')
+    for (const module_name of ['', '   ', undefined]) {
+      expect(buildSizingParams({ ...args, moduleCatalog: false, draft: { ...args.draft, module_name } }))
+        .toMatchObject({ ok: false, reason: 'sizing_fields_invalid', invalid: ['module_name'] })
+    }
+    expect(buildSizingParams(args)).toMatchObject({ ok: false, reason: 'sizing_module_unconfirmed', invalid: ['module_name'] })
+  })
+
+  it('requires an exact confirmed global module and keeps the confirmation out of params', () => {
+    for (const changes of [{ module_confirmed: undefined }, { module_confirmed: '' },
+      { module_confirmed: 'Other module' }, { module_name: undefined }, { module_name: '' }]) {
+      const result = build(changes)
+      expect(result).toMatchObject({ ok: false, reason: 'sizing_module_unconfirmed' })
+      expect(result.invalid).toContain('module_name')
+      expect(SOLAR_SIZING_REASONS[result.reason]).toBe('Choose a module from the sizer catalog.')
+      expect(build(changes, read(), 'zones').ok).toBe(true)
+      expect(build(changes, read(r9Manual()), 'manual-global').ok).toBe(true)
+    }
+    const result = build()
+    expect(result.ok).toBe(true)
+    expect(result.params.requests.S.module_name).toBe('Module')
+    expect(JSON.stringify(result.params)).not.toContain('module_confirmed')
+  })
+
+  it('W1C-34c carries only a valid accepted global string length', () => {
+    const expected = { expected_rev: 7, mode: 'global', requests: { S: {
+      module_name: 'Module', full_inverter_name: 'Inverter', bifacial: false, bifacial_coefficient: '.7',
+      racking_params: { racking_type: 'fixed_tilt', surface_tilt: '5', surface_azimuth: '180', albedo: '.25' },
+      max_voltage: '1500', thermal_model_type: 'close mount glass glass', open_circuit_rise: false, zip_code: '44224',
+    } }, grant_ref: 'grant_1', confirm: true }
+    expect(build()).toEqual({ ok: true, params: expected })
+    for (const accepted_string_length of [1, 31, 4096]) {
+      expect(build({ accepted_string_length })).toEqual({ ok: true,
+        params: { ...expected, accepted_string_length } })
+    }
+    for (const accepted_string_length of [0, 4097, 31.5, '31', true, undefined, null]) {
+      expect(build({ accepted_string_length })).toEqual({ ok: false,
+        reason: 'sizing_fields_invalid', invalid: ['accepted_string_length'] })
+    }
+    for (const accepted_string_length of [31, 0, '31']) {
+      expect(build({ accepted_string_length }, read(r9Manual()), 'manual-global')).toEqual({ ok: true,
+        params: { expected_rev: 7, mode: 'manual-global', confirm: true } })
+      expect(build({ accepted_string_length }, read(), 'zones')).toEqual(build({}, read(), 'zones'))
+    }
+  })
 
   it('R9-01 canonical context cannot pass either legacy version envelope', () => {
     const context = r9Context(raw())
@@ -268,7 +318,7 @@ describe('solarSizingModel', () => {
     expect(Object.isFrozen(SOLAR_SIZING_REASONS)).toBe(true)
     expect(Object.keys(SOLAR_SIZING_REASONS)).toEqual(['sizing_graph_unavailable', 'sizing_project_scope',
       'sizing_zip_required', 'sizing_panels_required', 'sizing_zones_invalid', 'sizing_zone_models_required',
-      'sizing_zone_models_invalid', 'sizing_fields_invalid', 'sizing_too_many_targets', 'sizing_manual_length_required'])
+      'sizing_zone_models_invalid', 'sizing_fields_invalid', 'sizing_too_many_targets', 'sizing_manual_length_required', 'sizing_module_unconfirmed'])
   })
 
   it('accepts only current plain views and bounded graph revisions', () => {
@@ -330,7 +380,7 @@ describe('solarSizingModel', () => {
       expect(build({ module_name: value }).invalid).toContain('module_name')
     }
     for (const value of ['🌞'.repeat(256), '  Module  ', '\u200b', '\u001c\u0085']) {
-      expect(build({ module_name: value }).params.requests.S.module_name).toBe(value)
+      expect(build({ module_name: value, module_confirmed: value }).params.requests.S.module_name).toBe(value)
     }
     expect(build({ module_name: '', full_inverter_name: '' }, read(), 'zones').ok).toBe(true)
   })

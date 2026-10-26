@@ -1,8 +1,8 @@
 import React, { useEffect, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 
 // LCERR: the browser's own words for "nothing answered on this port" (Chromium, Firefox, Safari). Unreachable already
-// says AutoCAD was not found, so these add nothing; any other error (an HTTP status, a bad reply, a timeout) means
-// something answered or hung, and stays visible.
+// says AutoCAD was not found, so these add nothing. Other failures use the shared error copy.
 const UNREACHED = /^(?:Failed to fetch|NetworkError when attempting to fetch resource\.?|Load failed)$/
 
 export default function LocalCadConnect({ status = 'stopped', drawing, summary, truncated, error, textPending, onConnect, onDisconnect }) {
@@ -33,9 +33,10 @@ export default function LocalCadConnect({ status = 'stopped', drawing, summary, 
       onClick={connect ? onConnect : onDisconnect}>{connect ? 'Connect AutoCAD' : 'Disconnect'}</button>
     <span aria-live="polite" style={{ fontSize: 'var(--leaf-size-caption)', minWidth: 0, whiteSpace: 'normal', overflowWrap: 'anywhere' }}>
       <span data-testid="local-cad-status">{label}</span>
-      {error && !(status === 'unreachable' && UNREACHED.test(error)) && <span>{`. The last update failed: ${error}`}</span>}
+      {error && !(status === 'unreachable' && UNREACHED.test(error)) && <span>{`. The last update failed: ${humanizeError(error)}`}</span>}
       {(textPending || (error && /text|font|glyph|label/i.test(error))) && <span> · labels unavailable</span>}
       <span data-testid="local-cad-summary" style={{ marginLeft: summary || truncated ? 6 : 0 }}>{summary ?? ''}{truncated ? ' (showing the first 200,000 points)' : ''}</span>
     </span>
+    {error && onConnect && status !== 'connecting' && <button type="button" className="chip-act" onClick={onConnect}>Retry AutoCAD</button>}
   </div>
 }

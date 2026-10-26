@@ -134,7 +134,8 @@ const r9Sentences = {
   "access_denied": "Your current session cannot make this project drawing change.",
   "service_unavailable": "Project Solar is unavailable. Try again when the service is available.",
   "request_timeout": "The request timed out. Its submission status is uncertain; retry the same request.",
-  "request_cancelled": "The request stopped locally. Check its status before retrying."
+  "request_cancelled": "The request stopped locally. Check its status before retrying.",
+  "run_in_progress": "A Solar run is in progress. Wait for it to finish."
 }
 
 describe('SolarConductorForm', () => {

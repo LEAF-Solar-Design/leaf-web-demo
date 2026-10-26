@@ -3,7 +3,7 @@
   color: var(--foreground, #18181b);
   background: var(--card, #fff);
   border: 1px solid var(--border, #d4d4d8);
-  border-radius: 12px;
+  border-radius: var(--leaf-radius-card);
   min-width: 0;
 }
 .widgets-view[hidden] { display: none; }
@@ -53,14 +53,14 @@
   line-height: 1;
   font-family: -apple-system, system-ui, 'Segoe UI', sans-serif;
 }
-@media (max-width: 640px) {
+@media (max-width: 599px) {
   .widgets-layout { grid-template-columns: minmax(0, 1fr); }
 }
 .widget-formats, .widget-toolbar { display: flex; flex-wrap: wrap; align-items: end; gap: 8px; margin-bottom: 12px; }
 .widget-toolbar label { display: grid; gap: 4px; }
 .widget-designer-layout { display: grid; grid-template-columns: minmax(140px, 200px) minmax(0, 1fr) minmax(190px, 260px); gap: 20px; align-items: start; }
 .widget-designer-layout > * { min-width: 0; }
-.widget-designer-preview { padding: 12px; background: var(--leaf-color-background, #27272a); border-radius: 8px; }
+.widget-designer-preview { padding: 12px; background: var(--leaf-color-background, #27272a); border-radius: var(--leaf-radius-card); }
 .widget-designer-preview p { color: var(--leaf-color-foreground, #fafafa); }
 .widget-designer-surface { position: relative; width: 100%; touch-action: none; user-select: none; margin: 0 auto; }
 .widget-designer-surface:focus-visible { outline: 2px solid var(--leaf-color-success, #15803d); outline-offset: 4px; }
@@ -76,5 +76,5 @@
 .widget-layer-actions { display: flex; gap: 4px; margin-top: 4px; }
 .widget-layer-actions button { width: auto; flex: 1; padding: 4px; }
 .widgets-fields fieldset { min-width: 0; margin: 0; padding: 10px; }
-@media (max-width: 1000px) { .widget-designer-layout { grid-template-columns: minmax(0, 1fr) minmax(190px, 260px); } .widget-designer-layout > aside:first-child { grid-column: 1 / -1; } }
-@media (max-width: 640px) { .widget-designer-layout { grid-template-columns: minmax(0, 1fr); } }
+@media (max-width: 1023px) { .widget-designer-layout { grid-template-columns: minmax(0, 1fr) minmax(190px, 260px); } .widget-designer-layout > aside:first-child { grid-column: 1 / -1; } }
+@media (max-width: 599px) { .widget-designer-layout { grid-template-columns: minmax(0, 1fr); } }
