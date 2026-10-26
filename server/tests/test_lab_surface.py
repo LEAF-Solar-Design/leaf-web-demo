@@ -17,6 +17,7 @@ from routers import lab_router, lab_surface
 
 LAB_PATHS = [
     "/api/lab/status",
+    "/api/lab/tools",
     "/api/lab/docs/{doc_id}/save",
     "/api/lab/docs/{doc_id}/head",
     "/api/lab/docs/{doc_id}/revisions",
@@ -338,3 +339,103 @@ def test_app_mounts_the_aggregator_exactly_once():
     assert source.count(include) == 1
     assert source.index(include) > source.index("app.include_router(ios_ship.router)")
     assert "app.include_router(lab_surface.router)" not in source
+
+
+@pytest.mark.parametrize("flag,source,authored,tier,reason", [
+    (None, "catalog_seed", True, "microvm", "tool nodes off"),
+    ("true", "catalog_seed", True, "microvm", "tool nodes off"),
+    ("1", "tenant_repo", False, "microvm", "authored execution not armed"),
+    ("1", "authored", False, "process", "authored execution not armed"),
+    ("1", "catalog_seed", False, "process", "sandbox not armed"),
+    ("1", "write_seed", False, "microvm", "writes are not Lab nodes"),
+    ("1", "authored", True, "microvm", None),
+    ("1", "operator_owned_engine", False, "microvm", None),
+])
+def test_tools_contract_and_availability(monkeypatch, flag, source, authored, tier, reason):
+    import broker
+    from test_lab_tool_manifests import read_tool
+
+    monkeypatch.delenv("LEAF_LAB_TOOL_NODES", raising=False)
+    if flag is not None:
+        monkeypatch.setenv("LEAF_LAB_TOOL_NODES", flag)
+    tool = lab_surface.lab_tool_manifests.project_tool(read_tool(), source)
+    seen = []
+    def projection(tenant):
+        seen.append(tenant)
+        return (tool,)
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", projection)
+    monkeypatch.setattr(broker, "_authored_execution_enabled", lambda: authored)
+    monkeypatch.setattr(broker, "_tool_sandbox_tier", lambda: tier)
+    response = _client().get("/api/lab/tools")
+    assert response.status_code == 200
+    body = response.json()
+    assert set(body) == {"ok", "schema", "tools", "truncated"}
+    assert body["ok"] is True and body["schema"] == "leaf.lab-tools.v1"
+    assert body["truncated"] is False and seen == ["tenant-a"]
+    entry, = body["tools"]
+    assert entry == {"id": tool.name, "version": tool.version,
+                     "title": tool.manifest["title"] if tool.manifest else tool.name,
+                     "source": "tenant" if source in {"tenant_repo", "authored"} else "shipped",
+                     "manifest": tool.manifest, "effect": tool.trusted.effect if tool.trusted else "refused",
+                     "available": reason is None, "reason": reason}
+    for private in ("private.py", "private code", "tenant-a", "engine_op", "catalog_digest", "provenance"):
+        assert private not in response.text
+    assert not {"script", "entry", "engine_op", "code", "result_encoding"} & set(entry)
+
+
+def test_tools_availability_reads_environment_per_request(monkeypatch):
+    import broker
+    from test_lab_tool_manifests import read_tool
+
+    tool = lab_surface.lab_tool_manifests.project_tool(read_tool(), "catalog_seed")
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", lambda tenant: (tool,))
+    monkeypatch.setattr(broker, "_tool_sandbox_tier", lambda: "microvm")
+    monkeypatch.delenv("LEAF_LAB_TOOL_NODES", raising=False)
+    client = _client()
+    assert client.get("/api/lab/tools").json()["tools"][0]["reason"] == "tool nodes off"
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    assert client.get("/api/lab/tools").json()["tools"][0]["available"] is True
+    def fail():
+        raise RuntimeError("private sandbox path")
+    monkeypatch.setattr(broker, "_tool_sandbox_tier", fail)
+    response = client.get("/api/lab/tools")
+    assert response.json()["tools"][0]["reason"] == "sandbox not armed"
+    assert "private sandbox path" not in response.text
+
+
+@pytest.mark.parametrize("count,truncated", [(200, False), (201, True)])
+def test_tools_cap(monkeypatch, count, truncated):
+    from dataclasses import replace
+    from test_lab_tool_manifests import read_tool
+
+    tool = lab_surface.lab_tool_manifests.project_tool(read_tool(kind="other"), "catalog_seed")
+    projection = tuple(replace(tool, name=f"tool-{index:03}") for index in range(count))
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", lambda tenant: projection)
+    body = _client().get("/api/lab/tools").json()
+    assert body["truncated"] is truncated
+    assert [tool["id"] for tool in body["tools"]] == [tool.name for tool in projection[:200]]
+
+
+def test_tools_projection_failure_is_sanitized(monkeypatch):
+    def fail(tenant):
+        raise RuntimeError("private path and tenant")
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", fail)
+    response = _client().get("/api/lab/tools")
+    assert response.status_code == 503
+    assert response.json() == {"detail": "lab_tools_unavailable"}
+
+
+@pytest.mark.parametrize("rail,auth,status", [("0", "1", 404), ("1", "0", 503)])
+def test_tools_inherits_admission_refusals(monkeypatch, rail, auth, status):
+    monkeypatch.setenv(lab_surface.FLAG_LAB_SURFACE, rail)
+    monkeypatch.setenv("LEAF_AUTH_LIVE", auth)
+    def forbidden(*args):
+        pytest.fail("admission refusal accessed tenant projection")
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", forbidden)
+    client = _client()
+    client.app.dependency_overrides[deps.require_tenant] = forbidden
+    assert client.get("/api/lab/tools").status_code == status
+
+
+def test_tools_requires_verified_tenant():
+    assert _client(tenant_override=False).get("/api/lab/tools").status_code == 401

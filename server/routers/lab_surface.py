@@ -11,6 +11,7 @@ from fastapi import APIRouter, Depends, HTTPException
 import deps
 import entitlements
 import lab_run_store
+import lab_tool_manifests
 from routers.lab_artifacts import _call
 
 router = APIRouter(tags=["lab_surface"])
@@ -98,3 +99,39 @@ def status(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
         response["worker"] = {"state": "unavailable", "reason": "lab_store_unavailable"}
         logger.warning("Lab worker status unavailable: %s", "lab_store_unavailable")
     return response
+
+
+@router.get("/api/lab/tools")
+def tools(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
+    try:
+        projection = lab_tool_manifests.tenant_tool_projection(
+            str(getattr(tenant, "tenant_id", tenant)))
+    except Exception:
+        raise HTTPException(status_code=503, detail="lab_tools_unavailable") from None
+
+    result = []
+    for tool in projection[:200]:
+        source = "tenant" if tool.source in {"tenant_repo", "authored"} else "shipped"
+        reason = tool.reason
+        if reason is None and os.environ.get("LEAF_LAB_TOOL_NODES") != "1":
+            reason = "tool nodes off"
+        if reason is None:
+            from broker import _authored_execution_enabled, _tool_sandbox_tier
+
+            if source == "tenant" and not _authored_execution_enabled():
+                reason = "authored execution not armed"
+            else:
+                try:
+                    if _tool_sandbox_tier() != "microvm":
+                        reason = "sandbox not armed"
+                except Exception:
+                    reason = "sandbox not armed"
+        result.append({
+            "id": tool.name, "version": tool.version,
+            "title": tool.manifest["title"] if tool.manifest is not None else tool.name,
+            "source": source, "manifest": tool.manifest,
+            "effect": tool.trusted.effect if tool.trusted is not None else "refused",
+            "available": reason is None, "reason": reason,
+        })
+    return {"ok": True, "schema": "leaf.lab-tools.v1", "tools": result,
+            "truncated": len(projection) > 200}
