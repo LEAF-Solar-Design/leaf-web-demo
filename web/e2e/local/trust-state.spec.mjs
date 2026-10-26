@@ -88,7 +88,7 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
 
   const entitlementPanel = panel.getByRole('region', { name: 'Entitlements' })
   await expect(entitlementPanel).toContainText(`tier ${entitlements.tier}`)
-  await expect(entitlementPanel).toContainText('enforced server-side')
+  await expect(entitlementPanel).toContainText('Plan checked')
   for (const [key, label] of [
     ['run_read', 'Run read-only tools'],
     ['run_write', 'Run editing tools'],
