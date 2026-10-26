@@ -420,7 +420,7 @@ describe('F-7: surface frames render the live tenant catalog', () => {
     )
     const note = screen.getByTestId('browser-composition-note')
     expect(note.textContent).not.toContain('are live')
-    expect(note.textContent).toContain('adds')
+    expect(note.textContent).toContain('Create a workspace project')
   })
 
   it('F-9: the browser note reads present-tense once a workspace project is open', () => {
@@ -434,8 +434,8 @@ describe('F-7: surface frames render the live tenant catalog', () => {
       />,
     )
     const note = screen.getByTestId('browser-composition-note')
-    expect(note.textContent).toContain('are live')
-    expect(note.textContent).not.toContain('adds')
+    expect(note.textContent).toContain('are available together in this project')
+    expect(note.textContent).not.toContain('Create a workspace project')
   })
 
   it('F-9: rail and card agree — one derivation, never two answers on one screen', () => {

@@ -132,10 +132,10 @@ describe('front door exact Stage color roles (LS-T1)', () => {
   it('preserves the light alias block', () => {
     const lightRules = rules.filter(({ selector }) => selector === '.leaf-light')
     expect(lightRules).toHaveLength(1)
-    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--background\s*:\s*#e9e7e0\s*;/)
-    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--card\s*:\s*#ffffff\s*;/)
-    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--border\s*:\s*#d6d4cb\s*;/)
-    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--primary\s*:\s*#1e6b45\s*;/)
+    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--background\s*:\s*var\(--leaf-ground\)\s*;/)
+    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--card\s*:\s*var\(--leaf-surface\)\s*;/)
+    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--border\s*:\s*var\(--leaf-line\)\s*;/)
+    expect(lightRules[0].body).toMatch(/(?:^|;)\s*--primary\s*:\s*var\(--leaf-accent-text\)\s*;/)
   })
 
   it('reads the muted ink role in at least forty declarations', () => {

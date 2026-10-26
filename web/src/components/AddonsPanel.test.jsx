@@ -128,7 +128,7 @@ describe('Studio Add-ons', () => {
     mockFetch()
     panel()
     const month = within(await screen.findByRole('region', { name: 'This month' }))
-    expect(month.getByText('Prices are placeholders while pricing is set')).toBeInTheDocument()
+    expect(month.getByText('Prices are not final yet.')).toBeInTheDocument()
     expect(month.getByRole('columnheader', { name: 'Management fee' })).toBeInTheDocument()
     const execution = within(month.getByRole('row', { name: /Hosted execution/ }))
     for (const money of ['$12.34', '$1.23', '$13.57']) expect(execution.getByText(money)).toBeInTheDocument()
@@ -153,7 +153,7 @@ describe('Studio Add-ons', () => {
     mockFetch({ usage: { ...statement, placeholder: false, lines: [statement.lines[2]] } })
     panel()
     expect(await screen.findByText('No managed usage this month.')).toBeInTheDocument()
-    expect(screen.queryByText('Prices are placeholders while pricing is set')).not.toBeInTheDocument()
+    expect(screen.queryByText('Prices are not final yet.')).not.toBeInTheDocument()
   })
 
   it('shows loading and an API failure, then retries', async () => {

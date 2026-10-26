@@ -19,6 +19,7 @@ import solar_local_graph
 import solar_sizing_client
 import solar_tools
 import store
+import tool_validate
 from leaf_cloud_client import canonical_bytes
 from leaf_cloud_grants import CloudError, CloudGrant
 from product_capability_availability import is_cloud_proposal, is_local_graph_commit
@@ -142,7 +143,20 @@ def test_declaration_is_local_graph_commit():
     tools = json.loads((SERVER / "write_tools.json").read_text(encoding="utf-8"))["tools"]
     row = next(row for row in tools if row["name"] == TOOL)
     assert deps.catalog_tool_digest(row) == (
-        "sha256:9d195167218f59395ed9fe168864801eca88158c6af988fb0a84f5fcc5dd1bf2")
+        "sha256:6da06d36dc2c4de475f7fab48654003101d33d776562b76bc704e261d0f1d60e")
+
+
+def test_schema_accepts_global_accepted_string_length(graph):
+    record = solar_tools.trusted_record(TOOL)
+    assert tool_validate.validate_params(record, params(graph)) == []
+    assert tool_validate.validate_params(record, params(graph, accepted_string_length=31)) == []
+
+
+@pytest.mark.parametrize("value", [0, 4097, 31.5, "31", True])
+def test_schema_refuses_invalid_accepted_string_length(graph, value):
+    errors = tool_validate.validate_params(
+        solar_tools.trusted_record(TOOL), params(graph, accepted_string_length=value))
+    assert any(error.startswith("accepted_string_length:") for error in errors)
 
 
 def test_dispatch_commits_the_sizing_evidence(graph, tmp_path, monkeypatch, granted):

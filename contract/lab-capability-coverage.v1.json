@@ -3,19 +3,19 @@
   "families": [
     {
       "family": "measurement",
-      "status": "readable",
+      "status": "runnable",
       "adapter_owner": "server.deps",
       "host": "production"
     },
     {
       "family": "selection",
-      "status": "readable",
+      "status": "runnable",
       "adapter_owner": "server.deps",
       "host": "production"
     },
     {
       "family": "custom",
-      "status": "readable",
+      "status": "runnable",
       "adapter_owner": "server.deps",
       "host": "production"
     },
@@ -93,6 +93,13 @@
       "adapter_owner": "SEL-306",
       "host": "production",
       "reason": "no Lab adapter in wave 2"
+    },
+    {
+      "family": "mcp",
+      "status": "unavailable-with-reason",
+      "adapter_owner": "server.mcp_tool_projection",
+      "host": "production",
+      "reason": "no connected MCP tools project into Lab"
     }
   ],
   "entries": [
@@ -110,8 +117,8 @@
     },
     {
       "source": "studio-tool:count-by-layer",
-      "status": "readable",
-      "adapter_owner": "server.deps",
+      "status": "runnable",
+      "adapter_owner": "server.lab_tool_manifests",
       "host": "production"
     },
     {
@@ -122,8 +129,8 @@
     },
     {
       "source": "studio-tool:highlight-panels-near-edge",
-      "status": "readable",
-      "adapter_owner": "server.deps",
+      "status": "runnable",
+      "adapter_owner": "server.lab_tool_manifests",
       "host": "production"
     },
     {
@@ -134,8 +141,8 @@
     },
     {
       "source": "studio-tool:measure-panel-area",
-      "status": "readable",
-      "adapter_owner": "server.deps",
+      "status": "runnable",
+      "adapter_owner": "server.lab_tool_manifests",
       "host": "production"
     },
     {
@@ -470,8 +477,8 @@
     },
     {
       "source": "studio-tool:string-panels",
-      "status": "readable",
-      "adapter_owner": "server.deps",
+      "status": "runnable",
+      "adapter_owner": "server.lab_tool_manifests",
       "host": "production"
     },
     {

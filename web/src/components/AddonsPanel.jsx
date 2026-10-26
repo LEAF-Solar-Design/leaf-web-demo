@@ -104,7 +104,7 @@ function AddonsContent({ orgId }) {
             <button type="button" className="chip-act" onClick={() => setStatementAttempt((value) => value + 1)}>Retry</button>
           </div>
         ) : <>
-        {statementState.statement?.placeholder && <p className="ca-note">Prices are placeholders while pricing is set</p>}
+        {statementState.statement?.placeholder && <p className="ca-note">Prices are not final yet.</p>}
         {!lines.length && <p className="ca-copy">No managed usage this month.</p>}
         <table className="ca-copy">
           <thead><tr><th>Add-on</th><th>Cost</th><th>Management fee</th><th>Total</th></tr></thead>

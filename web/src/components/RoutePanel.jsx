@@ -10,7 +10,9 @@
 import { useEffect, useMemo, useRef, useState } from 'react'
 import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanKey } from '../labels.js'
+import { humanizeError } from '../errorHumanize.js'
 import { MIN_RUN_MATCH_CONF } from '../mock/mockNlPrompt.js'
 
 function defaultsOf(schema) {
@@ -25,7 +27,13 @@ function defaultsOf(schema) {
 function paramsSummary(params) {
   const entries = Object.entries(params || {})
   if (entries.length === 0) return null
-  return entries.map(([k, v]) => `${humanKey(k)} ${String(v)}`).join(' · ')
+  return entries.flatMap(([k, v]) => {
+    if (/^(?:handle|handles|.*_id)$/i.test(k)) return ['Selected drawing objects']
+    const label = humanKey(k.replace(/([a-z])([A-Z])/g, '$1_$2').toLowerCase())
+    if (typeof v === 'string' || typeof v === 'number') return [`${label} ${v}`]
+    if (typeof v === 'boolean') return [`${label}: ${v ? 'yes' : 'no'}`]
+    return []
+  }).join(' · ')
 }
 
 // A bound solve (routedLane 'solve', converted by the catalog controller) is
@@ -47,6 +55,11 @@ const ARROW_EDITOR_SELECTOR = [
 ].join(',')
 function arrowHeldByEditor(e) {
   return e.target instanceof Element && !!e.target.closest(ARROW_EDITOR_SELECTOR)
+}
+
+function fromCommandBar(e) {
+  const bar = e.target instanceof Element && e.target.closest('textarea.bar-field[role="combobox"]')
+  return !!bar && bar.getAttribute('aria-expanded') !== 'true'
 }
 
 export default function RoutePanel({
@@ -132,8 +145,10 @@ export default function RoutePanel({
   useEffect(() => {
     if (!route || exiting) return undefined
     const onKey = (e) => {
+      if (isCompositionKey(e) || e.shiftKey || e.ctrlKey || e.altKey || e.metaKey) return
+      const command = fromCommandBar(e)
       const arrow = e.key === 'ArrowDown' || e.key === 'ArrowUp'
-      if (arrow && (e.defaultPrevented || arrowHeldByEditor(e))) return
+      if (arrow && (e.defaultPrevented || (!command && arrowHeldByEditor(e)))) return
       if (e.key === 'ArrowDown' && rows.length > 0) {
         e.preventDefault(); setActiveIdx((i) => Math.min(i + 1, rows.length - 1)); return
       }
@@ -141,8 +156,10 @@ export default function RoutePanel({
         e.preventDefault(); setActiveIdx((i) => Math.max(i - 1, 0)); return
       }
       if (e.key !== 'Enter') return
+      if (e.repeat) return
+      if (command) e.preventDefault()
       if (performance.now() < enterArmedAtRef.current) return // dispatch keypress cooling down
-      if (e.target instanceof Element && e.target.closest([
+      if (!command && e.target instanceof Element && e.target.closest([
         'input', 'textarea', 'select', 'button', 'a',
         '[contenteditable]:not([contenteditable="false"])',
         '[role="textbox"]', '[role="searchbox"]', '[role="combobox"]', '[role="spinbutton"]',
@@ -162,8 +179,19 @@ export default function RoutePanel({
         onPickAlternative(row.tool)
       }
     }
+    // Capture the command bar handoff before prompt history can consume arrows
+    // or change the prompt (which would dismiss this decision).
+    const onCommandKey = (e) => {
+      if (!fromCommandBar(e)) return
+      onKey(e)
+      if (e.defaultPrevented) e.stopPropagation()
+    }
+    window.addEventListener('keydown', onCommandKey, true)
     window.addEventListener('keydown', onKey)
-    return () => window.removeEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('keydown', onCommandKey, true)
+      window.removeEventListener('keydown', onKey)
+    }
   }, [route, exiting, rows, activeIdx, confident, toolObj, params, running, locked, entBlocked, outage,
       onConfirmIntent, onPickAlternative, onOpenAuthor, onDismiss])
 
@@ -215,15 +243,13 @@ export default function RoutePanel({
 
   // ---- RUN lane, confident: decision strip (Run · Enter · Esc) --------------
   if (confident && toolObj) {
-    const summary = route.runIntent
-      ? `params ${JSON.stringify(route.runIntent.params)}`
-      : paramsSummary(params)
+    const summary = paramsSummary(params)
     return (
       <div ref={surfaceRef} className={`strip-decision ${motion}`} data-escape-passive={!liveRoute ? 'true' : undefined}>
         <span className="dot square" aria-hidden="true" />
         <span className="strip-sentence">
           {route.routedLane === 'solve' ? 'Solve with ' : 'Run '}<span className="route-tool">{route.tool}</span>
-          {isWrite && <> <span className="cap write">drawing.write</span></>}
+          {isWrite && <> <span className="cap write">Edits drawing</span></>}
           {summary && <span className="dim"> · {summary}</span>}
           <span className="dim">
             {': '}
@@ -253,16 +279,14 @@ export default function RoutePanel({
   }
 
   // ---- RUN lane, low confidence / not in this catalog: resolver rows --------
-  const summary = route.runIntent
-    ? `params ${JSON.stringify(route.runIntent.params)}`
-    : paramsSummary(params)
+  const summary = paramsSummary(params)
   const conf = Math.round((route.confidence || 0) * 100)
   return (
     <div ref={(node) => { surfaceRef.current = node; resolverRef.current = node }} className={`resolver ${motion}`} role="listbox" aria-label="Route resolver">
       <div className="resolver-header">
         {route.stubKind === 'demo' && <span>This demo matches requests against a limited tool catalog.</span>}
         {outage
-          ? <span>Routing is unavailable right now: {route.stubReason}</span>
+          ? <span>Routing is unavailable right now: {humanizeError(route.stubReason)}</span>
           : typeof route.tool !== 'string' || !route.tool.trim() || (route.stubKind === 'demo' && route.confidence < MIN_RUN_MATCH_CONF)
             ? <span aria-live="polite">{route.stubKind === 'demo'
               ? 'No matching tool in this demo. Try another description or browse available tools.'

@@ -7,7 +7,7 @@
   padding: 20px 16px;
   background: var(--surface, #fafaf8);
   color: var(--ink, #202622);
-  font: 15px/1.5 system-ui, sans-serif;
+  font: var(--leaf-size-body)/1.5 system-ui, sans-serif;
   overflow-wrap: anywhere;
 }
 

@@ -155,7 +155,15 @@ export function createLocalCadBridge({ fetchImpl = globalThis.fetch, ports = [81
   }
   return {
     start() {
-      if (running) return
+      if (running) {
+        if (timer !== null) {
+          clearTimeoutImpl(timer)
+          timer = null
+          delay = intervalMs
+          void poll(generation)
+        }
+        return
+      }
       if (timer !== null) clearTimeoutImpl(timer)
       timer = null
       running = true

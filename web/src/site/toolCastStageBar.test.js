@@ -158,9 +158,8 @@ describe('pilot round 2: the signed-out stage reads as a state, not a failure', 
     const rail = toolCast.slice(toolCast.indexOf("{rightView === 'execution' && <><div className=\"tc-events\">"), toolCast.indexOf('`previewLocked` closes the surface gap'))
     expect(rail).toMatch(/\{\(hasDrawing \|\| currentJobId \|\| linkedJobId\) \? \(<>/)
     expect(rail).toMatch(/<div className="tc-event" data-testid="tc-events-empty">\s*<span className="dot hollow" \/>\s*<span className="tc-event-text">Your first run will show its steps here<\/span>/)
-    // The checklist rows themselves are unchanged (cat-standards-surface and
-    // the guest upload e2e rows still read them once a drawing is mounted).
-    expect(rail).toMatch(/<span className="tc-event-text">Panels preserved<\/span>/)
+    // The drawing count does not claim a tool preserved every panel.
+    expect(rail).toMatch(/<span className="tc-event-text">Drawing shapes<\/span>/)
     expect(rail).toMatch(/<span className="tc-event-text">Tool job<\/span>/)
     expect(rail).toMatch(/<span className="tc-event-text">Version head<\/span>/)
   })

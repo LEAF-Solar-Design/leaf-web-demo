@@ -7,7 +7,7 @@
    ABOVE it, right-aligned. The bar column is the one horizontal band that is
    clear of both rails at every width, by the app's own layout contract --
    .coach-root mirrors .tc-bar-wrap's horizontal rules verbatim (landing.css:
-   default = centered 720px; <=1279px = left/right 270, max 720, anchored
+   default = centered 720px; <=1439px = left/right 270, max 720, anchored
    left). bottom: 188px clears the bar (top edge ~ 18px + ~105px signed-out
    height) and the caption (.tc-caption bottom: 122px + ~50px of text). The
    bar only grows taller (.strip-decision/.resolver rows) after an
@@ -71,7 +71,7 @@
 }
 
 .coach-key-label {
-  font-size: 11px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted-2);
   margin-right: 8px;
 }
@@ -81,18 +81,18 @@
   justify-content: flex-end;
 }
 
-/* 1280-1336px: the default rails are 300px wide, so the centered 720px bar
+/* >=1440px: the default rails are 300px wide, so the centered 720px bar
    column itself slides up to 20px under the right rail's edge (720 + 2*300 >
    vw). Pull the card left of the rail with an 8px gap: rail left edge =
    100vw - 300px, column right edge = 50vw + 360px, overhang + gap =
-   668px - 50vw, clamped to 0 from 1336px up. Scoped >=1280 so the <=1279
+   668px - 50vw, clamped to 0 from 1336px up. Scoped >=1440 so the <=1439
    column rules stay exact. */
-@media (min-width: 1280px) {
+@media (min-width: 1440px) {
   .coach-card { margin-right: max(0px, calc(668px - 50vw)); }
 }
 
-/* Mirror of landing.css's <=1279px .tc-bar-wrap rule. */
-@media (max-width: 1279px) {
+/* Mirror of landing.css's <=1439px .tc-bar-wrap rule. */
+@media (max-width: 1439px) {
   .coach-root {
     left: 270px;
     right: 270px;
