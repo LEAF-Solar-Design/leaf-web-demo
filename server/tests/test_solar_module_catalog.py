@@ -1,6 +1,9 @@
 """Frozen W1C-35 proxy contract, exercised against a streamed fake sizer."""
 from copy import deepcopy
 import json
+import socket
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -262,6 +265,66 @@ def test_overall_deadline(proxy, monkeypatch):
     finally:
         release.set()
         assert finished.wait(2)
+
+
+@pytest.mark.parametrize("read_error", [False, True], ids=["eof", "read-error"])
+def test_deadline_interrupts_blocked_body_and_releases_slot(proxy, monkeypatch, read_error):
+    interrupted = threading.Event()
+    released = threading.Event()
+    timeouts = []
+
+    class Slots(threading.BoundedSemaphore):
+        def release(self):
+            super().release()
+            released.set()
+
+    class Socket:
+        def shutdown(self, how):
+            assert how == socket.SHUT_RDWR
+            interrupted.set()
+
+        def settimeout(self, value):
+            timeouts.append((time.monotonic(), value))
+
+    class DrippingResponse(Response):
+        def __init__(self):
+            super().__init__()
+            self.raw = SimpleNamespace(_fp=SimpleNamespace(
+                fp=SimpleNamespace(raw=SimpleNamespace(_sock=Socket()))))
+
+        def close(self):
+            self.closed = True
+
+        def iter_content(self, chunk_size):
+            yield b"{"
+            # Simulate a pending chunk read that only socket shutdown wakes.
+            assert interrupted.wait(2)
+            if read_error:
+                raise requests.ConnectionError(BEARER)
+
+    slots = Slots(1)
+    monkeypatch.setattr(catalog, "_transport_slots", slots)
+    monkeypatch.setattr(catalog, "DEADLINE_SECONDS", 0.1)
+    response = proxy.response = DrippingResponse()
+    started = time.monotonic()
+    try:
+        with pytest.raises(CloudError) as caught:
+            catalog._transport("Acme 400", 20, CloudGrant("org", BEARER))
+        assert caught.value.status == 504
+        assert str(caught.value) == "cloud_upstream_timeout"
+        assert released.wait(1)
+        assert time.monotonic() - started < 1.1
+        assert interrupted.is_set() and response.closed
+        assert slots._value == 1
+        assert len(timeouts) == 2
+        assert all(0 < value <= 0.1 for _, value in timeouts)
+        assert timeouts[1][1] < timeouts[0][1]
+        assert all(0 < value <= 0.1 for value in proxy.calls[0][1]["timeout"])
+        proxy.response = Response()
+        assert catalog._transport("Acme 400", 20, CloudGrant("org", BEARER)) == BODY
+        assert slots._value == 1
+    finally:
+        interrupted.set()
 
 
 def test_demo_organization_resolution(proxy, monkeypatch):

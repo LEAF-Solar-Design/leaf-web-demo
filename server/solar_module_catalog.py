@@ -3,6 +3,7 @@ from collections import OrderedDict
 from copy import deepcopy
 import json
 import re
+import socket
 import threading
 import time
 from typing import Literal
@@ -20,7 +21,10 @@ GRANT_DETAIL = "grant_ref must match ^[a-zA-Z0-9_-]{1,64}$"
 _clock = time.monotonic
 _cache = OrderedDict()
 _cache_lock = threading.Lock()
-# A timed-out socket/DNS operation retains its slot until it actually exits.
+# A timed-out DNS operation or dripping response headers can retain a slot until
+# the worker exits: requests.get exposes no connection handle before headers.
+# Connect/header operations have per-operation timeouts; the body watchdog starts
+# once the response exists. The caller still receives 504 at the overall deadline.
 _transport_slots = threading.BoundedSemaphore(4)
 DEADLINE_SECONDS = 15
 
@@ -79,27 +83,68 @@ def _unique_object(pairs):
 
 
 def _fetch(q, limit, grant, deadline):
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise requests.Timeout()
     with requests.get(CATALOG_URL, params={"q": q, "limit": limit},
                       headers={"Authorization": "Bearer " + grant.access_token},
-                      timeout=(5, 10), allow_redirects=False, stream=True) as response:
-        if response.status_code == 401:
-            raise cloud.CloudError("cloud_auth_missing", 401)
-        if response.status_code == 403:
-            raise cloud.CloudError("cloud_tenant_unauthorized", 403)
-        if response.status_code != 200:
-            raise cloud.CloudError("cloud_upstream_failure", 502)
-        raw = bytearray()
-        for chunk in response.iter_content(16384):
-            if time.monotonic() >= deadline:
-                raise requests.Timeout()
-            if len(raw) + len(chunk) > MAX_RESPONSE_BYTES:
-                raise ValueError()
-            raw.extend(chunk)
-        body = SearchResponse.model_validate(json.loads(
-            bytes(raw).decode("utf-8"), object_pairs_hook=_unique_object))
-        if time.monotonic() >= deadline:
-            raise requests.Timeout()
-        return body.model_dump()
+                      timeout=(min(5, remaining), min(10, remaining)),
+                      allow_redirects=False, stream=True) as response:
+        # Capture the socket before EOF detaches it from urllib3. close() alone
+        # can wait on a buffered reader's lock while iter_content is blocked.
+        fp = getattr(getattr(response.raw, "_fp", None), "fp", None)
+        sock = getattr(getattr(fp, "raw", None), "_sock", None)
+
+        def interrupt():
+            if sock is not None:
+                try:
+                    sock.shutdown(socket.SHUT_RDWR)
+                except OSError:
+                    pass
+            try:
+                response.close()
+            except Exception:
+                pass
+
+        timer = threading.Timer(max(0, deadline - time.monotonic()), interrupt)
+        timer.daemon = True
+        timer.start()
+        try:
+            if response.status_code == 401:
+                raise cloud.CloudError("cloud_auth_missing", 401)
+            if response.status_code == 403:
+                raise cloud.CloudError("cloud_tenant_unauthorized", 403)
+            if response.status_code != 200:
+                raise cloud.CloudError("cloud_upstream_failure", 502)
+            raw = bytearray()
+            chunks = iter(response.iter_content(16384))
+            while True:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise requests.Timeout()
+                if sock is not None:
+                    try:
+                        sock.settimeout(min(10, remaining))
+                    except OSError:
+                        # urllib3 may close the socket after yielding the last
+                        # chunk; let the iterator report EOF or the read error.
+                        pass
+                try:
+                    chunk = next(chunks)
+                except StopIteration:
+                    break
+                if len(raw) + len(chunk) > MAX_RESPONSE_BYTES:
+                    raise ValueError()
+                raw.extend(chunk)
+            body = SearchResponse.model_validate(json.loads(
+                bytes(raw).decode("utf-8"), object_pairs_hook=_unique_object))
+        finally:
+            timer.cancel()
+            timer.join()
+    # Cleanup is part of the budget, including a deadline-induced read failure.
+    if time.monotonic() >= deadline:
+        raise requests.Timeout()
+    return body.model_dump()
 
 
 def _transport(q, limit, grant):
@@ -114,12 +159,12 @@ def _transport(q, limit, grant):
         try:
             result.append((200, _fetch(q, limit, grant, deadline)))
         except cloud.CloudError as exc:
-            result.append((exc.status, None))
+            result.append((504 if time.monotonic() >= deadline else exc.status, None))
         except requests.Timeout:
             result.append((504, None))
         except Exception:
             # Never propagate requests/parser exception text or sensitive frames.
-            result.append((502, None))
+            result.append((504 if time.monotonic() >= deadline else 502, None))
         finally:
             _transport_slots.release()
             done.set()
