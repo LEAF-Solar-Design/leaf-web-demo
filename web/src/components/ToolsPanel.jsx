@@ -19,7 +19,7 @@ function provenanceLine(t) {
     const grants = Array.isArray(p.grants) ? (p.grants.length ? p.grants.join(' ') : 'none') : String(p.grants)
     parts.push(`grants ${grants}`)
   }
-  if (p.reviewer !== undefined) parts.push(`reviewer ${p.reviewer || '—'}`)
+  if (p.reviewer !== undefined) parts.push(`reviewer ${p.reviewer || 'not set'}`)
   return parts.length ? parts.join(' · ') : null
 }
 
