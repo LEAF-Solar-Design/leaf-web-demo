@@ -982,6 +982,33 @@ describe('CAD catalog solar availability', () => {
 })
 
 describe('catalogClusters', () => {
+  it('drops the surface word from catalog display text without a Solar rail', () => {
+    const families = [{ family_id: 'solar', label: 'Solar', capabilities: [{ name: 'solar_select_by_zone' }] }]
+    expect(catalogClusters(families, { surfaceWord: 'Solar' })[0].tools[0])
+      .toMatchObject({ text: 'Select by zone', label: 'solar_select_by_zone' })
+    expect(catalogClusters(families)[0].tools[0])
+      .toMatchObject({ text: 'Solar select by zone', label: 'solar_select_by_zone' })
+  })
+
+  it('drops the surface word from placed catalog display text without a Solar rail', () => {
+    const families = [{
+      family_id: 'solar', label: 'Solar',
+      capabilities: [{ name: 'solar_select_by_zone', placement: { tab: 'draw' }, capabilities: [] }],
+    }]
+    expect(catalogTabClusters(families, { surfaceWord: 'Solar' }).draw[0].tools[0])
+      .toMatchObject({ text: 'Select by zone', label: 'solar_select_by_zone' })
+    expect(catalogTabClusters(families).draw[0].tools[0])
+      .toMatchObject({ text: 'Solar select by zone', label: 'solar_select_by_zone' })
+  })
+
+  it('drops the surface word from Solar profile family tools without a Solar rail', () => {
+    const families = [{ family_id: 'stringing', label: 'Stringing', capabilities: [{ name: 'solar_commit_solve' }] }]
+    const tabs = profileRibbonTabs('solar', { families })
+    const stringing = tabs.flatMap((tab) => tab.clusters).find((cluster) => cluster.label === 'Stringing')
+    expect(stringing.tools.find((tool) => tool.id === 'solar_commit_solve'))
+      .toMatchObject({ text: 'Commit solve', label: 'solar_commit_solve' })
+  })
+
   it.each([
     [true, 'Commit solve'],
     [false, 'Solar commit solve'],

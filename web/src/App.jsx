@@ -4373,6 +4373,7 @@ export default function App() {
       writeLocked,
       writeEntitled: canRunWrite,
       engineDirty,
+      surfaceWord: surfaceSlots.toolbar.profile === 'solar' ? 'Solar' : null,
     })
     const author = authorCluster({
       // The plan's own answer, then the folded entitlement-AND-availability
@@ -4406,6 +4407,7 @@ export default function App() {
       writeLocked,
       writeEntitled: canRunWrite,
       engineDirty,
+      surfaceWord: surfaceSlots.toolbar.profile === 'solar' ? 'Solar' : null,
     })
     // W4g-5c: the Clipboard panel is REAL now and the engine consumer
     // renders it, so referencePanels no longer supplies a placeholder.
@@ -4496,7 +4498,7 @@ export default function App() {
         ] : []),
       ],
     }
-  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, drafting, profileTabs, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
+  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
     shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
