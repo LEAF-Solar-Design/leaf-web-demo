@@ -17,7 +17,7 @@ const MIN = { cells: 81, voc: 52.58, isc: 13.9965, pmp: 595.5, vmp: 44.64, imp: 
   simulation_results: { standard: { Conditions: 'P99.5 Voc', max_module_voltage: 51.26,
     string_design_voltage: 1500, string_length: 28 } } }
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.unstubAllGlobals(); vi.useRealTimers() })
 const id = (kind, n) => `leaf:${kind}:00000000-0000-4000-8000-${String(n).padStart(12, '0')}`
 const S = id('settings', 1), P1 = id('panel', 1), P2 = id('panel', 2)
 const ZA = id('zone', 1), ZB = id('zone', 2)
@@ -36,20 +36,35 @@ const fields = { Module: R.module_name, Inverter: R.full_inverter_name, 'Bifacia
   'Open circuit rise': 'false', Racking: 'fixed_tilt' }
 const change = (label, value) => fireEvent.change(screen.getByLabelText(label), { target: { value } })
 const run = () => screen.getByRole('button', { name: 'Review & run' })
-const fill = (skip = []) => Object.entries(fields).forEach(([label, value]) => {
-  if (!skip.includes(label)) change(label, value)
-})
+const moduleResult = (key = R.module_name) => ({ ok: true, data: { modules: [
+  { key, stc_w: 595.5, n_s: 72 },
+], truncated: false } })
+async function chooseTypedModule() {
+  const name = screen.getByLabelText('Module').value
+  const option = await screen.findByRole('option', { name: name + ' (595.5 W, 72 cells)' })
+  fireEvent.click(option)
+}
+const fill = async (skip = []) => {
+  vi.useFakeTimers()
+  Object.entries(fields).forEach(([label, value]) => {
+    if (!skip.includes(label)) change(label, value)
+  })
+  await act(async () => { await vi.advanceTimersByTimeAsync(300) })
+  vi.useRealTimers()
+  if (!skip.includes('Module')) await chooseTypedModule()
+}
 const view = (graph, version = 3) => ({ version, intake: { solar_design_graph: graph } })
 async function mount(graph = G7(), overrides = {}, mode = 'global') {
   const props = { row: { name: 'solar-size-strings' }, drawingId: 'd1', drawingVersion: 3, projectId: null,
-    readIntake: vi.fn(async () => view(graph)), onSubmit: vi.fn(), ...overrides }
+    readIntake: vi.fn(async () => view(graph)), onSubmit: vi.fn(), projectClient: { searchSizingModules: vi.fn(async () => moduleResult()) }, ...overrides }
   const result = render(<SolarSizingForm {...props} />)
   await act(async () => {})
   if (mode !== 'manual-global') change('Scope', mode)
   return { ...result, props }
 }
 function invalid(label) {
-  expect(screen.getByText('Check the marked sizing fields before submitting.')).toBeTruthy()
+  expect(screen.getByText(label === 'Module' ? 'Choose a module from the sizer catalog.' :
+    'Check the marked sizing fields before submitting.')).toBeTruthy()
   expect(screen.getByLabelText(label).getAttribute('aria-invalid')).toBe('true')
   expect(run().disabled).toBe(true)
 }
@@ -105,6 +120,7 @@ function r9Harness() {
   h.real.setScope(r9Binding, 'epoch-1')
   r9Clients.push(h.real)
   h.client = { ...h.real,
+    searchSizingModules: vi.fn(async () => moduleResult()),
     readContext: vi.fn((options) => h.contextQueue.length ? Promise.resolve(h.contextQueue.shift()) : h.real.readContext(options)),
     catalog: vi.fn((options) => h.previewQueue.length ? Promise.resolve(h.previewQueue.shift()) : h.real.catalog(options)),
     prepareRun: vi.fn(h.real.prepareRun),
@@ -129,9 +145,9 @@ function r9Rebind(view, h, changes) {
 
 const r14Tracker = { 'Axis tilt': '0', 'Axis azimuth': '180', 'Max angle': '60',
   'Ground coverage ratio': '.4', Backtrack: 'true' }
-function r14Fill({ tracker = false, parameters = false } = {}) {
+async function r14Fill({ tracker = false, parameters = false } = {}) {
   change('Scope', 'global')
-  fill()
+  await fill()
   if (tracker) {
     change('Racking', 'single_axis')
     Object.entries(r14Tracker).forEach(([label, value]) => change(label, value))
@@ -149,6 +165,7 @@ function r14Harness() {
 
 function sizingAvailabilityHarness() {
   const client = {
+    searchSizingModules: vi.fn(async () => moduleResult()),
     readContext: vi.fn(async () => ({ ok: true, status: 200,
       data: r9Context({ ...r9Graph(), project: { zip_code: '44224-1234' } }) })),
     prepareRun: vi.fn((request) => request),
@@ -174,7 +191,7 @@ async function submitColdRun(outcome = coldFailure()) {
   h.client.observeJob = vi.fn(() => h.observation.promise)
   const view = render(<SolarSizingForm {...h.props} />)
   await r9Ready()
-  r14Fill()
+  await r14Fill()
   await r9Ready()
   fireEvent.click(run())
   await waitFor(() => expect(h.client.observeJob).toHaveBeenCalledTimes(1))
@@ -183,6 +200,116 @@ async function submitColdRun(outcome = coldFailure()) {
 }
 
 describe('SolarSizingForm', () => {
+  async function moduleSearchForm(search = vi.fn(async () => moduleResult())) {
+    const h = r14Harness()
+    h.client.searchSizingModules = search
+    render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    change('Scope', 'global')
+    await fill(['Module'])
+    vi.useFakeTimers()
+    return h
+  }
+  const debounce = async (ms = 300) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms) }) }
+
+  it.each(['click', 'Enter'])('debounces module searches and confirms a catalog key by %s', async (method) => {
+    const search = vi.fn(async () => ({ ok: true, data: { modules: [
+      { key: 'CS6U_330', stc_w: 330, n_s: 72 },
+      { key: 'CS6U_340', stc_w: null, n_s: 72 },
+      { key: 'CS6U_350', stc_w: 350, n_s: null },
+      { key: 'CS6U_unknown', stc_w: null, n_s: null },
+    ], truncated: true } }))
+    const h = await moduleSearchForm(search)
+    const input = screen.getByRole('combobox', { name: 'Module' })
+    expect(input.getAttribute('aria-expanded')).toBe('false')
+    expect(input.getAttribute('aria-controls')).toBeTruthy()
+    change('Module', 'cs')
+    await debounce(200)
+    change('Module', 'cs6u')
+    await debounce(299)
+    expect(search).not.toHaveBeenCalled()
+    await debounce(1)
+    expect(search).toHaveBeenCalledTimes(1)
+    expect(search.mock.calls[0][0]).toMatchObject({ q: 'cs6u', limit: 20, grantRef: 'grant_1' })
+    expect(search.mock.calls[0][0].signal.aborted).toBe(false)
+    expect(input.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('listbox').id).toBe(input.getAttribute('aria-controls'))
+    expect(screen.getByRole('option', { name: 'CS6U_340 (72 cells)' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'CS6U_350 (350 W)' })).toBeTruthy()
+    expect(screen.getByRole('option', { name: 'CS6U_unknown' })).toBeTruthy()
+    expect(screen.getByText('More modules match; keep typing.')).toBeTruthy()
+    if (method === 'click') fireEvent.click(screen.getByRole('option', { name: 'CS6U_330 (330 W, 72 cells)' }))
+    else {
+      fireEvent.keyDown(input, { key: 'ArrowDown' })
+      expect(screen.getByRole('option', { name: 'CS6U_340 (72 cells)' }).getAttribute('aria-selected')).toBe('true')
+      fireEvent.keyDown(input, { key: 'ArrowUp' })
+      fireEvent.keyDown(input, { key: 'Escape' })
+      expect(input.getAttribute('aria-expanded')).toBe('false')
+      fireEvent.keyDown(input, { key: 'ArrowDown' })
+      fireEvent.keyDown(input, { key: 'ArrowUp' })
+      fireEvent.keyDown(input, { key: 'Enter' })
+    }
+    expect(input.value).toBe('CS6U_330')
+    expect(input.getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('listbox')).toBeNull()
+    vi.useRealTimers()
+    await r9Ready()
+    fireEvent.click(run())
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1))
+    await r9Settle()
+    const params = h.props.onProjectSubmit.mock.calls[0][0].params
+    expect(params.requests[S].module_name).toBe('CS6U_330')
+    expect(JSON.stringify(params)).not.toContain('module_confirmed')
+    change('Module', 'CS6U_330x')
+    expect(run().disabled).toBe(true)
+    expect(screen.getByText('Choose a module from the sizer catalog.')).toBeTruthy()
+  })
+
+  it('aborts superseded module searches and ignores their late results', async () => {
+    const old = r9Deferred(), next = r9Deferred()
+    const search = vi.fn().mockReturnValueOnce(old.promise).mockReturnValueOnce(next.promise)
+    await moduleSearchForm(search)
+    change('Module', 'cs6')
+    await debounce()
+    change('Module', 'cs6u')
+    expect(search.mock.calls[0][0].signal.aborted).toBe(true)
+    await debounce()
+    await act(async () => next.resolve(moduleResult('Current')))
+    expect(screen.getByRole('option', { name: 'Current (595.5 W, 72 cells)' })).toBeTruthy()
+    await act(async () => old.resolve(moduleResult('Old')))
+    expect(screen.queryByRole('option', { name: 'Old (595.5 W, 72 cells)' })).toBeNull()
+    expect(screen.getByLabelText('Module').value).toBe('cs6u')
+    cleanup()
+    expect(search.mock.calls[1][0].signal.aborted).toBe(true)
+  })
+
+  it('needs a valid grant reference and two characters before searching', async () => {
+    const search = vi.fn(async () => moduleResult())
+    await moduleSearchForm(search)
+    change('Grant reference', '')
+    change('Module', 'cs6u')
+    await debounce()
+    expect(screen.getByText('Enter the grant reference to search the module catalog.')).toBeTruthy()
+    change('Grant reference', 'bad ref')
+    await debounce()
+    expect(search).not.toHaveBeenCalled()
+    change('Module', ' c ')
+    change('Grant reference', 'grant_1')
+    await debounce()
+    expect(search).not.toHaveBeenCalled()
+  })
+
+  it.each(['refused', 'rejected', 'empty'])('keeps module text after an %s search', async (kind) => {
+    const search = vi.fn(() => kind === 'rejected' ? Promise.reject(new Error('failed')) :
+      Promise.resolve(kind === 'refused' ? { ok: false } : { ok: true, data: { modules: [], truncated: false } }))
+    await moduleSearchForm(search)
+    change('Module', 'cs6u')
+    await debounce()
+    expect(screen.getByText(kind === 'empty' ? 'No modules match.' : 'The module catalog could not be searched.')).toBeTruthy()
+    expect(screen.getByLabelText('Module').value).toBe('cs6u')
+    expect(run().disabled).toBe(true)
+  })
+
   it('W1C-34c offers the cold-voltage arithmetic and submits an explicitly accepted length', async () => {
     const h = await submitColdRun()
     expect(h.client.observeJob.mock.calls[0][0]).toBe(r9Job)
@@ -224,7 +351,7 @@ describe('SolarSizingForm', () => {
       h.client.observeJob = vi.fn(() => observation.promise)
       const view = render(<SolarSizingForm {...h.props} />)
       await r9Ready()
-      r14Fill()
+      await r14Fill()
       await r9Ready()
       fireEvent.click(run())
       await waitFor(() => expect(h.client.observeJob).toHaveBeenCalledTimes(1))
@@ -292,7 +419,7 @@ describe('SolarSizingForm', () => {
     const h = sizingAvailabilityHarness()
     const view = render(<SolarSizingForm {...h.props} />)
     await r9Ready()
-    r14Fill()
+    await r14Fill()
     await r9Ready()
     const scopeInput = screen.getByLabelText('Scope')
     const moduleInput = screen.getByLabelText('Module')
@@ -370,7 +497,7 @@ describe('SolarSizingForm', () => {
     const h = sizingAvailabilityHarness()
     const view = render(<SolarSizingForm {...h.props} />)
     await r9Ready()
-    r14Fill()
+    await r14Fill()
     await r9Ready()
     const scopeInput = screen.getByLabelText('Scope')
     const moduleInput = screen.getByLabelText('Module')
@@ -455,7 +582,7 @@ describe('SolarSizingForm', () => {
       expect(screen.getByLabelText('Scope').disabled).toBe(false)
       expect(screen.queryByRole('option', { name: 'Zones' })).toBeNull()
       expect(screen.getByRole('option', { name: 'Global cloud sizing' })).toBeTruthy()
-      r14Fill(variant)
+      await r14Fill(variant)
       await r9Ready()
       const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
       const expected = { drawing_id: r9Binding.drawing_id, expected_rev: 7, mode: 'global',
@@ -497,7 +624,7 @@ describe('SolarSizingForm', () => {
         const h = r14Harness()
         render(<SolarSizingForm {...h.props} />)
         await r9Ready()
-        r14Fill({ tracker: true, parameters: true })
+        await r14Fill({ tracker: true, parameters: true })
         await r9Ready()
         const old = r9Deferred(), current = r9Deferred()
         h.client.catalog.mockReturnValueOnce(old.promise).mockReturnValue(current.promise)
@@ -514,6 +641,7 @@ describe('SolarSizingForm', () => {
             : label === 'N_s' ? '73' : original + '2'
           change(label, replacement)
           change(label, original)
+          if (label === 'Module') await chooseTypedModule()
         }
         if (mode === 'manual-global') change('Scope', mode)
         expect(run().disabled).toBe(true)
@@ -532,7 +660,7 @@ describe('SolarSizingForm', () => {
     // Hidden tracker and module fields remain part of the raw declaration, even in manual mode.
     const source = readFileSync(resolve(process.cwd(), 'src/solar/SolarSizingForm.jsx'), 'utf8')
     const declaration = source.slice(source.indexOf('const declarationIdentity ='), source.indexOf('const form = useProjectSizingConductor', source.indexOf('const declarationIdentity =')))
-    const keys = ['module_name', 'full_inverter_name', 'bifacial', 'bifacial_coefficient', 'racking_type',
+    const keys = ['module_name', 'module_confirmed', 'full_inverter_name', 'bifacial', 'bifacial_coefficient', 'racking_type',
       'surface_tilt', 'surface_azimuth', 'albedo', 'axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack',
       'max_voltage', 'thermal_model_type', 'open_circuit_rise', 'grant_ref', 'use_module_parameters']
     expect(declaration.match(/'[^']+'/g).map(value => value.slice(1, -1))).toEqual([...keys, 'accepted_string_length'])
@@ -540,7 +668,7 @@ describe('SolarSizingForm', () => {
     expect(declaration).toContain('...MODULE_PARAMETER_KEYS')
     expect(declaration).toContain('draft[key] ?? null')
     // Exercise raw updates to currently hidden fields through the real lifecycle as well.
-    const rawDraft = { module_name: R.module_name, full_inverter_name: R.full_inverter_name,
+    const rawDraft = { module_name: R.module_name, module_confirmed: R.module_name, full_inverter_name: R.full_inverter_name,
       bifacial: false, bifacial_coefficient: '.7', racking_type: 'fixed_tilt', surface_tilt: '5',
       surface_azimuth: '180', albedo: '.25', axis_tilt: '0', axis_azimuth: '180', max_angle: '60',
       gcr: '.4', backtrack: true, max_voltage: '1500', thermal_model_type: R.thermal_model_type,
@@ -590,7 +718,7 @@ describe('SolarSizingForm', () => {
         h.client.catalog.mockResolvedValue(r9Preview(r9Tool, r9Digest, { runnable: false,
           refusal_reasons: ['CLOUD_AUTH_MISSING'], admission: { status_code: 401, error: refusal.envelope.error } }))
       } else h.props.onProjectSubmit.mockResolvedValue(refusal)
-      r14Fill()
+      await r14Fill()
       change('Grant reference', 'unavailable_grant')
       if (phase === 'submission') { await r9Ready(); fireEvent.click(run()) }
       await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
@@ -620,7 +748,7 @@ describe('SolarSizingForm', () => {
         .mockResolvedValueOnce(r9Submitted())
       render(<SolarSizingForm {...h.props} />)
       await r9Ready()
-      r14Fill()
+      await r14Fill()
       await r9Ready()
       const intent = h.client.catalog.mock.calls.at(-1)[0].intents[0]
       const allocations = h.props.newProjectIntentKey.mock.calls.length
@@ -1358,7 +1486,7 @@ describe('SolarSizingForm', () => {
   })
 
   it('G1A-11 Retry retains the request once and is independent of copy selection', async () => {
-    const { props, rerender } = await mount(); fill()
+    const { props, rerender } = await mount(); await fill()
     for (const failureCode of ['CLOUD_AUTH_MISSING', 'FORBIDDEN', 'UNKNOWN_REFUSAL', '<script>hostile</script>', null]) {
       rerender(<SolarSizingForm {...props} status="failed" failureCode={failureCode} />)
       expect(screen.getByRole('button', { name: 'Retry' }).disabled).toBe(false)
@@ -1388,7 +1516,7 @@ describe('SolarSizingForm', () => {
   it('SZ1 global submits the saved revision and ZIP with the typed request', async () => {
     const { props } = await mount()
     expect(screen.getByText('Saved project ZIP: 44224-1234')).toBeTruthy()
-    fill()
+    await fill()
     fireEvent.click(run())
     expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith(props.row, {
       expected_rev: 7, mode: 'global', requests: { [S]: R }, grant_ref: 'grant_1', confirm: true,
@@ -1398,7 +1526,7 @@ describe('SolarSizingForm', () => {
   it('SZ2 zones bind each saved model and show both targets', async () => {
     const { props } = await mount()
     change('Scope', 'zones')
-    fill(['Module', 'Inverter'])
+    await fill(['Module', 'Inverter'])
     expect(screen.getByText(ZA)).toBeTruthy()
     expect(screen.getByText(ZB)).toBeTruthy()
     fireEvent.click(run())
@@ -1413,7 +1541,7 @@ describe('SolarSizingForm', () => {
   it('SZ3 blank saved ZIP blocks submission', async () => {
     const graph = G7(); graph.project.zip_code = '  '
     const { props } = await mount(graph)
-    fill()
+    await fill()
     expect(screen.getByText('Save a project ZIP code in Solar settings before sizing strings.')).toBeTruthy()
     expect(run().disabled).toBe(true)
     fireEvent.click(run())
@@ -1424,7 +1552,7 @@ describe('SolarSizingForm', () => {
     for (const refs of [[P1, P2], []]) {
       const graph = G7(); graph.electrical_zones[1].panel_refs = refs
       const { props } = await mount(graph)
-      fill(); change('Scope', 'zones')
+      await fill(); change('Scope', 'zones')
       expect(screen.getByText('Zones must cover every panel exactly once.')).toBeTruthy()
       expect(run().disabled).toBe(true)
       fireEvent.click(run())
@@ -1437,14 +1565,14 @@ describe('SolarSizingForm', () => {
 
   it('SZ5 no panels blocks sizing', async () => {
     const graph = G7(); graph.panels = []
-    await mount(graph); fill()
+    await mount(graph); await fill()
     expect(screen.getByText('Place panels before sizing strings.')).toBeTruthy()
     expect(run().disabled).toBe(true)
   })
 
   it('SZ6 a missing zone model blocks zone sizing', async () => {
     const graph = G7(); graph.electrical_zones[1].inverter_model_a = ''
-    await mount(graph); fill(); change('Scope', 'zones')
+    await mount(graph); await fill(); change('Scope', 'zones')
     expect(screen.getByText('Every zone needs a module and inverter model before sizing by zone.')).toBeTruthy()
     expect(run().disabled).toBe(true)
   })
@@ -1472,7 +1600,7 @@ describe('SolarSizingForm', () => {
       for (const value of ['A'.repeat(257), '\ud800']) {
         const graph = G7(); graph.electrical_zones[0][key] = value
         const { props } = await mount(graph)
-        change('Scope', 'zones'); fill(['Module', 'Inverter'])
+        change('Scope', 'zones'); await fill(['Module', 'Inverter'])
         expect(screen.getByText('Zone module and inverter model names must be at most 256 characters of valid text.')).toBeTruthy()
         expect(run().disabled).toBe(true)
         fireEvent.click(run())
@@ -1481,7 +1609,7 @@ describe('SolarSizingForm', () => {
       }
       const graph = G7(); graph.electrical_zones[0][key] = 'A'.repeat(256)
       const { props } = await mount(graph)
-      change('Scope', 'zones'); fill(['Module', 'Inverter'])
+      change('Scope', 'zones'); await fill(['Module', 'Inverter'])
       expect(run().disabled).toBe(false)
       fireEvent.click(run())
       expect(props.onSubmit).toHaveBeenCalledTimes(1)
@@ -1504,7 +1632,7 @@ describe('SolarSizingForm', () => {
   })
 
   it('SZ9 invalid text and grants mark their fields', async () => {
-    const { props } = await mount(); fill()
+    const { props } = await mount(); await fill()
     for (const [label, value] of [['Grant reference', 'g'.repeat(65)], ['Module', '🌞'.repeat(257)], ['Module', '   ']]) {
       change(label, value); invalid(label); fireEvent.click(run())
       change(label, fields[label])
@@ -1513,11 +1641,11 @@ describe('SolarSizingForm', () => {
   })
 
   it('SZ10 bifacial requires an explicit boolean', async () => {
-    await mount(); fill(['Bifacial']); invalid('Bifacial')
+    await mount(); await fill(['Bifacial']); invalid('Bifacial')
   })
 
   it('SZ11 single axis includes tracker fields and fixed tilt omits them', async () => {
-    const { props } = await mount(); fill(); change('Racking', 'single_axis')
+    const { props } = await mount(); await fill(); change('Racking', 'single_axis')
     change('Axis tilt', '0'); change('Axis azimuth', '180'); change('Max angle', '60')
     change('Ground coverage ratio', '.4'); change('Backtrack', 'true')
     fireEvent.click(run())
@@ -1528,14 +1656,14 @@ describe('SolarSizingForm', () => {
   })
 
   it('SZ12 missing tracker max angle is invalid', async () => {
-    await mount(); fill(); change('Racking', 'single_axis')
+    await mount(); await fill(); change('Racking', 'single_axis')
     change('Axis tilt', '0'); change('Axis azimuth', '180')
     change('Ground coverage ratio', '.4'); change('Backtrack', 'true')
     invalid('Max angle')
   })
 
   it('SZ13 module parameters require all ten numbers and a bounded integer count', async () => {
-    const { props } = await mount(); fill()
+    const { props } = await mount(); await fill()
     fireEvent.click(screen.getByLabelText('Use module parameters'))
     const numbers = { V_oc_ref: 50, I_sc_ref: 10, V_mp_ref: 40, I_mp_ref: 9, alpha_sc: .01,
       beta_oc: -.1, STC: 360, gamma_r: -.3, T_NOCT: 45, N_s: 72 }
@@ -1548,7 +1676,7 @@ describe('SolarSizingForm', () => {
   })
 
   it('SZ14 zones ignore blank draft models and hide the model inputs', async () => {
-    const { props } = await mount(); change('Scope', 'zones'); fill(['Module', 'Inverter'])
+    const { props } = await mount(); change('Scope', 'zones'); await fill(['Module', 'Inverter'])
     expect(screen.queryByLabelText('Module')).toBeNull()
     expect(screen.queryByLabelText('Inverter')).toBeNull()
     fireEvent.click(run())
@@ -1556,13 +1684,13 @@ describe('SolarSizingForm', () => {
   })
 
   it('SZ15 two clicks before a render arm one intent', async () => {
-    const { props } = await mount(); fill()
+    const { props } = await mount(); await fill()
     fireEvent.click(run()); fireEvent.click(run())
     expect(props.onSubmit).toHaveBeenCalledTimes(1)
   })
 
   it('SZ16 pending failure retry and finish keep inputs and refresh the graph', async () => {
-    const { props, rerender } = await mount(); fill()
+    const { props, rerender } = await mount(); await fill()
     rerender(<SolarSizingForm {...props} status="pending" />)
     expect(screen.getByText('This step is running. Confirm or wait for it to finish.')).toBeTruthy()
     expect(run().disabled).toBe(true)
@@ -1591,13 +1719,13 @@ describe('SolarSizingForm', () => {
 
   it('SZ18 mismatched and late views cannot supply the current graph', async () => {
     const mismatch = await mount(G7(), { readIntake: vi.fn(async () => view(G7(), 2)) })
-    fill(); expect(run().disabled).toBe(true); expect(mismatch.props.onSubmit).not.toHaveBeenCalled()
+    await fill(); expect(run().disabled).toBe(true); expect(mismatch.props.onSubmit).not.toHaveBeenCalled()
     cleanup()
     let resolveOld, resolveNew
     const readIntake = vi.fn().mockImplementationOnce(() => new Promise((resolve) => { resolveOld = resolve }))
       .mockImplementationOnce(() => new Promise((resolve) => { resolveNew = resolve }))
     const { props, rerender } = await mount(G7(), { readIntake })
-    fill()
+    await fill()
     rerender(<SolarSizingForm {...props} drawingVersion={4} />)
     await act(async () => {})
     await act(async () => { resolveOld(view(G7())) })
