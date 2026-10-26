@@ -644,7 +644,7 @@ describe('fixed integration destination and bounded authenticated transport', ()
     expect(integrationOrigin(origin)).toBeNull()
     const fetchImpl = vi.fn()
     const client = createIntegrationsClient({ origin: origin ?? '', fetchImpl })
-    await expect(client.getScope(projectId, { signal: new AbortController().signal })).rejects.toThrow('setup')
+    await expect(client.getScope(projectId, { signal: new AbortController().signal })).rejects.toThrow(/not set up/)
     expect(fetchImpl).not.toHaveBeenCalled()
   })
   it('uses only the deployment origin, caller signal, and fresh bearer on each request', async () => {
@@ -773,7 +773,8 @@ describe('fixed integration destination and bounded authenticated transport', ()
     const { client, fetchImpl, options } = setup()
     fetchImpl.mockResolvedValue(response({ secret: 'private provider payload' }, { status }))
     await expect(client.reconcileAction(projectId, run.run_id, options)).rejects.toMatchObject({ status,
-      message: status === 403 ? 'You do not have permission to view these integrations.' : 'The integration request failed. Please retry.' })
+      message: status === 403 ? 'You do not have permission to save or run this integration. Ask a project owner for access.' : status === 404 ?
+        'This integration could not be found. Check your selection before continuing.' : 'The service is temporarily unavailable. Try again shortly.' })
     expect(fetchImpl).toHaveBeenCalledTimes(1)
   })
   it('sanitizes reconciliation transport failures and refuses canceled or unauthenticated dispatch', async () => {

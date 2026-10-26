@@ -202,6 +202,7 @@ export const PROJECT_SIZING_CONDUCTOR_REASONS = Object.freeze({
   preview_required: 'Checking whether this change can be applied to this project drawing.',
   preview_refused: 'This change cannot be applied. Review the refusal and try again.',
   submit_unavailable: 'Project Solar submission is not available in this view.',
+  run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
   request_invalid: 'This request could not be prepared. Review the inputs and try again.',
   manual_only: 'Project string sizing supports the saved global length only.',
   project_adapter_unavailable: 'Conductor changes are not available for project drawings on this server.',
@@ -226,6 +227,7 @@ export function projectSizingConductorReason(reason) {
     case 'preview_required': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_required
     case 'preview_refused': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused
     case 'submit_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.submit_unavailable
+    case 'run_in_progress': return PROJECT_SIZING_CONDUCTOR_REASONS.run_in_progress
     case 'request_invalid': return PROJECT_SIZING_CONDUCTOR_REASONS.request_invalid
     case 'manual_only': return PROJECT_SIZING_CONDUCTOR_REASONS.manual_only
     case 'project_adapter_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.project_adapter_unavailable
