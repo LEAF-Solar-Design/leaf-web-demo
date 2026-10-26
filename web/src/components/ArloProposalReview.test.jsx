@@ -58,6 +58,39 @@ describe('ARLO review in the existing workspace result panel', () => {
     expect(saveArloReview.mock.calls[0][2]).toBe(saveArloReview.mock.calls[1][2])
   })
 
+  it('keeps a lost-response key when switching proposals and retrying the decision', async () => {
+    saveArloReview.mockRejectedValueOnce(new Error('Connection lost'))
+    render(panel(envelope()))
+    await waitFor(() => expect(screen.getByRole('button',{name:'Accept proposal'})).toBeEnabled())
+    fireEvent.change(screen.getByLabelText('Review note'),{target:{value:'Ready for review.'}})
+    fireEvent.click(screen.getByRole('button',{name:'Accept proposal'}))
+    await screen.findByRole('alert')
+    const firstAttempt = saveArloReview.mock.calls[0]
+    fireEvent.change(screen.getByLabelText('Feeder proposal'),{target:{value:'proposal-b'}})
+    fireEvent.change(screen.getByLabelText('Feeder proposal'),{target:{value:'proposal-a'}})
+    fireEvent.click(screen.getByRole('button',{name:'Accept proposal'}))
+    await screen.findByText('Proposal accepted for the next CAD step.')
+    expect(saveArloReview).toHaveBeenCalledTimes(2)
+    expect(firstAttempt[2]).toEqual(expect.any(String))
+    expect(saveArloReview.mock.calls[1][2]).toBe(firstAttempt[2])
+    expect(saveArloReview.mock.calls[1][1]).toEqual(firstAttempt[1])
+  })
+
+  it('uses a new key for a new decision after confirmed success', async () => {
+    render(panel(envelope()))
+    await waitFor(() => expect(screen.getByRole('button',{name:'Accept proposal'})).toBeEnabled())
+    fireEvent.click(screen.getByRole('button',{name:'Accept proposal'}))
+    await screen.findByText('Proposal accepted for the next CAD step.')
+    const firstKey = saveArloReview.mock.calls[0][2]
+    fireEvent.click(screen.getByRole('button',{name:'Accept proposal'}))
+    await waitFor(() => expect(saveArloReview).toHaveBeenCalledTimes(2))
+    await screen.findByText('Proposal accepted for the next CAD step.')
+    expect(firstKey).toEqual(expect.any(String))
+    expect(saveArloReview.mock.calls[1][2]).toEqual(expect.any(String))
+    expect(saveArloReview.mock.calls[1][2]).not.toBe(firstKey)
+    expect(saveArloReview.mock.calls[1][1]).toEqual(saveArloReview.mock.calls[0][1])
+  })
+
   it('does not let a stale save response populate a different job', async () => {
     let finish
     saveArloReview.mockImplementationOnce(() => new Promise(resolve => { finish=resolve }))

@@ -46,7 +46,7 @@ export default function ArloProposalReview({ envelope, context }) {
   const [saved, setSaved] = useState('')
   const [historyRetry, setHistoryRetry] = useState(0)
   const alive = useRef(false)
-  const attempt = useRef(null)
+  const attempts = useRef(new Map())
   const bound = ['org_id','project_id','job_id','input_version_id'].every(k => uuid.test(context?.[k] || ''))
     && ['organization_id','project_id','input_version_id'].every((k, i) => envelope?.solver_input?.[k] === context?.[['org_id','project_id','input_version_id'][i]])
   useEffect(() => {
@@ -62,19 +62,25 @@ export default function ArloProposalReview({ envelope, context }) {
     return () => { cancelled = true; alive.current = false }
   }, [bound, context?.job_id, envelope.result_sha256, historyRetry])
   const decide = async decision => {
-    const body = { proposal_id: proposal.proposal_id, result_sha256: envelope.result_sha256, decision, note }
-    const fingerprint = JSON.stringify(body)
-    if (attempt.current?.fingerprint !== fingerprint) attempt.current = { fingerprint, key: crypto.randomUUID() }
+    const attemptId = JSON.stringify([context.org_id, context.project_id, context.job_id, context.input_version_id, envelope.result_sha256, proposal.proposal_id, decision])
+    if (!attempts.current.has(attemptId)) attempts.current.set(attemptId, {
+      body: { proposal_id: proposal.proposal_id, result_sha256: envelope.result_sha256, decision, note }, key: crypto.randomUUID(),
+    })
+    // An unconfirmed retry must send the original payload as well as its key.
+    const attempt = attempts.current.get(attemptId)
     setSaving(true); setError(''); setSaved('')
     try {
-      const response = await saveArloReview(context, body, attempt.current.key)
+      const response = await saveArloReview(context, attempt.body, attempt.key)
       if (!alive.current) return
       const row = response.review
       if (row?.payload?.jobId !== context.job_id || row.payload.resultHash !== envelope.result_sha256 || row.payload.proposalId !== proposal.proposal_id || row.payload.decision !== decision) throw new Error('The saved decision did not match this proposal. Reload its history.')
       setReviews(previous => [...previous.filter(r => r.operation_id !== row.operation_id), row])
       setSaved(decision === 'accept' ? 'Proposal accepted for the next CAD step.' : 'Proposal rejected.')
-      attempt.current = null
-    } catch (cause) { if (alive.current) setError(`Decision not confirmed saved. ${humanizeError(cause)}`) }
+      attempts.current.delete(attemptId)
+    } catch (cause) {
+      if (cause.status >= 400 && cause.status < 500 && cause.status !== 408 && cause.body?.error?.retryable === false) attempts.current.delete(attemptId)
+      if (alive.current) setError(`Decision not confirmed saved. ${humanizeError(cause)}`)
+    }
     finally { if (alive.current) setSaving(false) }
   }
   if (!proposal) return <div className="arlo-review"><h4>Feeder design incomplete</h4><p>No complete proposal is available to review. Run the design again to try another proposal.</p></div>
@@ -83,7 +89,7 @@ export default function ArloProposalReview({ envelope, context }) {
   const disabledReason = saving ? 'Saving your decision. Please wait.' : !bound ? 'Open this result from its project job to save a decision.' : loading ? 'Loading saved decisions. Please wait.' : !complete ? `This proposal is incomplete${proposal.violations?.length ? ` and has ${proposal.violations.length} design ${proposal.violations.length === 1 ? 'check' : 'checks'} to resolve` : ''}. Run the design again before accepting or rejecting it.` : ''
   return <div className="arlo-review">
     <p className="dim">Electrical design / Proposal review</p><h4>Review the complete feeder</h4>
-    <label>Feeder proposal <select value={proposal.proposal_id} disabled={saving} onChange={e => { setSelectedId(e.target.value); setSaved(''); setError(''); setNote(''); attempt.current = null }}>
+    <label>Feeder proposal <select value={proposal.proposal_id} disabled={saving} onChange={e => { setSelectedId(e.target.value); setSaved(''); setError(''); setNote('') }}>
       {proposals.map((p,i) => <option value={p.proposal_id} key={p.proposal_id}>Proposal {i+1}, {number(p.estimated_installed_cost)} cost units</option>)}
     </select></label>
     <RoutePreview proposal={proposal} />
