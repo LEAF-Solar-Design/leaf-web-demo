@@ -30,7 +30,9 @@ def worker(monkeypatch):
         job={"job_id": JOB_ID, "attempt": 3, "params": {"secret": SECRET},
              "execution_context": {"secret": SECRET}},
         prepared=object(), prepare_error=None, persist_error=None, complete_error=None,
-        fail_outcome="failed", complete_outcome=("applied", None), lost=False, calls=[])
+        fail_outcome="failed", complete_outcome=("applied", None), lost=False, calls=[],
+        now=100.0, renewals=0, last_renewal_at=None)
+    monkeypatch.setattr(service.time, "monotonic", lambda: state.now)
 
     def claim(owner, *, tool_name, lease_seconds):
         assert owner == OWNER
@@ -53,6 +55,7 @@ def worker(monkeypatch):
     def prepare(job, **kwargs):
         assert job is state.job
         state.calls.append("prepare")
+        state.now += 2.0
         if state.prepare_error is not None:
             raise state.prepare_error
         return state.prepared
@@ -61,6 +64,7 @@ def worker(monkeypatch):
         assert (job_id, owner, attempt) == (JOB_ID, OWNER, 3)
         assert prepared is state.prepared
         state.calls.append("complete")
+        state.now += 3.0
         if state.complete_error is not None:
             raise state.complete_error
         return state.complete_outcome
@@ -81,6 +85,9 @@ def worker(monkeypatch):
 
         def close(self):
             state.calls.append("close")
+            state.now += 0.5
+            self.renewals = state.renewals
+            self.last_renewal_at = state.last_renewal_at
 
     monkeypatch.setattr(service, "_jobs", lambda: jobs)
     monkeypatch.setattr(service, "GraphLeaseGuard", Guard)
@@ -92,7 +99,8 @@ def worker(monkeypatch):
     return state
 
 
-def assert_event(capsys, phase, *, tool=TOOL, exception=None, reason=None, outcome=None):
+def assert_event(capsys, phase, *, tool=TOOL, exception=None, reason=None, outcome=None,
+                 renewals=0, last_renewal_age_ms=2500.0):
     captured = capsys.readouterr()
     assert captured.out == ""
     assert SECRET not in captured.err
@@ -101,7 +109,10 @@ def assert_event(capsys, phase, *, tool=TOOL, exception=None, reason=None, outco
     assert lines[0].startswith(PREFIX)
     expected = {"event": "graph_job_unsettled", "phase": phase, "job_id": str(JOB_ID),
                 "tool_name": tool, "attempt": 3, "worker_id": OWNER,
-                "exception": exception, "reason_code": reason, "outcome": outcome}
+                "exception": exception, "reason_code": reason, "outcome": outcome,
+                "prepare_ms": 2000.0,
+                "complete_ms": 3000.0 if phase.startswith("complete_") else None,
+                "renewals": renewals, "last_renewal_age_ms": last_renewal_age_ms}
     assert json.loads(lines[0][len(PREFIX):]) == expected
     assert captured.err == PREFIX + json.dumps(expected, separators=(",", ":"), sort_keys=True) + "\n"
 
@@ -164,10 +175,14 @@ def test_complete_error(worker, capsys, tool, reason, code, expected):
 
 @pytest.mark.parametrize("tool", [TOOL, service.solve.TOOL_NAME])
 @pytest.mark.parametrize("outcome", [("not_owner", None), ["missing", None], ("conflict", None)])
-def test_complete_not_settled(worker, capsys, tool, outcome):
+@pytest.mark.parametrize("renewals", [0, 2])
+def test_complete_not_settled(worker, capsys, tool, outcome, renewals):
     worker.complete_outcome = outcome
+    worker.renewals = renewals
+    worker.last_renewal_at = 101.0 if renewals else None
     assert service.run_once(OWNER, tool_name=tool) is True
-    assert_event(capsys, "complete_not_settled", tool=tool, outcome=outcome[0])
+    assert_event(capsys, "complete_not_settled", tool=tool, outcome=outcome[0],
+                 renewals=renewals, last_renewal_age_ms=1500.0 if renewals else 2500.0)
     assert worker.calls == ["claim", "start", "prepare", "close", "complete"]
 
 
@@ -239,3 +254,33 @@ def test_event_is_flushed_and_stream_errors_are_swallowed(worker, monkeypatch, b
     monkeypatch.setattr(service.sys, "stderr", Stream())
     assert service.run_once(OWNER, tool_name=TOOL) is True
     assert calls == (["write"] if broken == "write" else ["write", "flush"])
+
+
+@pytest.mark.parametrize("failure_mode", ["refused", "raised", "callback"])
+def test_guard_records_only_successful_renewals(monkeypatch, failure_mode):
+    now = [100.0]
+    monkeypatch.setattr(service.time, "monotonic", lambda: now[0])
+    calls = []
+
+    def heartbeat(*args, **kwargs):
+        calls.append((args, kwargs))
+        now[0] += 1.0
+        if len(calls) == 3:
+            if failure_mode == "raised":
+                raise ConnectionError(SECRET)
+            return failure_mode == "callback"
+        return True
+
+    def on_renew():
+        if len(calls) == 3:
+            raise ConnectionError(SECRET)
+
+    guard = service.GraphLeaseGuard(SimpleNamespace(heartbeat_project_graph_job=heartbeat),
+        JOB_ID, OWNER, 3, 30.0, on_renew=on_renew)
+    assert guard.renewals == 0 and guard.last_renewal_at is None
+    guard._stop = SimpleNamespace(wait=lambda interval: False)
+    guard._renew()
+    assert guard.lost
+    assert calls == [((JOB_ID, OWNER, 3), {"lease_seconds": 30.0})] * 3
+    assert guard.renewals == (3 if failure_mode == "callback" else 2)
+    assert guard.last_renewal_at == (103.0 if failure_mode == "callback" else 102.0)
