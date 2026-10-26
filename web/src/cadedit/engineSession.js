@@ -75,6 +75,198 @@ export { SESSION_ERROR } from './engineSessionErrors.js'
 
 const NO_ENTITIES = Object.freeze([])
 
+export function drawingUnitFromBytes(bytes) {
+  const header = new TextDecoder().decode(bytes.subarray(0, 65536))
+  const section = header.match(/(?:^|\r?\n)\s*0\r?\nSECTION\r?\n\s*2\r?\nHEADER\r?\n([\s\S]*?)(?:\r?\n\s*0\r?\nENDSEC|$)/)
+  const code = section?.[1].match(/(?:^|\r?\n)\s*9\r?\n\$INSUNITS\r?\n\s*70\r?\n\s*(\d+)\s*(?:\r?\n|$)/)?.[1]
+  return ({ 1: 'in', 2: 'ft', 4: 'mm', 5: 'cm', 6: 'm' })[Number(code)] ?? null
+}
+
+const CHANGE_NAMES = Object.freeze({
+  move: 'Move', copy: 'Copy', delete: 'Erase', setLayer: 'Layer change', setColor: 'Colour change',
+  setLinetype: 'Linetype change', setLineweight: 'Lineweight change', setVertices: 'Shape change',
+  addVertex: 'Add vertex', moveVertex: 'Move vertex', deleteVertex: 'Delete vertex',
+  createLine: 'Draw line', createCircle: 'Draw circle', createArc: 'Draw arc', createText: 'Place text',
+  createPolyline: 'Draw polyline', createRectangle: 'Draw rectangle', createPoint: 'Place point',
+  createEllipse: 'Draw ellipse', createInsert: 'Place block', createDimension: 'Place dimension',
+  dimlinear: 'Place linear dimension', dimaligned: 'Place aligned dimension',
+  createMleader: 'Place multileader', createBlock: 'Create block', createGroup: 'Group', removeGroup: 'Ungroup',
+  group: 'Group', ungroup: 'Ungroup', matchprop: 'Match properties', offset: 'Offset', trim: 'Trim',
+  extend: 'Extend', break: 'Break', join: 'Join', fillet: 'Fillet', chamfer: 'Chamfer',
+  mirror: 'Mirror', rotate: 'Rotate', scale: 'Scale', array: 'Array', arrayRect: 'Array', arrayPolar: 'Polar array',
+  explode: 'Explode', undo: 'Undo', redo: 'Redo', save: 'Save', setArc: 'Arc change',
+})
+const changeName = (op) => Object.hasOwn(CHANGE_NAMES, op) ? CHANGE_NAMES[op] : 'Change'
+const CAD_REFUSALS = Object.freeze({
+  line_zero_length: 'The line needs two different endpoints. Choose another point and retry.',
+  line_has_fixed_endpoints: 'A line needs both endpoints. Move an endpoint instead.',
+  bad_entity_id: 'The selected object is no longer available. Select it again and retry.',
+  bad_entity_handle: 'The selected object could not be identified. Select it again and retry.',
+  handle_precision_lost: 'The drawing has an object reference that cannot be read safely. Open another DXF file.',
+  create_returned_no_handle: 'The new object could not be identified. Undo and try drawing it again.',
+  explode_returned_no_parts: 'Exploding this object produced no parts. Undo and select another object.',
+  array_returned_no_copies: 'The array produced no copies. Undo and check the count and spacing.',
+  entity_handle_not_found: 'The selected object was not found. Select another object and retry.',
+  entity_index_out_of_range: 'The selected object is outside the drawing. Select it again and retry.',
+  no_document_loaded: 'No drawing is open. Open a drawing and retry.',
+  bad_document_bytes: 'The drawing could not be read. Open another DXF file and retry.',
+  document_too_large: 'This drawing exceeds the 16 MB size limit. Open a smaller drawing.',
+  bad_document_id: 'The drawing name could not be read. Open the drawing again.',
+  bad_message: 'The drawing command could not be read. Try the command again.',
+  engine_unavailable: 'Drawing tools are unavailable. Reopen the drawing and retry.',
+  batch_empty: 'There are no changes to apply. Choose a change and retry.',
+  batch_too_many_steps: 'There are too many changes to apply at once. Select fewer objects and retry.',
+  batch_nested: 'These combined changes cannot run together. Apply them separately.',
+  batch_snapshot_failed: 'The drawing could not be prepared for these changes. Reopen it and retry.',
+  batch_restore_failed: 'The drawing could not be restored after the failed change. Open the drawing again.',
+  batch_write_failed: 'These changes could not be written to the drawing. Retry or reopen the drawing.',
+  batch_parse_failed: 'The changed drawing could not be read. Undo and retry the change.',
+  batch_projection_failed: 'The changed objects could not be displayed. Reopen the drawing and retry.',
+  parse_failed: 'The drawing could not be read. Open another DXF file and retry.',
+  created_entity_lost: 'The new object could not be found. Undo and try drawing it again.',
+  coordinate_not_finite: 'The coordinates must be numbers. Correct the points and retry.',
+  delta_not_finite: 'The displacement must be a number. Correct the distance and retry.',
+  radius_not_positive: 'The radius must be greater than zero. Enter another radius and retry.',
+  scale_not_positive: 'The scale must be greater than zero. Enter another scale and retry.',
+  arc_sweep_zero: 'The arc needs different start and end angles. Change an angle and retry.',
+  circle_has_no_sweep: 'A circle has no start or end angle. Select an arc instead.',
+  mirror_line_zero_length: 'The mirror line needs two different points. Choose another point and retry.',
+  ellipse_axis_zero: 'The ellipse axis must have length. Choose an endpoint away from its centre.',
+  ellipse_ratio_out_of_range: 'The ellipse ratio must be greater than zero and at most one. Correct it and retry.',
+  points_not_pairs: 'Each point needs two coordinates. Enter x,y pairs and retry.',
+  polyline_needs_two_vertices: 'A polyline needs at least two points. Add another point and retry.',
+  polyline_too_many_vertices: 'The polyline has too many points. Use fewer points and retry.',
+  bulge_not_finite: 'The curve amount must be a number. Correct it and retry.',
+  bulges_not_per_vertex: 'Each point needs one curve amount. Correct the curve values and retry.',
+  bulges_not_a_list: 'Enter the curve amounts as a list, one per point, and retry.',
+  vertex_index_out_of_range: 'That vertex is no longer available. Select another vertex and retry.',
+  entity_kind_has_no_vertex_list: 'This object has no editable vertices. Select a line or polyline.',
+  entity_kind_not_an_arc: 'This object is not an arc. Select an arc and retry.',
+  entity_kind_not_editable: 'This kind of object can only be viewed here. Select another object.',
+  entity_not_explodable: 'This object cannot be exploded. Select a block or polyline.',
+  explode_too_many_parts: 'Exploding this object would create too many parts. Choose a smaller object.',
+  color_index_out_of_range: 'Choose a colour from 1 to 255, ByLayer or ByBlock and retry.',
+  lineweight_not_valid: 'Choose a standard lineweight, ByLayer, ByBlock or Default and retry.',
+  layer_name_empty: 'Enter a layer name and retry.',
+  layer_name_too_long: 'The layer name is too long. Shorten it and retry.',
+  group_name_invalid: 'Use a group name of 1 to 255 letters, numbers or spaces.',
+  group_name_exists: 'That group name is already used. Choose another name.',
+  group_needs_two_members: 'Select at least two distinct objects.',
+  group_not_found: 'That group no longer exists. Choose an existing group and retry.',
+  group_member_not_editable: 'One group member cannot be edited. Select editable objects and retry.',
+  group_dictionary_missing: 'Groups could not be read from this drawing. Reopen it and retry.',
+  group_projection_failed: 'Groups could not be displayed. Reopen the drawing and retry.',
+  mleader_style_unknown: 'Choose a callout style available in this drawing and retry.',
+  dimension_points_coincide: 'The dimension needs two different points. Choose another point and retry.',
+  dimension_projection_zero: 'The dimension has no length at this angle. Choose another angle or point.',
+  dimension_rotation_not_allowed: 'Only a linear dimension can be rotated. Choose a linear dimension.',
+  dimension_type_not_supported: 'Choose a linear or aligned dimension and retry.',
+  insert_name_invalid: 'Enter a valid block name and retry.',
+  insert_scale_zero: 'A block scale cannot be zero. Enter another scale and retry.',
+  array_count_not_positive: 'The array count must be positive. Correct the count and retry.',
+  array_spacing_zero: 'Array copies need spacing. Enter a distance and retry.',
+  array_sweep_zero: 'The array needs a nonzero angle. Enter another angle and retry.',
+  array_sweep_past_full_turn: 'The array angle cannot exceed a full turn. Reduce the angle and retry.',
+  array_too_many_copies: 'The array would create too many copies. Reduce the count and retry.',
+  text_empty: 'Enter the text to place and retry.',
+  text_too_long: 'The text is too long. Shorten it and retry.',
+  text_control_character: 'Text cannot contain control characters. Remove them and retry.',
+  text_caret: 'Text cannot contain a caret. Remove it and retry.',
+  text_height_not_positive: 'Text height must be greater than zero. Enter another height and retry.',
+  block_base_not_finite: 'The block base point must contain numbers. Correct it and retry.',
+  block_child_not_editable: 'One object cannot be included in a block. Select editable objects and retry.',
+  block_member_missing: 'One block member is missing. Select the members again and retry.',
+  block_name_invalid: 'Use a new block name without reserved punctuation and retry.',
+  block_name_exists: 'That block name is already used. Choose another name.',
+  block_bases_unknown: 'The block base points could not be read. Save as a text DXF file and reopen it.',
+  block_base_invalid: 'The block base needs two valid coordinates. Correct the point and retry.',
+  block_insert_layer: 'The new block must be placed on layer 0. Choose layer 0 and retry.',
+  block_member_count: 'Select between 1 and 60 objects for the block and retry.',
+  block_member_duplicate: 'The same object was included twice. Select distinct block members and retry.',
+  block_member_kind: 'This block needs lines, polylines, circles or arcs. Select those objects and retry.',
+  block_member_space: 'Block members must be in the drawing area. Select objects outside existing blocks.',
+  block_member_normal: 'Block members must lie flat in the drawing. Select flat objects and retry.',
+  block_member_width: 'Block members cannot have polyline width. Remove the width and retry.',
+  block_member_bulge: 'Block members cannot have curved polyline segments. Select straight segments and retry.',
+  block_member_byblock: 'Block members cannot use ByBlock properties. Choose explicit properties and retry.',
+  block_member_dimension: 'An object defining a dimension cannot be included in a block. Select other objects and retry.',
+  block_member_group: 'A block member is already grouped. Ungroup it before creating the block.',
+  block_members_invalid: 'The block members could not be identified. Select them again and retry.',
+  block_not_defined: 'The block is not defined in this drawing. Choose an available block and retry.',
+  block_incomplete: 'The block is incomplete in this drawing. Choose another block and retry.',
+  dimstyle_not_loaded: 'The dimension style is not loaded in this drawing. Choose an available style and retry.',
+  block_create_failed: 'The block could not be created. Select its members again and retry.',
+  create_failed: 'The object could not be created. Check its points and retry.',
+  block_base_retention_failed: 'The block base point could not be preserved. Open another DXF file.',
+  block_marker_handle_collision: 'The block conflicts with an existing object. Reopen the drawing and retry.',
+  block_name_scan_truncated: 'The block names could not all be checked. Reopen a smaller drawing and retry.',
+  block_catalogue_projection_failed: 'The block list could not be read. Reopen the drawing and retry.',
+  dimstyle_catalogue_projection_failed: 'Dimension styles could not be read. Reopen the drawing and retry.',
+  linetype_catalogue_projection_failed: 'Linetypes could not be read. Reopen the drawing and retry.',
+  mleader_style_catalogue_projection_failed: 'Callout styles could not be read. Reopen the drawing and retry.',
+})
+
+export function cadMessage(reason, op) {
+  let text = String(reason ?? '')
+  const wrapped = text.match(/^(?:Edit|Draw) refused \(([^)]+)\): (.*)$/)
+  if (wrapped) { op = wrapped[1]; text = wrapped[2] }
+  const action = text.match(/^([A-Za-z]+) refused:/)?.[1]
+  if (!op && action) op = Object.keys(CHANGE_NAMES).find((id) => CHANGE_NAMES[id].toLowerCase() === action.toLowerCase())
+  // A batch prefix identifies where the failure happened, not what the user
+  // must correct. Preserve the specific underlying reason.
+  const step = text.match(/^step_\d+_([^:]+)(?::(.*))?$/)
+  if (step) { if (!op || op === 'batch') op = step[1]; text = step[2] || step[1] }
+  const code = text.split(':')[0]
+  if (Object.hasOwn(CAD_REFUSALS, code)) return humanizeError(CAD_REFUSALS[code])
+  if (code === 'linetype_not_loaded') {
+    const name = text.slice(code.length + 1)
+    return humanizeError(name
+      ? `Property refused: linetype ${name} is not loaded in this drawing`
+      : 'Choose a linetype loaded in this drawing and retry.')
+  }
+  if (code === 'unknown_op') return humanizeError(`${changeName(op)} is not available here. Choose another command.`)
+  if (code === 'engine_lacks_op' || code === 'engine_lacks_create') return humanizeError(`${changeName(op || text.split(':')[1])} is unavailable in this drawing. Reopen it and retry.`)
+  if (/\bINSERT is placed/.test(text)) return humanizeError('A block can be placed here but not edited.')
+  if (/\bdimension is placed/i.test(text)) return humanizeError('A dimension can be placed here but not edited.')
+  if (/\bmleader is placed/i.test(text)) return humanizeError('A multileader can be placed here but not edited.')
+  if (/keeps its layer in this round/.test(text)) return humanizeError('Match refused: the block keeps its layer. Choose another property to copy.')
+  if (/read-only entity kind/.test(text)) return humanizeError('This kind of object can only be viewed here. Select another object.')
+  if (/the boundary rejected|refused by the boundary/.test(text)) return humanizeError(`${changeName(op)} could not be sent. Try again or reopen the drawing.`)
+  if (/not a pinned target/.test(text)) return humanizeError(`${changeName(op)} works on the current selection. Select the objects and retry.`)
+  if (/the target entity is no longer/.test(text)) return humanizeError(`${changeName(op)} refused: the target object is no longer in the drawing.`)
+  if (/APS rejected the plan/.test(text)) return humanizeError('The project could not accept these changes. Download the drawing to keep them.')
+  if (/unknown operation|unknown step/.test(text)) return humanizeError(`${changeName(op)} is not available here. Choose another command.`)
+  if (/the plan has no steps/.test(text)) return humanizeError(CAD_REFUSALS.batch_empty)
+  if (/the plan has more than/.test(text)) return humanizeError(CAD_REFUSALS.batch_too_many_steps)
+  if (/step \S+ names no entity/.test(text)) return humanizeError('A change has no selected object. Select the object again and retry.')
+  if (/a layer step names no layer/.test(text)) return humanizeError('Enter a layer name and retry.')
+  if (/a colour step has an invalid ACI/.test(text)) return humanizeError(CAD_REFUSALS.color_index_out_of_range)
+  if (/a linetype step names no linetype/.test(text)) return humanizeError('Choose a linetype and retry.')
+  if (/a lineweight step has an invalid value/.test(text)) return humanizeError(CAD_REFUSALS.lineweight_not_valid)
+  if (/a geometry step needs \d+ to \d+ points/.test(text)) return humanizeError('The shape has too few or too many points. Choose a simpler shape and retry.')
+  if (/a geometry step has a point that is not a number|an arc step has a value that is not a number/.test(text)) return humanizeError(CAD_REFUSALS.coordinate_not_finite)
+  if (/a geometry step needs one bulge per point/.test(text)) return humanizeError(CAD_REFUSALS.bulges_not_per_vertex)
+  if (/an arc step needs a radius greater than 0/.test(text)) return humanizeError(CAD_REFUSALS.radius_not_positive)
+  if (/an arc step needs a start and end that differ/.test(text)) return humanizeError(CAD_REFUSALS.arc_sweep_zero)
+  if (/eligible inline child|same-plan ordinals/.test(text)) return humanizeError('Save refused: save the new objects before creating the block, then retry.')
+  const clipboard = text.match(/^(Copy|Cut) refused: a (\S+) of this kind cannot go on the clipboard yet\.$/)
+  if (clipboard) {
+    const kind = ({ INSERT: 'block', DIMENSION: 'dimension', MLEADER: 'multileader', HATCH: 'hatch', SPLINE: 'spline', XLINE: 'construction line', RAY: 'ray', SOLID: 'solid', OPAQUE: 'read-only object' })[clipboard[2]] || 'object of this kind'
+    return humanizeError(`${clipboard[1]} refused: this ${kind} cannot be copied here. Select another object.`)
+  }
+  if (/\bhandle\b|the plan cannot carry|engine does not carry/.test(text)) return humanizeError(`${changeName(op)} is unavailable for this object. Download the drawing to keep your changes.`)
+  if (/^[a-z][a-z_]+(?::|$)|\bat .+\(.+:\d+/.test(text)) return humanizeError(`${changeName(op)} could not be applied. Try again or reopen the drawing.`)
+  for (const [id, name] of Object.entries(CHANGE_NAMES)) {
+    if (text.startsWith(`${id} refused:`)) text = name + text.slice(id.length)
+  }
+  text = text.replace(/ in this round/g, '').replace(/ in the browser engine/g, ' here').replace(/\bengine\b/g, 'drawing tools').replace(/[\u2013\u2014]/g, ',')
+  // Angle notation belongs to the point syntax help, not transport text.
+  if (/is not a point: use x,y, @dx,dy, dist<angle or @dist<angle\.$/.test(text)) {
+    return humanizeError(text.replaceAll('<angle', '(angle')).replaceAll('(angle', '<angle')
+  }
+  return humanizeError(text)
+}
+
 // Keep the catalogue on the entity snapshot: existing viewer consumers take
 // this array, and committed/undo snapshots must carry the same definitions.
 export function projectionEntities(message) {
@@ -113,6 +305,7 @@ const INITIAL_SESSION = Object.freeze({
   ...withSelection([]),
   status: '',
   savedBytes: null,
+  drawingUnit: null,
   // W4g-1b: the bytes the last successful save committed (the same reference
   // `savedBytes` held then). `dirty` below is savedBytes !== committedBytes:
   // an undo back to the committed snapshot reads clean by reference.
@@ -147,7 +340,7 @@ const INITIAL_SESSION = Object.freeze({
   redoDepth: 0,
 })
 
-const CRASH_STATUS = 'Engine stopped unexpectedly. Open a drawing again to restart it.'
+const CRASH_STATUS = 'Drawing tools stopped unexpectedly. Open a drawing again to restart them.'
 
 // W4f slice F: undo is a bytes-snapshot stack. Every applied edit re-parses
 // the WHOLE written document and hands the bytes back, so the state before an
@@ -358,7 +551,7 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     if (refusal) return { refusal }
     if (Number(px.toFixed(3)) === Number(lx.toFixed(3)) && Number(py.toFixed(3)) === Number(ly.toFixed(3))) return { refusal: 'the two points coincide at the drawing precision (0.001)' }
     const value = String(text ?? '')
-    if (value.includes('^')) return { refusal: "mleader text cannot contain ^: the engine's DXF reader rewrites it" }
+    if (value.includes('^')) return { refusal: 'Multileader text cannot contain a caret. Remove it and retry.' }
     if (!value) return { refusal: 'Mleader refused: enter the text to place.' }
     if ([...value].length > 256) return { refusal: 'Mleader refused: at most 256 characters.' }
     if ([...value].some((c) => c.charCodeAt(0) < 32 || c.charCodeAt(0) > 126 || '|\\%'.includes(c)) || value.trim() !== value) {
@@ -366,8 +559,8 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     }
     const requestedStyle = String(style ?? '').trim()
     const styleName = requestedStyle || 'Standard'
-    if (!admissibleServerName(styleName)) return { refusal: 'Mleader refused: the style name must follow the server name rule (letters, digits, spaces, _, ., $ and -, starting with a letter or digit, at most 255 characters).' }
-    if (!admissibleServerName(layerName || '0')) return { refusal: 'Mleader refused: the layer name must follow the server name rule (letters, digits, spaces, _, ., $ and -, starting with a letter or digit, at most 255 characters).' }
+    if (!admissibleServerName(styleName)) return { refusal: 'Multileader refused: use a style name of at most 255 letters, numbers, spaces, _, ., $ or -. Start with a letter or number.' }
+    if (!admissibleServerName(layerName || '0')) return { refusal: 'Multileader refused: use a layer name of at most 255 letters, numbers, spaces, _, ., $ or -. Start with a letter or number.' }
     const definition = Array.isArray(mlstyles) ? mlstyles.find((s) => String(s?.name ?? '').toLowerCase() === styleName.toLowerCase()) : null
     if (Array.isArray(mlstyles) && !definition) return { refusal: 'mleader_style_unknown' }
     if (definition && typeof definition.segments === 'number' && definition.segments !== 1) return { refusal: 'Mleader refused: the style must use one leader segment.' }
@@ -504,7 +697,7 @@ export function buildCreatePayload(op, { x, y, x2, y2, r, a0, a1, pts, closed, l
     const catalogue = Array.isArray(dimstyles) ? dimstyles : []
     const matchedStyle = catalogue.find((n) => String(n).toLowerCase() === styleText.toLowerCase())
     if (!matchedStyle) return { refusal: `Dimension refused: dimension style ${styleText} is not loaded in this drawing` }
-    if (!PLAN_DIMSTYLE_NAME.test(matchedStyle)) return { refusal: `Dimension refused: dimension style ${matchedStyle} carries characters the plan contract does not admit` }
+    if (!PLAN_DIMSTYLE_NAME.test(matchedStyle)) return { refusal: `Dimension refused: dimension style ${matchedStyle} has unsupported characters. Choose another style.` }
     return { payload: { dimtype: kind, x1: px1, y1: py1, x2: px2, y2: py2, dx: lx, dy: ly, rotationDeg, style: matchedStyle, layer: layerName } }
   }
   if (op === 'createPolyline') {
@@ -558,7 +751,7 @@ export function planMatchprop(session, inputs = {}) {
   // W4g-7b-03c-f: an INSERT reference's own properties are as matchable as
   // any other entity's (kimi, #1121 point 6); only a non-INSERT read-only
   // kind refuses here.
-  if (target.editable === false && target.type !== 'INSERT') return { refusal: 'Match refused: the destination object is read-only in the browser engine.' }
+  if (target.editable === false && target.type !== 'INSERT') return { refusal: 'Match refused: the destination object is read-only here.' }
   const layer = String(source.layer ?? '').trim()
   if (!layer) return { refusal: 'Match refused: the selection has no layer to copy.' }
   // W4g-7b-03c: MATCHPROP copies the layer AND the three properties, as ONE
@@ -587,7 +780,7 @@ export function planMatchprop(session, inputs = {}) {
   }
   const steps = []
   if (layerDiffers && keepsLayer && !colorDiffers && !linetypeDiffers && !lineweightDiffers) {
-    return { refusal: `Match refused: an ${target.type} keeps its layer in this round.` }
+    return { refusal: 'Match refused: the block keeps its layer. Choose another property to copy.' }
   }
   if (layerDiffers && !keepsLayer) steps.push({ op: 'setLayer', entityId: target.id, layer })
   if (colorDiffers) steps.push({ op: 'setColor', entityId: target.id, aci: sourceAci })
@@ -613,7 +806,7 @@ export function planIntersectVerb(op, session, inputs = {}) {
   if (!edge) return { refusal: `${verb.name} refused: the ${verb.edge} is no longer in the document.` }
   // The typed path reaches exactly the candidates a canvas pick can name: a
   // read-only entity is never one (FILLET and CHAMFER rewrite the edge).
-  if (edge.editable === false) return { refusal: `${verb.name} refused: the ${verb.edge} is read-only in the browser engine.` }
+  if (edge.editable === false) return { refusal: `${verb.name} refused: the ${verb.edge} is read-only here.` }
   const { x, y } = checked.payload
   if (op === 'trim') {
     const tol = readNumber(inputs.etol)
@@ -806,17 +999,17 @@ export const EDIT_KIND_EXEMPT_OPS = Object.freeze(new Set(['setColor', 'setLinet
 export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1, y1, x2, y2, keep, cx, cy, deg, factor, rows, cols, rowGap, colGap, count, totalDeg, edge, ex, ey, x, y, r, d1, d2, aci, linetype, exact, lineweight, members, groupName } = {}, linetypeCatalogue = [], entities = null) {
   if (op === 'group' || op === 'ungroup') {
     const typedName = String(groupName ?? '').trim()
-    if (!typedName || typedName.length > 255 || /[^\x20-\x7e]|[<>/\\":;?*|,=`]/.test(typedName)) return { refusal: 'group_name_invalid: use 1 to 255 printable ASCII characters without dictionary-key punctuation.' }
+    if (!typedName || typedName.length > 255 || /[^\x20-\x7e]|[<>/\\":;?*|,=`]/.test(typedName)) return { refusal: 'Use a group name of 1 to 255 letters, numbers or spaces.' }
     const name = typedName.toUpperCase()
     const existing = (entities?.groups || []).find((g) => g.name.toLowerCase() === name.toLowerCase())
-    if (op === 'ungroup') return existing ? { payload: { name: existing.name.toUpperCase() } } : { refusal: 'group_not_found: enter an existing group name.' }
-    if (existing) return { refusal: 'group_name_exists: that group name is already used.' }
+    if (op === 'ungroup') return existing ? { payload: { name: existing.name.toUpperCase() } } : { refusal: 'Enter an existing group name.' }
+    if (existing) return { refusal: 'That group name is already used. Choose another name.' }
     const ids = [...new Set((Array.isArray(members) ? members : [entityId, ...String(members || '').split(/\s+/)]).filter(Boolean).map(String))]
-    if (ids.length < 2) return { refusal: 'group_needs_two_members: select at least two distinct objects.' }
+    if (ids.length < 2) return { refusal: 'Select at least two distinct objects.' }
     if (ids.some((id) => {
       const e = entities?.find((candidate) => String(candidate.id) === id)
       return !e || e.modelSpace === false || e.blockChild || e.ownerBlock || (!e.editable && !['INSERT', 'DIMENSION'].includes(e.type))
-    })) return { refusal: 'group_member_not_editable: every member must be an editable model-space object.' }
+    })) return { refusal: 'Select objects that can be edited in the drawing.' }
     return { payload: { name, members: ids } }
   }
   const payload = { entityId }
@@ -826,12 +1019,12 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
   // an INSERT or a DIMENSION selection refuses every geometry verb, ERASE
   // and the three property ops (plus MATCHPROP's own source ladder) excepted.
   if (Array.isArray(entities) && op !== 'delete' && entities.find((candidate) => candidate.id === entityId)?.type === 'MLEADER') {
-    return { refusal: 'a mleader is placed, not edited, in this round' }
+    return { refusal: 'A multileader can be placed here but not edited.' }
   }
   if (Array.isArray(entities) && op !== 'delete' && !EDIT_KIND_EXEMPT_OPS.has(op)) {
     const target = entities.find((candidate) => candidate.id === entityId)
-    if (target?.type === 'INSERT') return { refusal: 'an INSERT is placed, not edited, in this round' }
-    if (target?.type === 'DIMENSION') return { refusal: 'a dimension is placed, not edited, in this round' }
+    if (target?.type === 'INSERT') return { refusal: 'A block can be placed here but not edited.' }
+    if (target?.type === 'DIMENSION') return { refusal: 'A dimension can be placed here but not edited.' }
   }
   // W4g-6: the intersection verbs validate their OPERANDS here, so the
   // prompt holds Run with the sentence as the drafter types; whether the
@@ -959,7 +1152,7 @@ export function buildEditPayload(op, entityId, { dx, dy, vertexIndex, layer, x1,
     // W4f-9: digits only; parseInt read "3abc" as 3.
     const vi = /^\s*\d{1,9}\s*$/.test(String(vertexIndex ?? '')) ? Number.parseInt(vertexIndex, 10) : NaN
     if (!Number.isInteger(vi) || vi < 0) {
-      return { refusal: `${op} refused: vertex must be a non-negative integer.` }
+      return { refusal: `${changeName(op)} refused: vertex must be a non-negative integer.` }
     }
     payload.vertexIndex = vi
     if (op === 'moveVertex') {
@@ -1034,12 +1227,12 @@ export function buildSelectionEditPayload(op, ids, inputs, entities) {
   if (members.some((entity) => !entity)) return { refusal: 'Edit refused: a selected object is no longer in the document.' }
   for (const entity of members) {
     if (op !== 'delete') {
-      if (entity.type === 'INSERT') return { refusal: 'an INSERT is placed, not edited, in this round' }
-      if (entity.type === 'DIMENSION') return { refusal: 'a dimension is placed, not edited, in this round' }
-      if (entity.type === 'MLEADER') return { refusal: 'a mleader is placed, not edited, in this round' }
+      if (entity.type === 'INSERT') return { refusal: 'A block can be placed here but not edited.' }
+      if (entity.type === 'DIMENSION') return { refusal: 'A dimension can be placed here but not edited.' }
+      if (entity.type === 'MLEADER') return { refusal: 'A multileader can be placed here but not edited.' }
     }
     if (entity.editable === false && !(op === 'delete' && ['INSERT', 'DIMENSION', 'MLEADER'].includes(entity.type))) {
-      return { refusal: 'read-only entity kind' }
+      return { refusal: 'This kind of object can only be viewed here. Select another object.' }
     }
   }
   const steps = []
@@ -1101,7 +1294,9 @@ export default function useEngineSession({
   }
 
   const patch = useCallback((next) => {
-    setSession((current) => Object.freeze({ ...current, ...next }))
+    setSession((current) => Object.freeze({ ...current, ...next,
+      ...(next.status && next.errorKind ? { status: cadMessage(next.status) } : {}),
+    }))
   }, [])
 
   const teardown = useCallback(() => {
@@ -1152,7 +1347,7 @@ export default function useEngineSession({
         if (message.refusal) {
           clearHistory()
           setSession((current) => Object.freeze({ ...INITIAL_SESSION, documentId: message.documentId, documentLoadIdentity,
-            clipboard: current.clipboard, errorKind: SESSION_ERROR.REFUSED, status: `Load refused: ${message.refusal}` }))
+            clipboard: current.clipboard, errorKind: SESSION_ERROR.REFUSED, status: cadMessage(message.refusal) }))
           return
         }
         const entities = projectionEntities(message)
@@ -1173,15 +1368,14 @@ export default function useEngineSession({
             entityCount: message.entityCount ?? 0,
             blockBasePatched: message.blockBasePatched ?? false,
             ...withSelection(surviveSelectionIds(current.selectedIds, entities)),
-            savedBytes: edited ? reload.bytes : null,
+            savedBytes: edited || current.committedBytes !== null ? reload.bytes : null,
             busy: false,
             engineParsed: true,
             geometrySource: GEOMETRY_SOURCE.ENGINE_REPARSE,
             errorKind: null,
             undoDepth: history.undo.length,
             redoDepth: history.redo.length,
-            status: `${reload.kind === 'undo' ? 'Undid' : 'Redid'} ${reload.op}: `
-              + `${message.entityCount} entities, ${reload.bytes.length} bytes.`,
+            status: `${reload.kind === 'undo' ? 'Undid' : 'Redid'} the ${changeName(reload.op).toLowerCase()}.`,
           }))
           return
         }
@@ -1193,6 +1387,7 @@ export default function useEngineSession({
           documentLoadIdentity,
           documentId: pendingLoad.documentId,
           documentOrigin: pendingLoad.origin,
+          drawingUnit: pendingLoad.drawingUnit,
           entities,
           entityCount: message.entityCount ?? 0,
           blockBasePatched: message.blockBasePatched ?? false,
@@ -1207,8 +1402,7 @@ export default function useEngineSession({
           errorKind: null,
           undoDepth: 0,
           redoDepth: 0,
-          status: `Loaded ${message.documentId}: ${message.entityCount} entities`
-            + (others ? ` (${others} preserved as read-only kinds).` : '.'),
+          status: 'Drawing opened.' + (others ? ' Some objects can only be viewed.' : ''),
         })
         return
       }
@@ -1227,9 +1421,7 @@ export default function useEngineSession({
           patch({
             busy: false,
             errorKind: SESSION_ERROR.REFUSED,
-            status: typeof message.reason === 'string' && message.reason.startsWith('linetype_not_loaded:')
-              ? `Property refused: linetype ${message.reason.slice('linetype_not_loaded:'.length)} is not loaded in this drawing`
-              : `Edit refused (${label}): ${message.reason ?? 'unknown reason'}`,
+            status: cadMessage(message.reason, label),
           })
           return
         }
@@ -1246,7 +1438,6 @@ export default function useEngineSession({
         const createdGroupId = message.op === GROUP_OPS.group && message.createdId != null
           ? String(message.createdId)
           : ''
-        const reparsed = `Re-parsed from the written bytes: ${message.entityCount} entities, ${message.byteLength} bytes.`
         // W4f slice F: the state BEFORE this edit is a snapshot; a new edit
         // ends any redo branch. Done once here (outside the updater, which
         // StrictMode runs twice).
@@ -1277,12 +1468,12 @@ export default function useEngineSession({
           geometrySource: GEOMETRY_SOURCE.ENGINE_REPARSE,
           errorKind: createLost ? SESSION_ERROR.REFUSED : null,
           status: createLost
-            ? `${label} applied, but the new entity was not found after re-parse. ${reparsed}`
+            ? humanizeError('The new object could not be confirmed. Undo and try drawing it again.')
             : createdId
-              ? `${label} applied: entity ${createdId} drawn. ${reparsed}`
+              ? 'Drawing applied: entity created.'
               : createdGroupId
-                ? `${label} applied: group ${createdGroupId} created. ${reparsed}`
-                : `${label} applied${batchNote}. ${reparsed}`,
+                ? 'Group created.'
+                : batchNote ? 'Properties copied. The destination keeps its layer.' : 'Change applied.',
         }))
         return
       }
@@ -1310,8 +1501,8 @@ export default function useEngineSession({
           undoDepth: 0,
           redoDepth: 0,
           status: failedStep
-            ? `${failedStep.kind === 'undo' ? 'Undo' : 'Redo'} of ${failedStep.op} failed: the engine refused the snapshot (${message.message}). Open the drawing again.`
-            : `Engine refused: ${message.message}`,
+            ? 'The change could not be restored. Open the drawing again.'
+            : cadMessage(message.message),
         })
       }
     })
@@ -1327,7 +1518,7 @@ export default function useEngineSession({
   // history floor, same boundary message. Fails closed on any other shape.
   const openBytes = useCallback((bytes, name, opts = null) => {
     if (savingRef.current) {
-      patch({ status: 'a save is in flight; wait for its receipt' })
+      patch({ status: 'Wait for the drawing to finish saving, then try again.' })
       return null
     }
     // toString, not instanceof: bytes from another realm (a test harness, a
@@ -1336,7 +1527,7 @@ export default function useEngineSession({
     if (bytes.length > MAX_DOCUMENT_BYTES) {
       patch({
         errorKind: SESSION_ERROR.LIMIT,
-        status: `Refused ${name}: ${bytes.length} bytes exceeds the ${MAX_DOCUMENT_BYTES}-byte limit.`,
+        status: 'This drawing exceeds the 16 MB size limit. Open a smaller drawing.',
       })
       return
     }
@@ -1350,26 +1541,26 @@ export default function useEngineSession({
     // W4f slice F: the opened bytes are the floor of the undo history.
     clearHistory()
     historyRef.current.original = bytes
-    pendingLoadRef.current = { documentId: name, origin: committedLoadRef.current ? 'head' : opts?.starter === true ? 'starter' : 'import' }
+    pendingLoadRef.current = { documentId: name, drawingUnit: drawingUnitFromBytes(bytes), origin: committedLoadRef.current ? 'head' : opts?.starter === true ? 'starter' : 'import' }
     if (!boundary.post({ type: 'loadDocument', documentId: name, bytes })) {
       patch({
         busy: false,
         errorKind: SESSION_ERROR.TRANSPORT,
-        status: `Could not send ${name} to the engine.`,
+        status: 'The drawing could not be opened. Try opening it again.',
       })
     }
   }, [ensureBoundary, patch])
 
   const open = useCallback(async (file) => {
     if (savingRef.current) {
-      patch({ status: 'a save is in flight; wait for its receipt' })
+      patch({ status: 'Wait for the drawing to finish saving, then try again.' })
       return null
     }
     if (!file) return
     if (file.size > MAX_DOCUMENT_BYTES) {
       patch({
         errorKind: SESSION_ERROR.LIMIT,
-        status: `Refused ${file.name}: ${file.size} bytes exceeds the ${MAX_DOCUMENT_BYTES}-byte limit.`,
+        status: 'This drawing exceeds the 16 MB size limit. Open a smaller drawing.',
       })
       return
     }
@@ -1426,7 +1617,7 @@ export default function useEngineSession({
       return
     }
     if (savingRef.current) {
-      patch({ status: 'a save is in flight; wait for its receipt' })
+      patch({ status: 'Wait for the drawing to finish saving, then try again.' })
       return null
     }
     if (!isCreateOp(op)) {
@@ -1475,7 +1666,7 @@ export default function useEngineSession({
     }
     if (!explicit && SELECTION_EDIT_OPS.includes(op) && sessionRef.current.selectedIds.length > 1) {
       if (!boundaryRef.current || !sessionRef.current.engineParsed || sessionRef.current.busy || selectionEditRef.current) return
-      if (savingRef.current) { patch({ status: 'a save is in flight; wait for its receipt' }); return null }
+      if (savingRef.current) { patch({ status: 'Wait for the drawing to finish saving, then try again.' }); return null }
       const { payload, refusal } = buildSelectionEditPayload(op, sessionRef.current.selectedIds, inputs, sessionRef.current.entities)
       if (refusal) { patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal }); return }
       selectionEditRef.current = {
@@ -1493,12 +1684,12 @@ export default function useEngineSession({
       return
     }
     if (selectionEditRef.current) return
-    if (!explicit && op !== 'ungroup' && sessionRef.current.selectedIds.length > 1) {
+    if (!explicit && op !== 'group' && op !== 'ungroup' && sessionRef.current.selectedIds.length > 1) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: multiSelectionRefusal(op, sessionRef.current.selectedIds.length) })
       return
     }
     if (savingRef.current) {
-      patch({ status: 'a save is in flight; wait for its receipt' })
+      patch({ status: 'Wait for the drawing to finish saving, then try again.' })
       return null
     }
     // Nothing selected is not an error, it is a no-op: the affordances that
@@ -1506,7 +1697,8 @@ export default function useEngineSession({
     if (!explicit && !sessionRef.current.selectedId && op !== 'group' && op !== 'ungroup') return
     const targetId = explicit ? options.targetId : sessionRef.current.selectedId
     if (op === 'group' || op === 'ungroup') {
-      const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, inputs, [], sessionRef.current.entities)
+      const members = [...new Set([...sessionRef.current.selectedIds, ...(Array.isArray(inputs?.members) ? inputs.members : String(inputs?.members || '').split(/\s+/))].filter(Boolean))]
+      const { payload, refusal } = buildEditPayload(op, sessionRef.current.selectedId, { ...inputs, members }, [], sessionRef.current.entities)
       if (refusal) { patch({ errorKind: SESSION_ERROR.REFUSED, status: refusal }); return }
       const boundary = boundaryRef.current
       if (!boundary || !sessionRef.current.engineParsed) return
@@ -1526,18 +1718,18 @@ export default function useEngineSession({
     // contract carries `removed` for any kind), so it is exempt here too.
     const targetType = sessionRef.current.entities.find((entity) => entity.id === targetId)?.type
     if (op !== 'delete' && !EDIT_KIND_EXEMPT_OPS.has(op) && targetType === 'INSERT') {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'an INSERT is placed, not edited, in this round' })
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'A block can be placed here but not edited.' })
       return
     }
     // W4g-7b-04c: the 05c sentence, adopted for DIMENSION. Unlike INSERT, a
     // dimension's DELETE is still allowed (a removal lowers as `removed`);
     // every other verb, including the property ops above, refuses here.
     if (op !== 'delete' && targetType === 'MLEADER') {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'a mleader is placed, not edited, in this round' })
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'A multileader can be placed here but not edited.' })
       return
     }
     if (op !== 'delete' && targetType === 'DIMENSION') {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'a dimension is placed, not edited, in this round' })
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'A dimension can be placed here but not edited.' })
       return
     }
     // W4g-5 OFFSET: a parallel copy is a CREATE whose geometry comes from the
@@ -1647,7 +1839,11 @@ export default function useEngineSession({
     // the operation cap) keeps today's sidecar-leg inheritance below.
     const diff = committedEntities ? diffPlan(committedEntities, entities) : null
     if (diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour' || diff.cause === 'group-singleton' || diff.cause === 'block-def-unmatched')) {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: `Save refused: ${diff.reason}.` })
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: diff.cause === 'block-def-unmatched'
+        ? cadMessage(`Save refused: ${diff.reason}.`)
+        : diff.cause === 'group-singleton' ? cadMessage(`Save refused: ${diff.reason}.`, 'save')
+          : diff.cause === 'true-colour' ? humanizeError('Save refused: custom colours cannot be saved here. Choose a standard colour or download the drawing.')
+            : humanizeError(`Save refused: a placed ${diff.kind === 'DIMENSION' ? 'dimension' : 'block'} was moved. Undo that move or download the drawing to keep it.`) })
       return null
     }
     savingRef.current = true
@@ -1660,15 +1856,13 @@ export default function useEngineSession({
     // DXF sidecar fallback for a kind the plan already carries (v63's rule —
     // the fallback exists only for a diff this module itself cannot express).
     const parent = sessionRef.current.committedVersion ?? target.headVersion
-    const onStatus = ({ status, progress }) => {
+    const onStatus = () => {
       if (generation !== generationRef.current || !savingRef.current) return
-      patch({ status: `Saving to the project as a new version... (job ${status}${progress ? ': ' + progress : ''})` })
+      patch({ status: 'Saving to the project as a new version...' })
     }
     let plan = null
-    let planNote = ''
     if (diff) {
       if (diff.mutations) plan = { mutations: diff.mutations, count: diff.count }
-      else planNote = ` No plan sent: ${diff.reason}.`
     }
     try {
       const digest = await sha256Hex(bytes)
@@ -1677,11 +1871,8 @@ export default function useEngineSession({
       // session that has since switched drawings.
       if (generation !== generationRef.current) return null
       const nv = receipt?.new_version?.version ?? receipt?.head
-      const commit = receipt?.commit ? ` through the ${receipt.commit} leg` : ''
       const live = receipt?.live === true
       const readBackPending = live && receipt.new_version_readable === false
-      const cost = typeof receipt?.cost?.engine_usd === 'number'
-        ? `engine cost $${receipt.cost.engine_usd}` : 'engine cost unknown'
       patch({
         busy: false,
         receipt,
@@ -1690,11 +1881,9 @@ export default function useEngineSession({
         committedEntities: live ? null : committedEntities ? sessionRef.current.entities : null,
         committedVersion: live ? (readBackPending ? nv ?? null : null) : nv ?? null,
         errorKind: null,
-        status: `Saved as version ${nv} (parent ${receipt?.new_version?.parent})${commit}, `
-          + `digest ${String(receipt?.source_sha256 || digest).slice(0, 12)}…, `
-          + `${cost}.${planNote}`
-          + (readBackPending ? ' The committed version read-back is pending.'
-            : live ? ' reopening the committed version from the server...' : ''),
+        status: (nv == null ? 'Drawing saved.' : `Saved as version ${nv}.`)
+          + (readBackPending ? ' Reopen the drawing to view the saved version.'
+            : live ? ' Opening the saved version...' : ''),
       })
       onSavedRef.current?.(receipt)
       return receipt
@@ -1704,7 +1893,7 @@ export default function useEngineSession({
         ? 'The save may still be running. Reopen the drawing to check before saving again.'
         : /^live commit\b/i.test(error?.message || '')
           ? 'The drawing was not saved. Try again.'
-          : error)
+          : cadMessage(error?.message || error, 'save'))
       patch({
         busy: false,
         errorKind: SESSION_ERROR.SAVE,
@@ -1743,7 +1932,7 @@ export default function useEngineSession({
         errorKind: SESSION_ERROR.TRANSPORT,
         undoDepth: history.undo.length,
         redoDepth: history.redo.length,
-        status: `${kind === 'undo' ? 'Undo' : 'Redo'} refused: the boundary rejected the message.`,
+        status: cadMessage('the boundary rejected the message.', kind),
       })
       return false
     }
@@ -1787,7 +1976,7 @@ export default function useEngineSession({
       return
     }
     if (entity.type === 'INSERT') {
-      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'an INSERT is placed, not edited, in this round' })
+      patch({ errorKind: SESSION_ERROR.REFUSED, status: 'A block can be placed here but not edited.' })
       return
     }
     // The record is taken BEFORE anything is deleted, so a cut that cannot be

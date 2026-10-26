@@ -1079,8 +1079,8 @@ describe('CommandLineArmer (W4f slice B)', () => {
   })
 
   it.each([
-    ['INSERT', 'an INSERT is placed, not edited, in this round'],
-    ['DIMENSION', 'a dimension is placed, not edited, in this round'],
+    ['INSERT', 'A block can be placed here but not edited.'],
+    ['DIMENSION', 'A dimension can be placed here but not edited.'],
   ])('C2: typed explode on %s surfaces the placed-kind refusal without posting', async (type, sentence) => {
     mount()
     await openAndLoad([{ ...LINE, type, editable: false }])
@@ -1109,7 +1109,7 @@ describe('CommandLineArmer (W4f slice B)', () => {
     const before = workers[0].posted.length
     command(parseDrawingCommand('m'))
     expect(promptEl().getAttribute('data-op')).toBe('move')
-    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('an INSERT is placed, not edited, in this round')
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('A block can be placed here but not edited.')
     expect(workers[0].posted).toHaveLength(before)
     command(parseDrawingCommand('erase'))
     expect(workers[0].posted.slice(before)).toEqual([{ type: 'applyEdit', op: 'delete', payload: { entityId: '11' } }])

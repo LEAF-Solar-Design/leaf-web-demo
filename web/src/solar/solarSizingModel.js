@@ -13,6 +13,7 @@ export const SOLAR_SIZING_REASONS = Object.freeze({
   sizing_fields_invalid: 'Check the marked sizing fields before submitting.',
   sizing_too_many_targets: 'Size at most 4096 targets at once.',
   sizing_manual_length_required: 'Save a whole-number string length from 1 to 4096 in Solar settings.',
+  sizing_module_unconfirmed: 'Choose a module from the sizer catalog.',
 })
 
 export const MODULE_PARAMETER_KEYS = Object.freeze([
@@ -135,7 +136,7 @@ export function sizingTargets(graph, mode) {
   return { ok: true, targets: graph.zones.map((zone) => zone.id) }
 }
 
-export function buildSizingParams({ graph, mode, draft = {} }) {
+export function buildSizingParams({ graph, mode, draft = {}, moduleCatalog = true }) {
   if (!graph?.ok) return fail('sizing_graph_unavailable')
   if (mode === 'manual-global') {
     const targets = sizingTargets(graph, mode)
@@ -174,6 +175,10 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
         : numeric < -1e7 || numeric > 1e7)) invalid.push(key)
       else moduleParameters[key] = numeric
     }
+  }
+  if (moduleCatalog && mode === 'global' && (!draft.module_name || !draft.module_confirmed || draft.module_confirmed !== draft.module_name)) {
+    if (!invalid.includes('module_name')) invalid.push('module_name')
+    return fail('sizing_module_unconfirmed', invalid)
   }
   if (invalid.length) return fail('sizing_fields_invalid', invalid)
   const racking = { racking_type: draft.racking_type, surface_tilt: draft.surface_tilt,
