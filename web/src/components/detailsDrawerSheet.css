@@ -1,6 +1,6 @@
 /* F-phone-details-sheet: geometry snaps; only opacity condenses. Extra
    specificity keeps the phone fork independent of stylesheet import order. */
-@media (max-width: 639px) {
+@media (max-width: 599px) {
   .drawer-layer.drawer-sheet-layer,
   .app[data-project-workspace="results"] > .drawer-layer.drawer-sheet-layer {
     position: fixed;
