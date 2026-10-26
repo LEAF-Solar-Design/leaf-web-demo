@@ -6,6 +6,8 @@ from copy import deepcopy
 from contextlib import contextmanager
 from datetime import timedelta
 import json
+import math
+from pathlib import Path
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -360,7 +362,84 @@ def test_R14C_16_invalid_captured_response(monkeypatch):
             assert w.exchange["response_bytes"] == raw
             assert w.exchange["state"] == "refused"
             assert w.exchange["refusal_code"] == "cloud_response_invalid"
-            assert w.row["error"]["reason_code"] == "CLOUD_RESPONSE_INVALID" and not w.history
+            reason = "COLD_VOLTAGE_FAILED" if raw == graph.local.canonical_bytes(cold) else "CLOUD_RESPONSE_INVALID"
+            assert w.row["error"]["reason_code"] == reason and not w.history
+
+
+@pytest.mark.parametrize("stored", (False, True))
+def test_cold_voltage_failure_carries_plugin_suggestion(monkeypatch, stored):
+    fixture = json.loads((Path(__file__).parent / "fixtures" /
+                          "w1_plugin_stringsizer_response.json").read_bytes())
+    w = World(monkeypatch)
+    target = next(iter(w.params["requests"]))
+    w.params["requests"][target] = fixture["request"]
+    w.raw = graph.local.canonical_bytes(fixture["response"])
+    raw = w.raw
+    if stored:
+        w.capture()
+        w.reclaim()
+        w.raw = b"{bad"
+        monkeypatch.setattr(cloud.requests, "post", admission.forbidden)
+        monkeypatch.setattr(cloud, "resolve_grant", admission.forbidden)
+    expected = cloud.recommend(cloud.SizingResponse.model_validate(fixture["response"]))["voc_cold"]
+    w.run()
+    assert w.row["status"] == "failed" and not w.history
+    assert w.exchange["state"] == "refused"
+    assert w.exchange["refusal_code"] == "cloud_response_invalid"
+    assert w.exchange["response_bytes"] == raw
+    details = {"standard_string_length": 28,
+               "suggested_string_length": expected["suggested_string_length"],
+               **{key: expected[key] for key in ("per_module", "string_voltage", "max_dc_voltage")}}
+    assert w.row["error"] == {
+        "error_code": "GRAPH_JOB_FAILED", "message": "canonical Solar graph preparation failed",
+        "retryable": False, "reason_code": "COLD_VOLTAGE_FAILED", "cold_voltage": details}
+    assert type(w.row["error"]["cold_voltage"]["standard_string_length"]) is int
+    assert type(w.row["error"]["cold_voltage"]["suggested_string_length"]) is int
+    assert details["suggested_string_length"] >= 1
+    for key in ("per_module", "string_voltage", "max_dc_voltage"):
+        assert type(w.row["error"]["cold_voltage"][key]) is float
+        assert math.isfinite(w.row["error"]["cold_voltage"][key])
+
+
+def test_other_evidence_failure_has_no_cold_voltage(monkeypatch):
+    w = World(monkeypatch)
+    response = deepcopy(SMALL)
+    response["simulation_results"]["standard"]["string_design_voltage"] = 601
+    w.raw = graph.local.canonical_bytes(response)
+    cloud.parse_response_bytes(w.raw)
+    w.run()
+    assert w.exchange["state"] == "refused"
+    assert w.exchange["refusal_code"] == "cloud_response_invalid"
+    assert w.row["error"] == {
+        "error_code": "GRAPH_JOB_FAILED", "message": "canonical Solar graph preparation failed",
+        "retryable": False, "reason_code": "CLOUD_RESPONSE_INVALID"}
+    assert not w.history
+
+
+@pytest.mark.parametrize("failure", ("parse", "recommend", "nonfinite"))
+def test_cold_voltage_diagnostics_failure_keeps_invalid_response(monkeypatch, failure):
+    w = World(monkeypatch)
+    if failure == "parse":
+        w.raw = b"{bad"
+    w.capture()
+    def guard_failure(*args, **kwargs):
+        raise service.GraphValidationError("COLD_VOLTAGE_FAILED")
+    monkeypatch.setattr(sizing, "build_sizing_evidence", guard_failure)
+    if failure == "recommend":
+        def unavailable(*args):
+            raise RuntimeError("cannot compute suggestion")
+        monkeypatch.setattr(cloud, "recommend", unavailable)
+    elif failure == "nonfinite":
+        recommendation = cloud.recommend(cloud.SizingResponse.model_validate(SMALL))
+        recommendation["voc_cold"].update(suggested_string_length=1, string_voltage=float("inf"))
+        monkeypatch.setattr(cloud, "recommend", lambda *args: recommendation)
+    w.run()
+    assert w.exchange["state"] == "refused"
+    assert w.exchange["refusal_code"] == "cloud_response_invalid"
+    assert w.row["error"] == {
+        "error_code": "GRAPH_JOB_FAILED", "message": "canonical Solar graph preparation failed",
+        "retryable": False, "reason_code": "CLOUD_RESPONSE_INVALID"}
+    assert not w.history
 
 
 def test_R14C_17_uncertain_capture(monkeypatch):
