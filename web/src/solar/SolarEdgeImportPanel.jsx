@@ -131,7 +131,7 @@ export default function SolarEdgeImportPanel({
     active.current = null
     setPending(null)
     if (!result.ok) {
-      setOutcome({ step, drawingId, message: `${step === 'upload' ? 'Upload' : 'Report'} failed. ${solarEdgeReason(result.code)}${result.retryable ? '. This failure is retryable. Try again.' : ''}` })
+      setOutcome({ step, drawingId, message: `${step === 'upload' ? 'Upload' : 'Report'} failed. ${solarEdgeReason(result.code)}.` })
       return
     }
     if (step === 'upload') {
@@ -204,7 +204,7 @@ export default function SolarEdgeImportPanel({
         <p id={toleranceHint}>{parsed.ok ? 'The alignment tolerance is within the allowed range.' : parsed.reason}</p>
         <label>Selection order<select value={order} disabled={disabled || busy}
           onChange={(event) => setOrder(event.target.value)}>
-          {SOLAREDGE_SELECTION_ORDERS.map((value) => <option key={value} value={value}>{value}</option>)}
+          {SOLAREDGE_SELECTION_ORDERS.map((value) => <option key={value} value={value}>{value === 'recorded' ? 'Use recorded order' : 'Match automatically'}</option>)}
         </select></label>
         <button ref={reportButton} type="button" disabled={disabled || busy || !parsed.ok}
           onClick={() => run('report')}>Build report</button>

@@ -457,14 +457,14 @@ describe('save truth', () => {
     expect(onSaved).toHaveBeenCalledTimes(1)
   })
 
-  it('without a project target the ribbon says download-only rather than offering a dead button', async () => {
+  it('without a project target the ribbon offers a download', async () => {
     const studio = mount()
     await openAndLoad(studio)
     fireEvent.click(screen.getByRole('radio'))
     armAndRun('move')
     studio.workers[0].emit(editApplied('move', [LINE]))
-    expect(saveTool().disabled).toBe(true)
-    expect(saveTool().title).toBe(SAVE_REASONS.noTarget)
+    expect(saveTool().disabled).toBe(false)
+    expect(saveTool().textContent).toContain('Download DXF')
     expect(screen.queryByTestId('cad-edit-save-version')).toBeNull()
   })
 })
@@ -567,7 +567,7 @@ describe('the Draw group (W4d Slice B): creation from the ribbon, selection land
     // armed for the next segment, fields live again.
     expect(modifyNote()).toBeNull()
     expect(ribbonTool('delete').disabled).toBe(false)
-    expect(screen.getByRole('status').textContent).toMatch(/entity e9 drawn/)
+    expect(screen.getByRole('status').textContent).toMatch(/Drawing applied: entity created\./)
     expect(screen.getByTestId('cockpit-prompt').getAttribute('data-op')).toBe('createLine')
     expect(screen.getByLabelText('ribbon x2').disabled).toBe(false)
   })
@@ -1301,7 +1301,7 @@ describe('the band\'s Undo edit / Redo edit (W4f slice F)', () => {
     expect(posted[posted.length - 1].type).toBe('loadDocument')
     expect(posted[posted.length - 1].documentId).toBe('one.dxf')
     studio.workers[0].emit(loadedMessage([LINE]))
-    expect(studio.context.session.status).toMatch(/^Undid move:/)
+    expect(studio.context.session.status).toMatch(/^Undid the move\.$/)
     expect(quick('quick-undo-edit').title).toBe('nothing to undo')
     expect(quick('quick-redo-edit').disabled).toBe(false)
     fireEvent.click(quick('quick-redo-edit'))
@@ -1338,7 +1338,7 @@ describe('the reason ladders are pure and total', () => {
   it('saveReason names the missing precondition', () => {
     expect(saveReason(null, true)).toBe(SAVE_REASONS.noDocument)
     expect(saveReason({ engineParsed: true, savedBytes: null }, true)).toBe(SAVE_REASONS.nothingEdited)
-    expect(saveReason({ engineParsed: true, savedBytes: new Uint8Array(1) }, false)).toBe(SAVE_REASONS.noTarget)
+    expect(saveReason({ engineParsed: true, savedBytes: new Uint8Array(1) }, false)).toBe('')
     expect(saveReason({ engineParsed: true, savedBytes: new Uint8Array(1), busy: true }, true)).toBe(SAVE_REASONS.busy)
     expect(saveReason({ engineParsed: true, savedBytes: new Uint8Array(1) }, true)).toBe('')
   })

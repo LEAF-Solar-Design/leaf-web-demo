@@ -1,7 +1,7 @@
 .drawing-objects-panel {
-  background: var(--ck-glass-dock, #24282e);
-  color: var(--ck-ink, #f3f4f6);
-  border: 1px solid var(--ck-edge, #68717b);
+  background: var(--ck-glass-dock, var(--leaf-glass-dock));
+  color: var(--ck-ink, var(--leaf-ink));
+  border: 1px solid var(--ck-edge, var(--leaf-line));
   border-radius: var(--leaf-radius-key);
   max-width: 100%;
   box-sizing: border-box;
@@ -9,7 +9,7 @@
 .drawing-objects-panel > summary { cursor: pointer; padding: 10px 12px; }
 .drawing-objects-content { padding: 0 10px 10px; }
 .drawing-object-list { list-style: none; padding: 0; margin: 8px 0 0; max-height: 42vh; overflow: auto; }
-.drawing-object-list > li { padding: 10px 6px; border-top: 1px solid var(--ck-edge, #68717b); overflow-wrap: anywhere; }
+.drawing-object-list > li { padding: 10px 6px; border-top: 1px solid var(--ck-edge, var(--leaf-line)); overflow-wrap: anywhere; }
 .drawing-object-list > li[data-selected] { border-left: 3px solid currentColor; padding-left: 3px; }
 .drawing-object-list > li[data-focused] { outline: 1px dashed currentColor; outline-offset: -3px; }
 .drawing-object-path, .drawing-object-radio, .drawing-object-reason { display: block; margin-top: 4px; }

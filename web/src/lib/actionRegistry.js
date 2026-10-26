@@ -317,7 +317,7 @@ export function repeatReason(ctx = {}) {
 }
 
 export const ENGINE_SHORTCUTS = Object.freeze({
-  'modify:delete': 'Delete',
+  'modify:delete': 'Delete / Backspace',
   'engine:undo': 'Mod+Z',
   'engine:redo': 'Mod+Y / Mod+Shift+Z',
   'clipboard:copyClip': 'Mod+C',
@@ -347,10 +347,15 @@ export function engineShortcutDecision(event, ctx = {}) {
   if (mod) {
     if (key === 'z') return event.shiftKey ? 'engine:redo' : 'engine:undo'
     if (event.shiftKey) return null
+    if (key === 'c' || key === 'x' || key === 'v') {
+      const selection = (event.target?.ownerDocument || ctx.activeElement?.ownerDocument
+        || globalThis.document)?.getSelection?.()
+      if (selection && !selection.isCollapsed) return null
+    }
     return ({ y: 'engine:redo', c: 'clipboard:copyClip', x: 'clipboard:cutClip', v: 'clipboard:pasteClip' })[key] || null
   }
   if (event.shiftKey) return null
-  if (key === 'delete') return 'modify:delete'
+  if (key === 'delete' || key === 'backspace') return 'modify:delete'
   if (key !== 'enter' && key !== ' ' && key !== 'spacebar') return null
   if (ctx.armed || !ctx.commandLineEmpty || ctx.decisionOpen
       || event.target?.closest?.(ENGINE_ACTIVATION_SELECTOR)
@@ -533,7 +538,7 @@ export function retryRung(ctx = {}) {
   return typeof target === 'string' && Object.prototype.hasOwnProperty.call(RETRY_RUNGS, target) ? target : ''
 }
 
-const isTypingTag = (tag) => tag === 'input' || tag === 'textarea'
+const isTypingTag = (tag) => tag === 'input' || tag === 'textarea' || tag === 'select'
 
 function isInteractiveTarget(target) {
   if (typeof Element === 'undefined' || !(target instanceof Element)) return false
@@ -575,7 +580,7 @@ export function ladderDecision(event, ctx = {}) {
   if (!event || event.defaultPrevented || event.isComposing || event.keyCode === 229
       || typeof event.key !== 'string') return null
   const tag = String(event.target?.tagName || '').toLowerCase()
-  const typing = isTypingTag(tag)
+  const typing = isTypingTag(tag) || editorTarget(event.target) || editorTarget(ctx.activeElement)
 
   if ((event.metaKey || event.ctrlKey) && (event.key === 'k' || event.key === 'K')) {
     return { id: 'bar:focus', rung: '', route: 'kbd', preventDefault: true, instant: true }
@@ -590,6 +595,10 @@ export function ladderDecision(event, ctx = {}) {
 
   if (event.key === 'Escape') {
     const rung = escapeRung(ctx, event)
+    // Fields never close a project or interrupt a run. A native select may
+    // still clear the drawing selection when no local Escape owner consumed it.
+    if (typing && (rung === 'running' || rung === 'project'
+        || (rung === 'selection' && tag !== 'select'))) return null
     // No open rung: nothing to close, so the ladder leaves the key alone
     // (null, no preventDefault). Esc is not printable, so it never reaches the
     // type-to-fall-through route below either.

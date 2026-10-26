@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { humanizeError } from '../errorHumanize.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { solarSizingRunSentence, SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { buildSizingParams, MODULE_PARAMETER_KEYS, sizingGraph, sizingTargets, SOLAR_SIZING_REASONS,
   deriveProjectSizingState, buildProjectSizingRequest, exactProjectSizingConductorPreview,
@@ -8,6 +9,20 @@ import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingB
 
 const projectReasonCode = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}(?![\\s\\S])')
 const projectJobId = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])')
+const previewTimeoutSentence = 'The catalog preview did not finish in time. Select Refresh preview to try again.'
+
+export const MODULE_PARAMETER_LABELS = Object.freeze({
+  V_oc_ref: 'Open circuit voltage at reference conditions (V)',
+  I_sc_ref: 'Short circuit current at reference conditions (A)',
+  V_mp_ref: 'Maximum power voltage at reference conditions (V)',
+  I_mp_ref: 'Maximum power current at reference conditions (A)',
+  alpha_sc: 'Short circuit current temperature coefficient (A/°C)',
+  beta_oc: 'Open circuit voltage temperature coefficient (V/°C)',
+  STC: 'Power at standard test conditions (W)',
+  gamma_r: 'Power temperature coefficient (%/°C)',
+  T_NOCT: 'Nominal operating cell temperature (°C)',
+  N_s: 'Cells in series',
+})
 
 export function projectSizingConductorFeedback(outcome, admission = null, phase = 'submission') {
   const code = [admission?.error?.reason_code, outcome?.envelope?.error?.reason_code, outcome?.reason]
@@ -45,7 +60,10 @@ export function projectSizingConductorFeedback(outcome, admission = null, phase 
     || typeof outcome !== 'object' || outcome === null || Array.isArray(outcome) || typeof outcome.ok !== 'boolean'
     || (phase === 'submission' && outcome.ok && (outcome.status !== 202 || outcome.data?.status !== 'submitted'
       || typeof outcome.data.job_id !== 'string' || !projectJobId.test(outcome.data.job_id))) ) reason = 'request_invalid'
-  return { outcome, admission, reason, text: projectSizingConductorReason(reason), code }
+  return { outcome, admission, reason, phase,
+    text: reason === 'request_timeout' && phase === 'preview' ? previewTimeoutSentence
+      : reason === 'request_timeout' && phase === 'context' ? 'The drawing check did not finish in time.'
+        : projectSizingConductorReason(reason), code }
 }
 
 // The two project forms share the exact-intent lifecycle; standalone components never enter it.
@@ -69,6 +87,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     if (owner.current) {
       owner.current.alive = false
       owner.current.cancelTouch?.()
+      owner.current.cancelJob?.()
       for (const controller of owner.current.controllers) controller.abort()
     }
     owner.current = { id: ++sequence.current, bindingKey, binding, authorityKey, client: projectClient,
@@ -85,6 +104,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     for (const controller of scope.candidateControllers) controller.abort()
   }
   if (scope.digest !== catalogDigest || scope.declarationIdentity !== declarationIdentity) {
+    if (scope.declarationIdentity !== declarationIdentity) scope.cancelJob?.()
     invalidateCandidate()
     scope.digest = catalogDigest
     scope.declarationIdentity = declarationIdentity
@@ -94,11 +114,20 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
   const [feedback, setFeedback] = useState(null)
   const [refresh, setRefresh] = useState(0)
   const [submitting, setSubmitting] = useState(false)
+  const [terminalJob, setTerminalJob] = useState(null)
+  if (terminalJob && (terminalJob.scope !== scope || terminalJob.declarationIdentity !== declarationIdentity)) {
+    setTerminalJob(null)
+  }
   const dependencies = binding && typeof authorityKey === 'string' && authorityKey.trim().length > 0
     && new TextEncoder().encode(authorityKey).byteLength <= 256
     && projectClient && ['readContext', 'prepareRun', 'catalog', 'captureCatalogScope', 'subscribe', 'getSnapshot']
       .every((key) => typeof projectClient[key] === 'function')
   const available = Boolean(dependencies && typeof newProjectIntentKey === 'function' && typeof onProjectSubmit === 'function')
+  // Keep sizing loaded when the workspace temporarily withholds submission callbacks.
+  const isSizing = toolName === 'solar-size-strings'
+  const readable = isSizing ? Boolean(dependencies) : available
+  const busy = isSizing && props.busy
+  const previewAvailable = available && !busy
   const isScopeCurrent = () => {
     const current = latest.current
     const snapshot = projectClient?.getSnapshot?.()
@@ -132,7 +161,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     setPublication(null)
     setFeedback(null)
     setSubmitting(false)
-    if (!available) return () => { scope.alive = false }
+    if (!readable) return () => { scope.alive = false }
     if (!isScopeCurrent()) {
       setLoaded({ scope, state: { mode: 'refused', reason: 'scope_stale' } })
       return () => { scope.alive = false }
@@ -149,7 +178,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           contextSettled = true
           setLoaded({ scope, state: outcome.ok ? deriveState({ binding, contextView: outcome.data })
             : { mode: 'refused', reason: 'context_unreadable' } })
-          if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome) })
+          if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome, null, 'context') })
         } catch {
           if (current.isCurrent()) {
             contextSettled = true
@@ -166,7 +195,9 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
         scope.armed = null
         scope.retry = null
         scope.generation += 1
-        for (const controller of scope.controllers) controller.abort()
+        // Catalog invalidation must not interrupt observation of an already submitted job.
+        read?.abort()
+        for (const controller of scope.candidateControllers) controller.abort()
         scope.predicates.clear()
         scope.previewCurrent = null
         setPublication(null)
@@ -177,6 +208,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     startRead()
     return () => {
       scope.cancelTouch?.()
+      scope.cancelJob?.()
       scope.alive = false
       scope.generation += 1
       scope.armed = null
@@ -184,10 +216,10 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
       for (const controller of scope.controllers) controller.abort()
       unsubscribe()
     }
-  }, [scope, available])
+  }, [scope, readable])
 
   const state = !binding ? { mode: 'refused', reason: 'binding_invalid' }
-    : !available ? { mode: 'refused', reason: 'submit_unavailable' }
+    : !readable ? { mode: 'refused', reason: 'submit_unavailable' }
       : loaded?.scope === scope ? loaded.state : null
   const editable = state?.mode === 'edit'
   const result = editable ? (props.row?.name !== toolName || !declarationValid
@@ -202,7 +234,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     scope.armed = null
     scope.retry = null
     setPublication(null)
-    if (!fingerprint || !available || !isScopeCurrent()) return undefined
+    if (!fingerprint || !previewAvailable || !isScopeCurrent()) return undefined
     const preview = operation()
     if (!preview.isCurrent()) { preview.finish(); return undefined }
     let candidate = scope.candidate
@@ -251,20 +283,23 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
       } finally { preview.finish() }
     })()
     return () => preview.abort()
-  }, [scope, fingerprint, available, refresh])
+  }, [scope, fingerprint, previewAvailable, refresh])
 
   const armed = scope.armed && scope.armed.generation === scope.generation && scope.armed.isCurrent()
     && scope.armed.candidate.fingerprint === fingerprint
-  const reason = state?.mode === 'refused' ? state.reason : !available ? 'submit_unavailable'
+  const reason = state?.mode === 'refused' ? state.reason : isSizing && (busy || submitting) ? 'run_in_progress'
+    : !available ? 'submit_unavailable'
     : !isScopeCurrent() ? 'scope_stale' : result && !result.ok ? result.reason
       : !armed ? (publication?.scope === scope && publication.generation === scope.generation
         ? publication.reason || 'preview_required' : 'preview_required') : null
   const runMessage = feedback?.scope === scope && feedback.generation === scope.generation ? feedback : null
   async function submit(event) {
     event?.preventDefault()
-    if (reason || !armed || scope.lock || !isScopeCurrent() || !scope.armed?.isCurrent()
+    if (reason || (isSizing && latest.current.busy) || !armed || scope.lock || !isScopeCurrent() || !scope.armed?.isCurrent()
         || scope.armed.generation !== scope.generation || scope.armed.candidate.fingerprint !== fingerprint) return
     const accepted = scope.armed
+    scope.cancelJob?.()
+    setTerminalJob(null)
     const pending = operation()
     const lock = {}
     scope.lock = lock
@@ -278,12 +313,13 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           || checked.graphSha256 !== state.graphSha256 || checked.rev !== state.rev
           || !sameSolarDrawingBinding(checked.binding, state.binding)) {
         scope.armed = null
-        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome) })
+        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome, null, 'context') })
         setPublication({ scope, generation: scope.generation,
           reason: checked.reason === 'not_current_head' ? 'not_current_head' : 'scope_stale' })
         return
       }
-      if (!pending.isCurrent() || typeof latest.current.onProjectSubmit !== 'function') return
+      if (!pending.isCurrent() || (isSizing && latest.current.busy)
+          || typeof latest.current.onProjectSubmit !== 'function') return
       const result = await latest.current.onProjectSubmit(accepted.candidate.intent,
         { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent })
       if (!pending.isCurrent()) return
@@ -291,6 +327,24 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           && typeof result.data.job_id === 'string' && projectJobId.test(result.data.job_id)) {
         scope.retry = null
         setFeedback({ scope, generation: scope.generation, outcome: result, text: 'Request submitted.', code: null })
+        if (isSizing && typeof projectClient.observeJob === 'function') {
+          const observer = operation(false)
+          scope.cancelJob = observer.abort
+          ;(async () => {
+            try {
+              const outcome = await projectClient.observeJob(result.data.job_id,
+                { tool: toolName, signal: observer.signal })
+              if (owner.current === scope && scope.alive && !observer.signal.aborted
+                  && scope.declarationIdentity === declarationIdentity && outcome?.ok) {
+                setTerminalJob({ scope, declarationIdentity, job: outcome.data?.job || outcome.data })
+              }
+            } catch { /* An unreadable job adds no suggestion. */ }
+            finally {
+              observer.finish()
+              if (scope.cancelJob === observer.abort) scope.cancelJob = null
+            }
+          })()
+        }
       } else {
         const message = projectSizingConductorFeedback(result)
         scope.retry = { candidate: accepted.candidate, feedback: message }
@@ -312,6 +366,8 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
   }
   const retryAvailable = Boolean(scope.retry?.candidate && scope.retry.candidate === scope.candidate && isScopeCurrent())
   return { scope, state, editable, reason, armed, submitting, runMessage, retryAvailable, submit, isScopeCurrent,
+    terminalJob: terminalJob?.scope === owner.current && terminalJob.declarationIdentity === declarationIdentity
+      ? terminalJob.job : null,
     invalidateCandidate: () => {
       invalidateCandidate()
       setRefresh((value) => value + 1)
@@ -327,13 +383,24 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
 
 function ProjectSolarSizingForm(props) {
   const [mode, setMode] = useState('manual-global')
-  const [draft, setDraft] = useState({})
+  const [storedDraft, setDraft] = useState({})
+  let draftBindingKey = null
+  try { draftBindingKey = solarDrawingBindingKey(createProjectSizingConductorBinding(props.solarBinding)) } catch { /* local refusal */ }
+  const draftScopeKey = JSON.stringify([draftBindingKey, props.authorityKey, props.projectId])
+  const draftScope = useRef({ key: draftScopeKey, client: props.projectClient })
+  let draft = storedDraft
+  if (draftScope.current.key !== draftScopeKey || draftScope.current.client !== props.projectClient) {
+    draftScope.current = { key: draftScopeKey, client: props.projectClient }
+    const { accepted_string_length, ...rest } = draft
+    draft = rest
+    setDraft(rest)
+  }
   const declarationIdentity = JSON.stringify([mode, ...[
-    'module_name', 'full_inverter_name', 'bifacial', 'bifacial_coefficient',
+    'module_name', 'module_confirmed', 'full_inverter_name', 'bifacial', 'bifacial_coefficient',
     'racking_type', 'surface_tilt', 'surface_azimuth', 'albedo',
     'axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack',
     'max_voltage', 'thermal_model_type', 'open_circuit_rise', 'grant_ref',
-    'use_module_parameters', ...MODULE_PARAMETER_KEYS,
+    'use_module_parameters', 'accepted_string_length', ...MODULE_PARAMETER_KEYS,
   ].map((key) => draft[key] ?? null)])
   const form = useProjectSizingConductor(props, { toolName: 'solar-size-strings',
     deriveState: deriveProjectSizingState, declarationIdentity,
@@ -341,9 +408,20 @@ function ProjectSolarSizingForm(props) {
   const { state, editable, reason, submitting, runMessage, retryAvailable, submit } = form
   const built = editable ? buildSizingParams({ graph: state.graph, mode, draft }) : null
   const invalid = new Set(built?.invalid || [])
-  const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
-  const sentence = projectSizingConductorReason(reason)
+  const change = (key, value) => {
+    setDraft(({ accepted_string_length, ...previous }) => ({ ...previous, [key]: value,
+      ...(key === 'module_name' ? { module_confirmed: undefined } : {}) }))
+  }
+  const cold = form.terminalJob?.status === 'failed'
+    && form.terminalJob.error?.reason_code === 'COLD_VOLTAGE_FAILED' ? form.terminalJob.error.cold_voltage : null
+  const suggestion = mode === 'global' && cold && typeof cold === 'object' && !Array.isArray(cold)
+    && ['standard_string_length', 'suggested_string_length', 'per_module', 'string_voltage', 'max_dc_voltage']
+      .every((key) => Number.isFinite(cold[key]))
+    && Number.isInteger(cold.standard_string_length) && Number.isInteger(cold.suggested_string_length)
+    && cold.suggested_string_length >= 1 && cold.suggested_string_length < cold.standard_string_length ? cold : null
+  const sentence = (reason === 'request_timeout' && runMessage?.phase === 'preview' ? previewTimeoutSentence : projectSizingConductorReason(reason))
     || projectSizingCloudReason(reason)
+    || (reason === 'sizing_module_unconfirmed' ? SOLAR_SIZING_REASONS.sizing_module_unconfirmed : null)
     || (reason === 'sizing_zip_required' ? SOLAR_SIZING_REASONS.sizing_zip_required
       : reason === 'sizing_fields_invalid' ? SOLAR_SIZING_REASONS.sizing_fields_invalid : null)
     || (reason === 'sizing_panels_required' ? SOLAR_SIZING_REASONS.sizing_panels_required
@@ -351,7 +429,11 @@ function ProjectSolarSizingForm(props) {
   return <div data-testid="project-solar-sizing-form" data-mode={state?.mode ?? 'loading'}>
     {state === null && <p role="status">Reading the drawing.</p>}
     {editable && <>
-      <label>Scope<select value={mode} disabled={submitting} onChange={(event) => setMode(event.target.value)}>
+      <label>Scope<select value={mode} disabled={submitting} onChange={(event) => {
+        form.invalidateCandidate()
+        setDraft(({ accepted_string_length, ...previous }) => previous)
+        setMode(event.target.value)
+      }}>
         <option value="manual-global">Saved global length</option>
         <option value="global">Global cloud sizing</option>
       </select></label>
@@ -361,12 +443,29 @@ function ProjectSolarSizingForm(props) {
       <p>Change the length in Solar settings.</p>
       {mode === 'manual-global' && <p>Manual confirmation does not calculate voltage limits or module power.</p>}
       {mode === 'global' && <SizingCloudFields mode={mode} draft={draft} change={change}
+        projectClient={props.projectClient} searchScope={draftScopeKey}
+        chooseModule={(key) => setDraft(({ accepted_string_length, ...previous }) => ({ ...previous,
+          module_name: key, module_confirmed: key }))}
         busy={submitting} invalid={invalid} />}
+      {mode === 'global' && draft.accepted_string_length !== undefined && <p>
+        Accepted string length: {draft.accepted_string_length}{' '}
+        <button type="button" disabled={submitting} onClick={() => {
+          form.invalidateCandidate()
+          setDraft(({ accepted_string_length, ...previous }) => previous)
+        }}>Clear</button>
+      </p>}
     </>}
     {sentence && <p role="status">{sentence}</p>}
     {runMessage && <p role="status" data-testid="project-solar-sizing-feedback">
-      {runMessage.text}{runMessage.code ? ` (${runMessage.code})` : ''}
+      {humanizeError(runMessage.reason === 'request_timeout' && runMessage.phase === 'submission'
+        ? 'The submission was not confirmed. Retry the same request to check its status.' : runMessage.text)}
     </p>}
+    {suggestion && <div role="status">
+      <p>At {suggestion.standard_string_length} modules the cold-weather open-circuit voltage is {suggestion.string_voltage.toFixed(1)} V, above the {suggestion.max_dc_voltage.toFixed(1)} V limit. {suggestion.suggested_string_length} modules stay within it.</p>
+      <button type="button" disabled={submitting} onClick={() => change('accepted_string_length', suggestion.suggested_string_length)}>
+        Use {suggestion.suggested_string_length} modules
+      </button>
+    </div>}
     <button type="button" disabled={Boolean(reason) || submitting || !editable} onClick={submit}>Review &amp; run</button>
     {retryAvailable && <button type="button"
       disabled={Boolean(reason) || submitting || !editable} onClick={submit}>Retry</button>}
@@ -382,7 +481,73 @@ export default function SolarSizingForm(props) {
   return <StandaloneSolarSizingForm {...props} />
 }
 
-function SizingCloudFields({ mode, draft, change, busy, invalid }) {
+function ModuleCatalogField({ draft, change, chooseModule, projectClient, searchScope, busy, invalid }) {
+  const listId = useId()
+  const fieldRef = useRef(null)
+  const [storedResult, setResult] = useState(null)
+  const [active, setActive] = useState(0)
+  const [open, setOpen] = useState(false)
+  const query = (draft.module_name ?? '').trim()
+  const grantValid = typeof draft.grant_ref === 'string' && /^[a-zA-Z0-9_-]{1,64}(?![\s\S])/.test(draft.grant_ref)
+  const resultKey = JSON.stringify([searchScope, query, draft.module_name, draft.module_confirmed, draft.grant_ref, busy])
+  const result = storedResult?.key === resultKey && storedResult.client === projectClient ? storedResult.data : null
+  useEffect(() => {
+    const controller = new AbortController()
+    setResult(null)
+    setOpen(false)
+    setActive(0)
+    if (busy || !grantValid || query.length < 2 || draft.module_confirmed === draft.module_name) return undefined
+    const timer = setTimeout(async () => {
+      try {
+        const outcome = await projectClient?.searchSizingModules({ q: query, limit: 20,
+          grantRef: draft.grant_ref, signal: controller.signal })
+        if (controller.signal.aborted) return
+        setResult({ key: resultKey, client: projectClient,
+          data: outcome?.ok ? { ...outcome.data, modules: outcome.data.modules.slice(0, 20) } : { failed: true } })
+        setOpen(true)
+      } catch {
+        if (!controller.signal.aborted) {
+          setResult({ key: resultKey, client: projectClient, data: { failed: true } }); setOpen(true)
+        }
+      }
+    }, 300)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [query, draft.module_name, draft.module_confirmed, draft.grant_ref, grantValid, busy, projectClient, searchScope])
+  const modules = result?.modules ?? []
+  const expanded = open && modules.length > 0
+  useEscapeOwner('solar-module-options', expanded, () => setOpen(false), { layer: 'menu', scope: fieldRef, scoped: true })
+  function choose(key) { chooseModule(key); setOpen(false); setResult(null) }
+  return <div ref={fieldRef}>
+    <label>Module<input role="combobox" value={draft.module_name ?? ''} disabled={busy}
+      autoComplete="off" aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
+      aria-activedescendant={expanded ? `${listId}-${active}` : undefined}
+      aria-invalid={invalid.has('module_name') || undefined}
+      onChange={(event) => { setResult(null); setOpen(false); change('module_name', event.target.value) }}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return
+        if (modules.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+          event.preventDefault()
+          setOpen(true)
+          setActive((index) => (index + (event.key === 'ArrowDown' ? 1 : modules.length - 1)) % modules.length)
+        } else if (expanded && event.key === 'Enter') { event.preventDefault(); choose(modules[active].key) }
+      }} /></label>
+    {expanded && <ul id={listId} role="listbox" aria-label="Sizer modules">
+      {modules.map((module, index) => {
+        const parts = [module.stc_w === null ? null : `${module.stc_w} W`, module.n_s === null ? null : `${module.n_s} cells`].filter(Boolean)
+        return <li key={module.key} id={`${listId}-${index}`} role="option" aria-selected={index === active}
+          onMouseDown={(event) => event.preventDefault()} onClick={() => choose(module.key)}>
+          {module.key}{parts.length ? ` (${parts.join(', ')})` : ''}
+        </li>
+      })}
+    </ul>}
+    {!grantValid && <p role="status">Enter the grant reference to search the module catalog.</p>}
+    {result?.failed && <p role="status">The module catalog could not be searched.</p>}
+    {result?.modules?.length === 0 && <p role="status">No modules match.</p>}
+    {result?.truncated && <p role="status">More modules match; keep typing.</p>}
+  </div>
+}
+
+function SizingCloudFields({ mode, draft, change, chooseModule, projectClient, searchScope, busy, invalid, moduleCatalog = true }) {
   function input(key, label) {
     return <label key={key}>{label}<input value={draft[key] ?? ''} disabled={busy}
       aria-invalid={invalid.has(key) || undefined} onChange={(event) => change(key, event.target.value)} /></label>
@@ -395,7 +560,10 @@ function SizingCloudFields({ mode, draft, change, busy, invalid }) {
     </select></label>
   }
   return <>
-    {mode === 'global' && <>{input('module_name', 'Module')}{input('full_inverter_name', 'Inverter')}</>}
+    {mode === 'global' && <>{moduleCatalog
+      ? <ModuleCatalogField {...{ draft, change, chooseModule, projectClient, searchScope, busy, invalid }} />
+      : input('module_name', 'Module')}
+      {input('full_inverter_name', 'Inverter')}</>}
     {boolean('bifacial', 'Bifacial')}
     {input('bifacial_coefficient', 'Bifacial coefficient')}
     <label>Racking<select value={draft.racking_type ?? ''} disabled={busy}
@@ -411,7 +579,7 @@ function SizingCloudFields({ mode, draft, change, busy, invalid }) {
     {boolean('open_circuit_rise', 'Open circuit rise')}{input('grant_ref', 'Grant reference')}
     <label><input type="checkbox" checked={draft.use_module_parameters === true} disabled={busy}
       onChange={(event) => change('use_module_parameters', event.target.checked)} />Use module parameters</label>
-    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, key))}
+    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, MODULE_PARAMETER_LABELS[key]))}
   </>
 }
 
@@ -454,11 +622,12 @@ function StandaloneSolarSizingForm({
   const currentLoad = loaded?.drawingId === drawingId && loaded?.drawingVersion === drawingVersion ? loaded : null
   const loading = scoped && currentLoad === null
   const built = !scoped ? { ok: false, reason: 'sizing_project_scope' }
-    : buildSizingParams({ graph, mode, draft })
+    : buildSizingParams({ graph, mode, draft, moduleCatalog: false })
   const targets = scoped && graph?.ok ? sizingTargets(graph, mode) : null
   const busy = status === 'pending'
   const invalid = new Set(built.invalid || [])
-  const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
+  const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value,
+    ...(key === 'module_name' ? { module_confirmed: undefined } : {}) }))
   function submit() {
     if (lock.current || busy || !built.ok) return
     lock.current = true
@@ -482,7 +651,7 @@ function StandaloneSolarSizingForm({
       {mode === 'zones' && <p>Module: {graph.zones[index].module_model}; Inverter: {graph.zones[index].inverter_model_a}</p>}
       <p>{Object.hasOwn(graph.power, id) && graph.power[id] != null ? `Confirmed module power: ${graph.power[id]} W` : 'Confirmed module power is unavailable. Re-size strings.'}</p>
     </div>)}
-    <SizingCloudFields mode={mode} draft={draft} change={change} busy={busy} invalid={invalid} />
+    <SizingCloudFields mode={mode} draft={draft} change={change} busy={busy} invalid={invalid} moduleCatalog={false} />
     </>}
     {loading && <p role="status">Loading the drawing.</p>}
     {currentLoad?.error && <p role="alert">{currentLoad.error}</p>}

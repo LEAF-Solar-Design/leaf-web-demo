@@ -188,7 +188,7 @@
 .cockpit-ribbon-tabs { display: inline-flex; align-items: stretch; height: var(--ck-top); margin-left: 40px; }
 .cockpit-ribbon-tabs [role="tab"] {
   height: var(--ck-top); padding: 0 17px; border: 0; background: transparent;
-  font: 400 12.5px var(--ck-font); color: var(--leaf-ink); cursor: pointer; white-space: nowrap;
+  font: 400 var(--leaf-size-dense) var(--ck-font); color: var(--leaf-ink); cursor: pointer; white-space: nowrap;
 }
 .cockpit-ribbon-tabs [role="tab"]:hover:not(:disabled) { color: var(--leaf-ink); background: var(--leaf-raised); }
 .cockpit-ribbon-tabs [role="tab"][aria-selected="true"] { color: var(--leaf-ink); background: transparent; box-shadow: inset 0 2px 0 var(--ck-sel), inset 0 -2px 0 var(--ck-sel); }
@@ -388,7 +388,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar::before { background: var(--ck-glass-band); backdrop-filter: var(--ck-glass-blur); }
 .doc-tab-start, .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title {
   display: inline-flex; align-items: center; height: 30px; padding: 0 14px;
-  font: 400 12.5px var(--ck-font); color: var(--leaf-ink); white-space: nowrap;
+  font: 400 var(--leaf-size-dense) var(--ck-font); color: var(--leaf-ink); white-space: nowrap;
 }
 .doc-tab-start { order: 1; border: 0; background: transparent; cursor: pointer; }
 .doc-tab-start:hover { background: var(--leaf-raised); color: var(--leaf-ink); }
@@ -403,7 +403,7 @@
 .doc-tab-close {
   order: 2; align-self: center; width: 18px; height: 18px; margin: 0 4px 0 -2px; padding: 0;
   border: 0; border-radius: var(--leaf-radius-key); background: var(--ck-active); color: var(--leaf-on-accent);
-  font: 400 13px/1 var(--ck-font); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+  font: 400 var(--leaf-size-dense)/1 var(--ck-font); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
 }
 .doc-tab-close:hover { background: var(--leaf-accent-hover); color: var(--leaf-on-accent); }
 .doc-tab-close:focus-visible { outline: 2px solid var(--leaf-ink); outline-offset: -2px; }
@@ -412,7 +412,7 @@
   background: var(--leaf-cad-overlay);
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title .dim { display: none; }
-.doc-tab-add { order: 3; width: 30px; height: 30px; margin-left: 2px; font: 400 16px/1 var(--ck-font); color: var(--leaf-ink); align-self: center; }
+.doc-tab-add { order: 3; width: 30px; height: 30px; margin-left: 2px; font: 400 var(--leaf-size-body)/1 var(--ck-font); color: var(--leaf-ink); align-self: center; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-actions {
   order: 4; margin-left: auto; gap: 4px; flex-wrap: nowrap; padding-right: 6px; align-items: center;
 }
@@ -443,7 +443,7 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button {
     min-width: 24px; width: 24px; height: 24px; padding: 0; border: 0; border-radius: var(--leaf-radius-key);
-    background: transparent; color: var(--ck-ink); font: 400 12px var(--ck-font);
+    background: transparent; color: var(--ck-ink); font: 400 var(--leaf-size-caption) var(--ck-font);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-view button:hover { background: var(--leaf-raised); }
   /* S3 Back and Up carry a word, so they size to it; the strip height is unchanged. */
@@ -491,11 +491,11 @@
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-title {
     display: flex; align-items: center; justify-content: space-between; flex: 0 0 26px; height: 26px;
-    padding: 0 4px 0 8px; font: 400 12.5px var(--ck-font); color: var(--leaf-ink); background: var(--ck-title);
+    padding: 0 4px 0 8px; font: 400 var(--leaf-size-dense) var(--ck-font); color: var(--leaf-ink); background: var(--ck-title);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-close {
     width: 20px; height: 20px; padding: 0; border: 0; border-radius: var(--leaf-radius-key); background: transparent;
-    color: var(--leaf-ink); font: 400 15px/1 var(--ck-font); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
+    color: var(--leaf-ink); font: 400 var(--leaf-size-body)/1 var(--ck-font); cursor: pointer; display: inline-flex; align-items: center; justify-content: center;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-close:hover { background: var(--leaf-raised); color: var(--leaf-ink); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .dock-close:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }
@@ -594,7 +594,7 @@
     flex: 1 1 auto; min-width: 0; height: 23px; padding: 0 0 0 8px; gap: 6px; align-items: center;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-caret {
-    font: 400 12px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-cmd); white-space: nowrap;
+    font: 400 var(--leaf-size-caption) var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-cmd); white-space: nowrap;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-caret::after {
     content: '>'; display: inline-flex; align-items: center; justify-content: center;
@@ -602,7 +602,7 @@
     background: var(--leaf-raised); border: 1px solid var(--leaf-line);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line :is(.bar-field, .bar-input input) {
-    font: 400 12px/21px var(--ck-font); height: 21px; min-height: 0; max-height: 21px; padding: 0 6px; margin: 0;
+    font: 400 var(--leaf-size-caption)/21px var(--ck-font); height: 21px; min-height: 0; max-height: 21px; padding: 0 6px; margin: 0;
     background: var(--leaf-ground); border: 1px solid var(--leaf-line); border-radius: 0; color: var(--leaf-ink); resize: none; overflow: hidden;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-command-line .bar-controls {
@@ -642,7 +642,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-step:focus-within .cp-ask { color: var(--ck-ink); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input {
     width: 48px; height: 21px; box-sizing: border-box; padding: 0 4px; margin: 0;
-    font: 400 12px/19px var(--ck-font); color: var(--leaf-ink); background: var(--leaf-ground); border: 1px solid var(--leaf-line); border-radius: 0;
+    font: 400 var(--leaf-size-caption)/19px var(--ck-font); color: var(--leaf-ink); background: var(--leaf-ground); border: 1px solid var(--leaf-line); border-radius: 0;
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .cockpit-prompt .cp-input.wide { width: 170px; }
   /* The key hints ride the buttons' titles on the cockpit; the row must fit
@@ -765,7 +765,7 @@
     background: var(--ck-chrome); color: var(--ck-ink); border: 1px solid var(--ck-edge); box-shadow: var(--leaf-shadow-popover);
   }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-step, .tour-card-wait) { color: var(--leaf-ink-muted); }
-  .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-title) { color: var(--leaf-ink); font: 600 12.5px/16px var(--ck-font); margin: 2px 0 4px; }
+  .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-title) { color: var(--leaf-ink); font: 600 var(--leaf-size-dense)/16px var(--ck-font); margin: 2px 0 4px; }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-step, .tour-card-wait) { font: 400 var(--leaf-size-caption)/14px var(--ck-font); }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.tour-card-body, .tour-card-prompt) { color: var(--leaf-ink); font: 400 var(--leaf-size-caption)/16px var(--ck-font); margin: 0 0 6px; }
   .studio-shell .app[data-studio-shell="cockpit"] .tour-card :is(.chip-neutral, .primary) { height: 20px; padding: 0 8px; font: 400 var(--leaf-size-caption)/20px var(--ck-font); border-radius: var(--leaf-radius-key); box-shadow: none; }
@@ -818,7 +818,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-model-tab,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-tab,
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) footer.foot-bar .foot-doc-add {
-    display: inline-flex; align-items: center; height: 29px; padding: 0 12px; font: 400 12px var(--ck-font); white-space: nowrap;
+    display: inline-flex; align-items: center; height: 29px; padding: 0 12px; font: 400 var(--leaf-size-caption) var(--ck-font); white-space: nowrap;
   }
   /* No margin hack for the menu glyph any more: the bar's own padding-left
      reserves that 30px, so the region actually starts where it looks like it
@@ -863,7 +863,7 @@
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-hint { display: block; padding: 4px 4px 2px; font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--leaf-ink-muted); }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-head {
     display: flex; align-items: center; justify-content: space-between; height: 26px; padding: 0 4px;
-    font: 400 12px var(--ck-font); color: var(--ck-ink);
+    font: 400 var(--leaf-size-caption) var(--ck-font); color: var(--ck-ink);
   }
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .properties-dock .sel-clear {
     height: 18px; padding: 0 6px; font: 400 var(--leaf-size-caption) var(--ck-font); background: var(--ck-title); border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-key); color: var(--ck-ink); cursor: pointer;
@@ -1276,7 +1276,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon:not([data-overflow-open="true"]) { overflow: hidden; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon:not([data-overflow-open="true"]) .ribbon-cluster { min-width: 100vw; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more { flex: 1 1 auto; width: 100%; margin: 0; padding: 0 10px; font-size: var(--leaf-size-caption); color: transparent; line-height: 0; text-align: left; }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more::before { content: 'Tools'; font: 500 13px/1 var(--ck-font); color: var(--ck-ink); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more::before { content: 'Tools'; font: 500 var(--leaf-size-dense)/1 var(--ck-font); color: var(--ck-ink); }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-more[aria-expanded="true"]::before { content: 'Hide tools'; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .ribbon-empty { padding: 12px 6px; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-panels {
@@ -1309,7 +1309,7 @@
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-title { color: var(--leaf-ink); }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.tour-card-body, .tour-card-prompt) { color: var(--leaf-ink); }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .tour-card-prompt { background: var(--ck-recess); border-color: var(--ck-edge); }
-  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.chip-neutral, .primary) { padding: 0 12px; font: 400 13px/1 var(--ck-font); border-radius: var(--leaf-radius-key); box-shadow: none; }
+  .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach :is(.chip-neutral, .primary) { padding: 0 12px; font: 400 var(--leaf-size-dense)/1 var(--ck-font); border-radius: var(--leaf-radius-key); box-shadow: none; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral { background: var(--ck-title); color: var(--leaf-ink); border: 1px solid var(--leaf-line); }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .chip-neutral:disabled { opacity: .7; }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .tour-card.is-coach .primary { background: var(--ck-model); color: var(--leaf-ink); border: 1px solid var(--leaf-accent); }
@@ -1337,7 +1337,7 @@
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs button {
     min-width: 0; min-height: 44px; padding: 0 4px; border: 0; border-right: 1px solid var(--ck-edge);
-    border-radius: 0; background: transparent; color: var(--ck-ink); font: 500 12px var(--ck-font);
+    border-radius: 0; background: transparent; color: var(--ck-ink); font: 500 var(--leaf-size-caption) var(--ck-font);
   }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs button[aria-expanded="true"] { background: var(--ck-model); color: var(--leaf-ink); }
   .studio-shell .app[data-studio-shell="cockpit"][data-drawer][data-surface] .studio-drawer-tabs button:focus-visible { outline: 2px solid var(--ck-sel); outline-offset: -2px; }

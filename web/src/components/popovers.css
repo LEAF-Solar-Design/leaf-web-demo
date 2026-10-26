@@ -26,7 +26,7 @@ button.key:disabled { opacity: .6; cursor: default; }
 
 /* D1 confirm question — plain foreground voice; red lives ONLY on the
    destroying chip (.chip-danger-confirm), never on the question text. */
-.confirm-q { font-size: 11.5px; color: var(--foreground); }
+.confirm-q { font-size: var(--leaf-size-caption); color: var(--foreground); }
 
 /* X3 whole-pane failure — centered takeover: red dot · what failed · reason
    in quiet text · Retry chip. */
@@ -50,24 +50,24 @@ button.key:disabled { opacity: .6; cursor: default; }
 }
 .ops-section-head { display: flex; align-items: flex-start; justify-content: space-between; gap: 10px; }
 .ops-section-title { color: var(--foreground); font-size: var(--leaf-size-caption); font-weight: 600; }
-.ops-section-copy { color: var(--muted); font-size: 10.5px; margin-top: 2px; }
+.ops-section-copy { color: var(--muted); font-size: var(--leaf-size-caption); margin-top: 2px; }
 .ops-control-row { display: flex; align-items: flex-start; justify-content: space-between; gap: 12px; }
 .ops-control-main { min-width: 0; display: flex; flex: 1; flex-direction: column; gap: 4px; }
-.ops-control-label { color: var(--foreground); font-size: 11.5px; line-height: 1.4; }
-.ops-control-help { color: var(--muted); font-size: 10.5px; line-height: 1.45; }
+.ops-control-label { color: var(--foreground); font-size: var(--leaf-size-caption); line-height: 1.4; }
+.ops-control-help { color: var(--muted); font-size: var(--leaf-size-caption); line-height: 1.45; }
 .ops-control-confirm { display: flex; flex: 0 0 auto; flex-direction: column; align-items: flex-end; gap: 6px; max-width: 180px; text-align: right; }
 
 /* V1 validation — the failed field's border turns danger; the message below is
    a red dot + sentence (never amber, never a toast). */
 .ca-field.field-invalid input { border-color: var(--status-danger); }
-.field-err { display: flex; align-items: center; gap: 7px; font-size: 11.5px; color: var(--status-danger); line-height: 1.4; }
+.field-err { display: flex; align-items: center; gap: 7px; font-size: var(--leaf-size-caption); color: var(--status-danger); line-height: 1.4; }
 
 .ca-account-list { display: flex; flex-direction: column; gap: 8px; margin: 10px 0; }
 .ca-account { border: 1px solid var(--border); padding: 9px; display: flex; flex-direction: column; gap: 7px; }
-.ca-account-main { display: flex; align-items: center; gap: 7px; font-size: 11.5px; }
+.ca-account-main { display: flex; align-items: center; gap: 7px; font-size: var(--leaf-size-caption); }
 .ca-account-main b { flex: 1; color: var(--foreground); }
 .ca-route { color: var(--primary); }
-.ca-account-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: 10.5px; }
+.ca-account-meta { display: flex; flex-wrap: wrap; gap: 8px; color: var(--muted); font-size: var(--leaf-size-caption); }
 .ca-account-actions { display: flex; gap: 6px; align-items: center; }
 
 /* VersionHistory rows — O2 resolver anatomy (2px accent left bar + tint on the
@@ -90,10 +90,10 @@ button.key:disabled { opacity: .6; cursor: default; }
 .vh-row-line { display: flex; align-items: stretch; gap: 6px; }
 .vh-row-line .vh-row { flex: 1; min-width: 0; }
 .vh-restore { display: flex; align-items: center; gap: 6px; flex: 0 0 auto; padding-right: 4px; white-space: nowrap; }
-.vh-restore .chip-act, .vh-restore .chip-neutral { font-size: 10.5px; padding: 3px 7px; }
+.vh-restore .chip-act, .vh-restore .chip-neutral { font-size: var(--leaf-size-caption); padding: 3px 7px; }
 .vh-restore-err { padding: 4px 8px 6px 12px; }
 
-.vh-delta { display: inline-flex; align-items: center; gap: 5px; font-size: 10px; font-variant-numeric: tabular-nums; }
+.vh-delta { display: inline-flex; align-items: center; gap: 5px; font-size: var(--leaf-size-caption); font-variant-numeric: tabular-nums; }
 .vh-delta-add { color: var(--primary); }
 .vh-delta-mod { color: var(--status-warning); }
 .vh-delta-del { color: var(--status-danger); }
@@ -101,7 +101,7 @@ button.key:disabled { opacity: .6; cursor: default; }
 /* Authored-tool provenance (slice 6a). Muted and mono: it is a receipt digest,
    evidence a reader can check, not a headline. Shared by both shells, because
    the chip ships from the one VersionList primitive. */
-.vh-source { display: inline-flex; align-items: center; font-size: 10px; color: var(--muted); font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; }
+.vh-source { display: inline-flex; align-items: center; font-size: var(--leaf-size-caption); color: var(--muted); font-family: var(--mono, ui-monospace, monospace); white-space: nowrap; }
 
 /* customize drawer (R7 admin self-edit): edit rows + mono fragments. Field
    visuals come from the shared .param rules in styles.css. */
@@ -122,28 +122,28 @@ button.key:disabled { opacity: .6; cursor: default; }
 .ops-scoreboard { display: grid; grid-template-columns: 1fr; gap: 6px; margin-bottom: 4px; }
 .ops-score-scope {
   min-width: 0; padding: 9px; border: 1px solid var(--border);
-  border-radius: 7px; background: var(--accent-tint);
+  border-radius: var(--leaf-radius-control); background: var(--accent-tint);
 }
 .ops-score-head {
   display: flex; align-items: baseline; justify-content: space-between; gap: 8px;
   padding-bottom: 7px; border-bottom: 1px solid var(--hairline);
 }
-.ops-score-head > span { font-size: 10.5px; color: var(--muted-2); }
+.ops-score-head > span { font-size: var(--leaf-size-caption); color: var(--muted-2); }
 .ops-score-head > strong {
   min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
-  font: 500 10.5px var(--font-mono); color: var(--foreground);
+  font: 500 var(--leaf-size-caption) var(--font-mono); color: var(--foreground);
 }
 .ops-score-metrics {
   display: grid; grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 8px; padding-top: 8px;
 }
 .ops-score-metric { min-width: 0; display: flex; flex-direction: column; gap: 2px; }
-.ops-score-metric > span { font-size: 10px; color: var(--muted-2); line-height: 1.3; }
+.ops-score-metric > span { font-size: var(--leaf-size-caption); color: var(--muted-2); line-height: 1.3; }
 .ops-score-metric > strong {
-  font: 500 17px var(--font-mono); color: var(--foreground);
+  font: 500 var(--leaf-size-heading) var(--font-mono); color: var(--foreground);
   font-variant-numeric: tabular-nums;
 }
-.ops-score-metric > small { font-size: 9.5px; color: var(--muted-2); line-height: 1.3; }
+.ops-score-metric > small { font-size: var(--leaf-size-caption); color: var(--muted-2); line-height: 1.3; }
 
 /* The identity cell doubles as the scoreboard's profile picker. It is a READ,
    so it carries no chip styling that would read as an action next to Disable. */

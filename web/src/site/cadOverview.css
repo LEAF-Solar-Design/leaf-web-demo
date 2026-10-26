@@ -1,26 +1,26 @@
 .cad-overview {
   position: fixed; right: 18px; top: calc(var(--ck-canvas-top-live, var(--ck-canvas-top, 140px)) + 124px); z-index: 24;
   width: 182px; box-sizing: border-box; pointer-events: auto;
-  color: var(--ck-ink, #e2e2e2); background: var(--ck-glass-panel, #1e2227);
-  border: 1px solid var(--ck-edge, #424242); border-radius: var(--leaf-radius-key);
-  font: 12px/1.4 var(--ck-font, system-ui);
+  color: var(--ck-ink, var(--leaf-ink)); background: var(--ck-glass-panel, var(--leaf-glass-panel));
+  border: 1px solid var(--ck-edge, var(--leaf-line)); border-radius: var(--leaf-radius-key);
+  font: var(--leaf-size-caption)/1.4 var(--ck-font, system-ui);
 }
 .cad-overview[data-collapsed="true"] { width: auto; }
 .cad-overview .cad-overview-toggle, .cad-overview .cad-overview-map {
-  display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: 3px;
+  display: block; width: 100%; margin: 0; padding: 0; border: 0; border-radius: var(--leaf-radius-key);
   color: inherit; background: transparent; font: inherit; cursor: pointer; touch-action: manipulation;
 }
 .cad-overview .cad-overview-toggle { min-height: 44px; padding: 4px 10px; }
 .cad-overview .cad-overview-map { line-height: 0; }
-.cad-overview button:focus-visible { outline: 2px solid var(--ck-sel, #00b4ff); outline-offset: 2px; }
+.cad-overview button:focus-visible { outline: 2px solid var(--ck-sel, var(--leaf-cad-selection)); outline-offset: 2px; }
 .cad-overview-map svg { display: block; width: 100%; height: auto; }
-.cad-overview-outline { fill: #212830; stroke: #b8b8b8; }
-.cad-overview-context { fill: #b8b8b8; fill-opacity: .18; stroke: #b8b8b8; stroke-opacity: .35; stroke-width: .5; }
+.cad-overview-outline { fill: var(--leaf-cad-canvas); stroke: var(--leaf-cad-ink-dim); }
+.cad-overview-context { fill: var(--leaf-cad-ink-dim); fill-opacity: .18; stroke: var(--leaf-cad-ink-dim); stroke-opacity: .35; stroke-width: .5; }
 .cad-overview-viewport { fill: #fff; fill-opacity: .12; stroke: #fff; stroke-width: 1.5; }
-.cad-overview-selected { fill: none; stroke: #00b4ff; stroke-width: 3; }
+.cad-overview-selected { fill: none; stroke: var(--leaf-cad-selection); stroke-width: 3; }
 .cad-overview-focus { fill: none; stroke: #f0c97b; stroke-width: 1.5; }
 .cad-overview-focus rect { stroke-dasharray: 3 2; }
-.cad-overview-focus path { fill: #212830; }
+.cad-overview-focus path { fill: var(--leaf-cad-canvas); }
 .cad-overview-key { display: flex; justify-content: space-between; padding: 4px 6px; gap: 4px; }
 @media (max-width: 1023px) {
   .cad-overview { top: auto; right: 8px; bottom: 112px; }

@@ -18,13 +18,14 @@ const PATHY = /\/api\/|\bhttps?:\/\//i
 const STATUS_ARROW = /->\s*\d{3}\b/
 const JOBBY = /\block job\b|\blost job\b|\bjob [0-9a-z-]{6,}\b/i
 
-const NETWORKY = /failed to fetch|networkerror|network error|err_(connection|network)|\bload failed|fetch failed|connection refused|econnrefused|timed? ?out|aborted/i
+const NETWORKY = /failed to fetch|networkerror|network error|err_(connection|network)|\bload failed|fetch failed|connection refused|econnrefused|timed? ?out|did not respond|aborted/i
+const INTERNAL = /\bbridge\b|\bHTTP\s*\d{3}\b|\b[\w.-]+\.(?:json|jsx?|mjs|tsx?)\b|\bstack\b|\bat\s+\S+\s*\(|\b(?:error_id|request_id)\b/i
 
 // A message we are willing to show verbatim: already a plain sentence, with no
 // plumbing in it. Kept deliberately conservative.
 function isPlainEnglish(s) {
   if (!s) return false
-  if (VERB.test(s) || PATHY.test(s) || STATUS_ARROW.test(s) || JOBBY.test(s)) return false
+  if (VERB.test(s) || PATHY.test(s) || STATUS_ARROW.test(s) || JOBBY.test(s) || INTERNAL.test(s)) return false
   if (/[{}<>]|\bundefined\b|\bnull\b|\bNaN\b/.test(s)) return false
   if (/^[A-Za-z]*Error\b/.test(s)) return false
   if (s.length > 160) return false
@@ -55,7 +56,7 @@ export function humanizeError(errOrString) {
     if (name === 'TypeError' && !isPlainEnglish(raw)) return MSG_NETWORK
 
     // Transport plumbing of any shape -> the calm service sentence.
-    if (VERB.test(raw) || PATHY.test(raw) || STATUS_ARROW.test(raw) || JOBBY.test(raw)) return MSG_SERVICE
+    if (VERB.test(raw) || PATHY.test(raw) || STATUS_ARROW.test(raw) || JOBBY.test(raw) || INTERNAL.test(raw)) return MSG_SERVICE
 
     if (isPlainEnglish(raw)) return raw
     return MSG_GENERIC

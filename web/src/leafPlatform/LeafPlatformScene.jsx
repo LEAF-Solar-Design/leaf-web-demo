@@ -340,7 +340,7 @@ export default function LeafPlatformScene() {
     : ''
 
   return (
-    <main className="leaf-platform" aria-labelledby="leaf-platform-title">
+    <main className="leaf-platform" data-leaf-theme="paper" aria-labelledby="leaf-platform-title">
       <header>
         <p className="leaf-platform-context">Studio in AutoCAD</p>
         <h1 id="leaf-platform-title" ref={headingRef} tabIndex={-1}>Drawing connection</h1>

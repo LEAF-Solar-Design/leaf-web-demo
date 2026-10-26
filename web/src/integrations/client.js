@@ -172,7 +172,21 @@ export class IntegrationError extends Error {
     super(message)
     this.status = status
     this.dispatched = false
+    this.retryable = status === 0 || status === 408 || status === 429 || status >= 500
   }
+}
+export function integrationRequestError(status, method, path) {
+  const resource = path.includes('/elements') ? 'saved view' : path.includes('/connections') ? 'connection' :
+    path.includes('workflow') ? 'workflow' : path.includes('/datasets') ? 'dataset' : 'integration'
+  const action = method === 'GET' ? 'read' : method === 'DELETE' ? 'remove' : 'save or run'
+  return new IntegrationError(status, status === 401 ? 'Sign in again to continue.' :
+    status === 403 ? `You do not have permission to ${action} this ${resource}. Ask a project owner for access.` :
+    status === 404 ? `This ${resource} could not be found. Check your selection before continuing.` :
+    status === 409 ? `This ${resource} conflicts with a saved record. Review the current record before continuing.` :
+    status === 400 || status === 422 ? 'Check the entered values before continuing.' :
+    status === 429 ? 'Too many requests. Wait a moment before trying again.' :
+    status >= 500 || status === 408 ? 'The service is temporarily unavailable. Try again shortly.' :
+    'This request cannot be completed. Ask a project owner for help.')
 }
 const invalid = () => new IntegrationError(0, 'The integration response or request was invalid.')
 function parse(schema, value) {
@@ -220,7 +234,11 @@ async function boundedJson(response, signal) {
 export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRATIONS_API_ORIGIN, fetchImpl = globalThis.fetch } = {}) {
   const destination = integrationOrigin(origin)
   async function request(projectId, path, { signal, method = 'GET', body, match, bodyLimit = 262144 } = {}) {
-    if (!destination) throw new IntegrationError(0, 'Integration setup is unavailable. An API destination must be configured.')
+    if (!destination) {
+      const error = new IntegrationError(0, 'Integrations are not set up for this site. Ask your administrator to enable them.')
+      error.retryable = false
+      throw error
+    }
     if (!UUID.test(projectId) || !signal) throw invalid()
     if (signal.aborted) throw new DOMException('Aborted', 'AbortError')
     const encoded = body === undefined ? undefined : boundedIntegrationBody(body, bodyLimit)
@@ -235,9 +253,7 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       noteUnauthorized(response, 'integrations', auth.Authorization, { fatal: false })
       if (!response.ok) {
         response.body?.cancel?.().catch(() => {})
-        throw new IntegrationError(response.status, response.status === 403 ? 'You do not have permission to view these integrations.' :
-          response.status === 401 ? 'Integration authorization has expired. Please retry after signing in.' :
-            response.status === 409 ? 'This view changed. Reload it before updating.' : 'The integration request failed. Please retry.')
+        throw integrationRequestError(response.status, method, path)
       }
       return await boundedJson(response, signal)
     } catch (error) {

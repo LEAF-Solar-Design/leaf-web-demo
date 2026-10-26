@@ -156,7 +156,7 @@ export function solarRailReason(availability, options) {
   if (!Array.isArray(codes) || codes.length === 0) return SOLAR_REFUSAL_REASONS.capability_not_ready
   return codes.map((code) => Object.hasOwn(SOLAR_REFUSAL_REASONS, code)
     ? SOLAR_REFUSAL_REASONS[code]
-    : `${SOLAR_REFUSAL_REASONS.unlisted} (${code})`).join('; ')
+    : SOLAR_REFUSAL_REASONS.unlisted).join('; ')
 }
 
 // A Solar run refusal names its code in the server's case: a readiness refusal
@@ -202,11 +202,11 @@ export const CATALOG_TOOL_NOTE_ALL_PLACED = 'Every catalog tool sits on its own 
 // Profile reasons share one vocabulary. Ship reasons are selected from the
 // mounted controller's phase and setup state, not inferred from a handler.
 export const PROFILE_REASONS = Object.freeze({
-  openProject: 'Sign in to open a project',
-  changeProject: 'Sign in to change projects',
+  openProject: 'Opening projects is unavailable right now',
+  changeProject: 'Changing projects is unavailable right now',
   createProject: 'Project creation is unavailable in this session',
   uploadDrawing: 'Drawing upload is unavailable in this session',
-  newConversation: 'Conversations need a signed-in session',
+  newConversation: 'Starting a conversation is unavailable right now',
   openJobs: 'The job monitor is unavailable in this session',
   openReceipts: 'Receipts are unavailable in this session',
   approvedRevision: 'No approved revision for this project yet',

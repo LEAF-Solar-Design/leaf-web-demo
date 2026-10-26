@@ -223,11 +223,11 @@ describe('solar terrain model', () => {
       { key: 'terrain', label: 'Terrain', text: TERRAIN_EMPTY_SENTENCE },
     ])
     expect(terrainSummary(validateTerrainView(V1(), SCOPE)).map((line) => [line.key, line.text])).toEqual([
-      ['head', H], ['change', '1 of this drawing'], ['units', 'Meters'], ['crs', 'None'], ['datum', 'Not recorded'],
+      ['head', 'Saved in this drawing'], ['change', '1'], ['units', 'Meters'], ['crs', 'None'], ['datum', 'Not recorded'],
       ['grid', TERRAIN_NO_GRID_SENTENCE], ['mesh', 'Not recorded'], ['slope', 'Not recorded'],
     ])
     expect(terrainSummary(validateTerrainView(V2(), SCOPE)).map((line) => [line.key, line.label, line.text])).toEqual([
-      ['head', 'Terrain state', H], ['change', 'Terrain change', '1 of this drawing'],
+      ['head', 'Terrain', 'Saved in this drawing'], ['change', 'Terrain revision', '1'],
       ['units', 'Drawing units', 'Meters'], ['crs', 'Coordinate system', 'None'],
       ['datum', 'Elevation datum', 'Not recorded'], ['grid', 'Terrain grid', '2 by 2 nodes'],
       ['cell', 'Grid cell', 'X 10 by Y 10 meters'], ['mesh', 'Mesh preview', 'Not recorded'],
@@ -295,7 +295,7 @@ describe('solar terrain model', () => {
       .toEqual(['EPSG:2229', 'EPSG:5703'])
     const later = viewOf({ head: headOf(H2, 4095, H) })
     expect(validateTerrainView(later, SCOPE)).toEqual(normalize(later))
-    expect(terrainSummary(validateTerrainView(later, SCOPE))[1].text).toBe('4096 of this drawing')
+    expect(terrainSummary(validateTerrainView(later, SCOPE))[1].text).toBe('4096')
     const upper = 'A'.repeat(64)
     const refused = [
       // Feet with a metre scale: the grid is consistent with the frame, so only the units disagree.

@@ -927,7 +927,7 @@ footer .warn-txt { color: var(--status-warning); }
 ::-webkit-scrollbar-thumb { background: var(--border); border-radius: var(--leaf-radius-control); border: 2px solid var(--background); } /* tokenized: dark subtrees re-pin --border */
 
 /* responsive: collapse the rail, then the nav */
-@media (max-width: 1200px) {
+@media (max-width: 1439px) {
   .app { grid-template-columns: 200px 1fr 300px; }
   .lower { grid-template-columns: 1fr; }
 }
@@ -970,7 +970,7 @@ footer .warn-txt { color: var(--status-warning); }
   }
 }
 /* ---------------- responsive: phone widths (390px target) ---------------- */
-@media (max-width: 430px) {
+@media (max-width: 599px) {
   /* SB3 floating bar: the desktop 26px insets + 700px max-width left no room
      at 390px — Dispatch was landing at x≈523, off-canvas. Shrink insets and
      drop the max-width; let the well's controls row wrap so Dispatch + the
@@ -1336,7 +1336,7 @@ footer .warn-txt { color: var(--status-warning); }
   inset: var(--drawer-top, 49px) 0 var(--drawer-bottom, 30px) auto;
   width: min(340px, 100%);
 }
-@media (max-width: 899px) {
+@media (max-width: 1023px) {
   .app[data-project-workspace="results"] { display: flex; flex-direction: column; }
   .app[data-project-workspace="results"] > header.top {
     order: 0;
@@ -1676,24 +1676,24 @@ footer .warn-txt { color: var(--status-warning); }
 
 /* ---------------- action chips (the ONLY clickable chip forms) ---------------- */
 .chip-act {
-  font: 500 12px var(--sans); color: var(--primary);
+  font: 500 var(--leaf-size-caption) var(--sans); color: var(--primary);
   background: var(--accent-tint); border: 0; border-radius: var(--leaf-radius-key);
   padding: 3px 9px; cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) { .chip-act:hover { background: var(--accent-tint-hover); } }
 .chip-neutral {
-  font: 500 12px var(--sans); color: var(--muted);
+  font: 500 var(--leaf-size-caption) var(--sans); color: var(--muted);
   background: var(--hover-tint); border: 0; border-radius: var(--leaf-radius-key);
   padding: 3px 9px; cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) { .chip-neutral:hover { background: var(--hover-tint-strong); } }
 .chip-danger {
-  font: 500 12px var(--sans); color: var(--status-danger);
+  font: 500 var(--leaf-size-caption) var(--sans); color: var(--status-danger);
   background: var(--danger-tint); border: 0; border-radius: var(--leaf-radius-key);
   padding: 3px 9px; cursor: pointer;
 }
 .chip-danger-confirm {
-  font: 500 12px var(--sans); color: #fff;
+  font: 500 var(--leaf-size-caption) var(--sans); color: #fff;
   background: var(--status-danger); border: 0; border-radius: var(--leaf-radius-key);
   padding: 3px 10px; cursor: pointer;
 }
@@ -1703,7 +1703,7 @@ footer .warn-txt { color: var(--status-warning); }
   border-radius: var(--leaf-radius-key); background: var(--primary); color: var(--on-accent);
   border: 0; cursor: pointer;
   box-shadow: 0 1px 2px rgba(25, 29, 26, .2);
-  font: 500 12.5px var(--sans); padding: 7px 14px;
+  font: 500 var(--leaf-size-dense) var(--sans); padding: 7px 14px;
 }
 @media (hover: hover) and (pointer: fine) { .primary:hover { background: var(--primary-hover); } }
 
@@ -1731,7 +1731,7 @@ footer .warn-txt { color: var(--status-warning); }
   pointer-events: none;
 }
 .bar-input { display: flex; align-items: center; gap: 10px; padding: 13px 16px 9px; }
-.bar-caret { font: 600 13px var(--font-mono); color: var(--well-accent); } /* the green prompt caret */
+.bar-caret { font: 600 var(--leaf-size-dense) var(--font-mono); color: var(--well-accent); } /* the green prompt caret */
 /* the command line reads in mono — typed intent looks like a command */
 .bar-input input, .bar-input .bar-field {
   flex: 1; border: 0; outline: 0; background: transparent;
@@ -1855,7 +1855,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   position: absolute; left: 0; right: 0; margin: 0 auto; width: fit-content;
   bottom: calc(132px + env(safe-area-inset-bottom, 0px)); z-index: calc(var(--leaf-layer-toast) + 10); /* clears the floating bar island and the home indicator */
   display: flex; align-items: center; gap: 9px;
-  font: 500 12px var(--sans); color: var(--muted);
+  font: 500 var(--leaf-size-caption) var(--sans); color: var(--muted);
   background: var(--card); border: 1px solid var(--border); border-radius: var(--leaf-radius-control); padding: 7px 13px;
   box-shadow: var(--shadow-pop);
   /* lifecycle animation comes from .enter/.exit (Toast.jsx owns the timing) */
@@ -1883,7 +1883,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   display: flex; align-items: center; gap: 8px; padding: 12px 14px;
   border-bottom: 1px solid var(--border);
 }
-.drawer-title { font: 500 12.5px var(--sans); color: var(--foreground); flex: 1; }
+.drawer-title { font: 500 var(--leaf-size-dense) var(--sans); color: var(--foreground); flex: 1; }
 /* header right = the Esc keycap (.key.hot) - the ONLY close affordance, never an x glyph */
 .drawer-body { padding: 12px 14px; display: flex; flex-direction: column; gap: 5px; overflow-y: auto; }
 .drawer-mono { font: 400 var(--leaf-size-caption) var(--font-mono); color: var(--muted-2); }
@@ -2143,7 +2143,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 .engine-changes-body a { color: var(--primary); }
 .engine-changes-actions, .engine-changes-confirm { display: flex; align-items: center; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
 .engine-changes-body button:focus-visible, .engine-changes-body a:focus-visible, .engine-changes-tabs button:focus-visible { outline: 2px solid var(--primary); outline-offset: 3px; }
-@media (max-width: 480px) {
+@media (max-width: 599px) {
   .engine-changes-facts { grid-template-columns: minmax(70px, 90px) minmax(0, 1fr); gap: 6px 8px; }
 }
 .converse-note { display: flex; align-items: center; gap: 8px; font-size: var(--leaf-size-caption); }
@@ -2304,7 +2304,7 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
   box-shadow: inset 0 2px 0 var(--primary); /* the set-tab's green ink strip */
 }
 .app .tc-product-tabs [role="tab"]:focus-visible { outline: 2px solid var(--primary); outline-offset: 2px; }
-.app .tc-product-tabs [role="tab"] > span { font: 600 12.5px var(--font-sans); }
+.app .tc-product-tabs [role="tab"] > span { font: 600 var(--leaf-size-dense) var(--font-sans); }
 .app .tc-product-tabs [role="tab"] small {
   color: var(--muted-2); font-family: var(--font-mono); font-size: var(--leaf-size-caption);
   text-transform: uppercase; letter-spacing: .06em;

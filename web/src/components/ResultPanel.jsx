@@ -363,7 +363,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
             {result.cost ? (
               <>
                 <span className="dim">·</span>
-                <span>engine {result.cost.engine_seconds}s</span>
+                <span>Processing time {result.cost.engine_seconds}s</span>
                 <span className="dim">·</span>
                 {fmtUsd(result.cost.usd_est)
                   ? <b className="usd">{fmtUsd(result.cost.usd_est)}</b>
@@ -372,7 +372,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
             ) : (
               <>
                 <span className="dim">·</span>
-                <span className="dim">{result.result?.solver === 'arlo-design' ? 'Compute cost unavailable' : 'no cloud cost (mock)'}</span>
+                <span className="dim">{result.result?.solver === 'arlo-design' ? 'Compute cost unavailable' : 'no cloud cost'}</span>
               </>
             )}
           </div>
