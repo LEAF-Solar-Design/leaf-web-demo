@@ -9,6 +9,21 @@ const markersOf = (source, rel = 'src/X.jsx') => scanSource(source, rel).map((h)
 const strictMarkersOf = (source, rel = 'src/X.jsx') =>
   scanSource(source, rel, { strict: true }).map((h) => h.marker);
 
+test('strict mode scans quoted branches inside nested template expressions', () => {
+  const source = 'const title = `Saved ${ok ? `Ready ${n} — local fallback` : "waiting"}`;';
+  assert.deepEqual(strictMarkersOf(source), ['em dash']);
+  assert.deepEqual(strictMarkersOf('const title = `Saved ${ok ? "—" : "ready"}`;'), ['em dash']);
+});
+
+test('strict mode scans quoted branches after a JSX apostrophe', () => {
+  const source = `<p>Don't {ok ? "Ready" : "Wait — retry"}</p>\n`;
+  assert.deepEqual(strictMarkersOf(source), ['em dash']);
+});
+
+test('plural placeholders in visible copy are a hit', () => {
+  assert.deepEqual(markersOf('<p>These placeholders will be replaced</p>'), ['placeholder']);
+});
+
 test('each marker in JSX text is a hit', () => {
   const cases = [
     ['PRICING PLACEHOLDER', 'placeholder'],

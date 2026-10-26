@@ -260,7 +260,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-catalog-error {
   display: flex; align-items: center; gap: 8px; align-self: center; flex: 0 0 auto;
   width: max-content; max-width: min(420px, calc(100% - 110px)); box-sizing: border-box;
-  padding: 4px 8px; color: var(--ck-ink); font: 400 12px/1.4 var(--ck-font);
+  padding: 4px 8px; color: var(--ck-ink); font: 400 var(--leaf-size-caption)/1.4 var(--ck-font);
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-catalog-error > span {
   min-width: 0; overflow-wrap: anywhere; max-height: 72px; overflow: auto;
@@ -343,7 +343,7 @@
     flex: 1 1 auto; min-width: 0; height: 23px; padding: 0 0 0 8px; gap: 6px; align-items: center;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-caret {
-    font: 400 12px var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-cmd); white-space: nowrap;
+    font: 400 var(--leaf-size-caption) var(--ck-font); letter-spacing: 0; text-transform: none; color: var(--ck-cmd); white-space: nowrap;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-caret::after {
     content: '>'; display: inline-flex; align-items: center; justify-content: center;
@@ -351,7 +351,7 @@
     background: var(--leaf-raised); border: 1px solid var(--leaf-line);
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line :is(.bar-field, .bar-input input) {
-    font: 400 12px/21px var(--ck-font); height: 21px; min-height: 0; max-height: 21px; padding: 0 6px; margin: 0;
+    font: 400 var(--leaf-size-caption)/21px var(--ck-font); height: 21px; min-height: 0; max-height: 21px; padding: 0 6px; margin: 0;
     background: var(--leaf-ground); border: 1px solid var(--leaf-line); border-radius: 0; color: var(--leaf-ink); resize: none; overflow: hidden;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .bar-command-line .bar-controls {
@@ -417,7 +417,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-model-tab,
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-tab,
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-add {
-    display: inline-flex; align-items: center; height: 29px; padding: 0 12px; font: 400 12px var(--ck-font); white-space: nowrap;
+    display: inline-flex; align-items: center; height: 29px; padding: 0 12px; font: 400 var(--leaf-size-caption) var(--ck-font); white-space: nowrap;
   }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-model-tab { background: var(--ck-model); color: var(--leaf-ink); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] footer.foot-bar .foot-doc-tab { color: var(--leaf-ink); max-width: 280px; overflow: hidden; text-overflow: ellipsis; }
@@ -638,7 +638,7 @@
   width: min(260px, calc(100vw - 24px)); max-height: calc(100dvh - var(--ck-canvas-top-live) - 112px);
   overflow: auto; box-sizing: border-box; padding: 8px 12px;
   border: 1px solid var(--ck-edge); border-radius: var(--leaf-radius-key);
-  background: var(--ck-glass-panel); color: var(--ck-ink); font: 400 12px/1.5 var(--ck-font);
+  background: var(--ck-glass-panel); color: var(--ck-ink); font: 400 var(--leaf-size-caption)/1.5 var(--ck-font);
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info summary { cursor: pointer; font-weight: 600; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info :is(p, .ios-surface, .ios-surface p) { color: var(--ck-ink-dim); }
@@ -656,7 +656,7 @@
   --ck-font: system-ui, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
   --ck-canvas: var(--leaf-cad-canvas); --ck-glass-panel: var(--leaf-cad-ground-glass);
   --ck-ink: var(--leaf-cad-ink); --ck-ink-dim: var(--leaf-cad-ink-dim); --ck-edge: var(--leaf-line);
-  background: var(--ck-canvas); color: var(--ck-ink); font: 400 13px/1.5 var(--ck-font);
+  background: var(--ck-canvas); color: var(--ck-ink); font: 400 var(--leaf-size-dense)/1.5 var(--ck-font);
 }
 .studio-shell [data-studio-shell="cockpit"] .ground-tile {
   background: var(--ck-glass-panel); border: 1px solid var(--ck-edge); border-radius: var(--leaf-radius-key);
@@ -676,14 +676,14 @@
 .studio-shell [data-studio-shell="cockpit"] .ground-device-stage { overflow: auto; box-sizing: border-box; padding: 12px; }
 .studio-shell [data-studio-shell="cockpit"] .ground-desk { min-height: 0; }
 @media (max-width: 1023px) {
-  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] { min-height: 42px; padding: 0 10px; font: 400 12px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"][data-surface] .tc-product-tabs [role="tab"] { min-height: 42px; padding: 0 10px; font: 400 var(--leaf-size-caption) var(--ck-font); }
   .studio-shell .app[data-studio-shell="cockpit"] .tc-product-tabs [role="tab"] small { display: none; }
   .studio-shell .app[data-studio-shell="cockpit"][data-surface] .studio-profile-info { width: auto; max-width: calc(100vw - 24px); height: auto; min-height: 0; max-height: calc(100dvh - var(--ck-canvas-top-live) - 112px); }
   .studio-shell .app[data-studio-shell="cockpit"] .bar.bar-command-line { flex-direction: row; flex-wrap: nowrap; background: var(--ck-glass-dock); font-family: var(--ck-font); }
   .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-input { min-width: 0; padding: 5px 8px; }
-  .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-caret { text-transform: none; letter-spacing: 0; font: 400 12px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-caret { text-transform: none; letter-spacing: 0; font: 400 var(--leaf-size-caption) var(--ck-font); }
   .studio-shell .app[data-studio-shell="cockpit"] .bar-command-line .bar-field { color: var(--ck-ink); font-family: var(--ck-font); }
-  .studio-shell .app[data-studio-shell="cockpit"] .cockpit-status-tabs { display: inline-flex; gap: 8px; align-items: center; font: 400 12px var(--ck-font); }
+  .studio-shell .app[data-studio-shell="cockpit"] .cockpit-status-tabs { display: inline-flex; gap: 8px; align-items: center; font: 400 var(--leaf-size-caption) var(--ck-font); }
   .studio-shell [data-studio-shell="cockpit"] .ground-device-stage { flex-direction: column; justify-content: flex-start; gap: 16px; }
   .studio-shell [data-studio-shell="cockpit"] .device-frame { flex-shrink: 0; width: 140px; height: 240px; }
   .studio-shell [data-studio-shell="cockpit"] .ground-tiles { grid-template-columns: minmax(0, 1fr); }

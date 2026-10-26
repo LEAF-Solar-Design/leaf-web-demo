@@ -146,10 +146,10 @@ it('MS11 invalid-target-set', async () => {
 })
 it('MS12 kind-preflight', async () => {
   for (const [type, refusal] of [
-    ['INSERT', 'an INSERT is placed, not edited, in this round'],
-    ['DIMENSION', 'a dimension is placed, not edited, in this round'],
-    ['MLEADER', 'a mleader is placed, not edited, in this round'],
-    ['XLINE', 'read-only entity kind'],
+    ['INSERT', 'A block can be placed here but not edited.'],
+    ['DIMENSION', 'A dimension can be placed here but not edited.'],
+    ['MLEADER', 'A multileader can be placed here but not edited.'],
+    ['XLINE', 'This kind of object can only be viewed here. Select another object.'],
   ]) {
     const entities = [...D, { ...common, id: '20', type, editable: false }]
     const h = await selectionSession(entities, ['16', '20'])

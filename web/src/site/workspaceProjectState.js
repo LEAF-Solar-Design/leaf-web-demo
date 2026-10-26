@@ -38,14 +38,14 @@ export const WORKSPACE_PROJECT_COPY = Object.freeze({
     + 'project-scoped files, conversation, and annotations around it.',
   drawingOnlyRail: 'no workspace project',
   emptyHeadline: 'No project open',
-  emptyExplainer: 'Open a project from the header, or add a drawing to start working in CAD.',
+  emptyExplainer: 'Add a drawing to start working in CAD. A project keeps your files, conversation, and annotations together.',
   emptyRail: 'no project open',
   actionLabel: 'Create project from this drawing',
   // Use the caller's own message when it supplies a reason.
   // This module never guesses which backend is missing.
   reasonNoPlatform: 'Workspace projects need the platform database, which this deployment is running without.',
   reasonServiceGeneric: 'Workspace projects are unavailable right now; the project service reported an error.',
-  reasonNoOrg: 'Create a workspace first. The Project menu in the header offers it.',
+  reasonNoOrg: 'Create a workspace first, then create a project.',
   reasonDemo: 'This is the offline demo build; it talks to no workspace service.',
   reasonNoHandler: 'This surface is not wired to create projects yet.',
 })

@@ -149,7 +149,7 @@ describe('W4g-4 ribbon: each verb posts the exact edit, and a creating verb sele
     const MADE = { ...POLY, id: '10', vertices: [[3, 4, 0], [7, 4, 0], [7, 7, 0]] }
     workers[0].emit({ type: 'editApplied', op: 'copy', ok: true, entities: [POLY, MADE], entityCount: 2, createdId: '10', bytes: new Uint8Array([48, 10]), byteLength: 2 })
     expect(studio.context.session.selectedId).toBe('10')
-    expect(studio.context.session.status).toContain('copy applied: entity 10 drawn')
+    expect(studio.context.session.status).toContain('Drawing applied: entity created.')
 
     fireEvent.click(tool('mirror'))
     fireEvent.change(field('x1'), { target: { value: '0' } })
@@ -221,7 +221,7 @@ describe('W4g-7b-05c-2: a placed INSERT or DIMENSION refuses every geometry verb
       const before = workers[0].posted.length
       act(() => { studio.context.session.actions.applyEdit(op, inputs) })
       expect(studio.context.session.status).toBe(kind === 'INSERT'
-        ? 'an INSERT is placed, not edited, in this round' : 'a dimension is placed, not edited, in this round')
+        ? 'A block can be placed here but not edited.' : 'A dimension can be placed here but not edited.')
       expect(workers[0].posted).toHaveLength(before)
     },
   )
@@ -241,17 +241,17 @@ describe('W4g-7b-05c-2: a placed INSERT or DIMENSION refuses every geometry verb
     act(() => { studio.context.session.actions.select(INSERT_ENTITY.id) })
     const before = workers[0].posted.length
     fireEvent.click(tool('move'))
-    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('an INSERT is placed, not edited, in this round')
+    expect(screen.getByTestId('cockpit-prompt-note').textContent).toBe('A block can be placed here but not edited.')
     expect(screen.getByTestId('cockpit-prompt').querySelector('.cp-run').disabled).toBe(true)
     expect(workers[0].posted).toHaveLength(before)
   })
 
   it('every geometry verb on the INSERT reference refuses with the store sentence', () => {
-    for (const op of GEOMETRY_OPS) expect(buildEditPayload(op, 'i1', inputs, undefined, entities).refusal).toBe('an INSERT is placed, not edited, in this round')
+    for (const op of GEOMETRY_OPS) expect(buildEditPayload(op, 'i1', inputs, undefined, entities).refusal).toBe('A block can be placed here but not edited.')
   })
 
   it('every geometry verb on the DIMENSION refuses with the store sentence', () => {
-    for (const op of GEOMETRY_OPS) expect(buildEditPayload(op, 'd1', inputs, undefined, entities).refusal).toBe('a dimension is placed, not edited, in this round')
+    for (const op of GEOMETRY_OPS) expect(buildEditPayload(op, 'd1', inputs, undefined, entities).refusal).toBe('A dimension can be placed here but not edited.')
   })
 
   it('delete stays allowed on both kinds (the contract carries `removed` for any kind)', () => {
@@ -274,7 +274,7 @@ describe('W4g-7b-05c-2: a placed INSERT or DIMENSION refuses every geometry verb
     act(() => { studio.context.session.actions.select('i1') })
     const before = workers[0].posted.length
     act(() => { studio.context.session.actions.applyEdit('move', { dx: '1', dy: '1' }) })
-    expect(studio.context.session.status).toBe('an INSERT is placed, not edited, in this round')
+    expect(studio.context.session.status).toBe('A block can be placed here but not edited.')
     expect(workers[0].posted.length).toBe(before)
     act(() => { studio.context.session.actions.applyEdit('delete', {}) })
     expect(lastPost()).toEqual({ type: 'applyEdit', op: 'delete', payload: { entityId: 'i1' } })

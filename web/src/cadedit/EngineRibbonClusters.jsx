@@ -39,7 +39,7 @@ import { QuickButton, QUICK_FILE_SLOT_ID } from '../site/CockpitTopBand.jsx'
 
 import { DEFERRED_REASONS, DRAW_REASONS, MODIFY_REASONS, PROPERTY_REASONS, byId, clipboardReason, drawReason, forGroup as registeredForGroup, modifyOpReason, modifyReason, propertyReason, propertyControlReason, ribbonTool } from '../lib/actionRegistry.js'
 
-import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, buildSelectionEditPayload, formatLineweight, readNumber } from './engineSession.js'
+import { ACI_NAMES, LINEWEIGHT_VALUES, SESSION_ERROR, admissibleBlockName, admissibleServerName, buildCreatePayload, buildEditPayload, buildSelectionEditPayload, cadMessage, formatLineweight, readNumber } from './engineSession.js'
 import { PENDING_INPUT_KEY, PENDING_WORD, REACH_STATE, useEngineSessionContext } from './EngineSessionProvider.jsx'
 import { PROMPTS, humanizeRefusal } from './promptKeys.js'
 import { isPointExpression } from './pointExpression.js'
@@ -159,10 +159,10 @@ const PROPERTY_OPS = new Set(registeredForGroup('modify').filter((a) => a.panel 
 export { DRAW_REASONS, MODIFY_REASONS, drawReason, modifyReason, historyStepReason } from '../lib/actionRegistry.js'
 
 export const SAVE_REASONS = Object.freeze({
-  noDocument: 'no drawing in the browser engine yet',
-  nothingEdited: 'edit something first',
-  noTarget: 'download-only here: no project target',
-  busy: 'engine busy: wait for the current edit',
+  noDocument: 'Open a drawing first.',
+  nothingEdited: 'Make a change first.',
+  noTarget: 'Download the drawing to keep your changes.',
+  busy: 'Wait for the current change to finish.',
 })
 
 const NOT_IN_ENGINE = 'not in the browser engine yet'
@@ -195,8 +195,8 @@ export { PROMPTS, promptKeys } from './promptKeys.js'
 export function saveReason(session, canSave) {
   if (!session || !session.engineParsed) return SAVE_REASONS.noDocument
   if (!session.savedBytes) return SAVE_REASONS.nothingEdited
-  if (!canSave) return SAVE_REASONS.noTarget
   if (session.busy) return SAVE_REASONS.busy
+  if (canSave && session.dirty === false) return 'All changes are saved.'
   return ''
 }
 
@@ -347,17 +347,22 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
   }
   const refusedKey = Object.keys(dimension).find((key) => dimension[key].reason && refusedDimensions.has(key))
   const dimensionRefusal = refusedKey ? `${prompt.verb} refused: ${dimension[refusedKey].label}: ${dimension[refusedKey].reason}` : ''
-  const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, typedInputs, armed && armed.from ? armed.from : null)
+  const resolvedInputs = armedOp === 'group'
+    ? { ...typedInputs, members: [...new Set([...(session.selectedIds || []), ...String(typedInputs.members || '').split(/\s+/)].filter(Boolean))].join(' ') }
+    : typedInputs
+  const { effective, expressionRefusal, failedExpression, waitingStep, pointSteps } = resolvePromptInputs(prompt, resolvedInputs, armed && armed.from ? armed.from : null)
   const gatheringMembers = (armedOp === 'group' && !inputs.groupName || armedOp === 'createBlock') && !inputs.membersDone
   const liveRefusal = prompt && !promptReason && !gatheringMembers
     ? (dimensionRefusal || (waitingStep ? '' : (expressionRefusal || (armedGroup === 'draw'
       ? buildCreatePayload(armedOp, effective, session.entities.blocks, session.entities.dimstyles, session, session.entities.mlstyles)
-      : session.selectedIds?.length > 1
+      : session.selectedIds?.length > 1 && armedOp !== 'group' && armedOp !== 'ungroup'
         ? buildSelectionEditPayload(armedOp, session.selectedIds, effective, session.entities)
-        : buildEditPayload(armedOp, session.selectedId, effective, session.entities.linetypes, session.entities)).refusal || '')))
+        : buildEditPayload(armedOp, session.selectedId, armedOp === 'group'
+          ? { ...effective, members: [...new Set([...(session.selectedIds || []), ...String(effective.members || '').split(/\s+/)].filter(Boolean))] }
+          : effective, session.entities.linetypes, session.entities)).refusal || '')))
     : ''
   const runOff = promptOff || !!liveRefusal || (!!waitingStep && !gatheringMembers)
-  const runReason = held || humanizeRefusal(promptReason || liveRefusal, prompt)
+  const runReason = held || humanizeRefusal(promptReason || (liveRefusal ? cadMessage(liveRefusal) : ''), prompt)
   const runHold = runReason || (waitingStep ? waitingStep.ask : '')
   const toggleArmed = (group, op) => setArmed(armedOp === op ? null : { group, op }, { rearm: true })
   // The one context the Draw and Modify records read: the session their reason
@@ -818,13 +823,31 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     {
       id: 'save-version',
       label: 'save-version',
-      text: 'Save version',
+      text: canSave ? 'Save version' : 'Download DXF',
       icon: 'save',
       size: 'large',
-      title: held ? 'Save the edits to the previous drawing as a new version' : 'Save the edited bytes to the project as a new version',
+      title: !canSave ? 'Download the drawing to keep your changes' : held ? 'Save the edits to the previous drawing as a new version' : 'Save the drawing to the project as a new version',
       disabled: !!save,
       reason: save,
-      onClick: () => { session.actions.save() },
+      onClick: () => {
+        if (canSave) { session.actions.save(); return }
+        if (!session.savedBytes) return
+        let url
+        let link
+        try {
+          url = URL.createObjectURL(new Blob([session.savedBytes], { type: 'application/dxf' }))
+          link = document.createElement('a')
+          link.href = url
+          link.download = session.documentId || 'edited.dxf'
+          document.body.appendChild(link)
+          link.click()
+        } catch {
+          refuse(cadMessage('The download could not start. Try again.'))
+        } finally {
+          link?.remove()
+          if (url) setTimeout(() => URL.revokeObjectURL(url), 0)
+        }
+      },
     },
   ]
   // W4f slice F: the engine's own Undo / Redo (a bytes-snapshot stack,
@@ -934,7 +957,7 @@ export default function EngineRibbonClusters({ importOpen = false, onToggleImpor
     const shown = definition.shown ?? label
     const accessibleLabel = ['x', 'y', 'x1', 'y1', 'x2', 'y2', 'cx', 'cy', 'dx', 'dy'].includes(key)
       ? key : key === 'a0' ? 'start' : key === 'a1' ? 'end' : key === 'r' && armedOp !== 'fillet' ? 'r' : label
-    if (key === 'members') return <span key={key} className="cp-field" tabIndex={0} aria-label="ribbon members">{new Set([session.selectedId, ...String(inputs.members || '').split(/\s+/)].filter(Boolean)).size} objects</span>
+    if (key === 'members') return <span key={key} className="cp-field" tabIndex={0} aria-label="ribbon members">{new Set([...(session.selectedIds || [session.selectedId]), ...String(inputs.members || '').split(/\s+/)].filter(Boolean)).size} objects</span>
     if (key === 'style') {
       return (
         <select

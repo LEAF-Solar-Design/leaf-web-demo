@@ -392,7 +392,7 @@ class Budget:
 
 def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
                    cpu_clock=time.thread_time, cancelled=None, on_block=None,
-                   tool_adapter=None):
+                   tool_adapter=None, trusted_lookup=None):
     graph, registry = _graph_inputs(graph, registry)
     validate_graph(graph)
     manifests = _admit_graph(graph, registry)
@@ -405,7 +405,8 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
     for block_id, block in blocks.items():
         ref = block["registry"]
         manifest = manifests[block_id]
-        trusted = lab_registry.lookup(ref["id"], ref["version"])
+        trusted = (lab_registry.lookup if trusted_lookup is None else trusted_lookup)(
+            ref["id"], ref["version"])
         if (manifest["residency"] == "host"
                 or manifest["id"] in ("studio-jobs", "studio-capabilities", "host-source")
                 or (trusted is not None and trusted.residency == "host")):
