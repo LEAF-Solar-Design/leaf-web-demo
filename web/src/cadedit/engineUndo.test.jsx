@@ -90,7 +90,7 @@ describe('engine undo (W4f slice F)', () => {
     expect(stepped(() => session.current.actions.undo())).toBe(false)
     session.workers[0].emit(loaded([{ ...LINE, vertices: [[1, 0], [2, 1]] }, POLY]))
     expect(session.current.busy).toBe(false)
-    expect(session.current.status).toBe('Undid setLayer: 2 entities, 2 bytes.')
+    expect(session.current.status).toBe('Undid the layer change.')
     expect(session.current.savedBytes).toBe(b1)
     expect(session.current.geometrySource).toBe(GEOMETRY_SOURCE.ENGINE_REPARSE)
     expect(session.current.selectedId).toBe('e1')
@@ -102,7 +102,7 @@ describe('engine undo (W4f slice F)', () => {
     expect(session.current.savedBytes).toBeNull()
     expect(session.current.undoDepth).toBe(0)
     expect(session.current.redoDepth).toBe(2)
-    expect(session.current.status).toBe('Undid move: 2 entities, 6 bytes.')
+    expect(session.current.status).toBe('Undid the move.')
   })
 
   it('redo steps forward again, and a new edit after an undo ends the redo branch', async () => {
@@ -117,7 +117,7 @@ describe('engine undo (W4f slice F)', () => {
     expect(stepped(() => session.current.actions.redo())).toBe(true)
     expect(session.workers[0].lastPost().bytes).toBe(b1)
     session.workers[0].emit(loaded([LINE]))
-    expect(session.current.status).toBe('Redid move: 1 entities, 1 bytes.')
+    expect(session.current.status).toBe('Redid the move.')
     expect(session.current.savedBytes).toBe(b1)
     expect(session.current.undoDepth).toBe(1)
     expect(session.current.redoDepth).toBe(0)
@@ -157,7 +157,7 @@ describe('engine undo (W4f slice F)', () => {
     expect(session.current.busy).toBe(false)
     expect(session.current.engineParsed).toBe(false)
     expect(session.current.errorKind).toBe(SESSION_ERROR.ENGINE)
-    expect(session.current.status).toBe('Undo of setLayer failed: the engine refused the snapshot (parse_failed:handle_precision_lost). Open the drawing again.')
+    expect(session.current.status).toBe('The change could not be restored. Open the drawing again.')
     expect(session.current.undoDepth).toBe(0)
     expect(session.current.redoDepth).toBe(0)
     // Nothing latched: a further step is refused cleanly, and a fresh open starts a clean history.

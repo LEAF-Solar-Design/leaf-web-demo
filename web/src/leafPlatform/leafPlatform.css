@@ -5,9 +5,9 @@
   min-height: 100dvh;
   margin: 0 auto;
   padding: 20px 16px;
-  background: var(--surface, #fafaf8);
-  color: var(--ink, #202622);
-  font: 15px/1.5 system-ui, sans-serif;
+  background: var(--leaf-surface);
+  color: var(--leaf-ink);
+  font: var(--leaf-size-body)/1.5 system-ui, sans-serif;
   overflow-wrap: anywhere;
 }
 
@@ -24,13 +24,13 @@
   min-width: 0;
   min-height: 44px;
   padding: 9px 12px;
-  border: 1px solid #7c877e;
+  border: 1px solid var(--leaf-ink-muted);
   border-radius: var(--leaf-radius-control);
   font: inherit;
 }
-.leaf-platform select { background: #fff; color: #202622; }
-.leaf-platform button { background: #244c36; color: #fff; cursor: pointer; }
-.leaf-platform button:disabled { background: #e5e9e5; color: #596159; cursor: default; }
-.leaf-platform a { color: #244c36; }
-.leaf-platform :is(h1, button, select, a):focus-visible { outline: 3px solid #427455; outline-offset: 3px; }
+.leaf-platform select { background: var(--leaf-surface); color: var(--leaf-ink); }
+.leaf-platform button { background: var(--leaf-accent-text); color: var(--leaf-on-accent); cursor: pointer; }
+.leaf-platform button:disabled { background: var(--leaf-raised); color: var(--leaf-ink-muted); cursor: default; }
+.leaf-platform a { color: var(--leaf-accent-text); }
+.leaf-platform :is(h1, button, select, a):focus-visible { outline: 3px solid var(--leaf-focus); outline-offset: 3px; }
 .leaf-platform-actions { display: flex; gap: 10px; }

@@ -351,7 +351,7 @@ describe('MLEADER store routing and catalogue retention', () => {
       const count = worker.posted.length
       act(() => session.current.actions.applyEdit(op, {}))
       expect(worker.posted).toHaveLength(count)
-      expect(session.current.status).toBe('a mleader is placed, not edited, in this round')
+      expect(session.current.status).toBe('A multileader can be placed here but not edited.')
     }
     act(() => session.current.actions.undo())
     worker.emit({ ...editedMessage('undo', [LINE]), mlstyles })
@@ -359,7 +359,7 @@ describe('MLEADER store routing and catalogue retention', () => {
     const count = worker.posted.length
     act(() => session.current.actions.create('createMleader', { x: '0', y: '0', x2: '3', y2: '4', text: 'Valve', style: 'Missing' }))
     expect(worker.posted).toHaveLength(count)
-    expect(session.current.status).toBe('mleader_style_unknown')
+    expect(session.current.status).toBe('Choose a callout style available in this drawing and retry.')
   })
 })
 
@@ -379,14 +379,14 @@ describe('engine-truth readouts only for engine-parsed documents', () => {
     expect(session.current.geometrySource).toBe(GEOMETRY_SOURCE.ENGINE_PARSE)
     expect(session.current.reparsed).toBe(false)
     expect(session.current.entityCount).toBe(2)
-    expect(session.current.status).toBe('Loaded one.dxf: 2 entities.')
+    expect(session.current.status).toBe('Drawing opened.')
   })
 
   it('names the read-only kinds a load preserved', async () => {
     const session = mountSession()
     await openDocument(session)
     session.workers[0].emit(loadedMessage([LINE], 'one.dxf', [{ type: 'CIRCLE' }]))
-    expect(session.current.status).toBe('Loaded one.dxf: 1 entities (1 preserved as read-only kinds).')
+    expect(session.current.status).toBe('Drawing opened. Some objects can only be viewed.')
   })
 
   it('an engine refusal clears the list AND the engine-parsed claim, rather than showing an empty document', async () => {
@@ -394,7 +394,7 @@ describe('engine-truth readouts only for engine-parsed documents', () => {
     await openDocument(session)
     session.workers[0].emit(loadedMessage([LINE]))
     session.workers[0].emit({ type: 'error', message: 'bad_document_bytes' })
-    expect(session.current.status).toBe('Engine refused: bad_document_bytes')
+    expect(session.current.status).toBe('The drawing could not be read. Open another DXF file and retry.')
     expect(session.current.errorKind).toBe(SESSION_ERROR.ENGINE)
     expect(session.current.engineParsed).toBe(false)
     expect(session.current.geometrySource).toBeNull()
@@ -417,7 +417,7 @@ describe('optimistic vs reparsed geometry', () => {
     expect(session.current.geometrySource).not.toBe(GEOMETRY_SOURCE.OPTIMISTIC)
     expect(session.current.busy).toBe(false)
     expect(session.current.status).toBe(
-      'move applied. Re-parsed from the written bytes: 2 entities, 3 bytes.')
+      'Change applied.')
     expect(session.current.savedBytes).toEqual(new Uint8Array([1, 2, 3]))
   })
 
@@ -430,7 +430,7 @@ describe('optimistic vs reparsed geometry', () => {
     session.workers[0].emit({
       type: 'editApplied', op: 'deleteVertex', ok: false, reason: 'line_has_fixed_endpoints',
     })
-    expect(session.current.status).toBe('Edit refused (deleteVertex): line_has_fixed_endpoints')
+    expect(session.current.status).toBe('A line needs both endpoints. Move an endpoint instead.')
     expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
     expect(session.current.entityCount).toBe(1)
     expect(session.current.geometrySource).toBe(GEOMETRY_SOURCE.ENGINE_PARSE)
@@ -482,10 +482,10 @@ describe('selection identity across an edit', () => {
 describe('edit dispatch refuses malformed input before it reaches the engine', () => {
   const cases = [
     ['move', { dx: 'nope', dy: '0' }, 'Move refused: dx and dy must both be numbers.'],
-    ['moveVertex', { vertexIndex: '-1', dx: '1', dy: '1' }, 'moveVertex refused: vertex must be a non-negative integer.'],
+    ['moveVertex', { vertexIndex: '-1', dx: '1', dy: '1' }, 'Move vertex refused: vertex must be a non-negative integer.'],
     ['moveVertex', { vertexIndex: '0', dx: 'x', dy: '1' }, 'Move vertex refused: dx and dy must both be numbers.'],
     ['addVertex', { vertexIndex: '0', dx: 'x', dy: '1' }, 'Add vertex refused: x and y must both be numbers.'],
-    ['deleteVertex', { vertexIndex: 'abc' }, 'deleteVertex refused: vertex must be a non-negative integer.'],
+    ['deleteVertex', { vertexIndex: 'abc' }, 'Delete vertex refused: vertex must be a non-negative integer.'],
     ['setLayer', { layer: '   ' }, 'Set layer refused: enter a layer name.'],
   ]
 
@@ -509,7 +509,7 @@ describe('edit dispatch refuses malformed input before it reaches the engine', (
     const before = session.workers[0].posted.length
     act(() => session.current.actions.applyEdit('delete', {}))
     expect(session.workers[0].posted.length).toBe(before)
-    expect(session.current.status).toBe('Loaded one.dxf: 1 entities.')
+    expect(session.current.status).toBe('Drawing opened.')
   })
 
   // W4g-5 OFFSET: the parallel copy is computed from the SELECTION and the
@@ -594,8 +594,8 @@ describe('save completion', () => {
     expect(onSaved).toHaveBeenCalledWith(receipt)
     expect(session.current.savedVersion).toBe(5)
     expect(session.current.receipt).toBe(receipt)
-    expect(session.current.status).toContain('Saved as version 5 (parent 4)')
-    expect(session.current.status).toContain('engine cost $0')
+    expect(session.current.status).toBe('Saved as version 5.')
+    expect(session.current.status).not.toContain('cost')
     expect(session.current.busy).toBe(false)
   })
 
@@ -688,7 +688,7 @@ describe('save completion', () => {
     expect(onSaved).toHaveBeenCalledWith(receipt)
     expect(session.current.dirty).toBe(false)
     expect(session.current.savedVersion).toBe(5)
-    expect(session.current.status).toContain('Saved as version 5 (parent 4)')
+    expect(session.current.status).toBe('Saved as version 5.')
     expect(session.current.errorKind).toBeNull()
   })
 
@@ -773,7 +773,7 @@ describe('save completion', () => {
     expect(session.current.committedVersion).toBeNull()
     expect(session.current.committedBytes).toBe(bytes)
     expect(session.current.dirty).toBe(false)
-    expect(session.current.status).toMatch(/reopening the committed version from the server\.\.\.$/)
+    expect(session.current.status).toMatch(/^Saved as version 5\. Opening the saved version\.\.\.$/)
     expect(onSaved).toHaveBeenCalledWith(liveReceipt)
   })
 
@@ -786,7 +786,7 @@ describe('save completion', () => {
     expect(session.current.committedEntities).toBeNull()
     expect(session.current.committedVersion).toBe(5)
     expect(session.current.dirty).toBe(false)
-    expect(session.current.status).toContain('read-back is pending')
+    expect(session.current.status).toContain('Reopen the drawing to view the saved version.')
     expect(session.current.status).not.toContain('reopening')
     await act(async () => { await session.current.actions.save() })
     expect(save).toHaveBeenNthCalledWith(
@@ -798,7 +798,7 @@ describe('save completion', () => {
   it('a missing engine cost is unknown, never an invented zero', async () => {
     const session = await editedSession({ headVersion: 4, save: async () => ({ ...receipt, cost: { engine_usd: null } }) })
     await act(async () => { await session.current.actions.save() })
-    expect(session.current.status).toContain('engine cost unknown')
+    expect(session.current.status).toBe('Saved as version 5.')
     expect(session.current.status).not.toContain('engine cost $')
   })
 
@@ -819,12 +819,12 @@ describe('save completion', () => {
       expect(await session.current.actions.open(file)).toBeNull()
       await started
     })
-    expect(session.current.status).toBe('a save is in flight; wait for its receipt')
+    expect(session.current.status).toBe('Wait for the drawing to finish saving, then try again.')
     act(() => {
       expect(session.current.actions.openBytes(new Uint8Array([8]), 'later.dxf')).toBeNull()
       expect(session.current.actions.applyEdit('delete', {})).toBeNull()
     })
-    expect(session.current.status).toBe('a save is in flight; wait for its receipt')
+    expect(session.current.status).toBe('Wait for the drawing to finish saving, then try again.')
     expect(session.current.busy).toBe(true)
     expect(session.current.documentId).toBe(before.documentId)
     expect(session.current.entities).toBe(before.entities)
@@ -879,7 +879,7 @@ describe('save completion', () => {
     act(() => {
       expect(session.current.actions.applyEdit('move', { dx: '8', dy: '8' })).toBeNull()
     })
-    expect(session.current.status).toBe('a save is in flight; wait for its receipt')
+    expect(session.current.status).toBe('Wait for the drawing to finish saving, then try again.')
     expect(session.current.documentId).toBe('other-v4.dxf')
     expect(session.current.committedVersion).toBe(4)
     expect(session.current.busy).toBe(true)
@@ -903,14 +903,14 @@ describe('save completion', () => {
     let pending
     await act(async () => { pending = session.current.actions.save(); await started })
     act(() => reportStatus({ status: 'running', progress: 'writing DWG' }))
-    expect(session.current.status).toBe('Saving to the project as a new version... (job running: writing DWG)')
+    expect(session.current.status).toBe('Saving to the project as a new version...')
     act(() => reportStatus({ status: 'running' }))
-    expect(session.current.status).toBe('Saving to the project as a new version... (job running)')
+    expect(session.current.status).toBe('Saving to the project as a new version...')
     await act(async () => {
       rejectSave(Object.assign(new Error('APS rejected the plan'), { status: 422 }))
       await pending
     })
-    expect(session.current.status).toBe('Save failed: APS rejected the plan')
+    expect(session.current.status).toBe('Save failed: The project could not accept these changes. Download the drawing to keep them.')
     expect(session.current.dirty).toBe(true)
     expect(session.current.savedBytes).toBe(before.savedBytes)
     expect(session.current.committedEntities).toBe(before.committedEntities)
@@ -982,7 +982,7 @@ describe('save completion', () => {
     session.workers[0].emit(editedMessage('move', [MOVED_LINE, POLY]))
     await act(async () => { await session.current.actions.save() })
     expect(save).toHaveBeenCalledTimes(1)
-    expect(session.current.status).toContain('through the dwg-plan leg')
+    expect(session.current.status).toBe('Saved as version 5.')
     // The list just saved is the new base: a save with no further edit
     // would diff to nothing.
     expect(session.current.committedEntities).toEqual([MOVED_LINE, POLY])
@@ -1001,7 +1001,7 @@ describe('save completion', () => {
     session.workers[0].emit(editedMessage('move', [{ id: 'e1', type: 'CIRCLE', layer: 'Panels', vertices: [[0, 0]], radius: 2 }, POLY]))
     await act(async () => { await session.current.actions.save() })
     expect(save).toHaveBeenCalledTimes(1)
-    expect(session.current.status).toContain('No plan sent: entity e1 changed kind from LINE to CIRCLE')
+    expect(session.current.status).toBe('Saved as version 5.')
   })
 
   it('a hand import has no base and sends no plan', async () => {
@@ -1077,7 +1077,7 @@ describe('save completion', () => {
       expect(save).not.toHaveBeenCalled()
       expect(fetch).not.toHaveBeenCalled()
       expect(session.workers[0].posted).toHaveLength(before)
-      expect(session.current.status).toBe('Save refused: entity 500 is a INSERT the plan cannot carry, and it changed.')
+      expect(session.current.status).toBe('Save refused: a placed block was moved. Undo that move or download the drawing to keep it.')
       expect(session.current.dirty).toBe(true)
       expect(session.current.committedEntities).toEqual([text, insert])
     } finally { fetch.mockRestore() }
@@ -1096,7 +1096,7 @@ describe('save completion', () => {
       await act(async () => { await session.current.actions.save() })
       expect(save).not.toHaveBeenCalled()
       expect(fetch).not.toHaveBeenCalled()
-      expect(session.current.status).toBe('Save refused: entity C has a true colour the plan cannot carry.')
+      expect(session.current.status).toBe('Save refused: custom colours cannot be saved here. Choose a standard colour or download the drawing.')
       expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
       expect(session.current.dirty).toBe(true)
       expect(session.current.committedEntities).toEqual([text])
@@ -1115,7 +1115,7 @@ describe('save completion', () => {
     session.workers[0].emit(editedMessage('move', [MOVED_LINE, MOVED_INSERT]))
     await act(async () => { await session.current.actions.save() })
     expect(save).not.toHaveBeenCalled()
-    expect(session.current.status).toBe('Save refused: entity i1 is a INSERT the plan cannot carry, and it changed.')
+    expect(session.current.status).toBe('Save refused: a placed block was moved. Undo that move or download the drawing to keep it.')
     expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
     expect(session.current.dirty).toBe(true)
     expect(session.current.committedEntities).toEqual([LINE, INSERTED])
@@ -1148,7 +1148,7 @@ describe('save completion', () => {
     session.workers[0].emit(editedMessage('move', [LINE, { ...TEXT_ENTITY, vertices: [[1, 1, 0]] }]))
     await act(async () => { await session.current.actions.save() })
     expect(save).toHaveBeenCalledTimes(1)
-    expect(session.current.status).toContain('No plan sent: entity t1 is a TEXT the plan cannot carry, and it changed')
+    expect(session.current.status).toBe('Saved as version 5.')
   })
 })
 
@@ -1166,7 +1166,7 @@ describe('MATCHPROP admits an INSERT reference as the selection (W4g-7b-03c-f)',
     session.workers[0].emit(loadedMessage([inserted, other]))
     act(() => session.current.actions.select('i1'))
     act(() => session.current.actions.applyEdit('matchprop', { edge: 'e1' }))
-    expect(session.current.status).not.toBe('an INSERT is placed, not edited, in this round')
+    expect(session.current.status).not.toBe('A block can be placed here but not edited.')
     expect(session.current.busy).toBe(true)
     expect(session.workers[0].posted.at(-1)).toEqual({
       type: 'applyEdit', op: 'batch', payload: { verb: 'matchprop', steps: [{ op: 'setLayer', payload: { entityId: 'e1', layer: 'A' } }] },
@@ -1185,7 +1185,7 @@ describe('W4g-7b-05c-3 F3: MATCHPROP destination and batch gates', () => {
     act(() => session.current.actions.select('7'))
     const before = session.workers[0].posted.length
     act(() => session.current.actions.applyEdit('matchprop', { edge: '11' }))
-    expect(session.current.status).toBe('Match refused: an INSERT keeps its layer in this round.')
+    expect(session.current.status).toBe('Match refused: the block keeps its layer. Choose another property to copy.')
     expect(session.workers[0].posted).toHaveLength(before)
   })
 
@@ -1201,14 +1201,14 @@ describe('W4g-7b-05c-3 F3: MATCHPROP destination and batch gates', () => {
       type: 'applyEdit', op: 'batch', payload: { verb: 'matchprop', steps: [{ op: 'setColor', payload: { entityId: '11', aci: 256 } }] },
     }])
     session.workers[0].emit(editedMessage('batch', [source, insert]))
-    expect(session.current.status).toContain('matchprop applied; layer not copied: an INSERT keeps its layer in this round')
+    expect(session.current.status).toBe('Properties copied. The destination keeps its layer.')
   })
 
   it.each(['move', 'setLayer', 'setVertices', 'setArc'])('a hand-built batch cannot lower a %s step against INSERT', (op) => {
     expect(lowerSteps([
       { op: 'setColor', entityId: '7', aci: 1 },
       { op, entityId: '11', dx: 1, dy: 1, layer: 'Source' },
-    ], [], [source, insert])).toEqual({ refusal: 'an INSERT is placed, not edited, in this round' })
+    ], [], [source, insert])).toEqual({ refusal: 'A block can be placed here but not edited.' })
   })
 })
 
@@ -1223,7 +1223,7 @@ describe('worker crash is a RECOVERABLE state', () => {
 
     expect(session.current.errorKind).toBe(SESSION_ERROR.CRASHED)
     expect(session.current.recoverable).toBe(true)
-    expect(session.current.status).toContain('Engine stopped unexpectedly')
+    expect(session.current.status).toContain('Drawing tools stopped unexpectedly')
     // No list you cannot edit, and no claim of engine truth without a session.
     expect(session.current.entities).toEqual([])
     expect(session.current.selectedId).toBe('')
@@ -1424,7 +1424,7 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
     expect(session.current.selected).toEqual(DRAWN)
     expect(session.current.geometrySource).toBe(GEOMETRY_SOURCE.ENGINE_REPARSE)
     expect(session.current.errorKind).toBeNull()
-    expect(session.current.status).toMatch(/createLine applied: entity e3 drawn/)
+    expect(session.current.status).toMatch(/^Drawing applied: entity created\.$/)
   })
 
   it('a create whose entity the writer dropped reads as a REFUSAL, not a success', async () => {
@@ -1435,7 +1435,7 @@ describe('draw dispatch (W4d Draw group): creation needs no selection, and the s
     act(() => session.current.actions.create('createCircle', { x: '0', y: '0', r: '1' }))
     session.workers[0].emit({ ...editedMessage('createCircle', [LINE]), createdId: null })
     expect(session.current.errorKind).toBe(SESSION_ERROR.REFUSED)
-    expect(session.current.status).toMatch(/not found after re-parse/)
+    expect(session.current.status).toMatch(/^The new object could not be confirmed\. Undo and try drawing it again\.$/)
     // The prior selection survives (e1 is still there); nothing pretends.
     expect(session.current.selectedId).toBe('e1')
   })

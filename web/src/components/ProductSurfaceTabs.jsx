@@ -315,12 +315,18 @@ const SURFACE_NOTES = Object.freeze({
   browser: (workspaceProject) => (
     <p className="tc-product-note" data-testid="browser-composition-note">
       {workspaceProject.kind === 'project'
-        ? 'Project-scoped files, conversation, and browser composition are live on the shared identity and project rail.'
-        : 'A workspace project adds project-scoped files, conversation, and browser composition on the shared identity and project rail.'}
+        ? 'Files, conversations, and browser editing are available together in this project.'
+        : 'Create a workspace project to keep files, conversations, and browser editing together.'}
     </p>
   ),
   solar: () => <p className="tc-product-note">Solar work runs the shared tenant catalog’s stringing and placement families against the versioned Leaf Automation solar template in the CAD workspace.</p>,
   ios: () => <p className="tc-product-note">A mounted Apple grant and terminal ship-lane readiness receipt are required. This browser never asks for Apple credentials.</p>,
+})
+
+const SHARED_CAPABILITY_LABELS = Object.freeze({
+  conversation: 'Conversations', annotations: 'Drawing notes', authoring: 'Create tools',
+  approvals: 'Approvals', versions: 'Version history', receipts: 'Run history',
+  marathons: 'Long-running tasks', 'one-shot execution': 'Run a tool',
 })
 
 function surfaceNote(surfaceId, workspaceProject) {
@@ -374,7 +380,7 @@ export function ProductSurfaceFrame({
         <div>
           <h2>Shared everywhere</h2>
           <ul>
-            {SHARED_WORKSPACE_CAPABILITIES.map((capability) => <li key={capability}>{capability}</li>)}
+            {SHARED_WORKSPACE_CAPABILITIES.map((capability) => <li key={capability}>{SHARED_CAPABILITY_LABELS[capability] || 'Project tools'}</li>)}
           </ul>
         </div>
         <div>

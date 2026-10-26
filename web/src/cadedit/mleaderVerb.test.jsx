@@ -40,11 +40,11 @@ describe('MLEADER in the browser engine create lane', () => {
     }
   })
   it('refuses caret text with the reader-specific sentence', () => {
-    for (const text of ['A^ B', 'A^B']) expect(build({ text }).refusal).toBe("mleader text cannot contain ^: the engine's DXF reader rewrites it")
+    for (const text of ['A^ B', 'A^B']) expect(build({ text }).refusal).toBe('Multileader text cannot contain a caret. Remove it and retry.')
   })
   it('uses the server name grammar for both style and layer', () => {
-    expect(build({ style: 'Notes(1)' }, [{ ...mlstyles[0], name: 'Notes(1)' }]).refusal).toMatch(/style.*server name rule/)
-    expect(build({ layer: 'Notes(1)' }).refusal).toMatch(/layer.*server name rule/)
+    expect(build({ style: 'Notes(1)' }, [{ ...mlstyles[0], name: 'Notes(1)' }]).refusal).toMatch(/^Multileader refused: use a style name of at most 255 letters, numbers, spaces, _, \., \$ or -\. Start with a letter or number\.$/)
+    expect(build({ layer: 'Notes(1)' }).refusal).toMatch(/^Multileader refused: use a layer name of at most 255 letters, numbers, spaces, _, \., \$ or -\. Start with a letter or number\.$/)
     for (const name of ['Notes 1', 'Notes_1.$-']) {
       expect(build({ style: name, layer: name }, [{ ...mlstyles[0], name }]).payload).toMatchObject({ style: name, layer: name })
     }
@@ -67,7 +67,7 @@ describe('MLEADER in the browser engine create lane', () => {
       handle: '2A', kind: 'MLEADER', layer: '0', style: 'Standard', pts: [[0, 0, 0], [3, 4, 0]], text: 'Valve',
     }])
     for (const op of ['move', 'setLayer', 'setColor', 'setLinetype', 'setLineweight', 'explode']) {
-      expect(buildEditPayload(op, entity.id, {}, [], [entity]).refusal).toBe('a mleader is placed, not edited, in this round')
+      expect(buildEditPayload(op, entity.id, {}, [], [entity]).refusal).toBe('A multileader can be placed here but not edited.')
     }
     expect(buildEditPayload('delete', entity.id, {}, [], [entity]).refusal).toBeUndefined()
   })

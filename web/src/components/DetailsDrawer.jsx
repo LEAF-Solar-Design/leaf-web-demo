@@ -11,7 +11,7 @@ import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import './detailsDrawerSheet.css'
 
-const PHONE_QUERY = '(max-width: 639px)'
+const PHONE_QUERY = '(max-width: 599px)'
 
 export function ServiceStatus({ mock, health, healthError, authRequired }) {
   const [label, tone] = mock ? ['Demo (sample data)', 'dim']

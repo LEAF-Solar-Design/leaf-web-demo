@@ -1,5 +1,6 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useId, useRef, useState } from 'react'
 import { humanizeError } from '../errorHumanize.js'
+import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { solarSizingRunSentence, SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { buildSizingParams, MODULE_PARAMETER_KEYS, sizingGraph, sizingTargets, SOLAR_SIZING_REASONS,
   deriveProjectSizingState, buildProjectSizingRequest, exactProjectSizingConductorPreview,
@@ -378,7 +379,7 @@ function ProjectSolarSizingForm(props) {
     setDraft(rest)
   }
   const declarationIdentity = JSON.stringify([mode, ...[
-    'module_name', 'full_inverter_name', 'bifacial', 'bifacial_coefficient',
+    'module_name', 'module_confirmed', 'full_inverter_name', 'bifacial', 'bifacial_coefficient',
     'racking_type', 'surface_tilt', 'surface_azimuth', 'albedo',
     'axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack',
     'max_voltage', 'thermal_model_type', 'open_circuit_rise', 'grant_ref',
@@ -391,7 +392,8 @@ function ProjectSolarSizingForm(props) {
   const built = editable ? buildSizingParams({ graph: state.graph, mode, draft }) : null
   const invalid = new Set(built?.invalid || [])
   const change = (key, value) => {
-    setDraft(({ accepted_string_length, ...previous }) => ({ ...previous, [key]: value }))
+    setDraft(({ accepted_string_length, ...previous }) => ({ ...previous, [key]: value,
+      ...(key === 'module_name' ? { module_confirmed: undefined } : {}) }))
   }
   const cold = form.terminalJob?.status === 'failed'
     && form.terminalJob.error?.reason_code === 'COLD_VOLTAGE_FAILED' ? form.terminalJob.error.cold_voltage : null
@@ -402,6 +404,7 @@ function ProjectSolarSizingForm(props) {
     && cold.suggested_string_length >= 1 && cold.suggested_string_length < cold.standard_string_length ? cold : null
   const sentence = projectSizingConductorReason(reason)
     || projectSizingCloudReason(reason)
+    || (reason === 'sizing_module_unconfirmed' ? SOLAR_SIZING_REASONS.sizing_module_unconfirmed : null)
     || (reason === 'sizing_zip_required' ? SOLAR_SIZING_REASONS.sizing_zip_required
       : reason === 'sizing_fields_invalid' ? SOLAR_SIZING_REASONS.sizing_fields_invalid : null)
     || (reason === 'sizing_panels_required' ? SOLAR_SIZING_REASONS.sizing_panels_required
@@ -423,6 +426,9 @@ function ProjectSolarSizingForm(props) {
       <p>Change the length in Solar settings.</p>
       {mode === 'manual-global' && <p>Manual confirmation does not calculate voltage limits or module power.</p>}
       {mode === 'global' && <SizingCloudFields mode={mode} draft={draft} change={change}
+        projectClient={props.projectClient} searchScope={draftScopeKey}
+        chooseModule={(key) => setDraft(({ accepted_string_length, ...previous }) => ({ ...previous,
+          module_name: key, module_confirmed: key }))}
         busy={submitting} invalid={invalid} />}
       {mode === 'global' && draft.accepted_string_length !== undefined && <p>
         Accepted string length: {draft.accepted_string_length}{' '}
@@ -457,7 +463,73 @@ export default function SolarSizingForm(props) {
   return <StandaloneSolarSizingForm {...props} />
 }
 
-function SizingCloudFields({ mode, draft, change, busy, invalid }) {
+function ModuleCatalogField({ draft, change, chooseModule, projectClient, searchScope, busy, invalid }) {
+  const listId = useId()
+  const fieldRef = useRef(null)
+  const [storedResult, setResult] = useState(null)
+  const [active, setActive] = useState(0)
+  const [open, setOpen] = useState(false)
+  const query = (draft.module_name ?? '').trim()
+  const grantValid = typeof draft.grant_ref === 'string' && /^[a-zA-Z0-9_-]{1,64}(?![\s\S])/.test(draft.grant_ref)
+  const resultKey = JSON.stringify([searchScope, query, draft.module_name, draft.module_confirmed, draft.grant_ref, busy])
+  const result = storedResult?.key === resultKey && storedResult.client === projectClient ? storedResult.data : null
+  useEffect(() => {
+    const controller = new AbortController()
+    setResult(null)
+    setOpen(false)
+    setActive(0)
+    if (busy || !grantValid || query.length < 2 || draft.module_confirmed === draft.module_name) return undefined
+    const timer = setTimeout(async () => {
+      try {
+        const outcome = await projectClient?.searchSizingModules({ q: query, limit: 20,
+          grantRef: draft.grant_ref, signal: controller.signal })
+        if (controller.signal.aborted) return
+        setResult({ key: resultKey, client: projectClient,
+          data: outcome?.ok ? { ...outcome.data, modules: outcome.data.modules.slice(0, 20) } : { failed: true } })
+        setOpen(true)
+      } catch {
+        if (!controller.signal.aborted) {
+          setResult({ key: resultKey, client: projectClient, data: { failed: true } }); setOpen(true)
+        }
+      }
+    }, 300)
+    return () => { clearTimeout(timer); controller.abort() }
+  }, [query, draft.module_name, draft.module_confirmed, draft.grant_ref, grantValid, busy, projectClient, searchScope])
+  const modules = result?.modules ?? []
+  const expanded = open && modules.length > 0
+  useEscapeOwner('solar-module-options', expanded, () => setOpen(false), { layer: 'menu', scope: fieldRef, scoped: true })
+  function choose(key) { chooseModule(key); setOpen(false); setResult(null) }
+  return <div ref={fieldRef}>
+    <label>Module<input role="combobox" value={draft.module_name ?? ''} disabled={busy}
+      autoComplete="off" aria-autocomplete="list" aria-expanded={expanded} aria-controls={expanded ? listId : undefined}
+      aria-activedescendant={expanded ? `${listId}-${active}` : undefined}
+      aria-invalid={invalid.has('module_name') || undefined}
+      onChange={(event) => { setResult(null); setOpen(false); change('module_name', event.target.value) }}
+      onKeyDown={(event) => {
+        if (event.nativeEvent.isComposing || event.keyCode === 229) return
+        if (modules.length && (event.key === 'ArrowDown' || event.key === 'ArrowUp')) {
+          event.preventDefault()
+          setOpen(true)
+          setActive((index) => (index + (event.key === 'ArrowDown' ? 1 : modules.length - 1)) % modules.length)
+        } else if (expanded && event.key === 'Enter') { event.preventDefault(); choose(modules[active].key) }
+      }} /></label>
+    {expanded && <ul id={listId} role="listbox" aria-label="Sizer modules">
+      {modules.map((module, index) => {
+        const parts = [module.stc_w === null ? null : `${module.stc_w} W`, module.n_s === null ? null : `${module.n_s} cells`].filter(Boolean)
+        return <li key={module.key} id={`${listId}-${index}`} role="option" aria-selected={index === active}
+          onMouseDown={(event) => event.preventDefault()} onClick={() => choose(module.key)}>
+          {module.key}{parts.length ? ` (${parts.join(', ')})` : ''}
+        </li>
+      })}
+    </ul>}
+    {!grantValid && <p role="status">Enter the grant reference to search the module catalog.</p>}
+    {result?.failed && <p role="status">The module catalog could not be searched.</p>}
+    {result?.modules?.length === 0 && <p role="status">No modules match.</p>}
+    {result?.truncated && <p role="status">More modules match; keep typing.</p>}
+  </div>
+}
+
+function SizingCloudFields({ mode, draft, change, chooseModule, projectClient, searchScope, busy, invalid, moduleCatalog = true }) {
   function input(key, label) {
     return <label key={key}>{label}<input value={draft[key] ?? ''} disabled={busy}
       aria-invalid={invalid.has(key) || undefined} onChange={(event) => change(key, event.target.value)} /></label>
@@ -470,7 +542,10 @@ function SizingCloudFields({ mode, draft, change, busy, invalid }) {
     </select></label>
   }
   return <>
-    {mode === 'global' && <>{input('module_name', 'Module')}{input('full_inverter_name', 'Inverter')}</>}
+    {mode === 'global' && <>{moduleCatalog
+      ? <ModuleCatalogField {...{ draft, change, chooseModule, projectClient, searchScope, busy, invalid }} />
+      : input('module_name', 'Module')}
+      {input('full_inverter_name', 'Inverter')}</>}
     {boolean('bifacial', 'Bifacial')}
     {input('bifacial_coefficient', 'Bifacial coefficient')}
     <label>Racking<select value={draft.racking_type ?? ''} disabled={busy}
@@ -529,11 +604,12 @@ function StandaloneSolarSizingForm({
   const currentLoad = loaded?.drawingId === drawingId && loaded?.drawingVersion === drawingVersion ? loaded : null
   const loading = scoped && currentLoad === null
   const built = !scoped ? { ok: false, reason: 'sizing_project_scope' }
-    : buildSizingParams({ graph, mode, draft })
+    : buildSizingParams({ graph, mode, draft, moduleCatalog: false })
   const targets = scoped && graph?.ok ? sizingTargets(graph, mode) : null
   const busy = status === 'pending'
   const invalid = new Set(built.invalid || [])
-  const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
+  const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value,
+    ...(key === 'module_name' ? { module_confirmed: undefined } : {}) }))
   function submit() {
     if (lock.current || busy || !built.ok) return
     lock.current = true
@@ -557,7 +633,7 @@ function StandaloneSolarSizingForm({
       {mode === 'zones' && <p>Module: {graph.zones[index].module_model}; Inverter: {graph.zones[index].inverter_model_a}</p>}
       <p>{Object.hasOwn(graph.power, id) && graph.power[id] != null ? `Confirmed module power: ${graph.power[id]} W` : 'Confirmed module power is unavailable. Re-size strings.'}</p>
     </div>)}
-    <SizingCloudFields mode={mode} draft={draft} change={change} busy={busy} invalid={invalid} />
+    <SizingCloudFields mode={mode} draft={draft} change={change} busy={busy} invalid={invalid} moduleCatalog={false} />
     </>}
     {loading && <p role="status">Loading the drawing.</p>}
     {currentLoad?.error && <p role="alert">{currentLoad.error}</p>}
