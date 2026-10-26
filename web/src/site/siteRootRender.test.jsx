@@ -59,6 +59,32 @@ async function mountAppRoute(flagValue) {
 }
 
 describe('SiteRoot renders the one studio shell', () => {
+  it.each(['/try', '/app'])('clears a pending callback when history navigates to %s and ignores its late completion', async path => {
+    window.history.replaceState({}, '', '/?code=x&state=y')
+    const auth = await import('../auth.js')
+    vi.spyOn(auth, 'isAuthRedirectCallback').mockReturnValue(true)
+    let completeCallback
+    const callback = vi.spyOn(auth, 'handleRedirectCallback').mockImplementation(() => new Promise(resolve => { completeCallback = resolve }))
+    const { default: SiteRoot } = await import('./SiteRoot.jsx')
+    vi.useFakeTimers()
+    render(<SiteRoot />)
+    await act(async () => {})
+    expect(screen.getByRole('status').textContent).toBe('Completing sign in')
+
+    act(() => {
+      window.history.replaceState({}, '', path)
+      window.dispatchEvent(new PopStateEvent('popstate'))
+    })
+    expect(screen.queryByText('Completing sign in')).toBeNull()
+    await act(async () => { completeCallback(true); await vi.advanceTimersByTimeAsync(20000) })
+    expect(callback).toHaveBeenCalledTimes(1)
+    expect(screen.queryByText('Completing sign in')).toBeNull()
+    expect(screen.queryByRole('alert')).toBeNull()
+    vi.useRealTimers()
+    expect(await screen.findByTestId('app-stub')).toBeTruthy()
+    expect(window.location.pathname).toBe(path)
+  }, 20_000)
+
   it('removes callback parameters before saving the page URL for a sign-in retry after timeout', async () => {
     window.history.replaceState({ page: 'drawing' }, '', '/app?surface=cad&code=x&state=y&drawing=roof#details')
     const auth = await import('../auth.js')

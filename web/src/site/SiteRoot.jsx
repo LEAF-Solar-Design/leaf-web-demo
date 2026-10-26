@@ -107,6 +107,13 @@ export default function SiteRoot() {
   // off, which IS the rollback contract (consumers render inline on null).
   const [studioGround, setStudioGround] = useState(null)
   const beginSignIn = useAsyncScope([path])
+  const callbackPathRef = useRef(path)
+
+  useEffect(() => {
+    if (callbackPathRef.current === path) return
+    callbackPathRef.current = path
+    setAuthCallbackPending(false)
+  }, [path])
 
   useEffect(() => {
     if (!authCallbackPending) return
@@ -126,7 +133,10 @@ export default function SiteRoot() {
       if (signedIn) { live = false; setAuthError(''); window.location.reload() }
       else fail()
     }).catch(fail)
-    return () => { live = false; clearTimeout(timer) }
+    return () => {
+      live = false
+      clearTimeout(timer)
+    }
   }, [authCallbackPending, beginSignIn])
 
   // Keyboard recasts — ONLY in scenes site|tool (listener not registered in

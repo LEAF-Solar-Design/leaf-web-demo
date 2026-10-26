@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import React, { useEffect, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
@@ -29,6 +29,8 @@ function productionCallback(file, predicate) {
 const loginBody = productionCallback('./App.jsx', node => node.type === 'VariableDeclarator' && node.id.name === 'onLogin')
 const returnBody = productionCallback('./site/SiteRoot.jsx', (node, text) => node.type === 'CallExpression'
   && node.callee.name === 'useEffect' && text(node.arguments[0]).includes('handleRedirectCallback('))
+const retireBody = productionCallback('./site/SiteRoot.jsx', (node, text) => node.type === 'CallExpression'
+  && node.callee.name === 'useEffect' && text(node.arguments[0]).includes('callbackPathRef.current'))
 const appReturnBody = productionCallback('./App.jsx', (node, text) => node.type === 'CallExpression'
   && node.callee.name === 'useEffect' && text(node.arguments[0]).includes('handleRedirectCallback('))
 const retryBody = productionCallback('./site/SiteRoot.jsx', (node, text) => node.type === 'ArrowFunctionExpression'
@@ -54,6 +56,9 @@ function CallbackHarness({ callback, onReload, scope = 'first' }) {
   const [pending, setAuthCallbackPending] = useState(true)
   const [message, setAuthError] = useState('')
   const beginSignIn = useAsyncScope([scope])
+  const callbackPathRef = useRef(scope)
+  useEffect(() => Function('callbackPathRef', 'path', 'setAuthCallbackPending',
+    `return (${retireBody})()`)(callbackPathRef, scope, setAuthCallbackPending), [scope])
   useEffect(() => Function('authCallbackPending', 'handleRedirectCallback', 'setAuthCallbackPending', 'setAuthError', 'humanizeError', 'window', 'beginSignIn',
     `return (${returnBody})()`)(pending, callback, setAuthCallbackPending, setAuthError, humanizeError,
     { location: { reload: onReload } }, beginSignIn), [pending, callback, onReload, beginSignIn])
@@ -64,6 +69,14 @@ it('clears pending feedback when the callback rejects', async () => {
   render(<CallbackHarness callback={() => Promise.reject(new Error('SDK load failed'))} />)
   expect((await screen.findByRole('alert')).textContent).toBe("Sign-in couldn't be completed.")
   expect(screen.queryByText('Completing sign in')).toBeNull()
+})
+
+it('reloads after a successful callback in the current scope', async () => {
+  const onReload = vi.fn()
+  render(<CallbackHarness callback={async () => true} onReload={onReload} />)
+  await act(async () => {})
+  expect(onReload).toHaveBeenCalledTimes(1)
+  expect(screen.queryByRole('alert')).toBeNull()
 })
 
 it('stops waiting after twenty seconds even if the callback never settles', async () => {
@@ -108,9 +121,10 @@ it('ignores the site callback success and timeout after navigation changes its s
   let complete
   const callback = () => new Promise(resolve => { complete = resolve })
   const onReload = vi.fn()
-  render(<CallbackHarness callback={callback} onReload={onReload} />)
+  const view = render(<CallbackHarness callback={callback} onReload={onReload} />)
   await act(async () => {})
-  act(() => window.dispatchEvent(new PopStateEvent('popstate')))
+  view.rerender(<CallbackHarness callback={callback} onReload={onReload} scope="second" />)
+  expect(screen.queryByText('Completing sign in')).toBeNull()
   await act(async () => { complete(true); await vi.advanceTimersByTimeAsync(20000) })
   expect(onReload).not.toHaveBeenCalled()
   expect(screen.queryByRole('alert')).toBeNull()
