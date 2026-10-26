@@ -35,6 +35,16 @@ describe('component v1 scale rounding and text minimum (P6f)', () => {
       }
     })
 
+    it(`${file} uses size tokens or inherit in font shorthands without bare pixel sizes`, () => {
+      for (const { property, value } of declarations) {
+        if (property !== 'font') continue
+        expect(value, `${file} ${property}: ${value}`)
+          .toMatch(/^(?:inherit)$|var\(--leaf-size-[\w-]+\)/i)
+        expect(value, `${file} ${property}: ${value}`)
+          .not.toMatch(/(-?(?:\d*\.)?\d+)px\b/i)
+      }
+    })
+
     it(`${file} uses radius tokens with only the specified exceptions`, () => {
       let barExceptions = 0
       for (const { selector, property, value } of declarations) {
@@ -55,9 +65,9 @@ describe('component v1 scale rounding and text minimum (P6f)', () => {
     })
 
     it(`${file} has no pixel font size below 12px`, () => {
-      for (const [, value] of css.matchAll(/\bfont-size\s*:\s*([^;}]+)/gi)) {
+      for (const [, property, value] of css.matchAll(/\b(font(?:-size)?)\s*:\s*([^;}]+)/gi)) {
         for (const [, pixels] of value.matchAll(/(-?(?:\d*\.)?\d+)px\b/gi)) {
-          expect(Number(pixels), `${file} font-size: ${value}`).toBeGreaterThanOrEqual(12)
+          expect(Number(pixels), `${file} ${property}: ${value}`).toBeGreaterThanOrEqual(12)
         }
       }
     })

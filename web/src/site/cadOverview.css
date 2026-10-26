@@ -3,7 +3,7 @@
   width: 182px; box-sizing: border-box; pointer-events: auto;
   color: var(--ck-ink, #e2e2e2); background: var(--ck-glass-panel, #1e2227);
   border: 1px solid var(--ck-edge, #424242); border-radius: var(--leaf-radius-key);
-  font: 12px/1.4 var(--ck-font, system-ui);
+  font: var(--leaf-size-caption)/1.4 var(--ck-font, system-ui);
 }
 .cad-overview[data-collapsed="true"] { width: auto; }
 .cad-overview .cad-overview-toggle, .cad-overview .cad-overview-map {
