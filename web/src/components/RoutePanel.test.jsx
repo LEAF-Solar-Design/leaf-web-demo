@@ -248,7 +248,7 @@ describe('RoutePanel solve lane', () => {
 
     const options = screen.getAllByRole('option')
     expect(options[0].querySelector('.label').textContent)
-      .toBe('string-autofill-opt · Autofill strings · params {"panelsPerString":12}')
+      .toBe('string-autofill-opt · Autofill strings · panels per string 12')
     expect(options[1].querySelector('.label').textContent)
       .toBe('solar-solve-proposal · Propose a solve')
   })

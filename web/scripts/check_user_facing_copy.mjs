@@ -2,7 +2,7 @@
 // User-facing copy lint (learning UI-L7). Fails CI when copy that reaches a
 // customer carries a placeholder marker, a TODO, lorem ipsum, statistics
 // notation (n = 18) or an em or en dash. No parser and no dependency: bounded
-// regular expressions over web/src and web/index.html, deterministic order.
+// extraction over web/src and web/index.html, deterministic order.
 // Naming law: Leaf Automation; rules from ~/.claude/scripts/prose-check.sh.
 // Fails closed: an unreadable, non-UTF-8 or oversize file counts as a hit, and
 // an allowlist entry that matches nothing is itself a failure.
@@ -49,7 +49,7 @@ function pathShaped(token) {
 }
 
 const MARKERS = [
-  { name: 'placeholder', re: /\bplaceholder\b/i },
+  { name: 'placeholder', re: /\bplaceholders?\b/i },
   { name: 'todo', re: /\btodo\b/i },
   { name: 'tbd', re: /\btbd\b/i },
   { name: 'fixme', re: /\bfixme\b/i },
@@ -103,7 +103,55 @@ const STRICT_SKIP_BEFORE = new RegExp(
 const STRICT_SKIP_VALUE = /^(?:[#./?]|https?:|mailto:|data:|[A-Za-z][\w+.-]*:\/\/)|^[\w.-]+\.(?:css|js|jsx|mjs|cjs|json|html|png|jpe?g|svg|webp|woff2?)$/;
 // One `${...}` hole, one nesting level deep (enough for `${a ? b : c}`).
 const TEMPLATE_HOLE_RE = /\$\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}/g;
-const ALL_LITERALS_RE = new RegExp(LITERAL, 'g');
+
+// Walk template expressions as code so their quoted branches and nested
+// templates are scanned too. Keep each literal's real offset for diagnostics
+// and allowlist matching; only its own text segments count as prose.
+function quotedLiterals(source) {
+  const literals = [];
+  let cursor = 0;
+  function quote() {
+    const offset = cursor;
+    const delimiter = source[cursor++];
+    let prose = '';
+    while (cursor < source.length) {
+      const char = source[cursor++];
+      if (char === '\\') {
+        prose += char + (source[cursor++] || '');
+      } else if (char === delimiter) {
+        break;
+      } else if (delimiter !== '`' && (char === '\n' || char === '\r')) {
+        // A prose apostrophe in JSX is not a multiline JavaScript string.
+        return;
+      } else if (delimiter === '`' && char === '$' && source[cursor] === '{') {
+        cursor += 1;
+        expression();
+        prose += ' ';
+      } else {
+        prose += char;
+      }
+    }
+    literals.push({ offset, literal: source.slice(offset, cursor), prose });
+  }
+  function expression() {
+    let depth = 1;
+    while (cursor < source.length && depth > 0) {
+      const char = source[cursor];
+      if (char === '"' || char === "'" || char === '`') quote();
+      else {
+        cursor += 1;
+        if (char === '{') depth += 1;
+        if (char === '}') depth -= 1;
+      }
+    }
+  }
+  while (cursor < source.length) {
+    const char = source[cursor];
+    if (char === '"' || char === "'" || char === '`') quote();
+    else cursor += 1;
+  }
+  return literals.sort((a, b) => a.offset - b.offset);
+}
 
 // Blank comments to spaces (newlines kept) so offsets, lines and columns stay
 // true and a `// TODO` in code is never read as JSX text.
@@ -140,6 +188,8 @@ export function extractStrings(text, relPath = '', { strict = false } = {}) {
   const isHtml = relPath.endsWith('.html');
   const source = blankComments(text, isHtml);
   const found = new Map();
+  const literals = strict ? quotedLiterals(source) : [];
+  const byOffset = new Map(literals.map((literal) => [literal.offset, literal]));
 
   for (const m of source.matchAll(JSX_TEXT_RE)) {
     const raw = m[1];
@@ -156,16 +206,18 @@ export function extractStrings(text, relPath = '', { strict = false } = {}) {
   for (const re of [ATTRIBUTE_RE, OBJECT_KEY_RE]) {
     re.lastIndex = 0;
     for (const m of source.matchAll(re)) {
-      const literal = m[m.length - 1];
+      const matched = m[m.length - 1];
+      const offset = m.index + m[0].length - matched.length;
+      const parsed = byOffset.get(offset);
+      const literal = parsed?.literal || matched;
       const isTemplate = literal.startsWith('`');
       // A `${}` template mixes copy with code. The bounded passes cannot tell
       // the halves apart, so default mode skips it; strict mode reads the
       // literal segments around every hole.
       if (isTemplate && literal.includes('${') && !strict) continue;
       const value = literal.slice(1, -1);
-      const prose = isTemplate ? value.replace(TEMPLATE_HOLE_RE, ' ') : value;
+      const prose = parsed?.prose ?? (isTemplate ? value.replace(TEMPLATE_HOLE_RE, ' ') : value);
       if (!/[A-Za-z\u2013\u2014]/.test(prose) && !/&[mn]dash;|\\u201[34]/i.test(prose)) continue;
-      const offset = m.index + m[0].length - literal.length;
       if (!found.has(offset)) found.set(offset, { text: value, prose });
     }
   }
@@ -174,15 +226,11 @@ export function extractStrings(text, relPath = '', { strict = false } = {}) {
   // sees a ternary branch inside a JSX expression container, a template
   // literal's segments, and a string handed to the UI's own message helpers.
   if (strict) {
-    ALL_LITERALS_RE.lastIndex = 0;
-    for (const m of source.matchAll(ALL_LITERALS_RE)) {
-      const literal = m[0];
-      const offset = m.index;
+    for (const { literal, offset, prose } of literals) {
       if (found.has(offset)) continue;
       if (STRICT_SKIP_BEFORE.test(source.slice(Math.max(0, offset - 80), offset))) continue;
       const value = literal.slice(1, -1);
       if (STRICT_SKIP_VALUE.test(value)) continue;
-      const prose = literal.startsWith('`') ? value.replace(TEMPLATE_HOLE_RE, ' ') : value;
       found.set(offset, { text: value, prose, strict: true });
     }
   }
