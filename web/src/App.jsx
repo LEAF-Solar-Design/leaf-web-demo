@@ -1187,6 +1187,18 @@ export default function App() {
     actorId: projectSolarAccountScope && projectSolarAccountScope !== 'guest' ? projectSolarAccountScope : null,
     generation: session.generation,
   }
+  // Discovery names the loaded empty project, never a retained standalone drawing.
+  const catalogDiscovery = useMemo(() => projectMode && signedIn
+    && projectSolarSession.authenticated && projectSolarSession.actorId && !wsLoading && !wsError
+    && orgId && workspace?.project?.project_id === openProjectId
+    && [workspace?.org_id, workspace?.project?.org_id].every((id) => id == null || id === orgId)
+    && Array.isArray(workspace?.drawing_versions) && workspace.drawing_versions.length === 0
+    && canonicalVersionId == null && ['project', 'ship'].includes(surfaceSlots.toolbar.profile)
+    ? { projectId: openProjectId, orgId, actorId: projectSolarSession.actorId,
+      generation: projectSolarSession.generation, profile: surfaceSlots.toolbar.profile } : null,
+  [projectMode, signedIn, projectSolarSession.authenticated, projectSolarSession.actorId,
+    projectSolarSession.generation, wsLoading, wsError, orgId, workspace, openProjectId,
+    canonicalVersionId, surfaceSlots.toolbar.profile])
   const projectSolarClientRef = useRef(null)
   const createProjectSolarScopeClient = useCallback(() => {
     const client = createProjectSolarClient()
@@ -1311,6 +1323,8 @@ export default function App() {
         solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
         authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
         projectIntents: PROJECT_SOLAR_INTENTS,
+        catalogDiscovery,
+        drawingId: null, drawing_id: null, drawingVersion: null, drawing_version: null,
       } : {}),
     },
   })
@@ -3824,6 +3838,8 @@ export default function App() {
         solarBinding: projectSolar.ready ? projectSolar.scope.binding : null,
         authorityKey: projectSolar.ready ? projectSolar.scope.authorityKey : null,
         projectIntents: PROJECT_SOLAR_INTENTS,
+        catalogDiscovery,
+        drawingId: null, drawing_id: null, drawingVersion: null, drawing_version: null,
       })
       return
     }
@@ -3832,10 +3848,11 @@ export default function App() {
     catalogController.setContext({
       solarBinding: undefined,
       authorityKey: undefined,
+      catalogDiscovery: null,
       projectIntents: undefined,
       ...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({ enabled: ENV_SOLAR_SETTINGS_FORM, mock, profile: surfaceSlots.toolbar.profile, context: catalogRunContext }) : {}),
     })
-  }, [catalogController, projectMode, projectSolar.ready, projectSolar.scope.binding, projectSolar.scope.authorityKey, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
+  }, [catalogController, projectMode, catalogDiscovery, projectSolar.ready, projectSolar.scope.binding, projectSolar.scope.authorityKey, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   // Guided Solar step rail: record the drawing the effect above just handed the catalog controller, so the
   // rail knows which drawing its families belong to and never files one drawing's readiness under another.
   useEffect(() => {

@@ -145,6 +145,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   const projectFingerprint = () => {
     if (!projectScope()) return null
     try {
+      if (current.catalogDiscovery) return JSON.stringify(['discovery', sortedJson(current.catalogDiscovery)])
       return JSON.stringify([solarDrawingBindingKey(current.solarBinding), current.authorityKey,
         services.projectSolarClient?.getSnapshot().leaseRevision,
         sortedJson(current.projectIntents || [])])
@@ -368,6 +369,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     if (current.guestReadsPaused) return undefined
     const request = ++catalogRequest
     const project = projectScope()
+    const discovery = project && current.catalogDiscovery
     const fingerprint = projectFingerprint()
     const mock = current.mock
     const projectClient = services.projectSolarClient
@@ -393,7 +395,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     }
     publish({ catalogError: null })
     try {
-      if (project) {
+      if (project && !discovery) {
         if (!requestIsCurrent()) return undefined
         const clientScope = projectClient?.getSnapshot?.()
         if (!sameSolarDrawingBinding(current.solarBinding, clientScope?.binding) ||
@@ -417,7 +419,10 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         }
         if (!isCurrent()) return undefined
       }
-      const catalog = project ? await services.getCapabilities(mock, {
+      if (discovery) isCurrent = requestIsCurrent
+      const catalog = discovery ? await services.getCapabilities(mock, {
+        catalogDiscovery: discovery,
+      }, { signal: catalogAbort.signal }) : project ? await services.getCapabilities(mock, {
         solarBinding: capturedBinding,
         authorityKey: capturedAuthorityKey,
         projectIntents,
@@ -445,6 +450,11 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       if (project) {
         if (!isCurrent()) return undefined
         for (const [name, entitlement] of learned) learnedSolar.set(name, entitlement)
+        if (discovery) {
+          // Discovery is display-only: never issue a project admission receipt.
+          publish({ catalog: projectCatalogData, openFamilies, projectCatalog: null })
+          return projectCatalogData
+        }
         acceptedPreview = fingerprint
         publish({
           catalog: projectCatalogData,
