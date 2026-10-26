@@ -33,6 +33,41 @@ it('retains a Release failure after successful readback', async () => {
   expect(controller.getSnapshot().error).toContain('Check the connection and retry.')
 })
 
+it.each(['reject', 'resolve'])('lets a new account Take the same drawing before an old Take settles (%s)', async (settlement) => {
+  const api = services()
+  let resolveOld
+  let rejectOld
+  api.take.mockImplementationOnce(() => new Promise((resolve, reject) => {
+    resolveOld = resolve
+    rejectOld = reject
+  })).mockResolvedValueOnce({ acquired: true, checkout_capability: 'cap-b' })
+  const controller = controllerFor(api)
+  const oldTake = controller.take()
+  expect(controller.getSnapshot().busy).toBe(true)
+  controller.setScope({ drawingId: 'drawing', holder: 'holder-b' })
+  await controller.refresh()
+  expect(controller.getSnapshot().unknown).toBe(false)
+  expect(controller.getSnapshot().busy).toBe(false)
+  const checkoutB = { holder: 'holder-b', expires: new Date(Date.now() + 60000).toISOString() }
+  api.loadVersions.mockResolvedValue({ checkout: checkoutB })
+  expect(await controller.take()).toEqual({ acquired: true, checkout_capability: 'cap-b' })
+  expect(api.take).toHaveBeenNthCalledWith(2, 'drawing', 'holder-b', null)
+  expect(controller.getCapability()).toBe('cap-b')
+  expect(controller.getSnapshot().heldByUs).toBe(true)
+  expect(controller.getSnapshot().busy).toBe(false)
+  const snapshot = controller.getSnapshot()
+  const reads = api.loadVersions.mock.calls.length
+  const published = vi.fn()
+  controller.subscribe(published)
+  if (settlement === 'reject') rejectOld(Object.assign(new Error('Forbidden'), { status: 403 }))
+  else resolveOld({ acquired: true, checkout_capability: 'cap-a' })
+  await oldTake
+  expect(controller.getSnapshot()).toBe(snapshot)
+  expect(controller.getCapability()).toBe('cap-b')
+  expect(api.loadVersions).toHaveBeenCalledTimes(reads)
+  expect(published).not.toHaveBeenCalled()
+})
+
 it('shows a failed Take and allows an explicit retry', async () => {
   const onTake = vi.fn().mockResolvedValueOnce(null).mockResolvedValueOnce({ acquired: true })
   render(<CheckoutControls onTake={onTake} />)
@@ -132,12 +167,46 @@ it('hides another account’s pending inputs at mount and keeps them for its ret
   const hook = renderHook(() => useJobController({ storage: localStorage, readsPaused: true }))
   expect(hook.result.current.pendingRun).toBeNull()
   expect(localStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
-  expect(JSON.parse(saved).account).toBe('studio:account-a')
+  expect(JSON.parse(saved).account).toBe(JSON.stringify(['studio', 'account-a', '']))
   act(() => {
     localStorage.setItem('leaf.jwt', tokenA)
     window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: tokenA }))
   })
   expect(hook.result.current.pendingRun).toEqual(pending)
+  expect(localStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
+})
+
+it('hides pending inputs across organizations and restores them only in their full scope', () => {
+  localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'account-a' }))}.signature`)
+  localStorage.setItem('leaf.org_id', 'org1')
+  const pending = savePendingRun('count', { private: 'roof' }, localStorage)
+  const saved = localStorage.getItem(PENDING_RUN_KEY)
+  expect(JSON.parse(saved).account).toBe(JSON.stringify(['studio', 'account-a', 'org1']))
+  localStorage.setItem('leaf.org_id', 'org2')
+  expect(readPendingRun(localStorage)).toBeNull()
+  const hook = renderHook(() => useJobController({ storage: localStorage, readsPaused: true }))
+  expect(hook.result.current.pendingRun).toBeNull()
+  expect(localStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
+  act(() => {
+    localStorage.setItem('leaf.org_id', 'org1')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.org_id', newValue: 'org1' }))
+  })
+  expect(readPendingRun(localStorage)).toEqual(pending)
+  expect(hook.result.current.pendingRun).toEqual(pending)
+  act(() => {
+    localStorage.removeItem('leaf.org_id')
+    window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.org_id', newValue: null }))
+  })
+  expect(readPendingRun(localStorage)).toBeNull()
+  expect(hook.result.current.pendingRun).toBeNull()
+  expect(localStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
+})
+
+it('keeps old issuer/subject-only pending inputs hidden without deleting them', () => {
+  localStorage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'account-a' }))}.signature`)
+  savePendingRun('count', { private: 'roof' }, localStorage, Date.now(), 'studio:account-a')
+  const saved = localStorage.getItem(PENDING_RUN_KEY)
+  expect(readPendingRun(localStorage)).toBeNull()
   expect(localStorage.getItem(PENDING_RUN_KEY)).toBe(saved)
 })
 

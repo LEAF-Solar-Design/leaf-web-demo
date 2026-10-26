@@ -38,7 +38,7 @@ it('binds an anonymous paused submission to the first sign-in after the redirect
   storage.setItem('leaf.jwt', `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'designer-a' }))}.signature`)
   const restored = renderHook(() => useJobController({ storage, readsPaused: true }))
   expect(restored.result.current.pendingRun.params).toEqual({ panels: 6 })
-  expect(JSON.parse(storage.getItem(PENDING_RUN_KEY)).account).toBe('studio:designer-a')
+  expect(JSON.parse(storage.getItem(PENDING_RUN_KEY)).account).toBe(JSON.stringify(['studio', 'designer-a', '']))
   restored.unmount()
   const signedIn = renderController({ storage, services: { listJobs: vi.fn(async () => []) } })
   let pending
@@ -58,14 +58,14 @@ it('keeps an anonymous run bound to its first account when another account signs
     storage.setItem('leaf.jwt', token)
     window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
   })
-  expect(JSON.parse(storage.getItem(PENDING_RUN_KEY)).account).toBe('studio:designer-a')
+  expect(JSON.parse(storage.getItem(PENDING_RUN_KEY)).account).toBe(JSON.stringify(['studio', 'designer-a', '']))
   const other = `header.${btoa(JSON.stringify({ iss: 'studio', sub: 'designer-b' }))}.signature`
   act(() => {
     storage.setItem('leaf.jwt', other)
     window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: other }))
   })
   expect(hook.result.current.pendingRun).toBeNull()
-  expect(readPendingRun(storage, Date.now(), 'studio:designer-a')?.params).toEqual({ panels: 6 })
+  expect(readPendingRun(storage, Date.now(), JSON.stringify(['studio', 'designer-a', '']))?.params).toEqual({ panels: 6 })
   expect(storage.getItem(PENDING_RUN_KEY)).not.toBeNull()
 })
 

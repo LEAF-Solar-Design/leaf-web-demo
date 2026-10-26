@@ -104,7 +104,7 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
   // Monotonic per setScope CHANGE: async work fences itself on this so a
   // result that raced a tenant/drawing switch can prove its scope is stale.
   let scopeGeneration = 0
-  let mutationBusy = false
+  let mutationBusyGeneration = null
   const listeners = new Set()
   let snapshotState = {
     ...state,
@@ -175,17 +175,18 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
   }
 
   const mutate = async (operation, { installCapability = true } = {}) => {
-    if (state.mock || !state.drawingId || mutationBusy) return null
-    mutationBusy = true
+    if (state.mock || !state.drawingId || mutationBusyGeneration === scopeGeneration) return null
     const drawing = state.drawingId
     const holderAtStart = state.holder
     const generation = scopeGeneration
+    mutationBusyGeneration = generation
     let mutationError = null
     publish({ busy: true, error: null })
     try {
       const result = operation === 'take'
         ? await services.take(drawing, holderAtStart, capability)
         : await services.release(drawing, capability)
+      if (disposed || generation !== scopeGeneration) return result
       if (operation === 'take') {
         if (result?.acquired && result.checkout_capability) {
           capability = installCapability ? result.checkout_capability : null
@@ -196,12 +197,12 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
       }
       return result
     } catch (error) {
-      if (error?.status === 403 || error?.status === 409) capability = null
+      if (!disposed && generation === scopeGeneration && (error?.status === 403 || error?.status === 409)) capability = null
       mutationError = humanizeError(error)
       return null
     } finally {
-      if (!disposed && drawing === state.drawingId) await refresh()
-      mutationBusy = false
+      if (!disposed && generation === scopeGeneration) await refresh()
+      if (mutationBusyGeneration === generation) mutationBusyGeneration = null
       if (!disposed && generation === scopeGeneration) publish({ busy: false, ...(mutationError ? { error: mutationError } : {}) })
     }
   }
@@ -228,9 +229,8 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
         readFailed: false,
         failure: null,
         error: null,
-        // mutate()'s finally guards its busy:false on the OLD drawingId, so a
-        // scope change mid-mutation would strand busy forever (panel W2c,
-        // lock-safety WARN): the new scope starts un-busy by definition.
+        // In-flight mutations belong to their starting generation; the new
+        // scope starts un-busy and may mutate before the old request settles.
         busy: changed ? false : state.busy,
       })
     },

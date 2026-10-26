@@ -72,7 +72,8 @@ export function pendingRunAccount(storage = browserStorage()) {
     const token = storage?.getItem('leaf.jwt')
     if (!token) return null
     const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
-    return typeof payload.sub === 'string' && payload.sub ? `${payload.iss || ''}:${payload.sub}` : null
+    const org = storage?.getItem('leaf.org_id') || ''
+    return typeof payload.sub === 'string' && payload.sub ? JSON.stringify([payload.iss || '', payload.sub, org]) : null
   } catch { return null }
 }
 
@@ -98,7 +99,8 @@ export function readPendingRun(storage = browserStorage(), now = Date.now(), acc
     clearPendingRun(storage)
     return null
   }
-  // Another account may return later for its saved inputs.
+  // Another account/org may return later for its saved inputs. Legacy iss:sub
+  // owner strings no longer match the full scope: hide them without deleting.
   if (typeof record.account === 'string' && typeof account === 'string' && record.account !== account) return null
   // An expired token cannot identify the returning account yet. Keep its
   // bounded record private until sign-in establishes who is returning.
@@ -239,7 +241,7 @@ export default function useJobController({
     const unauthorized = subscribeUnauthorized(refreshSaved)
     const onStorage = event => {
       if (event.key === PENDING_RUN_LOGOUT_KEY || event.key === null) clearSaved()
-      else if (event.key === 'leaf.jwt') refreshSaved()
+      else if (event.key === 'leaf.jwt' || event.key === 'leaf.org_id') refreshSaved()
     }
     window.addEventListener('storage', onStorage)
     return () => { clear(); refresh(); unauthorized(); window.removeEventListener('storage', onStorage) }

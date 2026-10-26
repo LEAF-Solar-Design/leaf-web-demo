@@ -136,7 +136,7 @@ it('hides saved account inputs after a 401 until the same account signs back in'
   })
   const saved = storage.getItem(PENDING_RUN_KEY)
   expect(hook.result.current.pendingRun).toBeNull()
-  expect(JSON.parse(saved).account).toBe('studio:designer-a')
+  expect(JSON.parse(saved).account).toBe(JSON.stringify(['studio', 'designer-a', '']))
   act(() => {
     storage.setItem('leaf.jwt', token)
     window.dispatchEvent(new StorageEvent('storage', { key: 'leaf.jwt', newValue: token }))
@@ -200,7 +200,7 @@ it('hides a 401 save after another tab removes the token until the same account 
   })
   expect(hook.result.current.pendingRun).toBeNull()
   const saved = storage.getItem(PENDING_RUN_KEY)
-  expect(JSON.parse(saved).account).toBe('studio:designer-a')
+  expect(JSON.parse(saved).account).toBe(JSON.stringify(['studio', 'designer-a', '']))
   expect(JSON.parse(saved).params).toEqual({ panels: 8 })
   act(() => {
     storage.setItem('leaf.jwt', token)
