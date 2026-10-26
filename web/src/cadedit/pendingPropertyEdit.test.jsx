@@ -84,16 +84,16 @@ describe('applyEdit with an explicit { targetId }', () => {
     act(() => { getContext().session.actions.select('7') })
     act(() => { getContext().session.actions.applyEdit('setColor', { aci: 'red' }, { targetId: 'gone' }) })
     expect(edits()).toHaveLength(0)
-    expect(getContext().session.status).toBe('Edit refused (setColor): the target entity is no longer in the document.')
+    expect(getContext().session.status).toBe('Colour change refused: the target object is no longer in the drawing.')
   })
 
   it('judges the MLEADER and DIMENSION refusals on the target, not the selection', () => {
     const { getContext, edits } = mount()
     act(() => { getContext().session.actions.select('9') })
     act(() => { getContext().session.actions.applyEdit('setColor', { aci: 'red' }, { targetId: 'm1' }) })
-    expect(getContext().session.status).toBe('a mleader is placed, not edited, in this round')
+    expect(getContext().session.status).toBe('A multileader can be placed here but not edited.')
     act(() => { getContext().session.actions.applyEdit('setColor', { aci: 'red' }, { targetId: 'd1' }) })
-    expect(getContext().session.status).toBe('a dimension is placed, not edited, in this round')
+    expect(getContext().session.status).toBe('A dimension can be placed here but not edited.')
     expect(edits()).toHaveLength(0)
     // And the reverse: a DIMENSION selected, a LINE target, the edit posts.
     act(() => { getContext().session.actions.select('d1') })
@@ -105,7 +105,7 @@ describe('applyEdit with an explicit { targetId }', () => {
     const { getContext, edits } = mount()
     act(() => { getContext().session.actions.select('9') })
     act(() => { getContext().session.actions.applyEdit('move', { dx: '1', dy: '0' }, { targetId: 'i1' }) })
-    expect(getContext().session.status).toBe('an INSERT is placed, not edited, in this round')
+    expect(getContext().session.status).toBe('A block can be placed here but not edited.')
     expect(edits()).toHaveLength(0)
     act(() => { getContext().session.actions.applyEdit('setColor', { aci: 'red' }, { targetId: 'i1' }) })
     expect(edits()).toEqual([{ type: 'applyEdit', op: 'setColor', payload: { entityId: 'i1', aci: 1 } }])
@@ -116,7 +116,7 @@ describe('applyEdit with an explicit { targetId }', () => {
     act(() => { getContext().session.actions.select('7') })
     act(() => { getContext().session.actions.applyEdit(op, { dist: '5', x: '0', y: '0', edge: '9', groupName: 'G' }, { targetId: '7' }) })
     expect(edits()).toHaveLength(0)
-    expect(getContext().session.status).toBe(`Edit refused (${op}): this command works on the selection, not a pinned target.`)
+    expect(getContext().session.status).toBe(`${({ offset: 'Offset', matchprop: 'Match properties', group: 'Group', ungroup: 'Ungroup', trim: 'Trim', fillet: 'Fillet' })[op]} works on the current selection. Select the objects and retry.`)
   })
 
   it('the call without a third argument is unchanged: the live selection, and the multi-selection refusal', () => {

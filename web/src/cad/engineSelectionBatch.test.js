@@ -152,7 +152,18 @@ function assertRefusal(out, reason, op = 'move') {
   act(() => h.result.current.actions.applyEdit(op, { dx: '2', dy: '3' }))
   expect(h.worker.posted).toHaveLength(1)
   h.worker.emit(out.reply)
-  expect(h.result.current.status).toBe('Edit refused (' + op + '): ' + reason)
+  expect(h.result.current.status).toBe({
+    'step_1_move:bad_entity_id': 'The selected object is no longer available. Select it again and retry.',
+    batch_empty: 'There are no changes to apply. Choose a change and retry.',
+    batch_too_many_steps: 'There are too many changes to apply at once. Select fewer objects and retry.',
+    step_0_batch_nested: 'These combined changes cannot run together. Apply them separately.',
+    'step_0_hasOwnProperty:unknown_op:hasOwnProperty': 'Move is not available here. Choose another command.',
+    'batch_snapshot_failed:injected_snapshot': 'The drawing could not be prepared for these changes. Reopen it and retry.',
+    'batch_write_failed:injected_write': 'These changes could not be written to the drawing. Retry or reopen the drawing.',
+    'batch_parse_failed:injected_parse': 'The changed drawing could not be read. Undo and retry the change.',
+    'batch_projection_failed:injected_projection': 'The changed objects could not be displayed. Reopen the drawing and retry.',
+    'batch_projection_failed:created_entity_lost': 'The changed objects could not be displayed. Reopen the drawing and retry.',
+  }[reason])
   expect(h.result.current.entities).toBe(before.entities)
   expect(h.result.current.selectedIds).toEqual(S)
   expect(h.result.current.savedBytes).toBe(before.savedBytes)
@@ -209,7 +220,7 @@ it('MS25 restore-failure', () => {
   expect(h.result.current.engineParsed).toBe(false)
   expect(h.result.current.selectedIds).toEqual([])
   expect(h.result.current.undoDepth).toBe(0)
-  expect(h.result.current.status).toBe('Engine refused: batch_restore_failed:injected_restore')
+  expect(h.result.current.status).toBe('The drawing could not be restored after the failed change. Open the drawing again.')
 })
 it('MS26 created-id-loss', () => {
   const out = raw(batch('copy'), 'created')

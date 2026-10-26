@@ -144,7 +144,7 @@ describe('Solar panel geometry', () => {
   })
   it('row6 refuses an INSERT selection by kind', () => {
     expect(buildEditPayload('arrayRect', '9', grid, [], [{ ...outline, type: 'INSERT' }]).refusal)
-      .toBe('an INSERT is placed, not edited, in this round')
+      .toBe('A block can be placed here but not edited.')
   })
   it('row12 selects Solar on each entry while keeping the engine document and undo state', async () => {
     const switchProfile = mount()
