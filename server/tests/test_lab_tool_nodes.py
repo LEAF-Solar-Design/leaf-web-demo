@@ -389,6 +389,22 @@ def test_projected_row_changed(rig, monkeypatch):
     assert not rig.calls
 
 
+def test_refused_tenant_tool_never_falls_back_to_a_seed(rig, monkeypatch):
+    from dataclasses import replace
+    projected = projected_graph(monkeypatch)
+    descriptor = next(tool for tool in lab_tool_manifests.tenant_tool_projection(TENANT)
+                      if tool.name == projected.trusted.kind)
+    refused = replace(descriptor, manifest=None, reason="live APS tools are not Lab nodes")
+    monkeypatch.setattr(lab_tool_manifests, "tenant_tool_projection", lambda tenant: (refused,))
+    monkeypatch.setattr(lab_tool_manifests, "trusted_for", lambda *args: projected.trusted)
+    monkeypatch.setattr(lab_tool_manifests, "row_for", lambda *args: None)
+    seeds = nodes.catalog.seed_tools()
+    monkeypatch.setattr(nodes.catalog, "seed_tools", lambda: seeds + [dict(projected.tool)])
+    assert rig.call(trusted=projected.trusted, manifest=projected.manifest) == {
+        "error": "lab_tool_tool_changed"}
+    assert not rig.calls
+
+
 @pytest.mark.parametrize("data,error", [({"z": 2, "a": [True, None]}, None),
                                        ("x" * 65535, "output-refused")],
                          ids=["within-limit", "over-limit"])

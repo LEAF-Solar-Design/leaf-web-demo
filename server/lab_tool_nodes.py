@@ -132,13 +132,17 @@ class ToolNodeAdapter:
         trusted = resolved or trusted
         row = lab_tool_manifests.row_for(self.tenant, trusted.kind, trusted.version,
                                         manifest.get("version", {}).get("code_sha256"))
-        projected = next((tool for tool in lab_tool_manifests.tenant_tool_projection(self.tenant)
+        # Any tenant tool of this name is authoritative, projected or refused: a pin it no
+        # longer matches is refused, never resolved through the seed list.
+        projection = lab_tool_manifests.tenant_tool_projection(self.tenant)
+        known = any(tool.name == trusted.kind for tool in projection)
+        projected = next((tool for tool in projection
                           if tool.name == trusted.kind and tool.version == trusted.version
                           and tool.manifest is not None), None)
         params_by_port = {}
         if row is not None:
             tool, params_by_port = row
-        elif projected is not None:
+        elif known:
             return refuse("tool_changed")
         else:
             tool = next((tool for tool in catalog.seed_tools()
