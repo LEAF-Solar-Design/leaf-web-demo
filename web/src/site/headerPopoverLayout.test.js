@@ -59,7 +59,7 @@ describe('header popover layout', () => {
     expect(declaration(popover, 'bottom')).toBe('calc(64px + env(safe-area-inset-bottom, 0px))')
     expect(declaration(popover, 'max-height')).toBe('70vh')
     expect(declaration(popover, 'overflow-y')).toBe('auto')
-    expect(Number(declaration(popover, 'z-index'))).toBeGreaterThan(60)
+    expect(layerValue(declaration(popover, 'z-index'))).toBeGreaterThan(60)
   })
 
   it('lifts the header above the product nav while a header popover is open', () => {
