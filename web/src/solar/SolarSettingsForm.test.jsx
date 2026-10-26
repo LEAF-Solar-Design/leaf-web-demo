@@ -87,6 +87,17 @@ function rerenderProject(view, harness, changes) {
 const previewCalls = (harness) => harness.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?'));
 
 describe('Canonical Solar settings form through the merged project client', () => {
+  it.each([true, false])('W1C-31 reports the busy state when submission is unavailable (busy=%s)', async (busy) => {
+    const h = projectHarness();
+    render(<SolarSettingsForm {...h.props} busy={busy} onProjectSubmit={undefined} />);
+    await waitForMode('edit');
+    const inProgress = 'A run is in progress. Wait for it to finish.';
+    const unavailable = 'Project settings submission is not available in this view.';
+    expect(screen.getByText(busy ? inProgress : unavailable)).toBeTruthy();
+    expect(screen.queryByText(busy ? unavailable : inProgress)).toBeNull();
+    expect(applyButton().disabled).toBe(true);
+  });
+
   it('W1C16 traces each Start click from entry through a successful submission', async () => {
     const h = projectHarness({ intake: IG.intake });
     await editProject(h, 'Panels in sequence', '3');

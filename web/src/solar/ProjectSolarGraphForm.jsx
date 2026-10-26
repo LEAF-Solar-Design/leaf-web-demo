@@ -329,9 +329,9 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   }
   const armed = scope.armed && scope.armed.current()
   const reason = !PROJECT_SOLAR_GRAPH_TOOLS.includes(name) ? 'tool_unsupported' : !binding ? 'binding_invalid'
-    : !available ? 'submit_unavailable' : !currentScope ? 'scope_stale'
-      : !receiptLive ? 'scope_stale'
-        : busy || scope.lock ? 'run_in_progress'
+    : busy || scope.lock ? 'run_in_progress'
+      : !available ? 'submit_unavailable' : !currentScope ? 'scope_stale'
+        : !receiptLive ? 'scope_stale'
           : currentView?.reason ?? (!armed && !scope.blocked ? 'preview_required' : null)
   function close() {
     invalidate()
