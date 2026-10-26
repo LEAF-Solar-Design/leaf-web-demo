@@ -4,13 +4,12 @@ import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within }
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import PromptBox from './PromptBox.jsx'
 import * as api from '../api.js'
-import { getDrawingVersions, listOperatorSessions, searchIndex } from '../api.js'
+import { getDrawingVersions, searchIndex } from '../api.js'
 
 vi.mock('../api.js', async (importOriginal) => ({
   ...await importOriginal(),
-  getStoredOrgId: () => null,
+  getStoredOrgId: vi.fn(() => null),
   getDrawingVersions: vi.fn(),
-  listOperatorSessions: vi.fn(),
 }))
 
 function Harness({ initialValue = '', ...props }) {
@@ -33,12 +32,126 @@ function deferred() {
 
 beforeEach(() => {
   vi.clearAllMocks()
+  api.getStoredOrgId.mockReturnValue(null)
   getDrawingVersions.mockResolvedValue({ versions: [] })
-  listOperatorSessions.mockResolvedValue({ sessions: [] })
+  vi.spyOn(api, 'listOperatorSessions').mockResolvedValue({ sessions: [] })
   vi.spyOn(api, 'searchIndex').mockResolvedValue({ results: [] })
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ servers: [] }) }))
 })
 afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+
+it('fix4 runs an Act client command through its handler and hides commands without handlers', () => {
+  const help = { kind: 'command', name: 'help', client_action: 'show_help' }
+  const onHelp = vi.fn()
+  const onDispatch = vi.fn()
+  render(<Harness tools={[
+    { kind: 'tool', name: 'panel-count' }, help,
+    { kind: 'command', name: 'unavailable-command', client_action: 'missing' },
+  ]} commandActions={{ show_help: onHelp }} onDispatch={onDispatch} />)
+  chooseScope('act')
+  const menu = screen.getByRole('listbox', { name: 'Actions and artifacts' })
+  expect(within(menu).getByRole('option', { name: /panel-count/ })).toBeTruthy()
+  expect(within(menu).queryByRole('option', { name: /unavailable-command/ })).toBeNull()
+  fireEvent.click(within(menu).getByRole('option', { name: /help/ }))
+  expect(onHelp).toHaveBeenCalledExactlyOnceWith(help)
+  expect(onDispatch).not.toHaveBeenCalled()
+  expect(input()).toHaveValue('')
+})
+
+it('fix4 accepts an image drag with withheld metadata through dragover and drop', () => {
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = vi.fn(() => 'blob:withheld-image')
+    static revokeObjectURL = vi.fn()
+  })
+  render(<Harness imageAttachmentsEnabled />)
+  const metadata = { types: [], files: [] }
+  fireEvent.dragEnter(bar(), { dataTransfer: metadata })
+  expect(document.querySelector('.bar-drop-hint')).toBeTruthy()
+  const over = createEvent.dragOver(bar(), { dataTransfer: metadata })
+  fireEvent(bar(), over)
+  expect(over.defaultPrevented).toBe(true)
+  fireEvent.drop(bar(), { dataTransfer: { files: [new File(['png'], 'roof.png', { type: 'image/png' })] } })
+  expect(screen.getByTestId('attachment-name')).toHaveTextContent('roof.png')
+  expect(document.querySelector('.bar-drop-hint')).toBeNull()
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+it('fix4 warns for an image plus HTML clipboard markup without plain text', () => {
+  render(<Harness imageAttachmentsEnabled={false} />)
+  const getData = vi.fn((type) => type === 'text/html' ? '<img src="clipboard.png">' : '')
+  const event = createEvent.paste(input(), { clipboardData: {
+    items: [{ kind: 'file', type: 'image/png' }, { kind: 'string', type: 'text/html' }],
+    getData,
+  } })
+  fireEvent(input(), event)
+  expect(getData).toHaveBeenCalledWith('text/plain')
+  expect(event.defaultPrevented).toBe(true)
+  expect(screen.getByRole('alert')).toHaveTextContent('Image paste is available in the assistant reply box.')
+  expect(input()).toHaveValue('')
+  expect(screen.queryByTestId('attachment-chip')).toBeNull()
+})
+
+it('fix4 reports a real sessions 503 and retries the fetch', async () => {
+  api.listOperatorSessions.mockRestore()
+  const fetch = vi.fn()
+    .mockResolvedValueOnce({ ok: false, status: 503 })
+    .mockResolvedValue({ ok: true, json: async () => ({ sessions: [] }) })
+  vi.stubGlobal('fetch', fetch)
+  render(<Harness />)
+  chooseScope('act')
+  expect(await screen.findByRole('alert')).toHaveTextContent('Some saved items could not be loaded. Try again.')
+  expect(fetch.mock.calls[0][0]).toContain('/api/operator/sessions')
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+  expect(fetch.mock.calls[1][0]).toBe(fetch.mock.calls[0][0])
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+})
+
+it('fix4 treats a real sessions 404 as the normal empty index', async () => {
+  api.listOperatorSessions.mockRestore()
+  const fetch = vi.fn().mockResolvedValue({ ok: false, status: 404 })
+  vi.stubGlobal('fetch', fetch)
+  render(<Harness />)
+  chooseScope('act')
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(screen.queryByRole('status')).toBeNull())
+  expect(fetch.mock.calls[0][0]).toContain('/api/operator/sessions')
+  expect(screen.getByText(/No action or artifact matches/)).toBeTruthy()
+  expect(screen.queryByRole('alert')).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+})
+
+it('fix4 waits for late project matches before declaring search empty', async () => {
+  api.getStoredOrgId.mockReturnValue('org-a')
+  const pending = deferred()
+  vi.spyOn(api, 'listProjects').mockReturnValue(pending.promise)
+  render(<Harness initialValue="roof" mcpDiscoveryEnabled />)
+  chooseScope('find')
+  await waitFor(() => expect(searchIndex).toHaveBeenCalledTimes(1))
+  await waitFor(() => expect(api.listProjects).toHaveBeenCalledWith('org-a'))
+  expect(screen.getByText('Searching…')).toBeTruthy()
+  expect(screen.queryByText('No results for “roof”')).toBeNull()
+  await act(async () => pending.resolve([{ project_id: 'p1', name: 'Roof design' }]))
+  expect(await screen.findByRole('option', { name: /Roof design/ })).toBeTruthy()
+  expect(screen.queryByText('No results for “roof”')).toBeNull()
+})
+
+it('fix4 tracks project loading again when Retry clears the project list', async () => {
+  api.getStoredOrgId.mockReturnValue('org-a')
+  const pending = deferred()
+  vi.spyOn(api, 'listProjects').mockRejectedValueOnce(new Error('unavailable')).mockReturnValueOnce(pending.promise)
+  render(<Harness initialValue="roof" mcpDiscoveryEnabled />)
+  chooseScope('find')
+  expect(await screen.findByRole('alert')).toHaveTextContent('Projects could not be loaded. Try again.')
+  await waitFor(() => expect(searchIndex).toHaveBeenCalledTimes(1))
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  await waitFor(() => expect(searchIndex).toHaveBeenCalledTimes(2))
+  expect(api.listProjects).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('Searching…')).toBeTruthy()
+  expect(screen.queryByText('No results for “roof”')).toBeNull()
+  await act(async () => pending.resolve([{ project_id: 'p1', name: 'Roof design' }]))
+  expect(await screen.findByRole('option', { name: /Roof design/ })).toBeTruthy()
+})
 
 it('S1-46 preserves text paste when an office clipboard also carries an image', () => {
   render(<Harness />)

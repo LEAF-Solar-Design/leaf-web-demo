@@ -239,6 +239,7 @@ export default function PromptBox({
   const [sessionsData, setSessionsData] = useState(null)
   const [findResults, setFindResults] = useState(null)
   const [projectsData, setProjectsData] = useState([])
+  const [projectsLoading, setProjectsLoading] = useState(false)
   const [findLoading, setFindLoading] = useState(false)
   const [findError, setFindError] = useState(null)
   const [actLoading, setActLoading] = useState(false)
@@ -381,10 +382,13 @@ export default function PromptBox({
   useEffect(() => {
     setProjectsData([])
     setProjectsError(null)
+    setProjectsLoading(false)
     if (activeScope !== 'find' || !liveCallsAllowed || mock || !mcpDiscoveryEnabled || !projectOrgId) return undefined
     let live = true
+    setProjectsLoading(true)
     listProjects(projectOrgId).then((projects) => { if (live) setProjectsData(projects) })
       .catch(() => { if (live) setProjectsError(humanizeError('Projects could not be loaded. Try again.')) })
+      .finally(() => { if (live) setProjectsLoading(false) })
     return () => { live = false }
   }, [activeScope, liveCallsAllowed, mock, mcpDiscoveryEnabled, projectOrgId, loadAttempt])
 
@@ -436,11 +440,11 @@ export default function PromptBox({
   const paletteRows = useMemo(() => (
     activeScope === 'act' && !trigger ? [
       ...actionPaletteRows(paletteActions, value),
-      ...toolArtifactRows(tools, value),
+      ...toolArtifactRows(filterRunnable(tools, localCommandActions), value),
       ...versionArtifactRows(versionsData, value),
       ...sessionArtifactRows(sessionsData, value),
     ] : []
-  ), [activeScope, trigger, paletteActions, tools, versionsData, sessionsData, value])
+  ), [activeScope, trigger, paletteActions, tools, localCommandActions, versionsData, sessionsData, value])
   const objectMatches = drawingObjectRows(drawingObjects?.index, value, MAX_ARTIFACT_ROWS_PER_KIND + 1)
   const projectMatches = projectArtifactRows(projectsData, value, MAX_ARTIFACT_ROWS_PER_KIND + 1)
   const findRows = activeScope === 'find' && !trigger ? [
@@ -449,7 +453,7 @@ export default function PromptBox({
     ...findResultRows(findResults),
   ] : []
   const scopeRows = (activeScope === 'act' ? paletteRows : activeScope === 'find' ? findRows : []).map((row) => {
-    if (row.kind === 'drawing-object' || row.kind === 'action' || row.kind === 'tool') return row
+    if (row.kind === 'drawing-object' || row.kind === 'action' || row.kind === 'tool' || row.kind === 'command') return row
     return { ...row, disabled: true, reason: 'Open this item from its project or history view.' }
   })
   // NOT gated on scopeMenu.shown (unlike menuOpen above): activeScope is set
@@ -493,7 +497,8 @@ export default function PromptBox({
   const onPaste = (e) => {
     if (!imageAttachmentsEnabled) {
       const items = Array.from(e.clipboardData?.items || [])
-      if (!items.some((item) => item.kind === 'string') && items.some((item) => item.kind === 'file' && isAttachableImage(item))) {
+      const hasText = !!e.clipboardData?.getData?.('text/plain')?.trim()
+      if (!hasText && items.some((item) => item.kind === 'file' && isAttachableImage(item))) {
         e.preventDefault()
         setAttachmentError('Image paste is available in the assistant reply box.')
         return
@@ -667,6 +672,7 @@ export default function PromptBox({
     if (liveCallsAllowed && !mock) trackUsage('palette.pick', labels)
     if (row.kind === 'drawing-object') { drawingObjects?.focus(row.id); return }
     if (row.kind === 'action') { row.onSelect?.(); changePrompt(''); setActiveScope(null); return }
+    if (row.kind === 'command') { pick(row.entry); setActiveScope(null); return }
     if (row.kind !== 'tool') return
     changePrompt(`/${row.label} `)
     setActiveScope(null)
@@ -702,18 +708,20 @@ export default function PromptBox({
   }, [scopeOpen, scopeIdx]) // eslint-disable-line react-hooks/exhaustive-deps
 
   // --- G2 drop catcher -----------------------------------------------------
+  const acceptsDrag = (dataTransfer) => {
+    const types = [...(dataTransfer?.types || [])]
+    return types.includes('Files') || !!dataTransfer?.files?.length || (imageAttachmentsEnabled && types.length === 0)
+  }
   const onDragEnter = (e) => {
-    const types = [...(e.dataTransfer?.types || [])]
-    const hasFiles = types.includes('Files') || e.dataTransfer?.files?.length
     // Some image drags withhold file metadata until the drop. Show a hint
     // for those without cancelling the native handling of text selections.
-    if (!hasFiles && !(imageAttachmentsEnabled && types.length === 0)) return
-    if (hasFiles) e.preventDefault()
+    if (!acceptsDrag(e.dataTransfer)) return
+    e.preventDefault()
     dragDepth.current += 1
     setDragging(true)
   }
   const onDragOver = (e) => {
-    if ([...(e.dataTransfer?.types || [])].includes('Files') || e.dataTransfer?.files?.length) e.preventDefault()
+    if (acceptsDrag(e.dataTransfer)) e.preventDefault()
   }
   const onDragLeave = () => {
     dragDepth.current = Math.max(0, dragDepth.current - 1)
@@ -863,7 +871,7 @@ export default function PromptBox({
                 ? 'Sign in to search your projects.'
                 : !value.trim()
                 ? 'Type to search drawing objects, projects, versions, sessions and tools'
-                : findLoading ? 'Searching…'
+                : findLoading || projectsLoading ? 'Searching…'
                 : findError ? 'Search is unavailable.'
                 : scopeRows.length > 0
                   ? `${scopeRows.length} result${scopeRows.length === 1 ? '' : 's'} · Enter chooses an available item`

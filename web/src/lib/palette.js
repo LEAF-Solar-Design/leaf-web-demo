@@ -75,8 +75,8 @@ export function versionArtifactRows(versionsPayload, query) {
 }
 
 // The operator-session artifact index (GET /api/operator/sessions). An empty
-// payload (a non-operator caller, or the store unavailable) yields zero
-// rows honestly — api.js already folds that failure into {sessions: []}.
+// payload for a non-operator caller yields zero rows; other failures reject
+// in api.js so the palette can offer a retry.
 export function sessionArtifactRows(sessionsPayload, query) {
   const rows = []
   for (const s of sessionsPayload?.sessions || []) {
@@ -103,7 +103,9 @@ export function toolArtifactRows(tools, query) {
     if (!name) continue
     const desc = t?.description || ''
     if (!matches(query, name, desc)) continue
-    rows.push({ kind: 'tool', id: `tool:${name}`, label: name, description: desc })
+    const kind = t.kind || 'tool'
+    rows.push({ kind, id: `${kind}:${name}`, label: name, description: desc,
+      ...(kind === 'command' ? { entry: t } : {}) })
     if (rows.length >= MAX_ARTIFACT_ROWS_PER_KIND) break
   }
   return rows

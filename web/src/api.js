@@ -1466,8 +1466,9 @@ export async function listOperatorSessions(mock) {
     return await http('/api/operator/sessions', {
       headers: { 'X-Tenant-Id': TENANT },
     }, 4000)
-  } catch {
-    return { sessions: [] }
+  } catch (error) {
+    if (error?.status === 404) return { sessions: [] }
+    throw error
   }
 }
 
