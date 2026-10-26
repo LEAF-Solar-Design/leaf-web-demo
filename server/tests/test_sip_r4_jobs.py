@@ -840,7 +840,8 @@ def test_sip_r4_terminal_evidence(memory, monkeypatch):
                         "receipt": json.loads(p.receipt_bytes)}
     source = inspect.getsource(platform_complete)
     for text in ("canonical-project-graph-success", "solar.graph.completed",
-                 "history.operation.appended", "lease_expires_at>clock_timestamp()"):
+                 "history.operation.appended", "FOR UPDATE",
+                 "lease_owner=%(worker)s AND attempt=%(attempt)s"):
         assert text in source
     refused("SIP_R4_JOB_BINDING_MISMATCH", lambda:
         service.complete_project_graph_job(memory.job, "owner", 1, {}))
