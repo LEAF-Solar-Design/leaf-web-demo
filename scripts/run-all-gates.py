@@ -3799,6 +3799,8 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_evidence.py"), 28),
         Suite("server-sip-r14-admission", "server canonical Solar sizing admission",
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_admission.py"), 8),
+        Suite("server-solar-module-catalog", "server authenticated Solar module catalog proxy",
+              "pytest", SERVER, _py_pytest("tests/test_solar_module_catalog.py"), 56),
         Suite("server-sip-r14-worker", "server canonical Solar sizing worker",
               "pytest", SERVER, _py_pytest("tests/test_sip_r14_worker.py"), 34),
         Suite("server-sip-r14-proof", "server canonical Solar sizing custody proof",
