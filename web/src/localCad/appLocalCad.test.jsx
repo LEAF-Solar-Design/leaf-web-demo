@@ -140,7 +140,7 @@ function Harness({ initialIntake = null, initialActiveIntake = null, initialErro
   return <EngineSessionProvider saveTarget={productionSaveTarget(localCadActive, { save: apply })}>
     <ProductionEngineHold active={localCadActive} /><EngineActions /><div className="viewer-toolbar">
     {bridge.localCadEligible && <LocalCadConnect {...bridge.localCadStatus}
-      onConnect={bridge.connectLocalCad} onDisconnect={bridge.stopLocalCad} />}
+      onConnect={bridge.connectLocalCad} onDisconnect={() => bridge.stopLocalCad({ forget: true })} />}
     <output>{drawing.shown?.dwg || 'empty'}</output>
     {loadErr && !localCadActive && <div role="alert">{loadErr}<button>Retry</button></div>}
     {drawing.historyOpen && <aside>{drawing.history?.versions.map(row => <span key={row.version}>Version {row.version}</span>)}</aside>}
@@ -382,7 +382,7 @@ it.each([false, true])('an initial load completing after Connect (remembered=%s)
   expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
   act(() => { expect(observed.bridge.onDrawingLoad(initialGeneration + 1)).toBe(true) })
   expect(transport.snapshot().running).toBe(false)
-  expect(localStorage.getItem('leaf.localCad.connect')).toBeNull()
+  expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
 })
 
 it('honors a remembered choice only on eligible surfaces and starts once under StrictMode', async () => {
@@ -404,8 +404,35 @@ it('honors a remembered choice only on eligible surfaces and starts once under S
   }
 })
 
+it('reconnects after leaving a drafting surface while preserving the Connect choice', async () => {
+  const view = render(<Harness />)
+  fireEvent.click(screen.getByRole('button', { name: 'Connect AutoCAD' }))
+  const transport = transports.at(-1)
+  view.rerender(<Harness drafting={false} />)
+  expect(transport.snapshot().running).toBe(false)
+  expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
+  view.rerender(<Harness drafting />)
+  await act(async () => {})
+  expect(transports.at(-1).snapshot().running).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Disconnect' }))
+  expect(localStorage.getItem('leaf.localCad.connect')).toBeNull()
+})
+
 it('never starts on an eligible surface without a click or remembered choice', async () => {
   render(<StrictMode><Harness /></StrictMode>)
   await act(async () => {})
   expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+})
+
+it('retires a queued remembered reconnect on surface change and unmount', async () => {
+  localStorage.setItem('leaf.localCad.connect', '1')
+  const view = render(<Harness />)
+  view.rerender(<Harness drafting={false} />)
+  await act(async () => {})
+  expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+  view.rerender(<Harness drafting />)
+  view.unmount()
+  await act(async () => {})
+  expect(transports.every(bridge => bridge.start.mock.calls.length === 0)).toBe(true)
+  expect(localStorage.getItem('leaf.localCad.connect')).toBe('1')
 })

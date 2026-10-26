@@ -18,6 +18,7 @@ import { useLeavingGround, useStudioTransition } from './site/useStudioTransitio
 import SurfaceGrounds, { groundShowsDrawing } from './site/SurfaceGrounds.jsx'
 import { useLabSurfaceStatus } from './lab/useLabSurfaceStatus.js'
 import { parseLabRoute } from './lab/labRoute.js'
+import { useRoute } from './site/router.js'
 import { START_BOARD_COPY } from './site/startBoardCopy.js'
 import { CockpitStatus, FootRegion, StatusTabs, ViewCluster, useViewNavigation } from './site/DrawingCockpit.jsx'
 import { createViewHistory } from './lib/viewHistory.js'
@@ -39,7 +40,7 @@ import useDockRise from './lib/useDockRise.js'
 import { REASONS, PROFILE_REASONS, RIBBON_RATIONALE, profileRibbonTabs, profileEntryTab, solarRouteStatus, solarRouteDisplay, solarRefusalEnvelope, authorCluster, catalogClusters, catalogTabClusters, layersCluster, railCluster, versionCluster, viewCluster, referencePanels, referencePanelsForTab } from './lib/ribbonClusters.js'
 import { isWriteTool } from './lib/toolRecord.js'
 import { STUDIO_DRAWERS } from './lib/studioDrawers.js'
-import { pushOnOpen, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
+import { pushOnOpen, useAsyncScope, useCameraViewParam, useViewParamSeat } from './lib/urlState.js'
 import { readNavExpanded, writeNavExpanded } from './lib/navExpandedPreference.js'
 import { useLoadingPhase } from './lib/loadingTiming.js'
 import SolarToolForm from './solar/SolarToolForm.jsx'
@@ -141,7 +142,7 @@ import { useSurfaceContract } from './site/useSurfaceContract.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
 // `logout` is no longer imported here: the session controller owns ending a
 // session (useSessionController defaults endSession to auth.js logout).
-import { authConfigured, login, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
+import { authConfigured, login as authLogin, isSignedIn, handleRedirectCallback, isAuthRedirectCallback } from './auth.js'
 import { shouldAutoDemo, explicitDemo } from './demoState.js'
 import { humanizeError } from './errorHumanize.js'
 import { classifyDrawingLoadFailure } from './drawing/loadFailure.js'
@@ -493,6 +494,11 @@ function LocalCadEngineHold({ active }) {
   return null
 }
 
+function appSurfaceFromLocation(location, labStatus) {
+  return location.pathname.startsWith('/app/lab') && parseLabRoute(location.pathname, location.search)
+    ? 'lab' : productSurfaceFromSearch(location.search, labStatus)
+}
+
 export default function App() {
   // W1 (convergence): the console's drawing identity is now owned by
   // DrawingIdentityProvider, seeded from the SAME rule these two module
@@ -515,13 +521,25 @@ export default function App() {
   // (studioGround.js); there is no old shell.
   const studioGround = useStudioGround()
   const [activeSurface, setActiveSurface] = useState(() => {
-    try { return productSurfaceFromSearch(window.location.search) } catch { return 'cad' }
+    try { return appSurfaceFromLocation(window.location) } catch { return 'cad' }
   })
+  const committedSurfaceRef = useRef(activeSurface)
+  committedSurfaceRef.current = activeSurface
   const onCommit = useCallback((id) => {
+    committedSurfaceRef.current = id
     setActiveSurface(id)
     try {
-      const next = searchForProductSurface(window.location.search, id)
-      window.history.replaceState(null, '', `${window.location.pathname}${next}${window.location.hash}`)
+      const labPath = /^\/app\/lab(?:\/|$)/.test(window.location.pathname)
+      const pathname = id === 'lab' ? (labPath ? window.location.pathname : '/app/lab')
+        : labPath ? '/app' : window.location.pathname
+      const next = id === 'lab' ? (() => {
+        const params = new URLSearchParams(window.location.search)
+        params.delete('surface')
+        params.delete('view')
+        const query = params.toString()
+        return query ? `?${query}` : ''
+      })() : searchForProductSurface(window.location.search, id)
+      window.history.pushState(null, '', `${pathname}${next}${window.location.hash}`)
     } catch { /* URL sync is a convenience; state alone still switches the tab */ }
   }, [])
   const { phase, request, settle, exitPending } = useStudioTransition({
@@ -566,7 +584,25 @@ export default function App() {
   const [mock, setMock] = useState(() => config.mockDefault
     || explicitDemo({ search: typeof window !== 'undefined' ? window.location.search : '', signedIn: isSignedIn() }))
   const labStatus = useLabSurfaceStatus(mock)
-  useEffect(() => { setActiveSurface(window.location.pathname.startsWith('/app/lab') && parseLabRoute(window.location.pathname, window.location.search) ? 'lab' : productSurfaceFromSearch(window.location.search, labStatus)) }, [labStatus])
+  const { path: surfacePath } = useRoute()
+  useEffect(() => {
+    const cancelSurfaceSwitch = () => request(committedSurfaceRef.current)
+    const restoreSurface = () => {
+      // Requesting the committed tab clears the transition timer without a commit.
+      cancelSurfaceSwitch()
+      const value = new URLSearchParams(window.location.search).get('surface')
+      const surface = appSurfaceFromLocation(window.location, labStatus)
+      if (value && value !== surface) return
+      setActiveSurface(surface)
+    }
+    window.addEventListener('popstate', restoreSurface)
+    window.addEventListener('leaf:navigate', cancelSurfaceSwitch)
+    return () => {
+      window.removeEventListener('popstate', restoreSurface)
+      window.removeEventListener('leaf:navigate', cancelSurfaceSwitch)
+    }
+  }, [labStatus, request])
+  useEffect(() => { setActiveSurface(appSurfaceFromLocation(window.location, labStatus)) }, [labStatus, surfacePath])
   const [loadErr, setLoadErr] = useState(null)
   const [drawingLoad, setDrawingLoad] = useState({ drawingId: REQUESTED_DRAWING_ID, state: 'pending' })
   const [intakeRetryKey, setIntakeRetryKey] = useState(0) // X3 Retry — bumping re-runs the intake load effect
@@ -582,7 +618,7 @@ export default function App() {
   const localCadEpochRef = useRef(null)
   const localCadHistoryRestoredRef = useRef(false)
   const [localCadStatus, setLocalCadStatus] = useState({ status: 'stopped' })
-  const stopLocalCad = useCallback(({ discard = false, clear = false } = {}) => {
+  const stopLocalCad = useCallback(({ discard = false, clear = false, forget = false } = {}) => {
     const seated = !!localCadSnapshotRef.current
     if (discard) {
       localCadSnapshotRef.current = null
@@ -591,7 +627,10 @@ export default function App() {
     localCadBridgeRef.current?.stop()
     if (!discard || (seated && clear)) localCadRestoreRef.current?.({ discard })
     setLocalCadActive(false)
-    try { localStorage.removeItem('leaf.localCad.connect') } catch { /* storage may be unavailable */ }
+    localCadStartedRef.current = false
+    if (forget) {
+      try { localStorage.removeItem('leaf.localCad.connect') } catch { /* storage may be unavailable */ }
+    }
   }, [])
   const connectLocalCad = useCallback(() => {
     localCadStartedRef.current = true
@@ -1025,6 +1064,10 @@ export default function App() {
     selectCanonicalVersion,
   } = workspaceController
   useDrawingScopeReset(openProjectId)
+  useLayoutEffect(() => {
+    // A project or drawing change retires any queued product-tab switch.
+    request(committedSurfaceRef.current)
+  }, [openProjectId, REQUESTED_DRAWING_ID, labStatus, request])
   const [projectPane, setProjectPane] = useState(null)
   const [conversationSource, setConversationSource] = useState(null)
   const [conversationDestination, setConversationDestination] = useState(null)
@@ -1038,6 +1081,33 @@ export default function App() {
   const [boardJob, setBoardJob] = useState(null)
   const [boardTransferStatus, setBoardTransferStatus] = useState('')
   const boardPreviewRunRef = useRef(null)
+  const boardTransferScopeRef = useRef(null)
+  const beginBoardTransfer = useAsyncScope([openProjectId, drawingState?.drawing_id, REQUESTED_DRAWING_ID, activeSurface])
+  useLayoutEffect(() => {
+    const previous = boardTransferScopeRef.current
+    if (!previous || previous.projectId !== openProjectId || previous.drawingId !== drawingState?.drawing_id
+      || previous.requestedDrawingId !== REQUESTED_DRAWING_ID || previous.surface !== activeSurface || (previous.previewing && !previewing)) {
+      boardTransferScopeRef.current = { projectId: openProjectId, drawingId: drawingState?.drawing_id,
+        requestedDrawingId: REQUESTED_DRAWING_ID, surface: activeSurface, previewing }
+      boardPreviewRunRef.current = null
+      setBoardTransferStatus('')
+    } else previous.previewing = previewing
+  }, [openProjectId, drawingState?.drawing_id, REQUESTED_DRAWING_ID, activeSurface, previewing])
+  useEffect(() => {
+    const retireBoardTransfer = () => {
+      boardTransferScopeRef.current = { ...boardTransferScopeRef.current }
+      boardPreviewRunRef.current = null
+      setBoardTransferStatus('')
+    }
+    window.addEventListener('popstate', retireBoardTransfer)
+    window.addEventListener('leaf:navigate', retireBoardTransfer)
+    return () => {
+      window.removeEventListener('popstate', retireBoardTransfer)
+      window.removeEventListener('leaf:navigate', retireBoardTransfer)
+      boardTransferScopeRef.current = null
+      boardPreviewRunRef.current = null
+    }
+  }, [])
   useEffect(() => {
     setProjectPane(null)
     setBoardJob(null)
@@ -1613,9 +1683,25 @@ export default function App() {
   // Auth0 return leg: if we came back from Universal Login (?code=&state=),
   // finish the exchange + store leaf.jwt, then reload so the fresh loads send
   // the token and land a 200 session (no gate). No-op in mock / when unconfigured.
+  const beginSignIn = useAsyncScope([openProjectId, REQUESTED_DRAWING_ID, drawingState?.drawing_id, activeSurface, projectMode])
   useEffect(() => {
-    if (mock) return
-    handleRedirectCallback().then((stored) => { if (stored) window.location.reload() })
+    if (mock || !isAuthRedirectCallback()) return
+    const current = beginSignIn()
+    let live = true
+    const fail = () => {
+      if (!live || !current()) return
+      live = false
+      clearTimeout(timer)
+      showToast({ text: humanizeError("Sign-in couldn't be completed."), action: { label: 'Sign in', onClick: onLogin } })
+    }
+    const timer = setTimeout(fail, 20000)
+    Promise.resolve().then(() => handleRedirectCallback({ isCurrent: () => live && current() })).then((stored) => {
+      if (!live || !current()) return
+      clearTimeout(timer)
+      if (stored) { live = false; window.location.reload() }
+      else fail()
+    }).catch(fail)
+    return () => { live = false; clearTimeout(timer) }
   }, []) // eslint-disable-line react-hooks/exhaustive-deps
 
   // A 401 clears leaf.jwt in api.js. Mirror that transport event into render
@@ -1658,8 +1744,11 @@ export default function App() {
   // capability. The controller's release does better than that: it re-reads
   // /versions, so the control shows the SERVER's answer, and a read that 401s
   // on the way to sign-in lands unknown + read-failed, which is fail-closed.
-  // Byte-identical to /try's signInWithCheckoutRelease.
+  // Like /try's signInWithCheckoutRelease, release before starting Auth0.
   const onLogin = useCallback(async () => {
+    const current = beginSignIn()
+    const login = () => authLogin({ isCurrent: current })
+    try {
     if (projectModeRef.current) {
       const captured = projectSolarLoginRef.current
       const owner = captured.projectSolar
@@ -1691,16 +1780,35 @@ export default function App() {
           && snapshot.authorityKey === owner.scope.authorityKey
       }
 
-      if (!stillCurrent()) return
+      if (!stillCurrent()) throw new Error('Sign-in scope changed')
       if (owner.ready && owner.checkout.canRelease) {
-        await client.releaseCheckout()
+        try {
+          await client.releaseCheckout()
+        } catch {
+          if (!current() || !stillCurrent()) return
+          showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+          return
+        }
       }
-      if (!stillCurrent()) return
-    } else if (checkout.actions.getCapability()) await checkout.actions.release()
+      if (!current() || !stillCurrent()) return
+    } else if (checkout.actions.getCapability()) {
+      try {
+        await checkout.actions.release()
+      } catch {
+        if (!current()) return
+        showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+        return
+      }
+    }
 
     // ONE sign-in path: both branches end their checkout authority above, then log in here.
+    if (!current()) return
     await login()
-  }, [checkout.actions])
+    } catch {
+      if (!current()) return
+      showToast({ text: humanizeError("Sign-in couldn't start. Check your connection and try again.") })
+    }
+  }, [checkout.actions, showToast, beginSignIn])
 
   // Tab-close reap beacon: on pagehide / tab-hidden, if a durable in-flight job
   // pointer exists, sendBeacon POST /api/jobs/{id}/close so the backend flags the
@@ -2276,6 +2384,10 @@ export default function App() {
   }, [onPreviewVersion, closeStartForChange])
 
   const onBackToHeadTracked = useCallback((...args) => {
+    // Retire the drop immediately, even if its preview has not loaded yet.
+    boardTransferScopeRef.current = { ...boardTransferScopeRef.current }
+    boardPreviewRunRef.current = null
+    setBoardTransferStatus('')
     closeStartForChange()
     return onBackToHead(...args)
   }, [onBackToHead, closeStartForChange])
@@ -4998,15 +5110,24 @@ export default function App() {
             actions={surfaceSlots.ground === 'board' ? {
               transferProjectId: openProjectId || '',
               transferStatus: boardTransferStatus,
-              onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? (raw) => {
-                const result = resolveVersionTransfer(raw, {
+              onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? async (raw) => {
+                // A declined drop must not retire the preview already loading.
+                if (boardPreviewRunRef.current?.isPending()) return
+                const current = beginBoardTransfer()
+                const scope = boardTransferScopeRef.current
+                const result = await resolveVersionTransfer(raw, {
                   projectId: openProjectId,
                   drawingId: drawingState.drawing_id,
                   versions: workspace.drawing_versions || [],
                 })
+                if (!current() || boardTransferScopeRef.current !== scope) return
                 if (result.ok) {
                   boardPreviewRunRef.current ??= createPreviewRunner()
-                  boardPreviewRunRef.current(result.seq, onPreviewVersionTracked, setBoardTransferStatus)
+                  boardPreviewRunRef.current(result.seq, (seq) => {
+                    if (current() && boardTransferScopeRef.current === scope) return onPreviewVersionTracked(seq)
+                  }, (message) => {
+                    if (current() && boardTransferScopeRef.current === scope) setBoardTransferStatus(message)
+                  })
                 } else {
                   setBoardTransferStatus(result.message)
                 }
@@ -5487,7 +5608,7 @@ export default function App() {
                 +
               </button>
             )}
-            {localCadEligible && <LocalCadConnect {...localCadStatus} onConnect={connectLocalCad} onDisconnect={stopLocalCad} />}
+            {localCadEligible && <LocalCadConnect {...localCadStatus} onConnect={connectLocalCad} onDisconnect={() => stopLocalCad({ forget: true })} />}
             <div className="viewer-actions">
               {/* Slice 11a: the running-count badge. Renders nothing at zero
                   and where the contract declares no build card, so the idle

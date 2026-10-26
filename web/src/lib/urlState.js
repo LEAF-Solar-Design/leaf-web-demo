@@ -18,7 +18,29 @@
 // writes nothing (fails closed). Reads fail closed too: a hand-edited or
 // hostile value reads as absent.
 
-import { useEffect, useRef, useSyncExternalStore } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useRef, useSyncExternalStore } from 'react'
+
+// A completion belongs to one request in one mounted navigation scope.
+export function useAsyncScope(keys = []) {
+  const scope = useRef(null)
+  useLayoutEffect(() => {
+    scope.current = {}
+    const retire = () => { scope.current = {} }
+    window.addEventListener('popstate', retire)
+    window.addEventListener('leaf:navigate', retire)
+    return () => {
+      scope.current = null
+      window.removeEventListener('popstate', retire)
+      window.removeEventListener('leaf:navigate', retire)
+    }
+  }, keys) // The caller supplies a fixed-length list of scope values.
+  return useCallback(() => {
+    const captured = scope.current
+    const request = {}
+    if (captured) captured.request = request
+    return () => captured !== null && scope.current === captured && captured.request === request
+  }, [])
+}
 
 export const VIEW_PARAM_KEYS = Object.freeze(['tool', 'drawer', 'sel', 'cam'])
 // The drawers a URL may name: App's studio drawers plus the session/account

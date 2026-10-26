@@ -94,6 +94,21 @@ const RETIRED = [
 ]
 
 describe('App.jsx checkout controller adoption', () => {
+  it('keeps checkout release before login in the native CI callback extraction', () => {
+    const body = (appSource.match(/const onLogin = useCallback\(async[\s\S]*?\n  \}, \[[^\]]*\]\)/) || [null])[0]
+    expect(body).not.toBeNull()
+    const release = body.indexOf('checkout.actions.release()')
+    const login = body.indexOf('await login()')
+    expect(release).toBeGreaterThanOrEqual(0)
+    expect(login).toBeGreaterThan(release)
+  })
+
+  it('keeps the scope guard on the no-argument login used by native CI', () => {
+    const body = appText(loginCallback())
+    expect(body).toContain('const login = () => authLogin({ isCurrent: current })')
+    expect(body).toContain('if (!current()) return\n    await login()')
+  })
+
   it('mounts exactly one checkout controller', () => {
     // SiteRoot renders the console (scene 'app') and StageScene -> ToolCast
     // (scenes site|tool) in mutually exclusive arms of one ternary, so the
@@ -164,14 +179,64 @@ describe('App.jsx checkout controller adoption', () => {
     // "You hold the edit lock" behind a dead capability.
     // ONE sign-in path: the project branch ends at its last currency check and the
     // standalone path releases in the else, so the single login follows both.
-    const statements = loginCallback().body.body
-    expect(statements).toHaveLength(2)
+    const guarded = loginCallback().body.body.find(node => node.type === 'TryStatement')
+    expect(guarded.type).toBe('TryStatement')
+    expect(appText(guarded.handler)).toContain('showToast')
+    const statements = guarded.block.body
+    expect(statements).toHaveLength(3)
     expect(statements[0].type).toBe('IfStatement')
     expect(appText(statements[0].test)).toBe('projectModeRef.current')
-    expect(appText(statements[0].consequent.body.at(-1))).toBe('if (!stillCurrent()) return')
+    expect(appText(statements[0].consequent.body.at(-1))).toBe('if (!current() || !stillCurrent()) return')
     expect(appText(statements[0].consequent)).not.toContain('login(')
-    expect(appText(statements[0].alternate)).toBe('if (checkout.actions.getCapability()) await checkout.actions.release()')
-    expect(appText(statements[1])).toBe('await login()')
+    const standalone = statements[0].alternate
+    expect(appText(standalone.test)).toBe('checkout.actions.getCapability()')
+    expect(standalone.consequent.body).toHaveLength(1)
+    const release = standalone.consequent.body[0]
+    expect(release.type).toBe('TryStatement')
+    expect(release.block.body).toHaveLength(1)
+    expect(appText(release.block.body[0])).toBe('await checkout.actions.release()')
+    expect(appText(release.handler)).toContain('showToast')
+    expect(appText(statements[1])).toBe('if (!current()) return')
+    expect(appText(statements[2])).toBe('await login()')
+  })
+
+  it.each([
+    [false, true], [true, true], [false, false], [true, false],
+  ])('only starts sign-in after checkout release succeeds (projectMode=%s, releaseFails=%s)', async (projectMode, releaseFails) => {
+    const binding = { kind: 'project',
+      organization_id: '11111111-1111-1111-1111-111111111111',
+      project_id: '22222222-2222-2222-2222-222222222222',
+      drawing_id: '33333333-3333-3333-3333-333333333333',
+      input_version_id: '44444444-4444-4444-4444-444444444444' }
+    const snapshot = { binding, authorityKey: 'authority' }
+    const release = releaseFails
+      ? vi.fn().mockRejectedValue(new Error('Release failed'))
+      : vi.fn().mockResolvedValue(undefined)
+    const client = { getSnapshot: () => snapshot, releaseCheckout: release }
+    const controller = { getSnapshot: () => ({ generation: 7 }) }
+    const projectSolarLoginRef = { current: { generation: 7, controller, projectSolar: {
+      ready: true, projectClient: client, checkout: { canRelease: true },
+      scope: { binding, authorityKey: 'authority' },
+    } } }
+    const checkout = { actions: { getCapability: vi.fn(() => 'capability'), release } }
+    const login = vi.fn().mockResolvedValue(undefined)
+    const showToast = vi.fn()
+    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'authLogin',
+      'sameSolarDrawingBinding', 'showToast', 'humanizeError', 'beginSignIn', `return (${appText(loginCallback())})`)(
+      { current: projectMode }, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, showToast, String, () => () => true)
+
+    await onLogin()
+
+    expect(release).toHaveBeenCalledExactlyOnceWith()
+    if (releaseFails) {
+      expect(showToast).toHaveBeenCalledExactlyOnceWith({
+        text: "Sign-in couldn't start. Check your connection and try again.",
+      })
+      expect(login).not.toHaveBeenCalled()
+    } else {
+      expect(showToast).not.toHaveBeenCalled()
+      expect(login).toHaveBeenCalledExactlyOnceWith({ isCurrent: expect.any(Function) })
+    }
   })
 
   it.each([false, true])('R13F-07 project mode deactivates both legacy checkout inputs and preserves standalone inputs (knownGuest=%s)', (knownGuest) => {
@@ -216,9 +281,9 @@ describe('App.jsx checkout controller adoption', () => {
     const capability = vi.fn(() => 'legacy capability')
     const checkout = { actions: { getCapability: capability, release: legacyRelease } }
     const login = vi.fn(async () => { sequence.push('login') })
-    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
-      'sameSolarDrawingBinding', `return (${appText(loginCallback())})`)(
-      projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding)
+    const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'authLogin',
+      'sameSolarDrawingBinding', 'showToast', 'humanizeError', 'beginSignIn', `return (${appText(loginCallback())})`)(
+      projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, vi.fn(), String, () => () => true)
     const binding = { kind: 'project',
       organization_id: '11111111-1111-1111-1111-111111111111',
       project_id: '22222222-2222-2222-2222-222222222222',
@@ -258,7 +323,7 @@ describe('App.jsx checkout controller adoption', () => {
     unchanged.settle()
     await leaving
     expect(sequence).toEqual(['project release', 'login'])
-    expect(login).toHaveBeenCalledExactlyOnceWith()
+    expect(login).toHaveBeenCalledExactlyOnceWith({ isCurrent: expect.any(Function) })
 
     const drifts = [
       ['mode', () => { projectModeRef.current = false }],
@@ -360,9 +425,9 @@ describe('App.jsx checkout controller adoption', () => {
       const projectSolarLoginRef = { current: { projectSolar: owner, generation: 7, controller } }
       const login = vi.fn(async () => {})
       const checkout = { actions: { getCapability: vi.fn(() => null), release: vi.fn(async () => {}) } }
-      const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'login',
-        'sameSolarDrawingBinding', `return (${appText(loginCallback())})`)(
-        projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding)
+      const onLogin = Function('projectModeRef', 'projectSolarLoginRef', 'checkout', 'authLogin',
+        'sameSolarDrawingBinding', 'showToast', 'humanizeError', 'beginSignIn', `return (${appText(loginCallback())})`)(
+        projectModeRef, projectSolarLoginRef, checkout, login, sameSolarDrawingBinding, vi.fn(), String, () => () => true)
       const pending = onLogin()
       await vi.waitFor(() => expect(settle).toBeTypeOf('function'))
       if (roundTrip) {
