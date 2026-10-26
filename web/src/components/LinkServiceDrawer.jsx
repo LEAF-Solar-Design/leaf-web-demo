@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
@@ -18,10 +18,9 @@ import { humanizeError } from '../errorHumanize.js'
 // rules in styles.css/popovers.css are a generic popover primitive, not
 // Claude-specific, so a second consumer costs zero new CSS.
 //
-// State chips read the ROUTER's own state word — registered | connecting |
-// connected | error — through the shared `.state` status-word primitive
-// (styles.css: .sub hollow-muted, .prog pulsing, .done filled-primary,
-// .fail danger). The router's list/health routes never project an error
+// State chips use the registry's authorization state as their source of truth.
+// Health checks report reachability separately and can downgrade a row to
+// unreachable, but can never upgrade a row to connected. The router's list/health routes never project an error
 // reason (tenant_mcp.py `_project()` — id/label/host/state/linked_at only),
 // so "error" never claims a cause it was not given; the one place a reason
 // IS available is a connect call's own synchronous failure response, shown
@@ -31,6 +30,17 @@ import { humanizeError } from '../errorHumanize.js'
 // off a server record — never a spread, never a raw dump — so an upstream
 // tool name or a credentialed URL riding along in a hostile payload has no
 // path to the DOM even if a record carried one.
+const authorizationState = (server) => (
+  server.state === 'connected' ? 'connected'
+    : server.state === 'error' ? 'sign-in-failed'
+      : 'sign-in-needed'
+)
+const reachabilityState = (result) => (result?.state === 'error' ? 'unreachable' : 'reachable')
+const isAllowedAuthorizationUrl = (url) => (
+  url.protocol === 'https:'
+  || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))
+)
+
 export default function LinkServiceDrawer({
   mock,
   servers,
@@ -41,6 +51,7 @@ export default function LinkServiceDrawer({
   onToggle,
   onRegister,
   onConnect,
+  onRefresh,
   onHealth,
   onUnlink,
 }) {
@@ -49,11 +60,109 @@ export default function LinkServiceDrawer({
   const [confirmUnlink, setConfirmUnlink] = useState(null)
   const [connectErrors, setConnectErrors] = useState({})
   const [healthResults, setHealthResults] = useState({})
+  const [registerError, setRegisterError] = useState(null)
+  const [refreshedServers, setRefreshedServers] = useState(null)
   const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const dialogRef = useRef(null)
+  const closeRef = useRef(null)
+  const wasOpen = useRef(false)
+  const healthGeneration = useRef({})
+  const automaticallyCheckedIds = useRef(new Set())
+  const drawerOpenRef = useRef(open)
+  const authorizationTabOpened = useRef(false)
+  const authorizationRefreshInFlight = useRef(false)
+  const registryRefreshRef = useRef(onRefresh)
   const pop = useExit(open)
-  const list = Array.isArray(servers) ? servers : []
+  const list = Array.isArray(refreshedServers) ? refreshedServers : Array.isArray(servers) ? servers : []
+  const serverIdsKey = JSON.stringify([...new Set(list.map((server) => server.id))].sort())
   const listFailed = error?.kind === 'list'
   const mutationError = listFailed ? error.mutationError : error
+  const shownState = (server) => {
+    if (server.state === 'error') return authorizationState(server)
+    const result = healthResults[server.id]
+    if (result?.sourceState === server.state && result.reachability === 'unreachable') return 'unreachable'
+    return authorizationState(server)
+  }
+  const healthContext = useRef(null)
+  healthContext.current = { list, onHealth }
+  drawerOpenRef.current = open
+  registryRefreshRef.current = onRefresh
+
+  useEffect(() => {
+    setRefreshedServers(null)
+  }, [servers])
+
+  useLayoutEffect(() => {
+    if (mock) return
+    if (open) closeRef.current?.focus()
+    else if (wasOpen.current && (document.activeElement === document.body || dialogRef.current?.contains(document.activeElement))) triggerRef.current?.focus()
+    wasOpen.current = open
+  }, [open, mock])
+
+  useEffect(() => {
+    if (!open || mock) {
+      automaticallyCheckedIds.current.clear()
+      return undefined
+    }
+    const currentIds = new Set(healthContext.current.list.map((server) => server.id))
+    automaticallyCheckedIds.current.forEach((id) => {
+      if (!currentIds.has(id)) automaticallyCheckedIds.current.delete(id)
+    })
+    const check = async (server) => {
+      const generation = (healthGeneration.current[server.id] || 0) + 1
+      healthGeneration.current[server.id] = generation
+      try {
+        const result = await healthContext.current.onHealth?.(server.id)
+        if (!drawerOpenRef.current || generation !== healthGeneration.current[server.id]) return
+        if (!result?.state) return
+        setHealthResults((current) => ({
+          ...current,
+          [server.id]: { reachability: reachabilityState(result), sourceState: server.state },
+        }))
+      } catch (e) {
+        if (drawerOpenRef.current && generation === healthGeneration.current[server.id]) {
+          setHealthResults((current) => ({
+            ...current,
+            [server.id]: { reachability: 'unreachable', sourceState: server.state },
+          }))
+          setConnectErrors((current) => ({ ...current, [server.id]: humanizeError(e) }))
+        }
+      }
+    }
+    const refreshHealth = () => {
+      healthContext.current.list.forEach((server) => { void check(server) })
+    }
+    const refreshAfterAuthorization = async () => {
+      if (!authorizationTabOpened.current || authorizationRefreshInFlight.current) return
+      authorizationTabOpened.current = false
+      authorizationRefreshInFlight.current = true
+      refreshHealth()
+      try {
+        const nextServers = await registryRefreshRef.current?.()
+        if (drawerOpenRef.current && Array.isArray(nextServers)) setRefreshedServers(nextServers)
+      } catch (e) {
+        if (drawerOpenRef.current) setRegisterError(humanizeError(e))
+      } finally {
+        authorizationRefreshInFlight.current = false
+      }
+    }
+    // Check each row once when it first appears, including rows loaded after opening.
+    healthContext.current.list.forEach((server) => {
+      if (automaticallyCheckedIds.current.has(server.id)) return
+      automaticallyCheckedIds.current.add(server.id)
+      void check(server)
+    })
+    // Refresh authorization and reachability when returning from service sign-in.
+    const onFocus = () => { void refreshAfterAuthorization() }
+    const onVisible = () => { if (document.visibilityState === 'visible') void refreshAfterAuthorization() }
+    window.addEventListener('focus', onFocus)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      window.removeEventListener('focus', onFocus)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [open, mock, serverIdsKey])
 
   // S27: Escape is the owner stack's (menu layer: this is an anchored popover).
   useEscapeOwner('link-service', !!open && !mock, () => onToggle(false), { layer: 'menu', scope: rootRef })
@@ -76,11 +185,17 @@ export default function LinkServiceDrawer({
     const u = url.trim()
     const l = label.trim()
     if (!u || !l || busy) return
+    setRegisterError(null)
     try {
-      await onRegister(u, l)
+      const result = await onRegister(u, l)
+      if (!result) {
+        setRegisterError('The service was not linked. Sign in to your workspace and try again.')
+        return
+      }
       setUrl('')
       setLabel('')
-    } catch {
+    } catch (e) {
+      setRegisterError(humanizeError(e))
       // onRegister's caller (useTenantMcpRegistry) already recorded `error`;
       // fields are deliberately LEFT FILLED on failure so a rejected label
       // or URL is not silently discarded.
@@ -89,30 +204,76 @@ export default function LinkServiceDrawer({
 
   const runConnect = async (id) => {
     setConnectErrors((current) => ({ ...current, [id]: null }))
+    // Reserve the tab during the click, before the asynchronous authorization request.
+    let popup
+    let result
     try {
-      const result = await onConnect(id)
-      const startUrl = result?.authorize_url
-      if (typeof startUrl === 'string' && startUrl) {
-        window.open(startUrl, '_blank', 'noopener,noreferrer')
+      popup = window.open('about:blank', '_blank')
+      if (popup) popup.opener = null
+      result = await onConnect(id)
+    } catch (e) {
+      popup?.close()
+      const reason = e?.body?.error?.message || humanizeError(e)
+      setConnectErrors((current) => ({ ...current, [id]: reason }))
+      return
+    }
+    const startUrl = result?.authorize_url
+    try {
+      if (typeof startUrl === 'string' && startUrl.trim()) {
+        if (!popup || popup.closed) {
+          setConnectErrors((current) => ({ ...current, [id]: 'The sign-in tab was blocked or closed. Allow pop-ups and try Connect again.' }))
+        } else {
+          const authorizationUrl = new URL(startUrl, window.location.href)
+          if (!isAllowedAuthorizationUrl(authorizationUrl)) {
+            popup.close()
+            setConnectErrors((current) => ({ ...current, [id]: 'The service provided an unsafe sign-in link. Try Connect again.' }))
+            return
+          }
+          popup.location.replace(authorizationUrl.toString())
+          authorizationTabOpened.current = true
+        }
+      } else {
+        popup?.close()
+        setConnectErrors((current) => ({ ...current, [id]: 'The service did not provide a sign-in link. Try Connect again.' }))
       }
     } catch (e) {
+      popup?.close()
       const reason = e?.body?.error?.message || humanizeError(e)
       setConnectErrors((current) => ({ ...current, [id]: reason }))
     }
   }
 
   const runHealth = async (id) => {
+    const generation = (healthGeneration.current[id] || 0) + 1
+    healthGeneration.current[id] = generation
     try {
       const result = await onHealth(id)
-      setHealthResults((current) => ({ ...current, [id]: result?.state || 'error' }))
-    } catch {
-      setHealthResults((current) => ({ ...current, [id]: 'error' }))
+      if (generation !== healthGeneration.current[id]) return
+      if (!result?.state) throw new Error('Connection status is unavailable. Try Health again.')
+      setHealthResults((current) => ({
+        ...current,
+        [id]: {
+          reachability: reachabilityState(result),
+          sourceState: list.find((server) => server.id === id)?.state,
+        },
+      }))
+      setConnectErrors((current) => ({ ...current, [id]: null }))
+    } catch (e) {
+      if (generation === healthGeneration.current[id]) {
+        setHealthResults((current) => ({
+          ...current,
+          [id]: { reachability: 'unreachable', sourceState: list.find((server) => server.id === id)?.state },
+        }))
+        setConnectErrors((current) => ({ ...current, [id]: humanizeError(e) }))
+      }
     }
   }
 
   const runUnlink = async (id) => {
     try {
       await onUnlink(id)
+      healthGeneration.current[id] = (healthGeneration.current[id] || 0) + 1
+      automaticallyCheckedIds.current.delete(id)
       setConnectErrors((current) => { const next = { ...current }; delete next[id]; return next })
       setHealthResults((current) => { const next = { ...current }; delete next[id]; return next })
     } catch (e) {
@@ -125,15 +286,14 @@ export default function LinkServiceDrawer({
 
   const chipClass = (state) => (
     state === 'connected' ? 'done'
-      : state === 'connecting' ? 'prog'
-        : state === 'error' ? 'fail'
-          : 'sub' // 'registered' and any unrecognized word both read as queued, never a guess at a happier state
+      : state === 'unreachable' || state === 'sign-in-failed' ? 'fail'
+        : 'sub'
   )
   const chipWord = (state) => (
     state === 'connected' ? 'Connected'
-      : state === 'connecting' ? 'Connecting…'
-        : state === 'error' ? 'Error'
-          : 'Registered'
+      : state === 'unreachable' ? 'Unreachable'
+        : state === 'sign-in-failed' ? 'Sign-in failed, try again'
+        : 'Sign in needed'
   )
 
   return (
@@ -145,22 +305,23 @@ export default function LinkServiceDrawer({
         // The look is shared by selector (`.claude-trigger, .link-svc-trigger` in
         // styles.css and landing.css), never by wearing the account's class.
         className="link-svc-trigger"
+        ref={triggerRef}
         onClick={() => onToggle(!open)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title="Link a tenant-owned MCP service"
+        title="Manage linked services for your workspace"
       >
         <span className="ca-k">Linked services</span>
-        <span className={`ca-state ${list.some((s) => s.state === 'connected') ? 'on' : ''}`}>
+        <span className={`ca-state ${list.some((s) => shownState(s) === 'connected') ? 'on' : ''}`}>
           {loading ? 'checking' : listFailed ? 'Unavailable' : `${list.length} linked`}
         </span>
       </button>
 
       {pop.shown && (
-        <div className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Linked services">
+        <div ref={dialogRef} inert={!open ? '' : undefined} aria-hidden={!open || undefined} title={busy ? 'Please wait for the service update.' : undefined} className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Linked services">
           <div className="ca-head">
             <span>Link a service</span>
-            <EscCap onClick={() => onToggle(false)} label="Close linked services panel" />
+            <EscCap ref={closeRef} onClick={() => onToggle(false)} label="Close linked services panel" />
           </div>
 
           <div className="ca-linked">
@@ -168,23 +329,25 @@ export default function LinkServiceDrawer({
               <div className="field-err" role="alert">
                 <p>Linked services could not be loaded.</p>
                 <p>{humanizeError(error)}</p>
-                <button className="chip-act" onClick={error.retry} disabled={loading}>Retry</button>
+                <button className="chip-act" onClick={error.retry} disabled={loading} title={loading ? 'Checking linked services.' : undefined}>Retry</button>
               </div>
             )}
             {list.length === 0 && !loading && !listFailed && <p className="ca-copy">No services linked yet.</p>}
             <div className="ca-account-list">
               {list.map((server) => {
                 const connectErr = connectErrors[server.id]
-                const health = healthResults[server.id]
+                const result = healthResults[server.id]
+                const health = result && result.sourceState === server.state ? result.reachability : null
+                const state = shownState(server)
                 return (
                   <div className="ca-account" key={server.id}>
                     <div className="ca-account-main">
                       <b>{server.label}</b>
-                      <span className={`state ${chipClass(server.state)}`}>{chipWord(server.state)}</span>
+                      <span className={`state ${chipClass(state)}`}>{chipWord(state)}</span>
                     </div>
                     <div className="ca-account-meta">
                       {server.host && <span>{server.host}</span>}
-                      {health && <span>health: {health}</span>}
+                      {health && <span>Connection checked: {health === 'unreachable' ? 'Unreachable' : 'Reachable'}</span>}
                     </div>
                     {connectErr && (
                       <div className="field-err" role="alert"><span className="dot red" />{connectErr}</div>
@@ -210,7 +373,7 @@ export default function LinkServiceDrawer({
           </div>
 
           <div className="ca-setup">
-            <p className="ca-copy">Link an MCP service by its <b>HTTPS</b> address. The connection is authorized server-side; this app never sees a token.</p>
+            <p className="ca-copy">Link a service by its secure <b>HTTPS</b> address. You may be asked to sign in to the service.</p>
             <label className="ca-field">
               <span className="ca-field-k">Service label</span>
               <input
@@ -238,11 +401,12 @@ export default function LinkServiceDrawer({
                 disabled={busy}
               />
             </label>
-            <button className="btn primary ca-act" onClick={submit} disabled={busy || !url.trim() || !label.trim()}>
+            <button className="btn primary ca-act" onClick={submit} disabled={busy || !url.trim() || !label.trim()} title={busy ? 'Please wait for the service update.' : !url.trim() || !label.trim() ? 'Enter a service label and address.' : undefined}>
               {busy ? 'Linking…' : 'Link service'}
             </button>
-            <p className="ca-note">Credentials and upstream tool names stay server-side and never appear in this panel.</p>
+            <p className="ca-note">Your sign-in details are stored securely and are hidden in this panel.</p>
           </div>
+          {registerError && <div className="field-err" role="alert">{registerError}</div>}
           {mutationError && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(mutationError)}</div>}
         </div>
       )}

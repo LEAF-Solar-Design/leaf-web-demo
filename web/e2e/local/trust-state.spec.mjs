@@ -114,7 +114,7 @@ test('trust rail reflects real health, plan, usage, and Claude grant state', asy
   })
   await page.getByRole('button', { name: 'Link Claude account' }).click()
   expect((await linkResponse).status()).toBe(200)
-  await expect(panel.locator('.claude-trigger')).toContainText('1 mounted')
+  await expect(panel.locator('.claude-trigger')).toContainText('1 linked')
   const accountDialog = page.getByRole('dialog', { name: 'Claude accounts' })
   await expect(accountDialog).toContainText(/pro subscription/i)
 

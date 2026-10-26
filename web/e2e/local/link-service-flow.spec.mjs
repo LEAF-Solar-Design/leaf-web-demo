@@ -48,7 +48,7 @@ test('link service through local OAuth, show connected, then unlink', async ({ p
   await drawer.getByLabel('Service URL').fill(`${API_BASE}${REGISTRY}/_fake-oauth`)
   await drawer.getByRole('button', { name: 'Link service', exact: true }).click()
   const row = drawer.locator('.ca-account').filter({ hasText: label })
-  await expect(row.locator('.state')).toHaveText('Registered')
+  await expect(row.locator('.state')).toHaveText('Sign in needed')
 
   // noopener removes the opener relationship in Chromium. Arm both before
   // clicking so the context page event is a race-free fallback for popup.

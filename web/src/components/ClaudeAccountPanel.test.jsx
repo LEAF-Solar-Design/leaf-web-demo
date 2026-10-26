@@ -13,7 +13,7 @@ function panel(props = {}) {
 function noManagement() {
   expect(screen.queryByLabelText('Claude token')).not.toBeInTheDocument()
   expect(screen.queryByText('not linked')).not.toBeInTheDocument()
-  expect(screen.queryByRole('button', { name: /Link Claude account|Add another mount|Remove|Unlink/ })).not.toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: /Link Claude account|Link another account|Remove|Unlink/ })).not.toBeInTheDocument()
 }
 
 describe('Claude account administrative status', () => {
@@ -79,11 +79,11 @@ describe('Claude account administrative status', () => {
     expect(screen.getByText('not linked')).toBeInTheDocument()
     expect(screen.getByLabelText('Claude token')).toBeInTheDocument()
   })
-  it('shows known mounted status and preserves mutation errors', () => {
+  it('shows known linked status and preserves mutation errors', () => {
     panel({ grant: { linked: true, kind: 'oauth', accounts: [] }, error: 'Could not unlink this account.' })
-    expect(screen.getByText('1 mounted')).toBeInTheDocument()
+    expect(screen.getByText('1 linked')).toBeInTheDocument()
     expect(screen.getByText('Could not unlink this account.')).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Add another mount' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Link another account' })).toBeInTheDocument()
   })
   it('suppresses controls while checking even with a previous linked result', () => {
     panel({ loading: true, grant: { linked: true } })
@@ -98,6 +98,15 @@ describe('Claude account administrative status', () => {
   it('retains mock suppression', () => {
     panel({ mock: true, signedOut: true, grant: { linked: false } })
     expect(screen.queryByRole('button')).not.toBeInTheDocument()
+  })
+
+  it('preserves focus in an outside editor when the account panel closes', () => {
+    const props = { mock: false, grant: { linked: false }, onToggle: vi.fn() }
+    const view = render(<><input aria-label="Drawing name" /><ClaudeAccountPanel {...props} open /></>)
+    const editor = screen.getByLabelText('Drawing name')
+    editor.focus()
+    view.rerender(<><input aria-label="Drawing name" /><ClaudeAccountPanel {...props} open={false} /></>)
+    expect(editor).toHaveFocus()
   })
 })
 

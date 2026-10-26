@@ -4832,6 +4832,7 @@ export default function App() {
         onToggle: setLinkServiceOpen,
         onRegister: mcpRegistry.register,
         onConnect: mcpRegistry.connect,
+        onRefresh: mcpRegistry.refresh,
         onHealth: mcpRegistry.health,
         onUnlink: mcpRegistry.unlink,
       }}
