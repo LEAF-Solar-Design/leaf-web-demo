@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
+import functools
 import logging
 import os
 import threading
@@ -19,9 +20,10 @@ import lab_activation
 import lab_artifacts_git
 import lab_run_store
 import lab_tool_nodes
+import lab_tool_manifests
 from dependency_health import _source_revision
 from lab_evaluate import (Budget, GraphRefused, RunBudgetExceeded, RunCancelled,
-                          evaluate_graph, export_value, trusted_registry)
+                          evaluate_graph, export_value)
 from routers.lab_surface import lab_surface_enabled
 
 OPS_REVISION = "lab-ops.v1"
@@ -283,8 +285,9 @@ class LabWorker:
                            if row["adapter_revision"] == "lab-activation.v1" else {})
                 tool_options["tool_adapter"] = lab_tool_nodes.ToolNodeAdapter(
                     row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run), **effects)
-            evaluate_graph(artifact["graph"], trusted_registry(), budget=Budget(run_wall_s=600 - elapsed),
+            evaluate_graph(artifact["graph"], lab_tool_manifests.registry_for(str(row["tenant_id"])), budget=Budget(run_wall_s=600 - elapsed),
                            clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block,
+                           trusted_lookup=functools.partial(lab_tool_manifests.trusted_for, str(row["tenant_id"])),
                            **tool_options)
             # Refresh cancellation at the terminal boundary, even for a one-block graph.
             with run.lock:

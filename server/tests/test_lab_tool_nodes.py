@@ -10,7 +10,9 @@ from types import SimpleNamespace
 import pytest
 
 import jobs
+import deps
 import lab_registry
+import lab_tool_manifests
 import lab_tool_nodes as nodes
 from lab_evaluate import Budget, GraphRefused, RunBudgetExceeded, RunCancelled, evaluate_graph, runtime_value
 from test_lab_evaluate import case
@@ -24,6 +26,7 @@ DRAWING = {"project_id": "project", "drawing_id": "drawing", "dwg_version": 2}
 def tool_graph(monkeypatch):
     # No compute tool is currently seeded. Register the test extension through
     # the real authority, and restore the registry after the test.
+    monkeypatch.setattr(deps, "effective_tools_with_provenance", lambda tenant: [])
     monkeypatch.setattr(lab_registry, "REGISTRY", dict(lab_registry.REGISTRY))
     trusted = lab_registry.register_extension({
         "id": "qa-lab-tool", "kind": "qa-lab-tool", "version": "1.0.0",
@@ -49,6 +52,23 @@ def tool_graph(monkeypatch):
     monkeypatch.setattr(nodes.catalog, "seed_tools", lambda: seeds + [tool])
     return SimpleNamespace(graph=graph, registry={trusted.kind + "@1.0.0": manifest},
                            trusted=trusted, manifest=manifest, tool=tool)
+
+
+def projected_graph(monkeypatch, **changes):
+    from test_lab_tool_manifests import read_tool
+    tool = read_tool(params={"type": "object", "properties": {
+        "drawing_id": {"type": "string"},
+        "max_rows": {"type": "integer", "default": 3}}}, **changes)
+    monkeypatch.setattr(deps, "effective_tools_with_provenance", lambda tenant: [(tool, "tenant_repo")])
+    descriptor, = lab_tool_manifests.tenant_tool_projection(TENANT)
+    graph = {"schema": "leaf.lab-graph.v1", "blocks": [{
+        "id": "node", "registry": {"id": descriptor.name, "version": descriptor.version,
+                                     "code_sha256": descriptor.code_sha256},
+        "settings": {"drawing": dict(DRAWING)}}], "pipes": [],
+        "outputs": {"result": {"node": "node", "port": "result"}}}
+    return SimpleNamespace(tool=tool, descriptor=descriptor, graph=graph,
+                           trusted=descriptor.trusted, manifest=descriptor.manifest,
+                           registry=lab_tool_manifests.registry_for(TENANT))
 
 
 @pytest.fixture
@@ -350,6 +370,56 @@ def test_submit_identity_and_result(rig):
                       "idempotency_key": "lab:run:node:1"}
 
 
+def test_projected_row_and_parameter_names(rig, monkeypatch):
+    projected = projected_graph(monkeypatch)
+    assert rig.call(trusted=projected.trusted, manifest=projected.manifest,
+                    inputs={"max-rows": runtime_value(8)}) == {"outputs": {"result": 7}}
+    args, kwargs = rig.calls[0]
+    assert args == (TENANT, {**projected.tool, "lab_execution": {
+        "run_id": "run", "block_id": "node", "attempt": 1}},
+        {"max_rows": 8, "drawing_id": "drawing"}, "drawing", False)
+    assert kwargs["idempotency_key"] == "lab:run:node:1"
+
+
+def test_projected_row_changed(rig, monkeypatch):
+    projected = projected_graph(monkeypatch)
+    monkeypatch.setattr(lab_tool_manifests, "row_for", lambda *args: None)
+    assert rig.call(trusted=projected.trusted, manifest=projected.manifest) == {
+        "error": "lab_tool_tool_changed"}
+    assert not rig.calls
+
+
+def test_refused_tenant_tool_never_falls_back_to_a_seed(rig, monkeypatch):
+    from dataclasses import replace
+    projected = projected_graph(monkeypatch)
+    descriptor = next(tool for tool in lab_tool_manifests.tenant_tool_projection(TENANT)
+                      if tool.name == projected.trusted.kind)
+    refused = replace(descriptor, manifest=None, reason="live APS tools are not Lab nodes")
+    monkeypatch.setattr(lab_tool_manifests, "tenant_tool_projection", lambda tenant: (refused,))
+    monkeypatch.setattr(lab_tool_manifests, "trusted_for", lambda *args: projected.trusted)
+    monkeypatch.setattr(lab_tool_manifests, "row_for", lambda *args: None)
+    seeds = nodes.catalog.seed_tools()
+    monkeypatch.setattr(nodes.catalog, "seed_tools", lambda: seeds + [dict(projected.tool)])
+    assert rig.call(trusted=projected.trusted, manifest=projected.manifest) == {
+        "error": "lab_tool_tool_changed"}
+    assert not rig.calls
+
+
+@pytest.mark.parametrize("data,error", [({"z": 2, "a": [True, None]}, None),
+                                       ("x" * 65535, "output-refused")],
+                         ids=["within-limit", "over-limit"])
+def test_projected_json_text_pin(rig, monkeypatch, data, error):
+    from lab_evaluate import canonical_json
+    projected = projected_graph(monkeypatch, returns_schema=None)
+    rig.options["get_job"] = lambda job: {"status": "complete", "result": {"result": data}}
+    result = evaluate_graph(projected.graph, projected.registry,
+                            trusted_lookup=lambda block_id, version: projected.trusted,
+                            tool_adapter=nodes.ToolNodeAdapter(TENANT, "run", **rig.options))
+    assert result["outputs"]["result"].error == error
+    if error is None:
+        assert result["outputs"]["result"].data == canonical_json(data)
+
+
 def test_takeover_reuses_key_and_skips_budgets(rig, monkeypatch):
     assert rig.call() == {"outputs": {"result": 7}}
     rig.options["list_jobs"] = lambda *args: [
@@ -507,7 +577,7 @@ def test_no_adapter_refuses_tool(rig):
         evaluate_graph(rig.graph, rig.registry)
 
 
-@pytest.mark.parametrize("filename", ["lab_tool_nodes.py", "lab_worker.py"])
+@pytest.mark.parametrize("filename", ["lab_tool_nodes.py", "lab_worker.py", "lab_tool_manifests.py"])
 def test_import_boundary(filename):
     tree = ast.parse((Path(__file__).parents[1] / filename).read_text(encoding="utf-8"))
     for node in ast.walk(tree):
