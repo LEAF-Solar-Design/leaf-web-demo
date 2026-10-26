@@ -1,6 +1,7 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { boundedIntegrationBody, validateDatasetRegistration } from './client.js'
 import { ConnectorDefinitionV1 } from '../../../vendor/assistant-contract/src/integration'
+import { humanizeError } from '../errorHumanize.js'
 
 const kinds = ['text', 'boolean', 'identifier', 'count', 'instant', 'date', 'number', 'ratio', 'money', 'duration']
 const newField = () => ({ id: '', label: '', kind: '', nullable: false, sensitivity: 'internal', pointer: '', conversion: 'identity',
@@ -101,8 +102,8 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       if (dispatched && attempt) {
         setUnknown(attempt); setRecovery(null)
         setError(attempt.kind === 'retirement' ?
-          'Outcome unknown. Read this exact connection status before an explicit cleanup retry. No DELETE will be repeated automatically.' :
-          'Outcome unknown. The request may have taken effect. Read status before choosing an existing resource or a new ID. No request will be repeated automatically.')
+          'Outcome unknown. Read this connection status before retrying cleanup. Removal will not be repeated automatically.' :
+          'Outcome unknown. The request may have taken effect. Read status before choosing an existing resource or a new ID.')
       } else setError('Setup could not continue. Check the nonsecret inputs and current authorization, then try again.')
       if (failure?.status === 403) onForbidden?.()
     } finally {
@@ -363,7 +364,7 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
         <li key={step} aria-current={i === (!draft ? 0 : !published ? 1 : !custody ? 2 : !dataset ? 3 : 4) ? 'step' : undefined}>{step}</li>)}
     </ol>
     <p role="status" aria-live="polite">{pending || message}</p>
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert">{humanizeError(error)}</p>}
     {!draft ? <form onSubmit={importDocument} aria-label="Import connector JSON"><fieldset disabled={locked}>
       <legend>1. Import supported JSON</legend>
       <label>Connector stable ID<input required maxLength={128} value={source.id} onChange={(e) => setSource({ ...source, id: e.target.value })} /></label>
@@ -394,6 +395,13 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       <button type="button" onClick={() => { setDraft(null); setSource((old) => ({ ...old, id: '' })); setOperationId('') }}>Choose another connector ID</button>
     </fieldset>}
     {published && <p>Published connector: {refText(published.reference)}. Selected operation: {operationRef && refText(operationRef)}.</p>}
+    {connection && retirementComplete(connection) && <button disabled={locked} onClick={() => {
+      if (busy.current || !alive() || unknown) return
+      if (password.current) password.current.value = ''
+      setConnection(null); setCustody(false); setConnectionForm({ id: '', title: '', origin: '' })
+      setDataset(null); setResult(null); setRecovery(null); setError(''); setMessage('')
+      setForm({ id: '', title: '', version: '1', timezone: 'UTC', retention: '30', timeField: '', fields: [newField()] })
+    }}>Create another connection</button>}
     {published && !connection && <form onSubmit={createConnection} aria-label="Create connection"><fieldset disabled={locked}>
       <legend>3. Create connection</legend>
       <label>Connection stable ID<input required maxLength={128} value={connectionForm.id} onChange={(e) => setConnectionForm({ ...connectionForm, id: e.target.value })} /></label>

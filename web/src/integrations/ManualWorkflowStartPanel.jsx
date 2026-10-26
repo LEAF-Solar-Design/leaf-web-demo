@@ -1,4 +1,5 @@
 import { useLayoutEffect, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 import { IntegrationRefV1, IntegrationManualWorkflowDefinitionV1, IntegrationManualWorkflowSubmissionV1,
   IntegrationManualWorkflowSubmissionResultV1 } from '../../../vendor/assistant-contract/src/integration'
 
@@ -8,6 +9,7 @@ const authority = (connection) => JSON.stringify([connection.id, connection.stat
 
 export function ManualWorkflowStartPanel({ client, projectId, signal, guard, onForbidden, onAdmitted }) {
   const [input, setInput] = useState({ id: '', version: '', digest: '' })
+  const [pastedReference, setPastedReference] = useState('')
   const [review, setReview] = useState(null)
   const [pending, setPending] = useState('')
   const [unknown, setUnknown] = useState(false)
@@ -20,6 +22,7 @@ export function ManualWorkflowStartPanel({ client, projectId, signal, guard, onF
     const ctx = { controller: new AbortController(), busy: false, review: null, intent: null }
     binding.current = ctx
     const reset = () => {
+      setPastedReference('')
       setReview(null); setInput({ id: '', version: '', digest: '' }); setPending(''); setUnknown(false); setLocked(false); setError(''); setNotice(''); setResolved(false)
     }
     const clear = () => {
@@ -117,14 +120,15 @@ export function ManualWorkflowStartPanel({ client, projectId, signal, guard, onF
       if (!current()) return
       if (failure?.status === 401 || failure?.status === 403) {
         ctx.review = null; ctx.intent = null; ctx.controller.abort()
+        setPastedReference('')
         setReview(null); setInput({ id: '', version: '', digest: '' }); setUnknown(false); setLocked(false)
         setPending(''); setResolved(false); setError(''); setNotice('')
         onForbidden()
         return
       }
       if (dispatched) setUnknown(true)
-      setError(dispatched ? 'The submission could not be verified.' :
-        'The workflow or current authority could not be verified. Load a new review before starting. Recovery requires unchanged authority.')
+      setError(ctx.intent && !dispatched ? 'Connection permissions changed or could not be verified. Recover the original request when access is restored, or leave recovery below.' : dispatched ? 'The submission could not be verified.' :
+        'The workflow or your permissions could not be verified. Load a new review before starting.')
     } finally {
       clearTimeout(timer)
       controller.signal.removeEventListener('abort', cancel)
@@ -134,10 +138,25 @@ export function ManualWorkflowStartPanel({ client, projectId, signal, guard, onF
   }
 
   const disabled = Boolean(pending) || locked
+  function pasteReference(value) {
+    if (disabled) return
+    setPastedReference(value)
+    binding.current.review = null; setReview(null)
+    try {
+      const reference = IntegrationRefV1.parse(JSON.parse(value))
+      setInput({ ...reference, version: String(reference.version) })
+      setError('')
+    } catch {
+      setInput({ id: '', version: '', digest: '' })
+      setError('Paste a complete workflow reference with a valid ID, version and digest copied from a saved workflow.')
+    }
+  }
   return <section className="integration-setup" aria-label="Start manual workflow" style={{ minWidth: 0, overflowWrap: 'anywhere' }}>
     <h2>Start manual workflow</h2>
     <p>Review an exact immutable definition. Loading only reads; Start may execute the ordered actions with your current authority. Never enter credentials.</p>
     <form onSubmit={(event) => { event.preventDefault(); operate('Load') }}>
+      <label>Paste reference<input disabled={disabled} value={pastedReference}
+        onChange={(event) => pasteReference(event.target.value)} /></label>
       <div className="integration-setup-grid">{['id', 'version', 'digest'].map((key) => <label key={key}>
         {({ id: 'Workflow definition ID', version: 'Workflow version', digest: 'Workflow digest' })[key]}
         <input required type={key === 'version' ? 'number' : 'text'} min={key === 'version' ? '1' : undefined}
@@ -160,13 +179,22 @@ export function ManualWorkflowStartPanel({ client, projectId, signal, guard, onF
     </section>}
     <p role="status" aria-live="polite">{pending ? `${pending} in progress…` : notice}</p>
     {unknown && <><p role="status">Outcome unknown. Work may have completed. The original request is retained only in this page session.</p>
-      <button disabled={Boolean(pending)} onClick={() => operate('Recover')}>Recover original request (may continue the original workflow)</button></>}
+      <button disabled={Boolean(pending)} onClick={() => operate('Recover')}>Recover original request (may continue the original workflow)</button>
+      <p>Leaving recovery does not cancel the original workflow. Check workflow history before starting again to avoid duplicate work.</p>
+      <button disabled={Boolean(pending)} onClick={() => {
+        const ctx = binding.current
+        if (!ctx || ctx.busy || ctx.controller.signal.aborted) return
+        ctx.intent = null; ctx.review = null
+        setPastedReference('')
+        setReview(null); setInput({ id: '', version: '', digest: '' }); setLocked(false); setUnknown(false); setResolved(false); setError('')
+        setNotice('Recovery left. The original workflow may still run. Check workflow history before starting another.')
+      }}>Leave recovery without cancelling</button></>}
     {resolved && <button disabled={Boolean(pending)} onClick={() => {
       const ctx = binding.current
       if (!ctx || ctx.busy || ctx.controller.signal.aborted) return
       ctx.intent = null; ctx.review = null
       setReview(null); setLocked(false); setResolved(false); setNotice(''); setError('')
     }}>Review a new workflow intent</button>}
-    {error && <p role="alert">{error}</p>}
+    {error && <p role="alert">{humanizeError(error)}</p>}
   </section>
 }
