@@ -14,7 +14,7 @@ const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
 const asPipe = connection => ({ from: { node: connection.source, port: connection.sourceHandle }, to: { node: connection.target, port: connection.targetHandle } })
 
-function Editor({ initialDocument, onChange, entries, measurements, upstream, codeEvidence }) {
+function Editor({ initialDocument, onChange, entries, measurements, upstream, codeEvidence, tools, onLoadTools }) {
   const [document, setDocument] = useState(() => roundTrip(initialDocument || emptyGraph()))
   const [initialLayoutDocument] = useState(document)
   const [layoutRunner] = useState(createDependencyLayoutRunner)
@@ -113,7 +113,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       event.target.closest?.('input,textarea,select,[contenteditable="true"]') || event.currentTarget.closest('[hidden]')) return
     event.preventDefault(); search.current?.focus()
   }}>
-    <Palette entries={entries} onAdd={add} searchRef={search} />
+    <Palette entries={entries} onAdd={add} searchRef={search} tools={tools} onLoadTools={onLoadTools} />
     <section className="lab-canvas-region" aria-label="Dependency canvas">
       <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} onClick={relayout}>Relayout</button>
         <button type="button" onClick={() => flow.fitView({ padding: 0.2 })}>Fit cards</button></header>
@@ -167,6 +167,6 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   </div>
 }
 
-export default function LabCanvas({ initialDocument, onChange, entries = registry, measurements = {}, upstream = {}, codeEvidence }) {
-  return <ReactFlowProvider><Editor initialDocument={initialDocument} onChange={onChange} entries={entries} measurements={measurements} upstream={upstream} codeEvidence={codeEvidence} /></ReactFlowProvider>
+export default function LabCanvas({ initialDocument, onChange, entries = registry, measurements = {}, upstream = {}, codeEvidence, tools = [], onLoadTools }) {
+  return <ReactFlowProvider><Editor initialDocument={initialDocument} onChange={onChange} entries={entries} measurements={measurements} upstream={upstream} codeEvidence={codeEvidence} tools={tools} onLoadTools={onLoadTools} /></ReactFlowProvider>
 }

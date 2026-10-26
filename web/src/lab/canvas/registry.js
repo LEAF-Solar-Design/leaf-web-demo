@@ -1,4 +1,5 @@
 import { createContract } from '../contract.js'
+import { toolRegistry } from './toolNodes.js'
 import blockSchema from '../contract/lab-block.v1.schema.json'
 import pinSchema from '../contract/lab-pin.v1.schema.json'
 import graphSchema from '../contract/lab-graph.v1.schema.json'
@@ -41,6 +42,9 @@ function freeze(value) {
 freeze(manifests)
 export const registry = Object.freeze(Object.fromEntries(manifests.map(manifest =>
   [`${manifest.id}@${manifest.version.semver}`, manifest])))
+export function withTools(base, tools) {
+  return Object.freeze({ ...toolRegistry(tools), ...base })
+}
 export function manifestFor(block, entries = registry) {
   const { manifest, problem } = resolveManifest(block, entries)
   if (problem) throw new Error(problem)
