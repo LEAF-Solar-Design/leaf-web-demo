@@ -125,8 +125,8 @@ describe('product surface contract', () => {
 
   it('places the profile rail below the persistent header', () => {
     const css = readFileSync(`${process.cwd()}/src/site/landing.css`, 'utf8')
-    expect(css).toMatch(/\.lp-topbar\s*\{[^}]*height:\s*52px;[^}]*z-index:\s*50;/s)
-    expect(css).toMatch(/\.tc-product-nav\s*\{[^}]*inset:\s*52px 0 auto;[^}]*z-index:\s*34;/s)
+    expect(css).toMatch(/\.lp-topbar\s*\{[^}]*height:\s*52px;[^}]*z-index:\s*var\(--leaf-layer-popover\);/s)
+    expect(css).toMatch(/\.tc-product-nav\s*\{[^}]*inset:\s*52px 0 auto;[^}]*z-index:\s*calc\(var\(--leaf-layer-header\) \+ 4\);/s)
     expect(css).toMatch(/\.tc-product-frame\s*\{[^}]*inset:\s*96px 0 0;/s)
   })
 })
