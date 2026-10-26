@@ -44,6 +44,17 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  it('S1-121 clears a release error after a successful checkout reread', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(refusal('CHECKOUT_STALE'), 409))
+    expect((await client.releaseCheckout()).ok).toBe(false)
+    expect(client.getSnapshot().error).toBe('CHECKOUT_STALE')
+    fetchImpl.mockResolvedValueOnce(response({ ...identity, checkout: null }))
+    expect((await client.readCheckout()).ok).toBe(true)
+    expect(client.getSnapshot()).toMatchObject({ error: null, checkout: null, ownsCheckout: false })
+  })
+
   it('W1C6 previews carry the same optional solve and commit fields as run bodies', async () => {
     const { client, fetchImpl, intent } = setup(acquired())
     await client.acquireCheckout()

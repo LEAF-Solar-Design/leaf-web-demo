@@ -4,7 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import SolarSizingForm from './SolarSizingForm.jsx'
-import { projectSizingConductorFeedback, useProjectSizingConductor } from './SolarSizingForm.jsx'
+import { projectSizingConductorFeedback, useProjectSizingConductor, MODULE_PARAMETER_LABELS } from './SolarSizingForm.jsx'
 import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason, MODULE_PARAMETER_KEYS,
   deriveProjectSizingState, buildProjectSizingRequest } from './solarSizingModel.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
@@ -138,7 +138,7 @@ function r14Fill({ tracker = false, parameters = false } = {}) {
   }
   if (parameters) {
     fireEvent.click(screen.getByLabelText('Use module parameters'))
-    MODULE_PARAMETER_KEYS.forEach((key) => change(key, key === 'N_s' ? '72' : '1'))
+    MODULE_PARAMETER_KEYS.forEach((key) => change(MODULE_PARAMETER_LABELS[key], key === 'N_s' ? '72' : '1'))
   }
 }
 function r14Harness() {
@@ -195,7 +195,7 @@ describe('SolarSizingForm', () => {
   })
 
   it('R14D-02 test_cloud_draft_edit_invalidates_preview', async () => {
-    const labels = [...Object.keys(fields), ...Object.keys(r14Tracker), 'Use module parameters', ...MODULE_PARAMETER_KEYS]
+    const labels = [...Object.keys(fields), ...Object.keys(r14Tracker), 'Use module parameters', ...Object.values(MODULE_PARAMETER_LABELS)]
     expect(labels).toHaveLength(28)
     for (const mode of ['global', 'manual-global']) {
       for (const label of labels) {
@@ -216,7 +216,7 @@ describe('SolarSizingForm', () => {
         } else {
           const replacement = control.tagName === 'SELECT'
             ? (label === 'Racking' ? 'fixed_tilt' : original === 'true' ? 'false' : 'true')
-            : label === 'N_s' ? '73' : original + '2'
+            : label === 'Cells in series' ? '73' : original + '2'
           change(label, replacement)
           change(label, original)
         }
@@ -299,7 +299,7 @@ describe('SolarSizingForm', () => {
       change('Grant reference', 'unavailable_grant')
       if (phase === 'submission') { await r9Ready(); fireEvent.click(run()) }
       await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
-        .toBe(SOLAR_SIZING_RUN_REASONS.grant_missing + ' (CLOUD_AUTH_MISSING)'))
+        .toBe(SOLAR_SIZING_RUN_REASONS.grant_missing))
       expect(screen.getByLabelText('Scope').value).toBe('global')
       for (const [label, value] of Object.entries(fields)) {
         expect(screen.getByLabelText(label).value).toBe(label === 'Grant reference' ? 'unavailable_grant' : value)
@@ -336,7 +336,7 @@ describe('SolarSizingForm', () => {
       expect(screen.getByLabelText('Scope').value).toBe('global')
       for (const [label, value] of Object.entries(fields)) expect(screen.getByLabelText(label).value).toBe(value)
       expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
-        .toContain(PROJECT_SIZING_CONDUCTOR_REASONS.request_timeout)
+        .toContain('The submission was not confirmed. Retry the same request to check its status.')
       if (stale) {
         h.context.context.head_version_id = r9Next.input_version_id
         h.context.context.is_head = false
@@ -530,7 +530,7 @@ describe('SolarSizingForm', () => {
       status_code: 409, error: { reason_code: 'SIP_R3_SERVICE_EVIDENCE_REQUIRED' } }, refusal_reasons: ['SIP_R3_SERVICE_EVIDENCE_REQUIRED'] })
     render(<SolarSizingForm {...h.props} />)
     await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
-      .toBe(PROJECT_SIZING_CONDUCTOR_REASONS.manual_only + ' (SIP_R3_SERVICE_EVIDENCE_REQUIRED)'))
+      .toBe(PROJECT_SIZING_CONDUCTOR_REASONS.manual_only))
     expect(run().disabled).toBe(true)
     fireEvent.click(run())
     expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
@@ -851,7 +851,7 @@ describe('SolarSizingForm', () => {
     fireEvent.click(run())
     await waitFor(() => expect(screen.getByRole('button', { name: 'Retry' })).toBeTruthy())
     expect(screen.getByText('Saved global string length: 3')).toBeTruthy()
-    expect(screen.getByTestId('project-solar-sizing-feedback').textContent).toContain(PROJECT_SIZING_CONDUCTOR_REASONS.request_timeout)
+    expect(screen.getByTestId('project-solar-sizing-feedback').textContent).toContain('The submission was not confirmed. Retry the same request to check its status.')
     expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
@@ -899,8 +899,7 @@ describe('SolarSizingForm', () => {
       h.preview = r9Preview(r9Tool, r9Digest, { admission, runnable: false, refusal_reasons: ['refused'] })
       render(<SolarSizingForm {...h.props} />)
       await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback')).toBeTruthy())
-      expect(screen.getByTestId('project-solar-sizing-feedback').textContent).toBe(PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused
-        + (code === 'STALE_GRAPH_REVISION' ? ' (STALE_GRAPH_REVISION)' : ''))
+      expect(screen.getByTestId('project-solar-sizing-feedback').textContent).toBe(PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused)
       const feedback = projectSizingConductorFeedback(h.preview, admission)
       expect(feedback.outcome).toBe(h.preview)
       expect(feedback.admission).toBe(admission)
@@ -1241,10 +1240,22 @@ describe('SolarSizingForm', () => {
     fireEvent.click(screen.getByLabelText('Use module parameters'))
     const numbers = { V_oc_ref: 50, I_sc_ref: 10, V_mp_ref: 40, I_mp_ref: 9, alpha_sc: .01,
       beta_oc: -.1, STC: 360, gamma_r: -.3, T_NOCT: 45, N_s: 72 }
-    for (const [key, value] of Object.entries(numbers)) change(key, String(value))
+    const labels = {
+      V_oc_ref: 'Open circuit voltage at reference conditions (V)',
+      I_sc_ref: 'Short circuit current at reference conditions (A)',
+      V_mp_ref: 'Maximum power voltage at reference conditions (V)',
+      I_mp_ref: 'Maximum power current at reference conditions (A)',
+      alpha_sc: 'Short circuit current temperature coefficient (A/°C)',
+      beta_oc: 'Open circuit voltage temperature coefficient (V/°C)',
+      STC: 'Power at standard test conditions (W)',
+      gamma_r: 'Power temperature coefficient (%/°C)',
+      T_NOCT: 'Nominal operating cell temperature (°C)',
+      N_s: 'Cells in series',
+    }
+    for (const [key, value] of Object.entries(numbers)) change(labels[key], String(value))
     fireEvent.click(run())
     expect(props.onSubmit.mock.calls[0][1].requests[S].module_parameters).toEqual(numbers)
-    for (const value of ['72.5', '0']) { change('N_s', value); invalid('N_s') }
+    for (const value of ['72.5', '0']) { change('Cells in series', value); invalid('Cells in series') }
     fireEvent.click(screen.getByLabelText('Use module parameters')); fireEvent.click(run())
     expect(props.onSubmit.mock.calls[1][1].requests[S]).not.toHaveProperty('module_parameters')
   })

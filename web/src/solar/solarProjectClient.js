@@ -324,6 +324,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       const { signal } = options
       const outcome = await request(checkoutPath(scope.binding), { scope, signal, validate: validCheckout })
       if (outcome.ok && current(scope)) {
+        error = null
         const lease = outcome.data.checkout
         if (capability && (!lease || lease.fence !== checkout?.fence || Date.parse(lease.expires) <= Date.now())) rotate(null, lease)
         else { checkout = lease; publish() }

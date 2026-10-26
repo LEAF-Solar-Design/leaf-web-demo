@@ -9,6 +9,19 @@ import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingB
 const projectReasonCode = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}(?![\\s\\S])')
 const projectJobId = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])')
 
+export const MODULE_PARAMETER_LABELS = Object.freeze({
+  V_oc_ref: 'Open circuit voltage at reference conditions (V)',
+  I_sc_ref: 'Short circuit current at reference conditions (A)',
+  V_mp_ref: 'Maximum power voltage at reference conditions (V)',
+  I_mp_ref: 'Maximum power current at reference conditions (A)',
+  alpha_sc: 'Short circuit current temperature coefficient (A/°C)',
+  beta_oc: 'Open circuit voltage temperature coefficient (V/°C)',
+  STC: 'Power at standard test conditions (W)',
+  gamma_r: 'Power temperature coefficient (%/°C)',
+  T_NOCT: 'Nominal operating cell temperature (°C)',
+  N_s: 'Cells in series',
+})
+
 export function projectSizingConductorFeedback(outcome, admission = null, phase = 'submission') {
   const code = [admission?.error?.reason_code, outcome?.envelope?.error?.reason_code, outcome?.reason]
     .find((value) => typeof value === 'string' && projectReasonCode.test(value)) ?? null
@@ -365,7 +378,8 @@ function ProjectSolarSizingForm(props) {
     </>}
     {sentence && <p role="status">{sentence}</p>}
     {runMessage && <p role="status" data-testid="project-solar-sizing-feedback">
-      {runMessage.text}{runMessage.code ? ` (${runMessage.code})` : ''}
+      {humanizeError(runMessage.reason === 'request_timeout'
+        ? 'The submission was not confirmed. Retry the same request to check its status.' : runMessage.text)}
     </p>}
     <button type="button" disabled={Boolean(reason) || submitting || !editable} onClick={submit}>Review &amp; run</button>
     {retryAvailable && <button type="button"
@@ -411,7 +425,7 @@ function SizingCloudFields({ mode, draft, change, busy, invalid }) {
     {boolean('open_circuit_rise', 'Open circuit rise')}{input('grant_ref', 'Grant reference')}
     <label><input type="checkbox" checked={draft.use_module_parameters === true} disabled={busy}
       onChange={(event) => change('use_module_parameters', event.target.checked)} />Use module parameters</label>
-    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, key))}
+    {draft.use_module_parameters && MODULE_PARAMETER_KEYS.map((key) => input(key, MODULE_PARAMETER_LABELS[key]))}
   </>
 }
 
