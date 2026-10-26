@@ -23,7 +23,7 @@
   --recast-gap: 900ms;      /* exit-complete -> entrance-start */
   --recast-blur: 14px;
   --recast-scale: .965;
-  --stage-scrim: rgba(8, 8, 9, .72);
+  --stage-scrim: color-mix(in srgb, var(--leaf-ground) 72%, transparent);
 
   position: fixed;
   inset: 0;
@@ -41,8 +41,8 @@
 .stage-grid {
   position: absolute; inset: 0;
   background-image:
-    linear-gradient(rgba(255, 255, 255, .02) 1px, transparent 1px),
-    linear-gradient(90deg, rgba(255, 255, 255, .02) 1px, transparent 1px);
+    linear-gradient(color-mix(in srgb, var(--leaf-ink) 2%, transparent) 1px, transparent 1px),
+    linear-gradient(90deg, color-mix(in srgb, var(--leaf-ink) 2%, transparent) 1px, transparent 1px);
   background-size: 24px 24px;
 }
 
@@ -68,7 +68,7 @@
   position: absolute; z-index: calc(var(--leaf-layer-base) + 2); left: 50%; top: 74px; transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px; padding: 8px 10px;
   border: 1px solid rgba(245, 158, 11, .35); border-radius: var(--leaf-radius-key);
-  background: rgba(24, 24, 27, .94); color: #d4d4d8; font-size: var(--leaf-size-caption);
+  background: color-mix(in srgb, var(--leaf-raised) 94%, transparent); color: #d4d4d8; font-size: var(--leaf-size-caption);
 }
 .stage-viewer-notice button {
   border: 1px solid #3f3f46; border-radius: var(--leaf-radius-key); background: var(--leaf-line);
@@ -77,7 +77,7 @@
 
 .stage-scrim {
   position: absolute; inset: 0; pointer-events: none;
-  background: linear-gradient(90deg, rgba(10, 10, 10, .9) 0%, rgba(10, 10, 10, .5) 40%, transparent 64%);
+  background: linear-gradient(90deg, color-mix(in srgb, var(--leaf-ground) 90%, transparent) 0%, color-mix(in srgb, var(--leaf-ground) 50%, transparent) 40%, transparent 64%);
   transition: opacity .6s ease;
   opacity: 1;
 }
@@ -136,7 +136,7 @@
 .lp-topbar {
   position: absolute; top: 0; left: 0; right: 0; height: 52px; z-index: var(--leaf-layer-popover);
   display: flex; align-items: center; gap: 12px; padding: 0 20px;
-  border-bottom: 1px solid var(--leaf-line); background: rgba(10, 10, 10, .86);
+  border-bottom: 1px solid var(--leaf-line); background: color-mix(in srgb, var(--leaf-ground) 86%, transparent);
   box-sizing: border-box;
 }
 .lp-lockup { display: block; height: 24px; width: auto; flex: 0 0 auto; }
@@ -152,12 +152,12 @@
    .lp-cta; the top bar's trial and the solver's open button stay secondary. */
 .lp-trial {
   display: inline-flex; align-items: center; border: 0; border-radius: var(--leaf-radius-control);
-  background: rgba(34, 197, 94, .08); color: var(--leaf-accent);
+  background: color-mix(in srgb, var(--leaf-accent) 8%, transparent); color: var(--leaf-accent);
   box-shadow: none;
   font: 500 13px 'Inter Tight', sans-serif; padding: 8px 16px; cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .lp-trial:hover { background: rgba(34, 197, 94, .14); color: var(--leaf-accent-hover); }
+  .lp-trial:hover { background: color-mix(in srgb, var(--leaf-accent) 14%, transparent); color: var(--leaf-accent-hover); }
 }
 .lp-solver-open {
   background: transparent; border: 0; color: var(--leaf-ink-muted);
@@ -177,7 +177,7 @@
 .tc-product-nav {
   position: absolute; inset: 52px 0 auto; z-index: calc(var(--leaf-layer-header) + 4); min-height: 44px;
   display: flex; align-items: center; gap: 14px; padding: 6px 14px;
-  border-bottom: 1px solid var(--leaf-line); background: rgba(10, 10, 12, .97);
+  border-bottom: 1px solid var(--leaf-line); background: color-mix(in srgb, var(--leaf-surface) 97%, transparent);
   box-sizing: border-box;
 }
 .tc-account-signout { flex: 0 0 auto; white-space: nowrap; }
@@ -194,7 +194,7 @@
   color: var(--leaf-ink-muted); background: transparent;
 }
 @media (hover: hover) and (pointer: fine) {
-  .tc-product-tabs button:hover { color: var(--leaf-ink); background: rgba(255, 255, 255, .04); }
+  .tc-product-tabs button:hover { color: var(--leaf-ink); background: color-mix(in srgb, var(--leaf-ink) 4%, transparent); }
 }
 .tc-product-tabs button[aria-selected="true"] { color: var(--leaf-ink); background: var(--leaf-line); }
 .tc-product-tabs button > span { font: 600 12.5px 'Inter Tight', sans-serif; }
@@ -274,7 +274,7 @@
 }
 .tc-product-frame {
   position: absolute; inset: 96px 0 0; z-index: calc(var(--leaf-layer-sticky) + 8); overflow: auto;
-  padding: clamp(36px, 7vw, 88px); background: rgba(12, 12, 14, .98);
+  padding: clamp(36px, 7vw, 88px); background: color-mix(in srgb, var(--leaf-surface) 98%, transparent);
   box-sizing: border-box;
 }
 .tc-product-frame-head { display: flex; align-items: center; gap: 12px; color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption); text-transform: uppercase; letter-spacing: .08em; }
@@ -357,12 +357,12 @@
 .membership-roster { display: grid; gap: 6px; }
 .membership-row, .receipt-row {
   display: grid; gap: 4px; padding: 6px 8px;
-  background: rgba(255, 255, 255, .03); border-radius: var(--leaf-radius-key);
+  background: color-mix(in srgb, var(--leaf-ink) 3%, transparent); border-radius: var(--leaf-radius-key);
 }
 .membership-member { font-family: ui-monospace, monospace; font-size: var(--leaf-size-caption); word-break: break-all; }
 .membership-invite { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; }
 .membership-invite input, .membership-invite select {
-  background: rgba(0, 0, 0, .3); border: 1px solid rgba(255, 255, 255, .12);
+  background: rgba(0, 0, 0, .3); border: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent);
   color: var(--leaf-ink); border-radius: var(--leaf-radius-key); padding: 4px 6px; font-size: var(--leaf-size-caption); min-width: 0;
 }
 .membership-error, .danger-action-error, .clone-dialog-error, .export-dialog-error {
@@ -392,7 +392,7 @@
 .clone-dialog, .export-dialog {
   width: min(420px, calc(100vw - 32px)); display: grid; gap: 10px;
   padding: 14px; border-radius: var(--leaf-radius-card); font-size: var(--leaf-size-caption); color: var(--leaf-ink);
-  background: var(--leaf-raised); border: 1px solid rgba(255, 255, 255, .12);
+  background: var(--leaf-raised); border: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent);
   box-shadow: 0 18px 48px rgba(0, 0, 0, .55);
 }
 .clone-dialog-progress, .export-dialog-progress, .export-dialog-progress-label {
@@ -438,7 +438,7 @@
 
 .lp-solver {
   position: absolute; right: 44px; bottom: 150px; width: 380px; z-index: var(--leaf-layer-sticky);
-  border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-card); background: rgba(19, 19, 22, .93);
+  border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-card); background: color-mix(in srgb, var(--leaf-surface) 93%, transparent);
   padding: 13px 15px; display: flex; flex-direction: column; gap: 10px;
   box-shadow: 0 18px 44px rgba(0, 0, 0, .5);
 }
@@ -480,7 +480,7 @@
 .lp-index {
   position: absolute; left: 0; right: 0; bottom: 0; z-index: var(--leaf-layer-header);
   display: flex; align-items: center; gap: 6px; padding: 11px 20px;
-  border-top: 1px solid var(--leaf-line); background: rgba(10, 10, 10, .88);
+  border-top: 1px solid var(--leaf-line); background: color-mix(in srgb, var(--leaf-ground) 88%, transparent);
   box-sizing: border-box;
 }
 .lp-tab {
@@ -498,11 +498,11 @@
 
 .tc-rail {
   position: absolute; top: 52px; bottom: 0; width: 300px; z-index: var(--leaf-layer-sticky);
-  background: rgba(12, 12, 14, .95);
+  background: color-mix(in srgb, var(--leaf-surface) 95%, transparent);
   display: flex; flex-direction: column; box-sizing: border-box;
 }
 @media (prefers-reduced-transparency: reduce) {
-  .tc-rail { background: rgb(12, 12, 14); }
+  .tc-rail { background: var(--leaf-surface); }
 }
 .tc-rail-l { left: 0; border-right: 1px solid var(--leaf-line); }
 .tc-rail-r { right: 0; border-left: 1px solid var(--leaf-line); }
@@ -524,7 +524,7 @@
   white-space: nowrap;
 }
 @media (hover: hover) and (pointer: fine) {
-  .tc-rail-tabs button:hover { color: #d4d4d8; background: rgba(255, 255, 255, .03); }
+  .tc-rail-tabs button:hover { color: #d4d4d8; background: color-mix(in srgb, var(--leaf-ink) 3%, transparent); }
 }
 .tc-rail-tabs button[aria-selected="true"] { color: var(--leaf-ink); background: var(--leaf-raised); }
 .tc-rail-tabs button span { float: right; color: var(--leaf-ink-muted); font-variant-numeric: tabular-nums; }
@@ -558,7 +558,7 @@
 .tc-event { display: flex; align-items: center; gap: 8px; padding: 7px 8px; }
 .tc-event .dot { background: var(--leaf-accent); }
 .tc-event .dot.hollow { background: transparent; border-color: var(--leaf-ink-muted); }
-.tc-event.current { border-radius: var(--leaf-radius-control); background: rgba(34, 197, 94, .09); }
+.tc-event.current { border-radius: var(--leaf-radius-control); background: color-mix(in srgb, var(--leaf-accent) 9%, transparent); }
 .tc-event-text { flex: 1; font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); }
 .tc-event-text.hot { color: var(--leaf-ink); font-weight: 500; }
 .tc-event-time { font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); font-variant-numeric: tabular-nums; }
@@ -766,7 +766,7 @@
   width: 720px; z-index: var(--leaf-layer-header);
 }
 .tc-bar {
-  border: 1px solid rgba(34, 197, 94, .75); border-radius: var(--leaf-radius-card); background: var(--leaf-raised);
+  border: 1px solid color-mix(in srgb, var(--leaf-accent) 75%, transparent); border-radius: var(--leaf-radius-card); background: var(--leaf-raised);
   box-shadow: 0 0 0 3px rgba(34, 197, 94, .07);
   display: flex; flex-direction: column;
 }
@@ -863,10 +863,10 @@
 .tc-bar .bar .bar-controls .tc-run:disabled { background: var(--leaf-accent); color: #04140a; opacity: .42; cursor: default; }
 /* Inert bar (sign in or a drawing is required first): the Run chip drops its filled primary face and reads as a quiet chip, so nothing on the pane invites a click that cannot run. */
 .tc-bar.tc-bar-inert .bar .bar-controls .tc-run,
-.tc-bar-inert .tc-run { background: rgba(34, 197, 94, .08); color: var(--leaf-ink-muted); box-shadow: none; opacity: 1; cursor: default; }
+.tc-bar-inert .tc-run { background: color-mix(in srgb, var(--leaf-accent) 8%, transparent); color: var(--leaf-ink-muted); box-shadow: none; opacity: 1; cursor: default; }
 @media (hover: hover) and (pointer: fine) {
   .tc-bar.tc-bar-inert .bar .bar-controls .tc-run:hover:not(:disabled),
-  .tc-bar-inert .tc-run:hover { background: rgba(34, 197, 94, .08); color: var(--leaf-ink-muted); }
+  .tc-bar-inert .tc-run:hover { background: color-mix(in srgb, var(--leaf-accent) 8%, transparent); color: var(--leaf-ink-muted); }
 }
 
 /* ---------------- tool: caption (z 15) ---------------- */
@@ -880,7 +880,7 @@
 .tc-caption {
   position: absolute; left: 300px; right: 300px; bottom: 0; z-index: calc(var(--leaf-layer-raised) + 5);
   height: 18px; line-height: 17px; padding: 0 20px; box-sizing: border-box;
-  border-top: 1px solid var(--leaf-line); background: rgba(10, 10, 10, .88);
+  border-top: 1px solid var(--leaf-line); background: color-mix(in srgb, var(--leaf-ground) 88%, transparent);
   font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); text-align: center;
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
   filter: none !important; transform: none !important;
@@ -1019,21 +1019,21 @@
   --hairline: var(--leaf-raised);
   --rail: var(--leaf-surface);
   --input: var(--leaf-raised);
-  --accent-tint: rgba(34, 197, 94, .08);
-  --accent-tint-hover: rgba(34, 197, 94, .14);
+  --accent-tint: color-mix(in srgb, var(--leaf-accent) 8%, transparent);
+  --accent-tint-hover: color-mix(in srgb, var(--leaf-accent) 14%, transparent);
   --warn-tint: color-mix(in srgb, var(--leaf-cad-select-warm) 10%, transparent);
   --danger-tint: rgba(226, 73, 71, .10);
   --sheet: var(--leaf-ground);
   --code-bg: var(--leaf-surface);
-  --grid-line: rgba(255, 255, 255, .02);
+  --grid-line: color-mix(in srgb, var(--leaf-ink) 2%, transparent);
   --rule-strong: var(--leaf-line);
-  --hover-tint: rgba(255, 255, 255, .04);
-  --hover-tint-strong: rgba(255, 255, 255, .08);
+  --hover-tint: color-mix(in srgb, var(--leaf-ink) 4%, transparent);
+  --hover-tint-strong: color-mix(in srgb, var(--leaf-ink) 8%, transparent);
   --shadow-pop: 0 12px 32px rgba(0, 0, 0, .55);
   /* the stage's viewer glass panels keep the OLD canvas neutrals too */
   --cv-bg: var(--leaf-surface);
   --cv-panel: var(--leaf-raised);
-  --cv-panel-glass: rgba(24, 24, 27, .86);
+  --cv-panel-glass: color-mix(in srgb, var(--leaf-raised) 86%, transparent);
   --cv-border: var(--leaf-line);
   --cv-text: var(--leaf-ink);
   --cv-dim: var(--leaf-ink-muted);
@@ -1186,9 +1186,9 @@
    bans them from styles.css, not from this file). Direct declarations on
    descendants (`.hint b`, tab labels, continuity values) need their own
    re-pin: an inherited color never beats a declared one. */
-.studio-shell :is(.kicker, .home-q, .hint) { color: rgba(240, 242, 240, .92); }
-.studio-shell .home-q em { color: rgba(240, 242, 240, .98); }
-.studio-shell .hint b { color: rgba(240, 242, 240, .98); }
+.studio-shell :is(.kicker, .home-q, .hint) { color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); }
+.studio-shell .home-q em { color: color-mix(in srgb, var(--leaf-ink) 98%, transparent); }
+.studio-shell .hint b { color: color-mix(in srgb, var(--leaf-ink) 98%, transparent); }
 /* The running strip has no background by design (it rode the sheet); over
    the ground it takes the same card material as its decision/failed siblings. */
 .studio-shell .strip-running {
@@ -1196,12 +1196,12 @@
   background: var(--card); color: var(--foreground);
 }
 /* Unselected surface tabs and their state labels sit on the transparent nav. */
-.studio-shell .app .tc-product-tabs [role="tab"] { color: rgba(240, 242, 240, .74); }
+.studio-shell .app .tc-product-tabs [role="tab"] { color: color-mix(in srgb, var(--leaf-ink) 74%, transparent); }
 @media (hover: hover) and (pointer: fine) {
-  .studio-shell .app .tc-product-tabs [role="tab"]:hover { color: rgba(240, 242, 240, .98); background: rgba(240, 242, 240, .08); }
+  .studio-shell .app .tc-product-tabs [role="tab"]:hover { color: color-mix(in srgb, var(--leaf-ink) 98%, transparent); background: color-mix(in srgb, var(--leaf-ink) 8%, transparent); }
 }
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] { color: var(--foreground); background: var(--card); }
-.studio-shell .app .tc-product-tabs [role="tab"] small { color: rgba(240, 242, 240, .62); }
+.studio-shell .app .tc-product-tabs [role="tab"] small { color: color-mix(in srgb, var(--leaf-ink) 62%, transparent); }
 /* The state labels' paper-ramp status colors (styles.css, same (0,4,1)
    specificity, later in sheet order) would win the tie: pin them one
    attribute higher with dark-ground-safe ink. */
@@ -1210,17 +1210,17 @@
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small { color: var(--muted-2); }
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: var(--status-success); }
 .studio-shell .app .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="unavailable"] { color: var(--status-danger); }
-.studio-shell .app .tc-product-shared { color: rgba(240, 242, 240, .7); }
+.studio-shell .app .tc-product-shared { color: color-mix(in srgb, var(--leaf-ink) 70%, transparent); }
 .studio-shell .app .tc-continuity,
-.studio-shell .app .tc-continuity-label { color: rgba(240, 242, 240, .7); }
-.studio-shell .app .tc-continuity-item strong { color: rgba(240, 242, 240, .98); }
-.studio-shell .chip-neutral { color: rgba(240, 242, 240, .88); background: rgba(240, 242, 240, .1); }
+.studio-shell .app .tc-continuity-label { color: color-mix(in srgb, var(--leaf-ink) 70%, transparent); }
+.studio-shell .app .tc-continuity-item strong { color: color-mix(in srgb, var(--leaf-ink) 98%, transparent); }
+.studio-shell .chip-neutral { color: color-mix(in srgb, var(--leaf-ink) 88%, transparent); background: color-mix(in srgb, var(--leaf-ink) 10%, transparent); }
 @media (hover: hover) and (pointer: fine) {
-  .studio-shell .chip-neutral:hover { background: rgba(240, 242, 240, .18); }
+  .studio-shell .chip-neutral:hover { background: color-mix(in srgb, var(--leaf-ink) 18%, transparent); }
 }
 /* Pre-intake and skeleton feedback render on the bare ground. */
 .studio-shell .viewer-wrap .loading-line,
-.studio-ground .loading-line { color: rgba(240, 242, 240, .8); }
+.studio-ground .loading-line { color: color-mix(in srgb, var(--leaf-ink) 80%, transparent); }
 /* The lazy-viewer fallback sheet takes the GROUND material here, not the
    card canvas colour it uses in the old shell (W4c-0: the #0f0f11 sheet at
    z0 read as a mis-toned flash over the #0a0a0a ground). */
@@ -1228,9 +1228,9 @@
 /* Error copy that used to ride the card's paper: the viewer-refresh
    inline error and the pane-failure title/reason inside the transparent
    card and wrap. */
-.studio-shell .workspace-card .inline-error { color: rgba(240, 242, 240, .92); }
-.studio-shell .viewer-wrap .pane-fail-title { color: rgba(240, 242, 240, .96); }
-.studio-shell .viewer-wrap .pane-fail-reason { color: rgba(240, 242, 240, .72); }
+.studio-shell .workspace-card .inline-error { color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); }
+.studio-shell .viewer-wrap .pane-fail-title { color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); }
+.studio-shell .viewer-wrap .pane-fail-reason { color: color-mix(in srgb, var(--leaf-ink) 72%, transparent); }
 
 /* ================= W4a: per-surface GROUNDS (site/SurfaceGrounds.jsx) ======
    The ground is each tab's workspace. Drawing (CAD, Solar CAD) is the
@@ -1265,14 +1265,15 @@
 .studio-shell .tc-product-frame[data-surface="browser"] :is(.tc-product-columns, .tc-product-note),
 .studio-shell .tc-product-frame[data-surface="ios"] :is(.tc-product-columns, .tc-product-note) { display: none; }
 .studio-shell .tc-product-frame[data-surface="browser"] :is(h1, .tc-product-project-state > strong),
-.studio-shell .tc-product-frame[data-surface="ios"] :is(h1, .tc-product-project-state > strong) { color: rgba(240, 242, 240, .96); }
+.studio-shell .tc-product-frame[data-surface="ios"] :is(h1, .tc-product-project-state > strong) { color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); }
 .studio-shell .tc-product-frame[data-surface="browser"] :is(p, .tc-product-frame-head, .tc-product-frame-head strong, .tc-product-project-reason, .dim, .ios-surface),
-.studio-shell .tc-product-frame[data-surface="ios"] :is(p, .tc-product-frame-head, .tc-product-frame-head strong, .tc-product-project-reason, .dim, .ios-surface) { color: rgba(240, 242, 240, .7); }
+.studio-shell .tc-product-frame[data-surface="ios"] :is(p, .tc-product-frame-head, .tc-product-frame-head strong, .tc-product-project-reason, .dim, .ios-surface) { color: color-mix(in srgb, var(--leaf-ink) 70%, transparent); }
 
 .studio-ground-board, .studio-ground-device {
   position: absolute; inset: 0; overflow: hidden; color: rgba(240, 242, 240, .86);
   font-family: var(--font-sans);
 }
+.studio-ground-device { color: color-mix(in srgb, var(--leaf-ink) 86%, transparent); }
 .studio-ground-board {
   background:
     linear-gradient(rgba(240, 242, 240, .045) 1px, transparent 1px) 0 0 / 100% 48px,
@@ -1318,7 +1319,7 @@
 .ground-board-header :focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 3px; }
 .start-board-gloss {
   margin: 0 0 6px; padding: 8px 12px; border-radius: var(--leaf-radius-key);
-  background: var(--leaf-raised); color: rgba(240, 242, 240, .92); font-size: var(--leaf-size-caption); line-height: 1.5;
+  background: var(--leaf-raised); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); font-size: var(--leaf-size-caption); line-height: 1.5;
 }
 .studio-shell .app[data-start-open="true"] :is(.cockpit-view, .cockpit-cube-wrap, .cockpit-cube-wcs) { visibility: hidden; }
 @media (max-width: 1023px) {
@@ -1326,16 +1327,16 @@
 }
 .ground-eyebrow, .device-k, .ground-tile h3 {
   font: 600 var(--leaf-size-caption) var(--font-mono); letter-spacing: .12em; text-transform: uppercase;
-  color: rgba(240, 242, 240, .55); margin: 0;
+  color: color-mix(in srgb, var(--leaf-ink) 55%, transparent); margin: 0;
 }
 .ground-tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); grid-auto-rows: minmax(0, 1fr); gap: 10px; min-height: 0; }
 .ground-tile {
-  border: 1px solid rgba(240, 242, 240, .14); border-radius: var(--leaf-radius-control); padding: 9px 12px;
-  background: rgba(10, 12, 11, .72); display: grid; align-content: start; gap: 4px; overflow: hidden; min-height: 0;
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 14%, transparent); border-radius: var(--leaf-radius-control); padding: 9px 12px;
+  background: color-mix(in srgb, var(--leaf-ground) 72%, transparent); display: grid; align-content: start; gap: 4px; overflow: hidden; min-height: 0;
 }
-.ground-tile strong { font-size: var(--leaf-size-dense); font-weight: 500; color: rgba(240, 242, 240, .96); }
-.ground-tile p { margin: 0; font-size: var(--leaf-size-caption); color: rgba(240, 242, 240, .7); }
-.ground-tile ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: var(--leaf-size-caption); color: rgba(240, 242, 240, .78); }
+.ground-tile strong { font-size: var(--leaf-size-dense); font-weight: 500; color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); }
+.ground-tile p { margin: 0; font-size: var(--leaf-size-caption); color: color-mix(in srgb, var(--leaf-ink) 70%, transparent); }
+.ground-tile ul { margin: 0; padding: 0; list-style: none; display: grid; gap: 2px; font-size: var(--leaf-size-caption); color: color-mix(in srgb, var(--leaf-ink) 78%, transparent); }
 .ground-tile li { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .ground-tile li strong { font-size: var(--leaf-size-caption); }
 .studio-ground-board[data-studio-presentation="true"] .ground-tiles { grid-auto-rows: minmax(min-content, auto); overflow: auto; }
@@ -1343,11 +1344,11 @@
 .studio-ground-board[data-studio-presentation="true"] .ground-tile[data-tile="catalog"] li { white-space: normal; overflow: visible; text-overflow: clip; overflow-wrap: anywhere; min-width: 0; }
 .studio-ground-board[data-studio-presentation="true"] .ground-catalog-tools { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); gap: 8px; margin: 4px 0 8px; }
 .studio-ground-board[data-studio-presentation="true"] .ground-catalog-tool { display: grid; align-content: start; gap: 3px; }
-.ground-empty { color: rgba(240, 242, 240, .5) !important; font-style: italic; }
-.ground-note { margin: 0; font: var(--leaf-size-caption) var(--font-mono); color: rgba(240, 242, 240, .55); }
+.ground-empty { color: color-mix(in srgb, var(--leaf-ink) 50%, transparent) !important; font-style: italic; }
+.ground-note { margin: 0; font: var(--leaf-size-caption) var(--font-mono); color: color-mix(in srgb, var(--leaf-ink) 55%, transparent); }
 .ground-theme-toggle {
-  justify-self: end; padding: 5px 9px; border: 1px solid rgba(240, 242, 240, .55);
-  border-radius: var(--leaf-radius-key); background: var(--leaf-raised); color: rgba(240, 242, 240, .96);
+  justify-self: end; padding: 5px 9px; border: 1px solid color-mix(in srgb, var(--leaf-ink) 55%, transparent);
+  border-radius: var(--leaf-radius-key); background: var(--leaf-raised); color: color-mix(in srgb, var(--leaf-ink) 96%, transparent);
   font: 12px var(--font-sans); cursor: pointer;
 }
 .ground-theme-toggle:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 3px; }
@@ -1419,24 +1420,24 @@
 .ground-device-stage { display: flex; align-items: center; justify-content: center; gap: 44px; }
 .device-frame {
   position: relative; width: 150px; height: 310px; border-radius: calc(var(--leaf-radius-sheet) + 10px); flex: none;
-  border: 2px solid rgba(240, 242, 240, .28); background: var(--leaf-ground);
-  box-shadow: 0 0 0 5px rgba(240, 242, 240, .06), 0 24px 60px rgba(0, 0, 0, .6);
+  border: 2px solid color-mix(in srgb, var(--leaf-ink) 28%, transparent); background: var(--leaf-ground);
+  box-shadow: 0 0 0 5px color-mix(in srgb, var(--leaf-ink) 6%, transparent), 0 24px 60px rgba(0, 0, 0, .6);
   display: grid; align-items: center;
 }
 .device-notch {
   position: absolute; top: 10px; left: 50%; width: 56px; height: 16px; margin-left: -28px;
-  border-radius: var(--leaf-radius-card); background: rgba(240, 242, 240, .16);
+  border-radius: var(--leaf-radius-card); background: color-mix(in srgb, var(--leaf-ink) 16%, transparent);
 }
 .device-screen { display: grid; gap: 6px; padding: 0 16px; text-align: center; }
-.device-v { font: 500 15px/1.2 var(--font-sans); color: rgba(240, 242, 240, .96); }
+.device-v { font: 500 15px/1.2 var(--font-sans); color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); }
 .device-stage { font: var(--leaf-size-caption) var(--font-mono); color: var(--studio-accent); }
-.device-meta { font: var(--leaf-size-caption) var(--font-mono); color: rgba(240, 242, 240, .55); word-break: break-all; }
+.device-meta { font: var(--leaf-size-caption) var(--font-mono); color: color-mix(in srgb, var(--leaf-ink) 55%, transparent); word-break: break-all; }
 .studio-ground-device[data-state="ready"] .device-frame { border-color: var(--studio-accent); }
 .studio-ground-device[data-state="unavailable"] .device-frame { border-color: #f0997b; }
 .ground-device-side { display: grid; gap: 14px; max-width: 340px; }
-.ground-lane { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; font: 12px var(--font-mono); color: rgba(240, 242, 240, .6); }
+.ground-lane { margin: 0; padding: 0; list-style: none; display: grid; gap: 10px; font: 12px var(--font-mono); color: color-mix(in srgb, var(--leaf-ink) 60%, transparent); }
 .ground-lane li { display: flex; align-items: center; gap: 10px; }
-.ground-lane li[data-lit="true"] { color: rgba(240, 242, 240, .96); }
+.ground-lane li[data-lit="true"] { color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); }
 @media (max-width: 1023px) {
   .studio-shell { --ground-left: 16px; --ground-right: 16px; --ground-top: 420px; --ground-window: 360px; }
   .ground-tiles { grid-template-columns: repeat(2, minmax(0, 1fr)); }
@@ -1459,8 +1460,8 @@
 .studio-shell header.top {
   position: relative;
   z-index: calc(var(--leaf-layer-base) + 3);
-  background: rgba(10, 10, 10, .84); backdrop-filter: blur(8px);
-  border-bottom: 1px solid rgba(240, 242, 240, .12); color: rgba(240, 242, 240, .92);
+  background: color-mix(in srgb, var(--leaf-ground) 84%, transparent); backdrop-filter: blur(8px);
+  border-bottom: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
 }
 /* a header popover (Add-ons, Claude accounts) paints above .tc-product-nav (z-index 6) while open */
 .studio-shell header.top:has(.claude-pop) { z-index: calc(var(--leaf-layer-base) + 7); }
@@ -1469,15 +1470,15 @@
 @media (max-width: 599px) {
   .studio-shell header.top:has(.claude-pop) { backdrop-filter: none; -webkit-backdrop-filter: none; }
 }
-.studio-shell header.top :is(.mark, .who, .who b, .proj .name, .switch) { color: rgba(240, 242, 240, .92); }
-.studio-shell header.top .meta { color: rgba(240, 242, 240, .6); }
+.studio-shell header.top :is(.mark, .who, .who b, .proj .name, .switch) { color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); }
+.studio-shell header.top .meta { color: color-mix(in srgb, var(--leaf-ink) 60%, transparent); }
 /* Browser results use paper; the sticky shell header keeps its dark material. */
 .studio-shell .app[data-project-workspace="results"] .home-q { color: var(--foreground); }
-.studio-shell .app[data-project-workspace="results"] > header.top { background: rgba(10, 10, 10, .84); }
+.studio-shell .app[data-project-workspace="results"] > header.top { background: color-mix(in srgb, var(--leaf-ground) 84%, transparent); }
 .studio-shell header.top .chip-act,
 .studio-shell footer.foot-bar .chip-act,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act {
-  background: rgba(240, 242, 240, .08); border-color: rgba(240, 242, 240, .22); color: rgba(240, 242, 240, .92);
+  background: color-mix(in srgb, var(--leaf-ink) 8%, transparent); border-color: color-mix(in srgb, var(--leaf-ink) 22%, transparent); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
 }
 .studio-shell header.top .tc-account-signout {
   color: #f0997b; background: rgba(240, 153, 123, .12);
@@ -1486,7 +1487,7 @@
 @media (hover: hover) and (pointer: fine) {
   .studio-shell header.top .chip-act:hover,
   .studio-shell footer.foot-bar .chip-act:hover,
-  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act:hover { background: rgba(240, 242, 240, .16); }
+  .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .chip-act:hover { background: color-mix(in srgb, var(--leaf-ink) 16%, transparent); }
 }
 .studio-shell aside.nav, .studio-shell aside.rail {
   position: relative; z-index: calc(var(--leaf-layer-base) + 2);
@@ -1519,12 +1520,12 @@
 }
 .studio-shell aside.rail[data-spine] {
   padding: 8px 4px; margin: 12px 12px 12px 0; overflow: hidden;
-  background: rgba(10, 10, 10, .88);
+  background: color-mix(in srgb, var(--leaf-ground) 88%, transparent);
 }
 .rail-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; }
-.rail-spine-count { font: 600 var(--leaf-size-caption) var(--font-mono); color: rgba(240, 242, 240, .86); }
+.rail-spine-count { font: 600 var(--leaf-size-caption) var(--font-mono); color: color-mix(in srgb, var(--leaf-ink) 86%, transparent); }
 .studio-shell aside.rail .spine-collapse { margin-left: auto; }
-.studio-shell aside.nav[data-spine] { padding: 8px 4px; overflow-y: auto; overflow-x: hidden; background: rgba(10, 10, 10, .88); }
+.studio-shell aside.nav[data-spine] { padding: 8px 4px; overflow-y: auto; overflow-x: hidden; background: color-mix(in srgb, var(--leaf-ground) 88%, transparent); }
 .nav-spine { display: flex; flex-direction: column; align-items: center; gap: 6px; }
 /* Explicit ink on the dark rail: inherited color never beats a declared
    one (kimi, twice): 240,242,240 at .88 on the rail material clears 4.5:1. */
@@ -1535,13 +1536,13 @@
   width: 34px; height: 34px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   font: 600 12px var(--font-mono); letter-spacing: .02em;
-  color: rgba(240, 242, 240, .96);
-  background: rgba(240, 242, 240, .1);
-  border: 1px solid rgba(240, 242, 240, .26); border-radius: var(--leaf-radius-control);
+  color: color-mix(in srgb, var(--leaf-ink) 96%, transparent);
+  background: color-mix(in srgb, var(--leaf-ink) 10%, transparent);
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 26%, transparent); border-radius: var(--leaf-radius-control);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .spine-btn:hover, .inbox-toggle:hover { background: rgba(240, 242, 240, .12); }
+  .spine-btn:hover, .inbox-toggle:hover { background: color-mix(in srgb, var(--leaf-ink) 12%, transparent); }
 }
 .spine-btn:focus-visible, .inbox-toggle:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .spine-expand { font-size: var(--leaf-size-dense); }
@@ -1561,33 +1562,33 @@
      --cockpit-ribbon-h (DraftingRibbon publishes it on the workspace card). */
   flex-wrap: wrap;
   padding: 6px 10px; margin-bottom: 6px;
-  border: 1px solid rgba(240, 242, 240, .14); border-radius: var(--leaf-radius-key);
-  color: rgba(240, 242, 240, .92);
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 14%, transparent); border-radius: var(--leaf-radius-key);
+  color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
 }
 .studio-shell .drafting-ribbon::before {
   content: ''; position: absolute; inset: 0; z-index: calc(var(--leaf-layer-base) - 1);
   border-radius: inherit;
-  background: rgba(10, 10, 10, .78); backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--leaf-ground) 78%, transparent); backdrop-filter: blur(6px);
 }
 /* flex: none, a shrinking cluster lets its nowrap tools paint over the
    neighbour (seen on the real 5-family catalog); the strip SCROLLS instead. */
 .ribbon-cluster { display: flex; flex-direction: column; gap: 3px; flex: 0 0 auto; justify-content: flex-end; }
-.ribbon-cluster + .ribbon-cluster { border-left: 1px solid rgba(240, 242, 240, .12); padding-left: 10px; }
+.ribbon-cluster + .ribbon-cluster { border-left: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent); padding-left: 10px; }
 /* W4d Slice D (seating, overlaid on the reference): the group label sits at
    the BOTTOM of the cluster and the tools fill a two-row column-flow grid,
    so a six-tool group is three columns wide, not six. */
 .ribbon-cluster-label {
   font: 500 var(--leaf-size-caption) var(--font-mono); letter-spacing: .08em; text-transform: uppercase;
-  color: rgba(240, 242, 240, .62);
+  color: color-mix(in srgb, var(--leaf-ink) 62%, transparent);
   display: inline-flex; gap: 6px; align-items: baseline; white-space: nowrap; justify-content: center;
   margin-top: 1px;
 }
 .ribbon-cluster-label.as-button {
   background: none; border: 0; padding: 0 2px; cursor: pointer; border-radius: var(--leaf-radius-key);
-  color: rgba(240, 242, 240, .72);
+  color: color-mix(in srgb, var(--leaf-ink) 72%, transparent);
 }
 @media (hover: hover) and (pointer: fine) {
-  .ribbon-cluster-label.as-button:hover { color: rgba(240, 242, 240, .96); background: rgba(240, 242, 240, .08); }
+  .ribbon-cluster-label.as-button:hover { color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); background: color-mix(in srgb, var(--leaf-ink) 8%, transparent); }
 }
 .ribbon-cluster-label.as-button:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .ribbon-monogram { color: rgba(127, 214, 166, .9); }
@@ -1599,46 +1600,46 @@
 .cockpit-prompt {
   flex: 1 0 100%; order: 99;
   display: flex; flex-wrap: wrap; gap: 4px 8px; align-items: center;
-  padding-top: 4px; border-top: 1px solid rgba(240, 242, 240, .1);
-  font: 500 var(--leaf-size-caption) var(--font-mono); color: rgba(240, 242, 240, .72);
+  padding-top: 4px; border-top: 1px solid color-mix(in srgb, var(--leaf-ink) 10%, transparent);
+  font: 500 var(--leaf-size-caption) var(--font-mono); color: color-mix(in srgb, var(--leaf-ink) 72%, transparent);
 }
 .cockpit-prompt .cp-verb { color: rgba(127, 214, 166, .9); letter-spacing: .08em; }
 .cockpit-prompt :is(.cp-step, .cp-field, .cp-actions) { display: inline-flex; gap: 4px; align-items: center; white-space: nowrap; }
 .cockpit-prompt .cp-input {
   width: 42px; padding: 1px 4px;
-  font: 500 var(--leaf-size-caption) var(--font-mono); color: rgba(240, 242, 240, .92);
-  background: rgba(240, 242, 240, .06); border: 1px solid rgba(240, 242, 240, .22); border-radius: var(--leaf-radius-key);
+  font: 500 var(--leaf-size-caption) var(--font-mono); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
+  background: color-mix(in srgb, var(--leaf-ink) 6%, transparent); border: 1px solid color-mix(in srgb, var(--leaf-ink) 22%, transparent); border-radius: var(--leaf-radius-key);
 }
 .cockpit-prompt .cp-input.wide { width: 120px; }
 .cockpit-prompt .cp-input:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
-.cockpit-prompt .cp-input:disabled { color: rgba(240, 242, 240, .45); background: transparent; }
+.cockpit-prompt .cp-input:disabled { color: color-mix(in srgb, var(--leaf-ink) 45%, transparent); background: transparent; }
 .cockpit-prompt input[type="checkbox"] { margin: 0; accent-color: var(--studio-accent); }
 .cockpit-prompt .cp-note { color: rgba(240, 200, 120, .9); }
 .ribbon-tool {
   padding: 3px 8px;
   font: 500 var(--leaf-size-caption) var(--font-mono); white-space: nowrap;
-  color: rgba(240, 242, 240, .88);
-  background: rgba(240, 242, 240, .06);
-  border: 1px solid rgba(240, 242, 240, .16); border-radius: var(--leaf-radius-key);
+  color: color-mix(in srgb, var(--leaf-ink) 88%, transparent);
+  background: color-mix(in srgb, var(--leaf-ink) 6%, transparent);
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 16%, transparent); border-radius: var(--leaf-radius-key);
   cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .ribbon-tool:hover:not(:disabled) { background: rgba(240, 242, 240, .12); }
+  .ribbon-tool:hover:not(:disabled) { background: color-mix(in srgb, var(--leaf-ink) 12%, transparent); }
 }
 .ribbon-tool:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 .ribbon-tool.write { border-color: rgba(212, 175, 110, .38); }
 /* Disabled keeps legible ink (3:1 floor for disabled affordances), and the
    reason rides the title/aria-label from the component. */
-.ribbon-tool:disabled { color: rgba(240, 242, 240, .45); cursor: not-allowed; background: transparent; }
-.ribbon-empty { font: 400 var(--leaf-size-caption) var(--sans); color: rgba(240, 242, 240, .6); padding: 4px 2px; }
+.ribbon-tool:disabled { color: color-mix(in srgb, var(--leaf-ink) 45%, transparent); cursor: not-allowed; background: transparent; }
+.ribbon-empty { font: 400 var(--leaf-size-caption) var(--sans); color: color-mix(in srgb, var(--leaf-ink) 60%, transparent); padding: 4px 2px; }
 /* W4d: honest gating reads as a sentence, not as grey. The cluster note is
    visible text (never aria-hidden) and each tool's reason rides its title
    and accessible name from the component. Pressed = a layer toggle's
    visible state; false = the layer is hidden, struck through so the state
    is readable without colour. */
-.ribbon-note { font: 400 var(--leaf-size-caption) var(--sans); color: rgba(240, 242, 240, .72); white-space: nowrap; }
+.ribbon-note { font: 400 var(--leaf-size-caption) var(--sans); color: color-mix(in srgb, var(--leaf-ink) 72%, transparent); white-space: nowrap; }
 .ribbon-tool[aria-pressed="true"] { background: rgba(127, 214, 166, .16); border-color: rgba(127, 214, 166, .5); }
-.ribbon-tool[aria-pressed="false"] { text-decoration: line-through; color: rgba(240, 242, 240, .62); }
+.ribbon-tool[aria-pressed="false"] { text-decoration: line-through; color: color-mix(in srgb, var(--leaf-ink) 62%, transparent); }
 /* --- W4c-C: the page dissolves into the viewport (CAD/Solar only) -------
    Operator, twice: the drawing IS the workspace. Before this the console's
    page blocks (import surface 1192x140, result 1194x83, tabs, toolbar) held
@@ -1666,21 +1667,21 @@
    reference; the command well is a slim docked line. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon::before,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar::before {
-  background: rgba(12, 12, 13, .96); backdrop-filter: none;
+  background: color-mix(in srgb, var(--leaf-surface) 96%, transparent); backdrop-filter: none;
 }
 /* The tab strip is the TOP of the opaque assembly (the reference's ribbon
    tab row): same material as the band, no gap, no drawing showing through. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) main.center-scroll { padding-top: 0; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
   margin-top: 0; padding: 4px 8px 0;
-  background: rgba(12, 12, 13, .96);
-  border: 1px solid rgba(240, 242, 240, .14); border-bottom: 0; border-radius: var(--leaf-radius-key) var(--leaf-radius-key) 0 0;
+  background: color-mix(in srgb, var(--leaf-surface) 96%, transparent);
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 14%, transparent); border-bottom: 0; border-radius: var(--leaf-radius-key) var(--leaf-radius-key) 0 0;
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"] {
   flex-direction: row; align-items: baseline; gap: 6px; padding: 5px 12px 4px;
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card { margin-top: 0; }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon { border-radius: 0; border-top: 1px solid rgba(240, 242, 240, .1); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .drafting-ribbon { border-radius: 0; border-top: 1px solid color-mix(in srgb, var(--leaf-ink) 10%, transparent); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar { padding: 3px 10px; gap: 8px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar [data-cockpit="ribbon"] { display: none; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn { padding: 2px 8px; font-size: var(--leaf-size-caption); }
@@ -1691,7 +1692,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .bar-controls { padding: 0 12px 6px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
   border-radius: 0 0 var(--leaf-radius-key) var(--leaf-radius-key);
-  border-top: 1px solid rgba(240, 242, 240, .08);
+  border-top: 1px solid color-mix(in srgb, var(--leaf-ink) 8%, transparent);
   margin-bottom: var(--cockpit-band);
 }
 /* The card stops being a page: no flow height, so the drawing shows through
@@ -1723,7 +1724,7 @@
   margin: 0; padding: 0;
   border: 1px solid var(--cv-border); border-radius: var(--leaf-radius-control);
   background: var(--cv-panel-glass);
-  color: rgba(240, 242, 240, .92);
+  color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
   box-shadow: 0 16px 44px rgba(0, 0, 0, .5);
 }
 /* The result pane's own card carries the ink; the block only frames it, so
@@ -1731,31 +1732,31 @@
    inherited-vs-declared trap that has cost this repo two review rounds). */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block .card {
   background: transparent; border: 0; box-shadow: none; margin: 0;
-  color: rgba(240, 242, 240, .92);
+  color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block :is(h3, h4, .result-title, strong) {
-  color: rgba(240, 242, 240, .94);
+  color: color-mix(in srgb, var(--leaf-ink) 94%, transparent);
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .result-block :is(.dim, .muted, small, p) {
-  color: rgba(240, 242, 240, .68);
+  color: color-mix(in srgb, var(--leaf-ink) 68%, transparent);
 }
 /* The demo coach is real onboarding, so it stays - but as an instrument on
    the drawing, not a paper band across the top of it. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner {
-  background: rgba(10, 10, 10, .86);
-  border: 1px solid rgba(240, 242, 240, .14); border-radius: var(--leaf-radius-key);
-  color: rgba(240, 242, 240, .92);
+  background: color-mix(in srgb, var(--leaf-ground) 86%, transparent);
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 14%, transparent); border-radius: var(--leaf-radius-key);
+  color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
   backdrop-filter: blur(6px);
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tour-banner :is(.dim, .muted, small, p, span) {
-  color: rgba(240, 242, 240, .7);
+  color: color-mix(in srgb, var(--leaf-ink) 70%, transparent);
 }
 /* Product tabs read as document-tab chrome on the dark ground: opaque, so
    the drawing never bleeds through the labels. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav {
   position: relative;
-  background: rgba(10, 10, 10, .88);
-  border: 1px solid rgba(240, 242, 240, .12);
+  background: color-mix(in srgb, var(--leaf-ground) 88%, transparent);
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent);
   border-radius: var(--leaf-radius-key) var(--leaf-radius-key) 0 0;
   padding: 2px 4px 0;
   margin-bottom: var(--cockpit-band);
@@ -1773,7 +1774,7 @@
   width: 216px; max-height: calc(100% - 28px);
   display: flex; flex-direction: column; gap: 8px;
   overflow-y: auto; overflow-x: hidden;
-  color: var(--studio-dock-ink, rgba(240, 242, 240, .92));
+  color: var(--studio-dock-ink, color-mix(in srgb, var(--leaf-ink) 92%, transparent));
   pointer-events: auto;
 }
 .dock-section { position: relative; border: 1px solid var(--cv-border); border-radius: var(--leaf-radius-control); }
@@ -1786,10 +1787,10 @@
   width: 100%; display: flex; align-items: center; justify-content: space-between;
   padding: 7px 10px; background: none; border: 0; cursor: pointer;
   font: 500 var(--leaf-size-caption) var(--font-mono); letter-spacing: .08em; text-transform: uppercase;
-  color: var(--studio-dock-ink, rgba(240, 242, 240, .92));
+  color: var(--studio-dock-ink, color-mix(in srgb, var(--leaf-ink) 92%, transparent));
 }
 .dock-section-head:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
-.dock-chev { color: rgba(240, 242, 240, .55); }
+.dock-chev { color: color-mix(in srgb, var(--leaf-ink) 55%, transparent); }
 .dock-section-body { padding: 0 10px 8px; }
 /* The hosted Legend/readout drop their own floating placement inside the
    dock: they become flow content of their section. */
@@ -1803,25 +1804,25 @@
    on its own surface; inherited colour never beats a declared one). */
 .properties-dock .ent-panel,
 .properties-dock .ent-panel :is(h3, h4, li, p, span, strong, dt, dd) {
-  color: rgba(240, 242, 240, .88); font-size: var(--leaf-size-caption);
+  color: color-mix(in srgb, var(--leaf-ink) 88%, transparent); font-size: var(--leaf-size-caption);
 }
-.properties-dock .ent-panel :is(.dim, .muted, small) { color: rgba(240, 242, 240, .6); }
+.properties-dock .ent-panel :is(.dim, .muted, small) { color: color-mix(in srgb, var(--leaf-ink) 60%, transparent); }
 .dock-geometry {
   display: grid; grid-template-columns: auto 1fr; gap: 3px 10px; margin: 8px 0 0;
   font: 400 var(--leaf-size-caption) var(--font-mono);
 }
-.dock-geometry dt { color: rgba(240, 242, 240, .55); }
-.dock-geometry dd { margin: 0; color: rgba(240, 242, 240, .92); text-align: right; font-variant-numeric: tabular-nums; }
+.dock-geometry dt { color: color-mix(in srgb, var(--leaf-ink) 55%, transparent); }
+.dock-geometry dd { margin: 0; color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); text-align: right; font-variant-numeric: tabular-nums; }
 /* <=980px App renders the inline arm instead (wideViewport gate) - no
    CSS hide needed, the tools stay reachable in the stacked layout. */
 /* ----------------------------------------------------------------------- */
 .studio-shell aside.rail { margin: 12px 12px 12px 0; }
 .studio-shell footer.foot-bar {
-  background: rgba(10, 10, 10, .86); backdrop-filter: blur(8px);
-  border-top: 1px solid rgba(240, 242, 240, .12); color: rgba(240, 242, 240, .7);
+  background: color-mix(in srgb, var(--leaf-ground) 86%, transparent); backdrop-filter: blur(8px);
+  border-top: 1px solid color-mix(in srgb, var(--leaf-ink) 12%, transparent); color: color-mix(in srgb, var(--leaf-ink) 70%, transparent);
 }
-.studio-shell footer.foot-bar > * + * { border-left-color: rgba(240, 242, 240, .15); }
-.studio-shell footer.foot-bar :is(.dim, .foot-stat) { color: rgba(240, 242, 240, .7); }
+.studio-shell footer.foot-bar > * + * { border-left-color: color-mix(in srgb, var(--leaf-ink) 15%, transparent); }
+.studio-shell footer.foot-bar :is(.dim, .foot-stat) { color: color-mix(in srgb, var(--leaf-ink) 70%, transparent); }
 .studio-shell footer.foot-bar .ok-txt { color: var(--studio-accent); }
 .studio-shell footer.foot-bar .warn-txt { color: #f0c97b; }
 
@@ -1829,17 +1830,17 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) :is(.kicker, .home-q, .hint, .tc-continuity) { display: none; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-nav { margin-top: 4px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] {
-  background: rgba(240, 242, 240, .1); color: rgba(240, 242, 240, .96);
-  border-color: rgba(240, 242, 240, .2); box-shadow: inset 0 2px 0 var(--studio-accent);
+  background: color-mix(in srgb, var(--leaf-ink) 10%, transparent); color: color-mix(in srgb, var(--leaf-ink) 96%, transparent);
+  border-color: color-mix(in srgb, var(--leaf-ink) 20%, transparent); box-shadow: inset 0 2px 0 var(--studio-accent);
 }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small { color: rgba(240, 242, 240, .62); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small { color: color-mix(in srgb, var(--leaf-ink) 62%, transparent); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="available"] { color: var(--studio-accent); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .tc-product-tabs [role="tab"][aria-selected="true"] small[data-state="unavailable"] { color: #f0997b; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .workspace-card { margin-top: 8px; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
   position: relative;
-  background: transparent; border: 1px solid rgba(240, 242, 240, .14); border-radius: var(--leaf-radius-key);
-  color: rgba(240, 242, 240, .92);
+  background: transparent; border: 1px solid color-mix(in srgb, var(--leaf-ink) 14%, transparent); border-radius: var(--leaf-radius-key);
+  color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
   /* NO backdrop-filter on the element itself: a filter makes this toolbar
      the CONTAINING BLOCK for position:fixed descendants, and the Version
      history drawer (.drawer-fixed, mounted in .vh-anchor inside this
@@ -1850,10 +1851,10 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar::before {
   content: ''; position: absolute; inset: 0; z-index: calc(var(--leaf-layer-base) - 1);
   border-radius: inherit;
-  background: rgba(10, 10, 10, .78); backdrop-filter: blur(6px);
+  background: color-mix(in srgb, var(--leaf-ground) 78%, transparent); backdrop-filter: blur(6px);
 }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.viewer-title, .version-note) { color: rgba(240, 242, 240, .92); }
-.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title .dim { color: rgba(240, 242, 240, .6); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.viewer-title, .version-note) { color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); }
+.studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .viewer-title .dim { color: color-mix(in srgb, var(--leaf-ink) 60%, transparent); }
 
 /* The cockpit: view cluster in the drawing window (legend material), status
    cluster in the status bar. */
@@ -1865,18 +1866,18 @@
   color: var(--cv-text); pointer-events: auto;
 }
 .cockpit-cube {
-  width: 28px; height: 28px; border: 1px solid rgba(240, 242, 240, .35); border-radius: var(--leaf-radius-key);
+  width: 28px; height: 28px; border: 1px solid color-mix(in srgb, var(--leaf-ink) 35%, transparent); border-radius: var(--leaf-radius-key);
   display: grid; place-items: center; font: 600 var(--leaf-size-caption) var(--font-mono); letter-spacing: .08em;
-  color: rgba(240, 242, 240, .8); background: linear-gradient(135deg, rgba(240, 242, 240, .14), rgba(240, 242, 240, .02));
+  color: color-mix(in srgb, var(--leaf-ink) 80%, transparent); background: linear-gradient(135deg, color-mix(in srgb, var(--leaf-ink) 14%, transparent), color-mix(in srgb, var(--leaf-ink) 2%, transparent));
   margin-right: 4px;
 }
 .cockpit-view button {
   min-width: 26px; height: 26px; padding: 0 8px; border-radius: var(--leaf-radius-key);
-  border: 1px solid rgba(240, 242, 240, .18); background: rgba(240, 242, 240, .06);
-  color: rgba(240, 242, 240, .92); font: 500 12px var(--font-sans); cursor: pointer;
+  border: 1px solid color-mix(in srgb, var(--leaf-ink) 18%, transparent); background: color-mix(in srgb, var(--leaf-ink) 6%, transparent);
+  color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); font: 500 12px var(--font-sans); cursor: pointer;
 }
 @media (hover: hover) and (pointer: fine) {
-  .cockpit-view button:hover { background: rgba(240, 242, 240, .16); }
+  .cockpit-view button:hover { background: color-mix(in srgb, var(--leaf-ink) 16%, transparent); }
 }
 .cockpit-view button:focus-visible { outline: 2px solid var(--studio-accent); outline-offset: 1px; }
 /* S3 Back and Up: a word label in the icon's 16px box height; an empty Back
@@ -1884,27 +1885,27 @@
 .cockpit-view .ci-word { display: inline-flex; align-items: center; height: 16px; font: 600 var(--leaf-size-caption)/1 var(--font-sans); letter-spacing: .01em; }
 .cockpit-view button[aria-disabled="true"] { opacity: .45; cursor: default; }
 @media (hover: hover) and (pointer: fine) {
-  .cockpit-view button[aria-disabled="true"]:hover { background: rgba(240, 242, 240, .06); }
+  .cockpit-view button[aria-disabled="true"]:hover { background: color-mix(in srgb, var(--leaf-ink) 6%, transparent); }
 }
 .cockpit-status { display: inline-flex; gap: 14px; align-items: center; font-variant-numeric: tabular-nums; }
-.cockpit-status b { font-weight: 500; color: rgba(240, 242, 240, .96); min-width: 5.5ch; display: inline-block; text-align: right; }
+.cockpit-status b { font-weight: 500; color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); min-width: 5.5ch; display: inline-block; text-align: right; }
 .cockpit-scale b { min-width: 0; text-align: left; }
 .cockpit-sel[data-selected="true"] { color: var(--studio-accent); }
 /* kimi-critic on #899: text with its OWN declared paper color inside the
    dark chrome (an inherited re-pin never beats a declaration). */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn,
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost {
-  background: rgba(240, 242, 240, .08); color: rgba(240, 242, 240, .92); border-color: rgba(240, 242, 240, .22);
+  background: color-mix(in srgb, var(--leaf-ink) 8%, transparent); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent); border-color: color-mix(in srgb, var(--leaf-ink) 22%, transparent);
 }
 @media (hover: hover) and (pointer: fine) {
   .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar .btn.ghost:hover:not(:disabled) {
-    background: rgba(240, 242, 240, .16); color: rgba(240, 242, 240, .98);
+    background: color-mix(in srgb, var(--leaf-ink) 16%, transparent); color: color-mix(in srgb, var(--leaf-ink) 98%, transparent);
   }
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-mine, .checkout-mine b) { color: var(--studio-accent); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar :is(.checkout-chip, .checkout-chip b, .checkout-stale, .checkout-legacy) { color: #f0c97b; }
 .studio-shell header.top .tag.amber { color: #f0c97b; }
-.studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state, .link-svc-trigger .ca-k, .link-svc-trigger .ca-state) { color: rgba(240, 242, 240, .78); }
+.studio-shell header.top :is(.claude-trigger .ca-k, .claude-trigger .ca-state, .link-svc-trigger .ca-k, .link-svc-trigger .ca-state) { color: color-mix(in srgb, var(--leaf-ink) 78%, transparent); }
 /* Seen on staging 2026-09-02 (?dev=1, VITE_CAD_EDIT builds): the DXF edit
    workbench sits inside the transparent workspace card and painted paper
    ink over the dark ground. It is chrome touching the drawing, so it takes
@@ -1912,12 +1913,12 @@
 .studio-shell .workspace-card .cad-edit-workbench {
   margin: 8px 0 0; padding: 10px 12px; border-radius: var(--leaf-radius-control);
   background: var(--cv-panel-glass); backdrop-filter: blur(6px);
-  border: 1px solid var(--cv-border); color: rgba(240, 242, 240, .9);
+  border: 1px solid var(--cv-border); color: color-mix(in srgb, var(--leaf-ink) 90%, transparent);
 }
-.studio-shell .workspace-card .cad-edit-workbench :is(h3, .cad-edit-workbench-title) { color: rgba(240, 242, 240, .96); }
-.studio-shell .workspace-card .cad-edit-workbench :is(p, label, .dim, .cad-edit-workbench-hint, .cad-edit-workbench-doc, .cad-edit-workbench-notice) { color: rgba(240, 242, 240, .72); }
+.studio-shell .workspace-card .cad-edit-workbench :is(h3, .cad-edit-workbench-title) { color: color-mix(in srgb, var(--leaf-ink) 96%, transparent); }
+.studio-shell .workspace-card .cad-edit-workbench :is(p, label, .dim, .cad-edit-workbench-hint, .cad-edit-workbench-doc, .cad-edit-workbench-notice) { color: color-mix(in srgb, var(--leaf-ink) 72%, transparent); }
 .studio-shell .workspace-card .cad-edit-workbench :is(.chip-act, .btn, .btn.ghost) {
-  background: rgba(240, 242, 240, .08); border-color: rgba(240, 242, 240, .22); color: rgba(240, 242, 240, .92);
+  background: color-mix(in srgb, var(--leaf-ink) 8%, transparent); border-color: color-mix(in srgb, var(--leaf-ink) 22%, transparent); color: color-mix(in srgb, var(--leaf-ink) 92%, transparent);
 }
 .studio-shell .workspace-card .cad-edit-workbench a { color: var(--studio-accent); }
 @media (max-width: 1023px) {
@@ -1930,7 +1931,7 @@
    which made the opaque-assembly override earlier in this file dead code
    (kimi on #946). The assembly is one material, tab strip to toolbar. */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar::before {
-  background: rgba(12, 12, 13, .96); backdrop-filter: none;
+  background: color-mix(in srgb, var(--leaf-surface) 96%, transparent); backdrop-filter: none;
 }
 /* The hidden nav posture must beat the spine rule above it (same
    specificity, earlier): the .app ancestor lifts this one, and it sits last. */
