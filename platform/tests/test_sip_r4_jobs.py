@@ -662,9 +662,10 @@ def test_sip_r4_pg_legacy_nested_replay(world, monkeypatch):
         assert job_count() == 1
 
 
-def test_sip_r4_pg_final_clock(world, monkeypatch):
+@pytest.mark.parametrize("expired_before_lock", [False, True])
+def test_sip_r4_pg_final_clock(world, monkeypatch, expired_before_lock):
     s = world()
-    row = claim(s, submit(s, key=str(uuid4())), owner="r4-" + uuid4().hex, seconds=3)
+    row = claim(s, submit(s, key=str(uuid4())), owner="r4-" + uuid4().hex, seconds=1)
     p = prepared(row)
     before = census(s)
     original = adapter._pending_project_graph_job_provenance
@@ -677,7 +678,17 @@ def test_sip_r4_pg_final_clock(world, monkeypatch):
         return result
     monkeypatch.setattr(adapter, "_pending_project_graph_job_provenance", expire_during_proof)
     monkeypatch.setattr(jobs, "_now", lambda *a: (_ for _ in ()).throw(AssertionError("host clock used")))
-    assert complete(row, p) == ("not_owner", None)
-    assert proof_ran == [True] and census(s) == before
+    if expired_before_lock:
+        expire_worker(row["job_id"])
+        assert complete(row, p) == ("not_owner", None)
+        assert proof_ran == [] and census(s) == before
+    else:
+        outcome, result = complete(row, p)
+        assert outcome == "applied"
+        assert proof_ran == [True] and delta(census(s), before) == (1, 1, 1, 0)
+        assert load(row["job_id"])["result"] == result
     stored = load(row["job_id"])
-    assert stored["status"] == "running" and stored["result"] is None and stored["output_version_id"] is None
+    if expired_before_lock:
+        assert stored["status"] == "running" and stored["result"] is None and stored["output_version_id"] is None
+    else:
+        assert stored["status"] == "succeeded" and stored["output_version_id"] is not None

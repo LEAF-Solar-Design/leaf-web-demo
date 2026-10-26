@@ -1,8 +1,8 @@
 .widgets-view {
   padding: 16px;
-  color: var(--foreground, #18181b);
-  background: var(--card, #fff);
-  border: 1px solid var(--border, #d4d4d8);
+  color: var(--leaf-ink);
+  background: var(--leaf-ground);
+  border: 1px solid var(--leaf-line);
   border-radius: var(--leaf-radius-card);
   min-width: 0;
 }
@@ -20,16 +20,16 @@
   padding: 8px 10px;
   font: inherit;
   color: inherit;
-  background: var(--card, #fff);
-  border: 1px solid var(--border, #a1a1aa);
+  background: var(--leaf-ground);
+  border: 1px solid var(--leaf-ink-muted);
   border-radius: var(--leaf-radius-control);
 }
 .widgets-view textarea { width: 100%; resize: vertical; }
 .widgets-view button { cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
 .widgets-view button:disabled { cursor: default; opacity: .6; }
-.widgets-view button[aria-pressed="true"] { border-color: var(--primary, #15803d); background: var(--accent-tint, #dcfce7); }
-.widgets-view :is(button, input, textarea, select):focus-visible { outline: 3px solid var(--primary, #15803d); outline-offset: 2px; }
-.widgets-view [aria-invalid="true"] { border-color: #b91c1c; }
+.widgets-view button[aria-pressed="true"] { border-color: var(--leaf-accent); background: var(--leaf-accent-tint); }
+.widgets-view :is(button, input, textarea, select):focus-visible { outline: 3px solid var(--leaf-accent); outline-offset: 2px; }
+.widgets-view [aria-invalid="true"] { border-color: var(--leaf-error); }
 .widgets-view [role="alert"] { font-weight: 600; }
 .widgets-element-list { list-style: none; padding: 0; display: grid; gap: 6px; }
 .widgets-element-list button { width: 100%; text-align: left; }
@@ -60,19 +60,19 @@
 .widget-toolbar label { display: grid; gap: 4px; }
 .widget-designer-layout { display: grid; grid-template-columns: minmax(140px, 200px) minmax(0, 1fr) minmax(190px, 260px); gap: 20px; align-items: start; }
 .widget-designer-layout > * { min-width: 0; }
-.widget-designer-preview { padding: 12px; background: var(--leaf-color-background, #27272a); border-radius: var(--leaf-radius-card); }
-.widget-designer-preview p { color: var(--leaf-color-foreground, #fafafa); }
+.widget-designer-preview { padding: 12px; background: var(--leaf-color-background, var(--leaf-surface)); border-radius: var(--leaf-radius-card); }
+.widget-designer-preview p { color: var(--leaf-color-foreground, var(--leaf-ink)); }
 .widget-designer-surface { position: relative; width: 100%; touch-action: none; user-select: none; margin: 0 auto; }
-.widget-designer-surface:focus-visible { outline: 2px solid var(--leaf-color-success, #15803d); outline-offset: 4px; }
+.widget-designer-surface:focus-visible { outline: 2px solid var(--leaf-color-success, var(--leaf-ok)); outline-offset: 4px; }
 .widget-designer-surface > svg { position: absolute; inset: 0; width: 100%; height: 100%; }
 .widget-interaction { overflow: visible; }
 .widget-interaction > rect[data-element-id] { cursor: move; }
-.widget-selection { fill: none; stroke: var(--leaf-color-success, #22c55e); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
-.widget-handle { fill: var(--leaf-color-background, #fff); stroke: var(--leaf-color-success, #15803d); stroke-width: 1; vector-effect: non-scaling-stroke; }
-.widget-guide { stroke: var(--leaf-color-data-series-3, #f87171); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
-.widget-cutout { fill: var(--leaf-color-background, #09090b); pointer-events: none; }
+.widget-selection { fill: none; stroke: var(--leaf-color-success, var(--leaf-ok)); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+.widget-handle { fill: var(--leaf-color-background, var(--leaf-surface)); stroke: var(--leaf-color-success, var(--leaf-ok)); stroke-width: 1; vector-effect: non-scaling-stroke; }
+.widget-guide { stroke: var(--leaf-color-data-series-3, var(--leaf-warn)); stroke-width: 1; vector-effect: non-scaling-stroke; pointer-events: none; }
+.widget-cutout { fill: var(--leaf-color-background, var(--leaf-ground)); pointer-events: none; }
 .widget-geometry { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
-.widget-layer { border-bottom: 1px solid var(--border, #d4d4d8); padding-bottom: 6px; }
+.widget-layer { border-bottom: 1px solid var(--leaf-line); padding-bottom: 6px; }
 .widget-layer-actions { display: flex; gap: 4px; margin-top: 4px; }
 .widget-layer-actions button { width: auto; flex: 1; padding: 4px; }
 .widgets-fields fieldset { min-width: 0; margin: 0; padding: 10px; }

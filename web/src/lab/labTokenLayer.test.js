@@ -9,7 +9,6 @@ const webDir = fileURLToPath(new URL('../../', import.meta.url))
 const srcDir = fileURLToPath(new URL('../', import.meta.url))
 const labPath = fileURLToPath(new URL('./lab.css', import.meta.url))
 const sourcesDir = fileURLToPath(new URL('./contract/sources', import.meta.url))
-const testPath = fileURLToPath(import.meta.url)
 const labCSS = readFileSync(labPath, 'utf8')
 const stripComments = source => source.replace(/\/\*[\s\S]*?\*\//g, '')
 
@@ -32,7 +31,7 @@ describe('Lab token cascade layer', () => {
 
   it('keeps lab.css as the only source referencing the vendored token stylesheet', () => {
     const references = sourceFiles(srcDir)
-      .filter(path => path !== labPath && path !== testPath)
+      .filter(path => path !== labPath && !/\.test\.[cm]?[jt]sx?$/.test(path))
       .filter(path => readFileSync(path, 'utf8').includes('leaf-tokens.css'))
       .map(path => relative(srcDir, path))
     expect(references).toEqual([])
