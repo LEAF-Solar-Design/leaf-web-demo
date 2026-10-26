@@ -1,12 +1,23 @@
 import CheckoutChip from './CheckoutChip.jsx'
 import { useLayoutEffect, useRef, useState } from 'react'
 import { humanizeError } from '../errorHumanize.js'
+import { useDrawingIdentityOptional } from '../drawing/DrawingIdentityProvider.jsx'
 
 export default function CheckoutControls(props) {
+  const identity = useDrawingIdentityOptional()
+  const drawingKey = props.drawingKey ?? props.drawingId ?? identity?.drawingId
   const [error, setError] = useState(null)
   const [pending, setPending] = useState(false)
   const root = useRef(null)
   const restoreFocus = useRef(false)
+  const generation = useRef(0)
+  useLayoutEffect(() => {
+    generation.current += 1
+    restoreFocus.current = false
+    setError(null)
+    setPending(false)
+    return () => { generation.current += 1 }
+  }, [drawingKey])
   useLayoutEffect(() => {
     if (!pending && restoreFocus.current) {
       restoreFocus.current = false
@@ -14,20 +25,22 @@ export default function CheckoutControls(props) {
     }
   }, [pending])
   const perform = (action, taking = false, reading = false) => async () => {
+    const request = ++generation.current
     restoreFocus.current = root.current?.contains(document.activeElement)
     setError(null)
     setPending(true)
     try {
       const result = await action?.()
+      if (generation.current !== request) return
       if ((!reading && result === null) || (taking && result?.acquired === false)) {
         setError(humanizeError(taking
           ? 'The edit lock could not be taken. Another tab or editor may be using it. Try again.'
           : 'The edit lock could not be released. Try again.'))
       }
     } catch (cause) {
-      setError(humanizeError(cause))
+      if (generation.current === request) setError(humanizeError(cause))
     } finally {
-      setPending(false)
+      if (generation.current === request) setPending(false)
     }
   }
   return <span ref={root} tabIndex={-1} className="checkout-controls">

@@ -1,9 +1,54 @@
 // @vitest-environment jsdom
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import CheckoutControls from './CheckoutControls.jsx'
+import { DrawingIdentityProvider, useDrawingIdentity } from '../drawing/DrawingIdentityProvider.jsx'
 
 afterEach(cleanup)
+
+describe('checkout controls drawing changes', () => {
+  it('clears an error when the drawing identity changes', async () => {
+    let identity
+    function Controls() {
+      identity = useDrawingIdentity()
+      return <CheckoutControls onTake={vi.fn().mockRejectedValue(new Error('Failed to fetch'))} />
+    }
+    render(<DrawingIdentityProvider mode="console" search="?drawing=first" publicDemo={false} liveDemo={false}
+      readAuthToken={() => null}><Controls /></DrawingIdentityProvider>)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Take edit lock' })) })
+    expect(screen.getByRole('alert')).toBeTruthy()
+    act(() => identity.setFromUpload({ drawing_id: 'second' }))
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('resets pending state and ignores an old rejection while the new drawing has a request pending', async () => {
+    let rejectOld
+    let resolveNew
+    const oldAction = vi.fn(() => new Promise((resolve, reject) => { rejectOld = reject }))
+    const newAction = vi.fn(() => new Promise(resolve => { resolveNew = resolve }))
+    const view = render(<CheckoutControls drawingKey="first" onTake={oldAction} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Take edit lock' }))
+    expect(screen.getByRole('button').disabled).toBe(true)
+    view.rerender(<CheckoutControls drawingKey="second" onTake={newAction} />)
+    expect(screen.getByRole('button').disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button'))
+    await act(async () => { rejectOld(new Error('Failed to fetch')) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button').disabled).toBe(true)
+    await act(async () => { resolveNew({ acquired: true }) })
+    expect(screen.getByRole('button').disabled).toBe(false)
+  })
+
+  it('ignores an old refused take after moving to another drawing', async () => {
+    let resolveOld
+    const view = render(<CheckoutControls drawingKey="first" onTake={() => new Promise(resolve => { resolveOld = resolve })} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Take edit lock' }))
+    view.rerender(<CheckoutControls drawingKey="second" onTake={vi.fn()} />)
+    await act(async () => { resolveOld({ acquired: false }) })
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(screen.getByRole('button').disabled).toBe(false)
+  })
+})
 
 describe('checkout read failure banner', () => {
   it('keeps the sentence and Retry without a code when no record is supplied', () => {

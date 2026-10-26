@@ -6,6 +6,7 @@ import {
   getJob as defaultGetJob,
   listJobs as defaultListJobs,
   recordToEnvelope as defaultRecordToEnvelope,
+  subscribeUnauthorized,
 } from '../api.js'
 import { track } from '../telemetry.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
@@ -43,6 +44,8 @@ export function clearInflightJob(jobId = null, storage = browserStorage()) {
 // sign-in redirect so the user can review and run it again. Bounded (size,
 // age, grammar) and read fail closed: anything malformed is removed, never used.
 export const PENDING_RUN_KEY = 'leaf.pendingRun'
+export const PENDING_RUN_LOGOUT_KEY = 'leaf.pendingRun.logout'
+const PENDING_RUN_SESSION_KEY = 'leaf.pendingRun.session'
 export const PENDING_RUN_TTL_MS = 1800000
 export const MAX_PENDING_RUN_BYTES = 65536
 // Results that finished after a newer run started, newest first.
@@ -61,6 +64,7 @@ const isPlainParams = (value) => !!value && typeof value === 'object' && !Array.
 
 export function clearPendingRun(storage = browserStorage()) {
   try { storage?.removeItem(PENDING_RUN_KEY) } catch { /* storage is best effort */ }
+  try { window.sessionStorage.removeItem(PENDING_RUN_SESSION_KEY) } catch { /* storage is best effort */ }
 }
 
 export function pendingRunAccount(storage = browserStorage()) {
@@ -91,6 +95,16 @@ export function readPendingRun(storage = browserStorage(), now = Date.now(), acc
   // An expired token cannot identify the returning account yet. Keep its
   // bounded record private until sign-in establishes who is returning.
   if (account === null && record.account !== null) return null
+  if (record.account === null && account !== null) {
+    // Only the tab/session that paused this anonymous submission may bind it
+    // to the first sign-in. The proof survives the sign-in redirect.
+    try {
+      if (window.sessionStorage.getItem(PENDING_RUN_SESSION_KEY) !== raw) return null
+      record.account = account
+      storage?.setItem(PENDING_RUN_KEY, JSON.stringify(record))
+      window.sessionStorage.removeItem(PENDING_RUN_SESSION_KEY)
+    } catch { return null }
+  }
   if (record.account !== account) {
     clearPendingRun(storage)
     return null
@@ -105,6 +119,10 @@ export function savePendingRun(tool, params, storage = browserStorage(), now = D
   try { serialized = JSON.stringify({ v: 2, account, tool, params: body, ts: now }) } catch { return null }
   if (typeof serialized !== 'string' || serialized.length > MAX_PENDING_RUN_BYTES) return null
   try { storage?.setItem(PENDING_RUN_KEY, serialized) } catch { return null }
+  try {
+    if (account === null) window.sessionStorage.setItem(PENDING_RUN_SESSION_KEY, serialized)
+    else window.sessionStorage.removeItem(PENDING_RUN_SESSION_KEY)
+  } catch { /* anonymous binding fails closed when session storage is unavailable */ }
   return { tool, params: body, ts: now }
 }
 
@@ -178,20 +196,27 @@ export default function useJobController({
     }
     const refreshSaved = () => {
       const nextAccount = pendingRunAccount(storageRef.current)
-      if (pendingAccountRef.current !== nextAccount) pendingIntentRef.current += 1
-      pendingAccountRef.current = nextAccount
+      if (nextAccount && pendingAccountRef.current !== nextAccount) pendingIntentRef.current += 1
+      if (nextAccount) pendingAccountRef.current = nextAccount
       setPendingRun(readPendingRun(storageRef.current))
     }
-    const clear = subscribeBeforeLogout(clearSaved)
+    const clear = subscribeBeforeLogout(() => {
+      // Only explicit logout publishes this marker. A 401 removes the token
+      // too, but must preserve the saved inputs in other tabs.
+      try {
+        const target = storageRef.current ?? browserStorage()
+        target?.setItem(PENDING_RUN_LOGOUT_KEY, `${Date.now()}:${Math.random()}`)
+      } catch { /* storage is best effort */ }
+      clearSaved()
+    })
     const refresh = subscribeTokenStored(refreshSaved)
+    const unauthorized = subscribeUnauthorized(refreshSaved)
     const onStorage = event => {
-      if (event.key === 'leaf.jwt' || event.key === null) {
-        if (!event.newValue) clearSaved()
-        else refreshSaved()
-      }
+      if (event.key === PENDING_RUN_LOGOUT_KEY || event.key === null) clearSaved()
+      else if (event.key === 'leaf.jwt') refreshSaved()
     }
     window.addEventListener('storage', onStorage)
-    return () => { clear(); refresh(); window.removeEventListener('storage', onStorage) }
+    return () => { clear(); refresh(); unauthorized(); window.removeEventListener('storage', onStorage) }
   }, [])
 
   const sequenceRef = useRef(0)
