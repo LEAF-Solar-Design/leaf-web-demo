@@ -19,7 +19,7 @@
     max-height: 100%;
     border-left: 0;
     border-top: 1px solid var(--border);
-    border-radius: 12px 12px 0 0;
+    border-radius: var(--leaf-radius-sheet) var(--leaf-radius-sheet) 0 0;
     box-shadow: 0 -18px 44px rgba(25, 29, 26, .14);
     padding-bottom: env(safe-area-inset-bottom, 0px);
     transform: none;
@@ -64,7 +64,7 @@
     width: 32px;
     height: 4px;
     margin: auto;
-    border-radius: 2px;
+    border-radius: var(--leaf-radius-key);
     background: var(--muted-2);
   }
 }
