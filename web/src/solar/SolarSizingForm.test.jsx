@@ -163,7 +163,130 @@ function sizingAvailabilityHarness() {
   return { client, props }
 }
 
+const coldVoltage = () => ({ standard_string_length: 32, suggested_string_length: 31,
+  per_module: 48.3, string_voltage: 1545.6, max_dc_voltage: 1500 })
+const coldFailure = (cold_voltage = coldVoltage()) => ({ ok: true, data: { job: {
+  status: 'failed', error: { reason_code: 'COLD_VOLTAGE_FAILED', cold_voltage },
+} } })
+async function submitColdRun(outcome = coldFailure()) {
+  const h = sizingAvailabilityHarness()
+  h.observation = r9Deferred()
+  h.client.observeJob = vi.fn(() => h.observation.promise)
+  const view = render(<SolarSizingForm {...h.props} />)
+  await r9Ready()
+  r14Fill()
+  await r9Ready()
+  fireEvent.click(run())
+  await waitFor(() => expect(h.client.observeJob).toHaveBeenCalledTimes(1))
+  if (outcome) await act(async () => h.observation.resolve(outcome))
+  return { ...h, view }
+}
+
 describe('SolarSizingForm', () => {
+  it('W1C-34c offers the cold-voltage arithmetic and submits an explicitly accepted length', async () => {
+    const h = await submitColdRun()
+    expect(h.client.observeJob.mock.calls[0][0]).toBe(r9Job)
+    expect(h.client.observeJob.mock.calls[0][1].tool).toBe(r9Tool)
+    expect(screen.getByText('At 32 modules the cold-weather open-circuit voltage is 1545.6 V, above the 1500.0 V limit. 31 modules stay within it.')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: 'Use 31 modules' }))
+    expect(screen.queryByRole('button', { name: 'Use 31 modules' })).toBeNull()
+    expect(screen.getByText('Accepted string length: 31')).toBeTruthy()
+    expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(1)
+    await r9Ready()
+    fireEvent.click(run())
+    await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
+    expect(h.props.onProjectSubmit.mock.calls[1][0].params.accepted_string_length).toBe(31)
+    change('Surface tilt', '6')
+    expect(screen.queryByText('Accepted string length: 31')).toBeNull()
+    await r9Ready()
+    expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params).not.toHaveProperty('accepted_string_length')
+  })
+
+  it.each(['clear', 'mode', 'scope'])('W1C-34c clears the accepted length on %s', async (action) => {
+    const h = await submitColdRun()
+    fireEvent.click(screen.getByRole('button', { name: 'Use 31 modules' }))
+    await r9Ready()
+    if (action === 'clear') fireEvent.click(screen.getByRole('button', { name: 'Clear' }))
+    else if (action === 'mode') change('Scope', 'manual-global')
+    else h.view.rerender(<SolarSizingForm {...h.props} authorityKey="epoch-2" />)
+    expect(screen.queryByText('Accepted string length: 31')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Use 31 modules' })).toBeNull()
+    if (action !== 'scope') {
+      change('Scope', 'global')
+      await r9Ready()
+      expect(h.client.catalog.mock.calls.at(-1)[0].intents[0].params).not.toHaveProperty('accepted_string_length')
+    }
+  })
+
+  it.each(['catalog', 'client', 'preview'])('W1C-34c retains the job and suggestion across a %s refresh', async (refresh) => {
+    for (const phase of ['pending', 'failed']) {
+      const h = r14Harness(), observation = r9Deferred()
+      h.client.observeJob = vi.fn(() => observation.promise)
+      const view = render(<SolarSizingForm {...h.props} />)
+      await r9Ready()
+      r14Fill()
+      await r9Ready()
+      fireEvent.click(run())
+      await waitFor(() => expect(h.client.observeJob).toHaveBeenCalledTimes(1))
+      const signal = h.client.observeJob.mock.calls[0][1].signal
+      if (phase === 'failed') await act(async () => observation.resolve(coldFailure()))
+      const previews = h.client.catalog.mock.calls.length
+      if (refresh === 'catalog') {
+        h.props = { ...h.props, catalogDigest: 'sha256:' + 'e'.repeat(64) }
+        h.preview = r9Preview(r9Tool, h.props.catalogDigest)
+        view.rerender(<SolarSizingForm {...h.props} />)
+      } else if (refresh === 'client') {
+        await act(async () => h.real.acquireCheckout())
+      } else fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }))
+      await waitFor(() => expect(h.client.catalog.mock.calls.length).toBeGreaterThan(previews))
+      await r9Ready()
+      expect(signal.aborted).toBe(false)
+      if (phase === 'pending') await act(async () => observation.resolve(coldFailure()))
+      expect(screen.getByRole('button', { name: 'Use 31 modules' })).toBeTruthy()
+      expect(screen.getByText('At 32 modules the cold-weather open-circuit voltage is 1545.6 V, above the 1500.0 V limit. 31 modules stay within it.')).toBeTruthy()
+      change('Surface tilt', '6')
+      expect(screen.queryByRole('button', { name: 'Use 31 modules' })).toBeNull()
+      expect(screen.queryByText(/cold-weather open-circuit voltage is/)).toBeNull()
+      cleanup()
+    }
+  })
+
+  it.each([
+    null, {}, { ...coldVoltage(), per_module: '48.3' }, { ...coldVoltage(), string_voltage: Infinity },
+    { ...coldVoltage(), max_dc_voltage: NaN }, { ...coldVoltage(), standard_string_length: 32.5 },
+    { ...coldVoltage(), suggested_string_length: 31.5 }, { ...coldVoltage(), suggested_string_length: 0 },
+    { ...coldVoltage(), suggested_string_length: 32 },
+  ])('W1C-34c ignores malformed cold-voltage detail %j', async (detail) => {
+    await submitColdRun(coldFailure(detail))
+    expect(screen.queryByRole('button', { name: /Use .* modules/ })).toBeNull()
+    expect(screen.queryByText(/cold-weather open-circuit voltage is/)).toBeNull()
+  })
+
+  it.each(['edit', 'mode', 'scope', 'submit', 'unmount'])('W1C-34c disposes and ignores a late observation after %s', async (action) => {
+    const h = await submitColdRun(null)
+    const signal = h.client.observeJob.mock.calls[0][1].signal
+    if (action === 'edit') change('Surface tilt', '6')
+    else if (action === 'mode') change('Scope', 'manual-global')
+    else if (action === 'scope') h.view.rerender(<SolarSizingForm {...h.props} solarBinding={r9Next} />)
+    else if (action === 'unmount') h.view.unmount()
+    else {
+      h.client.observeJob.mockReturnValueOnce(new Promise(() => {}))
+      await r9Ready()
+      fireEvent.click(run())
+      await waitFor(() => expect(h.client.observeJob).toHaveBeenCalledTimes(2))
+    }
+    expect(signal.aborted).toBe(true)
+    await act(async () => h.observation.resolve(coldFailure()))
+    expect(screen.queryByRole('button', { name: 'Use 31 modules' })).toBeNull()
+    expect(screen.queryByText(/cold-weather open-circuit voltage is/)).toBeNull()
+  })
+
+  it.each(['complete', 'cancelled', 'running'])('W1C-34c adds no suggestion for a %s outcome', async (status) => {
+    const outcome = coldFailure()
+    outcome.data.job.status = status
+    await submitColdRun(outcome)
+    expect(screen.queryByRole('button', { name: 'Use 31 modules' })).toBeNull()
+  })
 
   it.each([true, false])('keeps sizing loaded while busy and re-arms without reading (callback withheld: %s)', async (withheld) => {
     const h = sizingAvailabilityHarness()
@@ -332,7 +455,7 @@ describe('SolarSizingForm', () => {
     const keys = ['module_name', 'full_inverter_name', 'bifacial', 'bifacial_coefficient', 'racking_type',
       'surface_tilt', 'surface_azimuth', 'albedo', 'axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack',
       'max_voltage', 'thermal_model_type', 'open_circuit_rise', 'grant_ref', 'use_module_parameters']
-    expect(declaration.match(/'[^']+'/g).map(value => value.slice(1, -1))).toEqual(keys)
+    expect(declaration.match(/'[^']+'/g).map(value => value.slice(1, -1))).toEqual([...keys, 'accepted_string_length'])
     expect(declaration).toContain('JSON.stringify([mode,')
     expect(declaration).toContain('...MODULE_PARAMETER_KEYS')
     expect(declaration).toContain('draft[key] ?? null')
