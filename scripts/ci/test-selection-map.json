@@ -379,6 +379,7 @@
     "server-lab-runs",
     "server-lab-stream",
     "server-lab-tool-nodes",
+    "server-lab-tool-manifests",
     "server-broker-lab-sandbox",
     "server-lab-diff",
     "server-lab-registry",
