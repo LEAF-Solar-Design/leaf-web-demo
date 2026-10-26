@@ -2,7 +2,7 @@
   position: fixed;
   top: calc(var(--ck-canvas-top, 140px) + 26px);
   left: 8px;
-  z-index: 30;
+  z-index: var(--leaf-layer-header);
   display: flex;
   flex-direction: column;
   gap: 4px;
@@ -10,14 +10,14 @@
   /* A stable occluder: expanding results must not trigger Viewer's safe-rect camera shift. */
   height: 52px;
   color: #f1f5f9;
-  font-size: 12px;
+  font-size: var(--leaf-size-caption);
   pointer-events: none;
 }
 .drawing-find-field, .drawing-find-status > *, .drawing-find-results {
   min-height: 0;
   padding: 0 4px;
   border: 1px solid #626c79;
-  border-radius: 4px;
+  border-radius: var(--leaf-radius-key);
   background: #202832;
   pointer-events: auto;
 }

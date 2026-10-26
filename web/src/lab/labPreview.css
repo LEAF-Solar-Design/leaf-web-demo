@@ -22,7 +22,7 @@
   color: inherit;
   background: var(--card, #fff);
   border: 1px solid var(--border, #a1a1aa);
-  border-radius: 6px;
+  border-radius: var(--leaf-radius-control);
   cursor: pointer;
 }
 .lab-preview [aria-selected="true"], .lab-preview-toggle[aria-expanded="true"] {

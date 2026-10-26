@@ -34,7 +34,7 @@ button.rail-row { cursor: pointer; }
 .rail-tool { font-family: var(--font-mono); font-size: 11.5px; font-weight: 500; color: var(--foreground); }
 .rail-detail { color: var(--muted-2); min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 /* status word tinted the state color (hollow states keep neutral words) */
-.rail-word { font-size: 12px; white-space: nowrap; }
+.rail-word { font-size: var(--leaf-size-caption); white-space: nowrap; }
 .rail-word.ok { color: var(--primary); }
 .rail-word.warn { color: var(--status-warning); }
 .rail-word.err { color: var(--status-danger); }
@@ -72,7 +72,7 @@ button.rail-row { cursor: pointer; }
 /* --- workspace summary: ONE big number, demoted sibling stats --- */
 .ws-stats {
   align-self: flex-end; padding-bottom: 5px;
-  font-size: 13px; color: var(--muted); font-variant-numeric: tabular-nums;
+  font-size: var(--leaf-size-dense); color: var(--muted); font-variant-numeric: tabular-nums;
 }
 
 /* --- JobInbox (slice 13a): the right spine's "what you missed" card. Reuses
