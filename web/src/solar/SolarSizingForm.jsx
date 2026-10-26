@@ -69,6 +69,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     if (owner.current) {
       owner.current.alive = false
       owner.current.cancelTouch?.()
+      owner.current.cancelJob?.()
       for (const controller of owner.current.controllers) controller.abort()
     }
     owner.current = { id: ++sequence.current, bindingKey, binding, authorityKey, client: projectClient,
@@ -85,6 +86,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     for (const controller of scope.candidateControllers) controller.abort()
   }
   if (scope.digest !== catalogDigest || scope.declarationIdentity !== declarationIdentity) {
+    if (scope.declarationIdentity !== declarationIdentity) scope.cancelJob?.()
     invalidateCandidate()
     scope.digest = catalogDigest
     scope.declarationIdentity = declarationIdentity
@@ -94,6 +96,10 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
   const [feedback, setFeedback] = useState(null)
   const [refresh, setRefresh] = useState(0)
   const [submitting, setSubmitting] = useState(false)
+  const [terminalJob, setTerminalJob] = useState(null)
+  if (terminalJob && (terminalJob.scope !== scope || terminalJob.declarationIdentity !== declarationIdentity)) {
+    setTerminalJob(null)
+  }
   const dependencies = binding && typeof authorityKey === 'string' && authorityKey.trim().length > 0
     && new TextEncoder().encode(authorityKey).byteLength <= 256
     && projectClient && ['readContext', 'prepareRun', 'catalog', 'captureCatalogScope', 'subscribe', 'getSnapshot']
@@ -171,7 +177,9 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
         scope.armed = null
         scope.retry = null
         scope.generation += 1
-        for (const controller of scope.controllers) controller.abort()
+        // Catalog invalidation must not interrupt observation of an already submitted job.
+        read?.abort()
+        for (const controller of scope.candidateControllers) controller.abort()
         scope.predicates.clear()
         scope.previewCurrent = null
         setPublication(null)
@@ -182,6 +190,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     startRead()
     return () => {
       scope.cancelTouch?.()
+      scope.cancelJob?.()
       scope.alive = false
       scope.generation += 1
       scope.armed = null
@@ -271,6 +280,8 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     if (reason || (isSizing && latest.current.busy) || !armed || scope.lock || !isScopeCurrent() || !scope.armed?.isCurrent()
         || scope.armed.generation !== scope.generation || scope.armed.candidate.fingerprint !== fingerprint) return
     const accepted = scope.armed
+    scope.cancelJob?.()
+    setTerminalJob(null)
     const pending = operation()
     const lock = {}
     scope.lock = lock
@@ -298,6 +309,24 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           && typeof result.data.job_id === 'string' && projectJobId.test(result.data.job_id)) {
         scope.retry = null
         setFeedback({ scope, generation: scope.generation, outcome: result, text: 'Request submitted.', code: null })
+        if (isSizing && typeof projectClient.observeJob === 'function') {
+          const observer = operation(false)
+          scope.cancelJob = observer.abort
+          ;(async () => {
+            try {
+              const outcome = await projectClient.observeJob(result.data.job_id,
+                { tool: toolName, signal: observer.signal })
+              if (owner.current === scope && scope.alive && !observer.signal.aborted
+                  && scope.declarationIdentity === declarationIdentity && outcome?.ok) {
+                setTerminalJob({ scope, declarationIdentity, job: outcome.data?.job || outcome.data })
+              }
+            } catch { /* An unreadable job adds no suggestion. */ }
+            finally {
+              observer.finish()
+              if (scope.cancelJob === observer.abort) scope.cancelJob = null
+            }
+          })()
+        }
       } else {
         const message = projectSizingConductorFeedback(result)
         scope.retry = { candidate: accepted.candidate, feedback: message }
@@ -319,6 +348,8 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
   }
   const retryAvailable = Boolean(scope.retry?.candidate && scope.retry.candidate === scope.candidate && isScopeCurrent())
   return { scope, state, editable, reason, armed, submitting, runMessage, retryAvailable, submit, isScopeCurrent,
+    terminalJob: terminalJob?.scope === owner.current && terminalJob.declarationIdentity === declarationIdentity
+      ? terminalJob.job : null,
     invalidateCandidate: () => {
       invalidateCandidate()
       setRefresh((value) => value + 1)
@@ -334,13 +365,24 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
 
 function ProjectSolarSizingForm(props) {
   const [mode, setMode] = useState('manual-global')
-  const [draft, setDraft] = useState({})
+  const [storedDraft, setDraft] = useState({})
+  let draftBindingKey = null
+  try { draftBindingKey = solarDrawingBindingKey(createProjectSizingConductorBinding(props.solarBinding)) } catch { /* local refusal */ }
+  const draftScopeKey = JSON.stringify([draftBindingKey, props.authorityKey, props.projectId])
+  const draftScope = useRef({ key: draftScopeKey, client: props.projectClient })
+  let draft = storedDraft
+  if (draftScope.current.key !== draftScopeKey || draftScope.current.client !== props.projectClient) {
+    draftScope.current = { key: draftScopeKey, client: props.projectClient }
+    const { accepted_string_length, ...rest } = draft
+    draft = rest
+    setDraft(rest)
+  }
   const declarationIdentity = JSON.stringify([mode, ...[
     'module_name', 'full_inverter_name', 'bifacial', 'bifacial_coefficient',
     'racking_type', 'surface_tilt', 'surface_azimuth', 'albedo',
     'axis_tilt', 'axis_azimuth', 'max_angle', 'gcr', 'backtrack',
     'max_voltage', 'thermal_model_type', 'open_circuit_rise', 'grant_ref',
-    'use_module_parameters', ...MODULE_PARAMETER_KEYS,
+    'use_module_parameters', 'accepted_string_length', ...MODULE_PARAMETER_KEYS,
   ].map((key) => draft[key] ?? null)])
   const form = useProjectSizingConductor(props, { toolName: 'solar-size-strings',
     deriveState: deriveProjectSizingState, declarationIdentity,
@@ -348,7 +390,16 @@ function ProjectSolarSizingForm(props) {
   const { state, editable, reason, submitting, runMessage, retryAvailable, submit } = form
   const built = editable ? buildSizingParams({ graph: state.graph, mode, draft }) : null
   const invalid = new Set(built?.invalid || [])
-  const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
+  const change = (key, value) => {
+    setDraft(({ accepted_string_length, ...previous }) => ({ ...previous, [key]: value }))
+  }
+  const cold = form.terminalJob?.status === 'failed'
+    && form.terminalJob.error?.reason_code === 'COLD_VOLTAGE_FAILED' ? form.terminalJob.error.cold_voltage : null
+  const suggestion = mode === 'global' && cold && typeof cold === 'object' && !Array.isArray(cold)
+    && ['standard_string_length', 'suggested_string_length', 'per_module', 'string_voltage', 'max_dc_voltage']
+      .every((key) => Number.isFinite(cold[key]))
+    && Number.isInteger(cold.standard_string_length) && Number.isInteger(cold.suggested_string_length)
+    && cold.suggested_string_length >= 1 && cold.suggested_string_length < cold.standard_string_length ? cold : null
   const sentence = projectSizingConductorReason(reason)
     || projectSizingCloudReason(reason)
     || (reason === 'sizing_zip_required' ? SOLAR_SIZING_REASONS.sizing_zip_required
@@ -358,7 +409,11 @@ function ProjectSolarSizingForm(props) {
   return <div data-testid="project-solar-sizing-form" data-mode={state?.mode ?? 'loading'}>
     {state === null && <p role="status">Reading the drawing.</p>}
     {editable && <>
-      <label>Scope<select value={mode} disabled={submitting} onChange={(event) => setMode(event.target.value)}>
+      <label>Scope<select value={mode} disabled={submitting} onChange={(event) => {
+        form.invalidateCandidate()
+        setDraft(({ accepted_string_length, ...previous }) => previous)
+        setMode(event.target.value)
+      }}>
         <option value="manual-global">Saved global length</option>
         <option value="global">Global cloud sizing</option>
       </select></label>
@@ -369,11 +424,24 @@ function ProjectSolarSizingForm(props) {
       {mode === 'manual-global' && <p>Manual confirmation does not calculate voltage limits or module power.</p>}
       {mode === 'global' && <SizingCloudFields mode={mode} draft={draft} change={change}
         busy={submitting} invalid={invalid} />}
+      {mode === 'global' && draft.accepted_string_length !== undefined && <p>
+        Accepted string length: {draft.accepted_string_length}{' '}
+        <button type="button" disabled={submitting} onClick={() => {
+          form.invalidateCandidate()
+          setDraft(({ accepted_string_length, ...previous }) => previous)
+        }}>Clear</button>
+      </p>}
     </>}
     {sentence && <p role="status">{sentence}</p>}
     {runMessage && <p role="status" data-testid="project-solar-sizing-feedback">
       {runMessage.text}{runMessage.code ? ` (${runMessage.code})` : ''}
     </p>}
+    {suggestion && <div role="status">
+      <p>At {suggestion.standard_string_length} modules the cold-weather open-circuit voltage is {suggestion.string_voltage.toFixed(1)} V, above the {suggestion.max_dc_voltage.toFixed(1)} V limit. {suggestion.suggested_string_length} modules stay within it.</p>
+      <button type="button" disabled={submitting} onClick={() => change('accepted_string_length', suggestion.suggested_string_length)}>
+        Use {suggestion.suggested_string_length} modules
+      </button>
+    </div>}
     <button type="button" disabled={Boolean(reason) || submitting || !editable} onClick={submit}>Review &amp; run</button>
     {retryAvailable && <button type="button"
       disabled={Boolean(reason) || submitting || !editable} onClick={submit}>Retry</button>}

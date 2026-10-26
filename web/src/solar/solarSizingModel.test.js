@@ -35,6 +35,27 @@ const r9Oracle = JSON.parse(readFileSync(`${process.cwd()}/src/solar/__fixtures_
 const r9Manual = () => ({ ...raw(), settings: { ...raw().settings, panels_in_sequence: 3 }, project: { zip_code: '' }, electrical_zones: [] })
 
 describe('solarSizingModel', () => {
+  it('W1C-34c carries only a valid accepted global string length', () => {
+    const expected = { expected_rev: 7, mode: 'global', requests: { S: {
+      module_name: 'Module', full_inverter_name: 'Inverter', bifacial: false, bifacial_coefficient: '.7',
+      racking_params: { racking_type: 'fixed_tilt', surface_tilt: '5', surface_azimuth: '180', albedo: '.25' },
+      max_voltage: '1500', thermal_model_type: 'close mount glass glass', open_circuit_rise: false, zip_code: '44224',
+    } }, grant_ref: 'grant_1', confirm: true }
+    expect(build()).toEqual({ ok: true, params: expected })
+    for (const accepted_string_length of [1, 31, 4096]) {
+      expect(build({ accepted_string_length })).toEqual({ ok: true,
+        params: { ...expected, accepted_string_length } })
+    }
+    for (const accepted_string_length of [0, 4097, 31.5, '31', true, undefined, null]) {
+      expect(build({ accepted_string_length })).toEqual({ ok: false,
+        reason: 'sizing_fields_invalid', invalid: ['accepted_string_length'] })
+    }
+    for (const accepted_string_length of [31, 0, '31']) {
+      expect(build({ accepted_string_length }, read(r9Manual()), 'manual-global')).toEqual({ ok: true,
+        params: { expected_rev: 7, mode: 'manual-global', confirm: true } })
+      expect(build({ accepted_string_length }, read(), 'zones')).toEqual(build({}, read(), 'zones'))
+    }
+  })
 
   it('R9-01 canonical context cannot pass either legacy version envelope', () => {
     const context = r9Context(raw())

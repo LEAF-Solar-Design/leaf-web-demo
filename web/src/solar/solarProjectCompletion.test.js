@@ -29,6 +29,16 @@ const fallback = { state: 'failed', jobId: J, outputVersionId: null, reasonCode:
   message: 'The server refused this solar tool' }
 
 describe('exact project Solar completion', () => {
+  it('W1C-34c maps cold voltage failures and tolerates their arithmetic detail', () => {
+    expect(projectSolarRunFailure('COLD_VOLTAGE_FAILED')).toEqual({ reasonCode: 'cold_voltage_failed',
+      message: SOLAR_SIZING_RUN_REASONS.cold_voltage })
+    expect(read(failed({ error: { error_code: 'BAD_PARAMS', reason_code: 'COLD_VOLTAGE_FAILED', retryable: false,
+      cold_voltage: { standard_string_length: 32, suggested_string_length: 31,
+        per_module: 48.3, string_voltage: 1545.6, max_dc_voltage: 1500 } } }))).toEqual({
+      state: 'failed', jobId: J, outputVersionId: null, reasonCode: 'cold_voltage_failed',
+      message: SOLAR_SIZING_RUN_REASONS.cold_voltage,
+    })
+  })
   it('W1C5 recognizes a scoped nonpublishing proposal and freezes only the review projection', () => {
     const result = { schema: 'leaf.solar-solve-proposal.v1', candidate_sha256: 'a'.repeat(64),
       frame_id: 'frame-1', phase: 'initial', candidate_summary: [{ panel_count: 12, endpoints: ['panel-1', 'panel-12'] }],
