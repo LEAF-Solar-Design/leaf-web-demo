@@ -51,6 +51,31 @@ describe('front door exact Stage color roles (LS-T1)', () => {
     }
   })
 
+  it('replaces translucent neutral ink outside Paper scopes', () => {
+    expect(declarations.length).toBeGreaterThan(0)
+    for (const [property, value] of declarations) {
+      expect(value, `landing.css ${property}: ${value}`)
+        .not.toMatch(/rgba\(\s*(?:240\s*,\s*242\s*,\s*240|255\s*,\s*255\s*,\s*255)\s*,/i)
+    }
+  })
+
+  it('mixes every translucent Leaf role with a bounded percentage and transparent', () => {
+    const mixes = [...css.matchAll(/color-mix\(\s*in\s+srgb\s*,\s*var\(\s*--leaf-[\w-]+\s*\)([^)]*)\)/g)]
+    const starts = [...css.matchAll(/color-mix\(\s*in\s+srgb\s*,\s*var\(\s*--leaf-/g)]
+    expect(starts.length).toBeGreaterThan(0)
+    expect(mixes.length).toBe(starts.length)
+    for (const [mix, tail] of mixes) {
+      const percentage = tail.match(/^\s+([+-]?(?:\d+(?:\.\d+)?|\.\d+))%\s*,\s*transparent\s*$/)
+      expect(percentage, `landing.css ${mix}`).not.toBeNull()
+      expect(Number(percentage[1]), mix).toBeGreaterThanOrEqual(0)
+      expect(Number(percentage[1]), mix).toBeLessThanOrEqual(100)
+    }
+  })
+
+  it('preserves the pinned seven-percent green tint', () => {
+    expect(css).toContain('rgba(34, 197, 94, .07)')
+  })
+
   it('preserves the light alias block', () => {
     const lightRules = rules.filter(({ selector }) => selector === '.leaf-light')
     expect(lightRules).toHaveLength(1)
