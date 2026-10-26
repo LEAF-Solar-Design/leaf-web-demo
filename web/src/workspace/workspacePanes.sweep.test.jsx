@@ -1,14 +1,29 @@
-import { useState } from 'react'
+import React, { useState } from 'react'
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProjectMaterialIntake from './ProjectMaterialIntake.jsx'
 import ProjectWorkspacePanels from './ProjectWorkspacePanels.jsx'
 import WorkspaceSummary from '../components/WorkspaceSummary.jsx'
+import { StandaloneMaterialUpload } from '../App.jsx'
+import useDrawingUploadController from '../controllers/upload/useDrawingUploadController.js'
 import { deriveWorkspaceProjectState } from '../site/workspaceProjectState.js'
 import { createWorkspaceController } from '../controllers/workspace/createWorkspaceController.js'
 
+vi.mock('../controllers/upload/useDrawingUploadController.js', () => ({ default: vi.fn() }))
+
 afterEach(cleanup)
 const project = { project_id: 'p1', name: 'Roof' }
+
+function standaloneMaterial(upload) {
+  useDrawingUploadController.mockReturnValue(upload)
+  return StandaloneMaterialUpload
+}
+
+function readyUpload() {
+  const snapshot = { policyLoading: false, policy: { enabled: true }, busy: false, phase: 'idle' }
+  return { ...snapshot, getSnapshot: () => snapshot,
+    actions: { cancel: vi.fn(), upload: vi.fn(), setEngine: vi.fn() } }
+}
 
 it('S1-145 presents one safe upload error with a recovery and closed diagnostics', () => {
   const { rerender, container } = render(<ProjectMaterialIntake project={project} />)
@@ -68,6 +83,52 @@ it('S1-149 focuses the pane heading and returns to the originating tile', () => 
   expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Material' }))
   fireEvent.click(screen.getByRole('button', { name: 'Back to board' }))
   expect(document.activeElement).toBe(tile)
+})
+
+it('S1-149 focuses standalone Material and restores each opening tile after Back', () => {
+  const upload = readyUpload()
+  const StandaloneMaterialUpload = standaloneMaterial(upload)
+  const onBack = vi.fn()
+  function Board() {
+    const [pane, setPane] = useState(null)
+    return <><StandaloneMaterialUpload token="standalone" pane={pane} selection={null}
+      getContext={() => ({ token: 'standalone', pane, selection: null })}
+      onPolicy={() => {}} onReady={() => {}} onBack={() => { onBack(); setPane(null) }} />
+      <button onClick={() => setPane('material')}>Material tile</button>
+      <button onClick={() => setPane('material')}>Another Material tile</button></>
+  }
+  render(<Board />)
+  for (const name of ['Material tile', 'Another Material tile']) {
+    const tile = screen.getByRole('button', { name })
+    tile.focus()
+    fireEvent.click(tile)
+    expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Material' }))
+    expect(screen.getByRole('button', { name: 'Upload DWG or DXF' }).disabled).toBe(false)
+    fireEvent.click(screen.getByRole('button', { name: 'Back to board' }))
+    expect(document.activeElement).toBe(tile)
+    expect(screen.queryByRole('heading', { name: 'Material' })).toBeNull()
+  }
+  expect(upload.actions.cancel).toHaveBeenCalledTimes(2)
+  expect(onBack).toHaveBeenCalledTimes(2)
+})
+
+it('S1-149 restores standalone Material focus on pane changes and unmount', () => {
+  const StandaloneMaterialUpload = standaloneMaterial(readyUpload())
+  const { unmount: removeTile } = render(<button>Material tile</button>)
+  const tile = screen.getByRole('button', { name: 'Material tile' })
+  const props = { token: 'standalone', selection: null,
+    getContext: () => ({ token: 'standalone', pane: 'material', selection: null }),
+    onPolicy: () => {}, onReady: () => {}, onBack: () => {} }
+  tile.focus()
+  const { rerender, unmount } = render(<StandaloneMaterialUpload {...props} pane="material" />)
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Material' }))
+  rerender(<StandaloneMaterialUpload {...props} pane="versions" />)
+  expect(document.activeElement).toBe(tile)
+  rerender(<StandaloneMaterialUpload {...props} pane="material" />)
+  expect(document.activeElement).toBe(screen.getByRole('heading', { name: 'Material' }))
+  unmount()
+  expect(document.activeElement).toBe(tile)
+  removeTile()
 })
 
 it('S1-202 exposes opening and failed-open recovery in the body', () => {

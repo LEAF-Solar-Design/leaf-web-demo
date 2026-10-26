@@ -3752,10 +3752,10 @@ describe('J1 Browser composition', () => {
 
     // Execute only the mounted adapter, with the two IO controllers replaced.
     // This pins ordering and refusal without making an upload or a project write.
-    const begin = appSource.indexOf('function LiveProjectMaterialIntake(')
-    const end = appSource.indexOf('export default function App()', begin)
-    assert.ok(begin >= 0 && end > begin)
-    const adapter = esbuild.transformSync(appSource.slice(begin, end), { loader: 'jsx' }).code
+    const adapterNode = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] }).program.body
+      .find((node) => node.type === 'FunctionDeclaration' && node.id?.name === 'LiveProjectMaterialIntake')
+    assert.ok(adapterNode, 'the mounted material adapter must exist')
+    const adapter = esbuild.transformSync(appSource.slice(adapterNode.start, adapterNode.end), { loader: 'jsx' }).code
     const events = []
     const project = { project_id: 'project-j1', name: 'J1 roof' }
     const artifacts = [{ drawing_id: 'drawing-j1' }]

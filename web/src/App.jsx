@@ -393,9 +393,21 @@ function promoteStandaloneUpload({ receipt }, attempt, current, setFromUpload) {
   setFromUpload(receipt)
 }
 
-function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy, onReady, onBack }) {
+export function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy, onReady, onBack }) {
   const lifetime = useRef(false)
   const attempt = useRef(null)
+  const origin = useRef(null)
+  const heading = useRef(null)
+  useLayoutEffect(() => {
+    if (pane !== 'material' || typeof document === 'undefined') return
+    origin.current = document.activeElement
+    heading.current?.focus()
+    return () => {
+      const target = origin.current
+      origin.current = null
+      if (target?.isConnected) target.focus()
+    }
+  }, [pane])
   // Render-time context changes invalidate callbacks before passive cleanup.
   const current = getContext()
   if (attempt.current && (current.token !== token || pane !== 'material'
@@ -434,6 +446,7 @@ function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy
   }
   if (pane !== 'material') return null
   return <section className="project-material-intake">
+    <h2 tabIndex={-1} ref={heading}>Material</h2>
     <button type="button" className="btn ghost" onClick={() => { cancel(); onBack() }}>Back to board</button>
     {!policyReady && <p>{PROFILE_REASONS.uploadDrawing}</p>}
     <DrawingUploadControl policy={upload.policy} policyLoading={upload.policyLoading}
