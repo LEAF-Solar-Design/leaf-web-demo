@@ -99,6 +99,11 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     && projectClient && ['readContext', 'prepareRun', 'catalog', 'captureCatalogScope', 'subscribe', 'getSnapshot']
       .every((key) => typeof projectClient[key] === 'function')
   const available = Boolean(dependencies && typeof newProjectIntentKey === 'function' && typeof onProjectSubmit === 'function')
+  // Keep sizing loaded when the workspace temporarily withholds submission callbacks.
+  const isSizing = toolName === 'solar-size-strings'
+  const readable = isSizing ? Boolean(dependencies) : available
+  const busy = isSizing && props.busy
+  const previewAvailable = available && !busy
   const isScopeCurrent = () => {
     const current = latest.current
     const snapshot = projectClient?.getSnapshot?.()
@@ -132,7 +137,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     setPublication(null)
     setFeedback(null)
     setSubmitting(false)
-    if (!available) return () => { scope.alive = false }
+    if (!readable) return () => { scope.alive = false }
     if (!isScopeCurrent()) {
       setLoaded({ scope, state: { mode: 'refused', reason: 'scope_stale' } })
       return () => { scope.alive = false }
@@ -184,10 +189,10 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
       for (const controller of scope.controllers) controller.abort()
       unsubscribe()
     }
-  }, [scope, available])
+  }, [scope, readable])
 
   const state = !binding ? { mode: 'refused', reason: 'binding_invalid' }
-    : !available ? { mode: 'refused', reason: 'submit_unavailable' }
+    : !readable ? { mode: 'refused', reason: 'submit_unavailable' }
       : loaded?.scope === scope ? loaded.state : null
   const editable = state?.mode === 'edit'
   const result = editable ? (props.row?.name !== toolName || !declarationValid
@@ -202,7 +207,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
     scope.armed = null
     scope.retry = null
     setPublication(null)
-    if (!fingerprint || !available || !isScopeCurrent()) return undefined
+    if (!fingerprint || !previewAvailable || !isScopeCurrent()) return undefined
     const preview = operation()
     if (!preview.isCurrent()) { preview.finish(); return undefined }
     let candidate = scope.candidate
@@ -251,18 +256,19 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
       } finally { preview.finish() }
     })()
     return () => preview.abort()
-  }, [scope, fingerprint, available, refresh])
+  }, [scope, fingerprint, previewAvailable, refresh])
 
   const armed = scope.armed && scope.armed.generation === scope.generation && scope.armed.isCurrent()
     && scope.armed.candidate.fingerprint === fingerprint
-  const reason = state?.mode === 'refused' ? state.reason : !available ? 'submit_unavailable'
+  const reason = state?.mode === 'refused' ? state.reason : isSizing && (busy || submitting) ? 'run_in_progress'
+    : !available ? 'submit_unavailable'
     : !isScopeCurrent() ? 'scope_stale' : result && !result.ok ? result.reason
       : !armed ? (publication?.scope === scope && publication.generation === scope.generation
         ? publication.reason || 'preview_required' : 'preview_required') : null
   const runMessage = feedback?.scope === scope && feedback.generation === scope.generation ? feedback : null
   async function submit(event) {
     event?.preventDefault()
-    if (reason || !armed || scope.lock || !isScopeCurrent() || !scope.armed?.isCurrent()
+    if (reason || (isSizing && latest.current.busy) || !armed || scope.lock || !isScopeCurrent() || !scope.armed?.isCurrent()
         || scope.armed.generation !== scope.generation || scope.armed.candidate.fingerprint !== fingerprint) return
     const accepted = scope.armed
     const pending = operation()
@@ -283,7 +289,8 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           reason: checked.reason === 'not_current_head' ? 'not_current_head' : 'scope_stale' })
         return
       }
-      if (!pending.isCurrent() || typeof latest.current.onProjectSubmit !== 'function') return
+      if (!pending.isCurrent() || (isSizing && latest.current.busy)
+          || typeof latest.current.onProjectSubmit !== 'function') return
       const result = await latest.current.onProjectSubmit(accepted.candidate.intent,
         { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent })
       if (!pending.isCurrent()) return
