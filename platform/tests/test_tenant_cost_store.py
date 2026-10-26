@@ -183,6 +183,48 @@ def test_writes_validate_before_using_connection():
         store.set_addon_mode(None, ORG, "aps_solve", "byo", actor="operator")
 
 
+def test_settings_ignore_unknown_rows():
+    rows = [
+        {"addon": "future_addon", "mode": {"arbitrary": []}, "byo_ref": False},
+        {"addon": "aps_solve", "mode": "byo", "byo_ref": "vault/team:aps"},
+        {"addon": "__proto__"},
+        {"addon": "constructor"},
+        {"addon": "storage", "mode": "managed", "byo_ref": None},
+        {"addon": "prototype"},
+    ]
+    original = deepcopy(rows)
+    calls = []
+
+    class Cursor:
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def execute(self, query, params):
+            calls.append((query, params))
+
+        def fetchall(self):
+            return rows
+
+    class Connection:
+        def cursor(self):
+            return Cursor()
+
+    settings = store.get_addon_settings(Connection(), str(ORG))
+    assert calls == [("SELECT addon, mode, byo_ref FROM tenant_addon_settings WHERE org_id = %s", (ORG,))]
+    assert set(settings) == set(store.ADDONS)
+    assert settings["aps_solve"] == {"mode": "byo", "byo_ref": "vault/team:aps"}
+    assert settings["storage"] == {"mode": "managed", "byo_ref": None}
+    assert all(settings[addon] == {"mode": "off", "byo_ref": None}
+               for addon in store.ADDONS if addon not in ("aps_solve", "storage"))
+    settings["aps_solve"]["byo_ref"] = "changed"
+    settings["e2b_exec"]["mode"] = "managed"
+    assert settings["tool_ci"] == {"mode": "off", "byo_ref": None}
+    assert rows == original
+
+
 def test_db_insert_duplicate_and_conflicting_replays(make_org):
     from leaf_platform.db import connection
 

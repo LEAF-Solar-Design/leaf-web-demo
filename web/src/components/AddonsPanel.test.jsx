@@ -18,11 +18,11 @@ const response = (body, status = 200) => new Response(JSON.stringify(body), {
   status, headers: { 'Content-Type': 'application/json' },
 })
 
-function mockFetch({ usage = statement, settings = {}, put } = {}) {
+function mockFetch({ usage = statement, settings = {}, catalog, put } = {}) {
   const fetch = vi.fn(async (url, options) => {
     if (options?.method === 'PUT') return put ? put(url, options) : response({ addon: { mode: 'byo', byo_ref: 'my-e2b-key' } })
     if (url.includes('/billing/statement?')) return response({ statement: usage })
-    return response({ addons: settings })
+    return response(catalog ?? { addons: settings })
   })
   vi.stubGlobal('fetch', fetch)
   return fetch
@@ -42,6 +42,40 @@ afterEach(() => {
 })
 
 describe('Studio Add-ons', () => {
+  it('test_panel_superset', async () => {
+    const fetch = mockFetch({ catalog: {
+      schema: 'leaf.addons.v1', reader_version: 2, extra: true,
+      addons: JSON.parse(`{
+        "e2b_exec": {"mode":"managed","min_reader_version":1,"label":"Untrusted label"},
+        "storage": {"mode":"managed","min_reader_version":2},
+        "future_addon": {"mode":"byo","byo_ref":"future-name"},
+        "__proto__": {"mode":"managed"},
+        "constructor": {"mode":"managed"},
+        "prototype": {"mode":"managed"}
+      }`),
+    } })
+    panel()
+    const row = within(await loadedRow())
+    expect(row.getByRole('radio', { name: 'Managed' })).toHaveAttribute('aria-checked', 'true')
+    expect(screen.queryByRole('region', { name: 'File storage' })).not.toBeInTheDocument()
+    expect(screen.queryByText('Untrusted label')).not.toBeInTheDocument()
+    expect(screen.getAllByRole('radiogroup')).toHaveLength(LABELS.length - 1)
+    expect(fetch.mock.calls.filter(([, options]) => options.method === 'PUT')).toHaveLength(0)
+    fireEvent.click(row.getByRole('radio', { name: 'Your own' }))
+    fireEvent.change(row.getByRole('textbox'), { target: { value: 'my-e2b-key' } })
+    for (const save of screen.getAllByRole('button', { name: 'Save' })) fireEvent.click(save)
+    await waitFor(() => expect(screen.getAllByText('Saved')).toHaveLength(LABELS.length - 1))
+    const writes = fetch.mock.calls.filter(([, options]) => options.method === 'PUT')
+    expect(writes.map(([url]) => url.split('/').at(-1)).sort()).toEqual(
+      Object.keys(addonsApi.ADDON_LABELS).filter((addon) => addon !== 'storage').sort())
+    expect(JSON.parse(writes.find(([url]) => url.endsWith('/e2b_exec'))[1].body))
+      .toEqual({ mode: 'byo', byo_ref: 'my-e2b-key' })
+    for (const addon of ['future_addon', '__proto__', 'constructor', 'prototype']) {
+      await expect(addonsApi.setAddonMode('org-1', addon, 'managed')).rejects.toThrow('Choose a valid add-on and mode.')
+    }
+    expect(fetch.mock.calls.filter(([, options]) => options.method === 'PUT')).toHaveLength(writes.length)
+  })
+
   it('asks for a workspace without fetching or offering Retry when none is selected', () => {
     const fetch = mockFetch()
     panel({ orgId: null })
@@ -240,6 +274,92 @@ describe('Studio Add-ons', () => {
 })
 
 describe('add-on API helpers', () => {
+  it('test_catalog_superset', () => {
+    const payload = JSON.parse(`{
+      "extra": [null, {"anything":true}],
+      "__proto__": {"polluted":true}, "constructor": {}, "prototype": {},
+      "addons": {
+        "e2b_exec": {"mode":"byo","byo_ref":"existing-name","extra":[],
+          "__proto__":{"polluted":true},"constructor":{},"prototype":{}},
+        "storage": {"mode":"managed","byo_ref":"ignored-name"},
+        "aps_solve": {"mode":"off","byo_ref":{"ignored":true}},
+        "marathon": {"mode":"invalid"},
+        "future_object": {"min_reader_version":"anything","mode":[]},
+        "future_array": [null, false, {"nested":true}],
+        "future_null": null, "future_string": "anything", "future_number": 42,
+        "__proto__": {"polluted":true}, "constructor": {}, "prototype": {}
+      }
+    }`)
+    const before = JSON.stringify(payload)
+    const freeze = (value) => {
+      if (value !== null && typeof value === 'object') {
+        Object.values(value).forEach(freeze)
+        Object.freeze(value)
+      }
+    }
+    freeze(payload)
+    const settings = addonsApi.readAddonCatalog(payload)
+    expect(Object.keys(settings)).toEqual(Object.keys(addonsApi.ADDON_LABELS))
+    expect(settings.e2b_exec).toEqual({ mode: 'byo', byo_ref: 'existing-name' })
+    expect(settings.storage).toEqual({ mode: 'managed', byo_ref: null })
+    for (const addon of Object.keys(addonsApi.ADDON_LABELS).filter((id) => !['e2b_exec', 'storage'].includes(id))) {
+      expect(settings[addon]).toEqual({ mode: 'off', byo_ref: null })
+    }
+    for (const key of ['__proto__', 'constructor', 'prototype']) expect(Object.hasOwn(settings, key)).toBe(false)
+    expect(Object.getPrototypeOf(settings)).toBe(Object.prototype)
+    expect(Object.hasOwn(Object.prototype, 'polluted')).toBe(false)
+    const again = addonsApi.readAddonCatalog(payload)
+    expect(again).toEqual(settings)
+    expect(again).not.toBe(settings)
+    for (const addon of Object.keys(settings)) expect(again[addon]).not.toBe(settings[addon])
+    settings.e2b_exec.byo_ref = 'changed'
+    settings.tool_ci.mode = 'managed'
+    expect(again.e2b_exec.byo_ref).toBe('existing-name')
+    expect(settings.app_auth.mode).toBe('off')
+    expect(JSON.stringify(payload)).toBe(before)
+  })
+
+  it('test_catalog_versions', () => {
+    const read = addonsApi.readAddonCatalog
+    const invalid = 'Invalid add-on catalog.'
+    expect(addonsApi.ADDON_READER_VERSION).toBe(1)
+    for (const payload of [null, undefined, [], true, 1, 'catalog', {}, { addons: null }, { addons: [] }, { addons: 'bad' }]) {
+      expect(() => read(payload)).toThrow(new Error(invalid))
+    }
+    for (const schema of ['leaf.addons.v2', '', null, 1, {}, []]) {
+      expect(() => read({ schema, addons: {} })).toThrow(new Error('Unsupported add-on catalog schema.'))
+    }
+    const badVersions = [null, undefined, 0, -1, 1.5, '1', true, {}, [], NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]
+    for (const version of badVersions) {
+      expect(() => read({ reader_version: version, addons: {} })).toThrow(new Error(invalid))
+      if (version !== undefined) expect(() => read({ addons: {} }, version)).toThrow(new Error(invalid))
+      const settings = read({ addons: {
+        e2b_exec: { mode: 'managed', min_reader_version: version }, storage: { mode: 'managed' },
+      } })
+      expect(settings.e2b_exec).toEqual({ mode: 'off', byo_ref: null })
+      expect(settings.storage).toEqual({ mode: 'managed', byo_ref: null })
+    }
+    const catalog = { schema: 'leaf.addons.v1', reader_version: Number.MAX_SAFE_INTEGER, addons: {
+      e2b_exec: { mode: 'byo', byo_ref: 'existing-name', min_reader_version: 2 },
+      storage: { mode: 'managed', min_reader_version: 1 },
+      marathon: { mode: 'invalid', min_reader_version: 2 },
+    } }
+    const older = read(catalog)
+    expect(Object.hasOwn(older, 'e2b_exec')).toBe(false)
+    expect(Object.hasOwn(older, 'marathon')).toBe(false)
+    expect(older.storage).toEqual({ mode: 'managed', byo_ref: null })
+    expect(read(catalog, 2).e2b_exec).toEqual({ mode: 'byo', byo_ref: 'existing-name' })
+    expect(read(catalog, 2).marathon).toEqual({ mode: 'off', byo_ref: null })
+    expect(read(catalog, Number.MAX_SAFE_INTEGER).e2b_exec.mode).toBe('byo')
+    for (const entry of [null, [], 42, 'managed', true, {}, { mode: 'MANAGED' }, { mode: 'future' },
+      { mode: 'byo' }, ...[null, '', 1, {}, [], false].map((byo_ref) => ({ mode: 'byo', byo_ref }))]) {
+      const settings = read({ addons: { e2b_exec: entry, storage: { mode: 'managed' } } })
+      expect(settings.e2b_exec).toEqual({ mode: 'off', byo_ref: null })
+      expect(settings.storage).toEqual({ mode: 'managed', byo_ref: null })
+    }
+    expect(read({ addons: {} })).toEqual(read({ schema: 'leaf.addons.v1', reader_version: 1, addons: {} }))
+  })
+
   it('uses the API auth and org scope, encodes paths and leaves BYO references out of managed/off writes', async () => {
     localStorage.setItem('leaf.jwt', 'test-token')
     const fetch = mockFetch()
