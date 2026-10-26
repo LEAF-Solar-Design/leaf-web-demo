@@ -2015,4 +2015,10 @@
   .lp-stmt form input, .lp-stmt form button { min-height: 44px; box-sizing: border-box; }
   .lp-index .lp-tab { min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; }
   .tc-product-tabs button { min-height: 44px; box-sizing: border-box; }
+  /* The /try console's phone controls reach the 44 px touch target (rule L4). */
+  .stage-root .tc-rail [role="tab"] { min-height: 44px; box-sizing: border-box; }
+  .stage-root .tc-back, .stage-root .proj-chip { min-height: 44px; box-sizing: border-box; }
+  .stage-root .bar-add { min-width: 44px; min-height: 44px; box-sizing: border-box; }
+  .stage-root .bar-scope, .stage-root .tc-run { min-height: 44px; box-sizing: border-box; }
+  .stage-root .session-gate button, .stage-root .drawing-upload button { min-height: 44px; box-sizing: border-box; }
 }
