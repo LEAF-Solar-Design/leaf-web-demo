@@ -14,6 +14,37 @@ export const ADDON_LABELS = {
   app_auth: { label: 'App sign-in', description: 'Manage app sign-in with Leaf Automation, or your own authentication provider.' },
 }
 
+export const ADDON_READER_VERSION = 1
+
+export function readAddonCatalog(payload, readerVersion = ADDON_READER_VERSION) {
+  const isObject = (value) => value !== null && typeof value === 'object' && !Array.isArray(value)
+  const isVersion = (value) => Number.isSafeInteger(value) && value > 0
+  if (!isObject(payload)) throw new Error('Invalid add-on catalog.')
+  if (Object.hasOwn(payload, 'schema') && payload.schema !== 'leaf.addons.v1') {
+    throw new Error('Unsupported add-on catalog schema.')
+  }
+  const producerVersion = Object.hasOwn(payload, 'reader_version') ? payload.reader_version : 1
+  if (!isVersion(readerVersion) || !isVersion(producerVersion)
+    || !Object.hasOwn(payload, 'addons') || !isObject(payload.addons)) {
+    throw new Error('Invalid add-on catalog.')
+  }
+  const settings = {}
+  for (const addon of Object.keys(ADDON_LABELS)) {
+    const entry = Object.hasOwn(payload.addons, addon) ? payload.addons[addon] : null
+    const minimum = isObject(entry) && Object.hasOwn(entry, 'min_reader_version') ? entry.min_reader_version : 1
+    if (isVersion(minimum) && minimum > readerVersion) continue
+    const mode = isObject(entry) && Object.hasOwn(entry, 'mode') ? entry.mode : null
+    const ref = isObject(entry) && Object.hasOwn(entry, 'byo_ref') ? entry.byo_ref : null
+    if (!isVersion(minimum) || !['managed', 'byo', 'off'].includes(mode)
+      || (mode === 'byo' && (typeof ref !== 'string' || !ref.length))) {
+      settings[addon] = { mode: 'off', byo_ref: null }
+    } else {
+      settings[addon] = { mode, byo_ref: mode === 'byo' ? ref : null }
+    }
+  }
+  return settings
+}
+
 async function request(orgId, suffix, options = {}) {
   if (!orgId) throw new Error('Choose a workspace to manage add-ons.')
   const path = `/api/orgs/${encodeURIComponent(orgId)}/${suffix}`
@@ -36,7 +67,7 @@ async function request(orgId, suffix, options = {}) {
 }
 
 export async function getAddons(orgId) {
-  return (await request(orgId, 'addons')).addons
+  return readAddonCatalog(await request(orgId, 'addons'))
 }
 
 export async function setAddonMode(orgId, addon, mode, byoRef) {

@@ -94,7 +94,8 @@ function AddonsContent({ orgId }) {
   return (
     <>
       <div className="ca-account-list">
-        {Object.keys(ADDON_LABELS).map((addon) => <AddonRow key={addon} orgId={orgId} addon={addon} setting={state.addons?.[addon]} />)}
+        {Object.keys(ADDON_LABELS).filter((addon) => Object.hasOwn(state.addons, addon))
+          .map((addon) => <AddonRow key={addon} orgId={orgId} addon={addon} setting={state.addons[addon]} />)}
       </div>
       <section aria-label="This month" className="ca-linked">
         <h3 className="ca-kindline">This month</h3>

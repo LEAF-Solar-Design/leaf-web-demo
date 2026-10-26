@@ -286,7 +286,9 @@ def get_org_addons(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_org_id
     if org_id != caller_org or store.get_org(org_id) is None:
         raise HTTPException(status_code=404, detail="org not found")
     with db.connection() as conn:
-        return {"addons": tenant_cost_store.get_addon_settings(conn, org_id)}
+        settings = tenant_cost_store.get_addon_settings(conn, org_id)
+    return {"schema": "leaf.addons.v1", "reader_version": 1, "addons": {
+        addon: {**setting, "min_reader_version": 1} for addon, setting in settings.items()}}
 
 
 @router.put("/orgs/{org_id}/addons/{addon}")

@@ -191,6 +191,8 @@ def get_addon_settings(conn, org_id) -> dict:
     with conn.cursor() as cur:
         cur.execute("SELECT addon, mode, byo_ref FROM tenant_addon_settings WHERE org_id = %s", (org,))
         for row in cur.fetchall():
+            if row["addon"] not in ADDONS:
+                continue
             result[row["addon"]] = {"mode": row["mode"], "byo_ref": row["byo_ref"]}
     return result
 
