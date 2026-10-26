@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useLayoutEffect, useRef, useState } from 'react'
 import EscCap from './EscCap.jsx'
 import './popovers.css'
 import useExit from '../useExit.js'
@@ -49,11 +49,58 @@ export default function LinkServiceDrawer({
   const [confirmUnlink, setConfirmUnlink] = useState(null)
   const [connectErrors, setConnectErrors] = useState({})
   const [healthResults, setHealthResults] = useState({})
+  const [registerError, setRegisterError] = useState(null)
   const rootRef = useRef(null)
+  const triggerRef = useRef(null)
+  const dialogRef = useRef(null)
+  const closeRef = useRef(null)
+  const wasOpen = useRef(false)
+  const healthGeneration = useRef(0)
   const pop = useExit(open)
   const list = Array.isArray(servers) ? servers : []
   const listFailed = error?.kind === 'list'
   const mutationError = listFailed ? error.mutationError : error
+  const shownState = (server) => {
+    const result = healthResults[server.id]
+    return result && result.sourceState === server.state ? result.state : server.state
+  }
+  const healthContext = useRef(null)
+  healthContext.current = { list, onHealth }
+
+  useLayoutEffect(() => {
+    if (mock) return
+    if (open) closeRef.current?.focus()
+    else if (wasOpen.current && (document.activeElement === document.body || dialogRef.current?.contains(document.activeElement))) triggerRef.current?.focus()
+    wasOpen.current = open
+  }, [open, mock])
+
+  useEffect(() => {
+    if (!open || mock) return undefined
+    const check = async (server, generation) => {
+      try {
+        const result = await healthContext.current.onHealth?.(server.id)
+        if (generation !== healthGeneration.current) return
+        if (!result?.state) return
+        setHealthResults((current) => ({ ...current, [server.id]: { state: result.state, sourceState: server.state } }))
+      } catch (e) {
+        if (generation === healthGeneration.current) setConnectErrors((current) => ({ ...current, [server.id]: humanizeError(e) }))
+      }
+    }
+    const refresh = () => {
+      const generation = ++healthGeneration.current
+      healthContext.current.list.forEach((server) => { void check(server, generation) })
+    }
+    // Recheck connection status on open and when returning from service sign-in.
+    refresh()
+    const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
+    window.addEventListener('focus', refresh)
+    document.addEventListener('visibilitychange', onVisible)
+    return () => {
+      healthGeneration.current += 1
+      window.removeEventListener('focus', refresh)
+      document.removeEventListener('visibilitychange', onVisible)
+    }
+  }, [open, mock])
 
   // S27: Escape is the owner stack's (menu layer: this is an anchored popover).
   useEscapeOwner('link-service', !!open && !mock, () => onToggle(false), { layer: 'menu', scope: rootRef })
@@ -76,11 +123,17 @@ export default function LinkServiceDrawer({
     const u = url.trim()
     const l = label.trim()
     if (!u || !l || busy) return
+    setRegisterError(null)
     try {
-      await onRegister(u, l)
+      const result = await onRegister(u, l)
+      if (!result) {
+        setRegisterError('The service was not linked. Sign in to your workspace and try again.')
+        return
+      }
       setUrl('')
       setLabel('')
-    } catch {
+    } catch (e) {
+      setRegisterError(humanizeError(e))
       // onRegister's caller (useTenantMcpRegistry) already recorded `error`;
       // fields are deliberately LEFT FILLED on failure so a rejected label
       // or URL is not silently discarded.
@@ -89,24 +142,40 @@ export default function LinkServiceDrawer({
 
   const runConnect = async (id) => {
     setConnectErrors((current) => ({ ...current, [id]: null }))
+    // Reserve the tab during the click, before the asynchronous authorization request.
+    let popup
     try {
+      popup = window.open('about:blank', '_blank')
+      if (popup) popup.opener = null
       const result = await onConnect(id)
       const startUrl = result?.authorize_url
-      if (typeof startUrl === 'string' && startUrl) {
-        window.open(startUrl, '_blank', 'noopener,noreferrer')
+      if (typeof startUrl === 'string' && /^https:\/\//i.test(startUrl)) {
+        if (!popup || popup.closed) {
+          setConnectErrors((current) => ({ ...current, [id]: 'The sign-in tab was blocked or closed. Allow pop-ups and try Connect again.' }))
+        } else {
+          popup.location.replace(startUrl)
+        }
+      } else {
+        popup?.close()
+        setConnectErrors((current) => ({ ...current, [id]: 'The service did not provide a sign-in link. Try Connect again.' }))
       }
     } catch (e) {
+      popup?.close()
       const reason = e?.body?.error?.message || humanizeError(e)
       setConnectErrors((current) => ({ ...current, [id]: reason }))
     }
   }
 
   const runHealth = async (id) => {
+    const generation = ++healthGeneration.current
     try {
       const result = await onHealth(id)
-      setHealthResults((current) => ({ ...current, [id]: result?.state || 'error' }))
-    } catch {
-      setHealthResults((current) => ({ ...current, [id]: 'error' }))
+      if (generation !== healthGeneration.current) return
+      if (!result?.state) throw new Error('Connection status is unavailable. Try Health again.')
+      setHealthResults((current) => ({ ...current, [id]: { state: result.state, sourceState: list.find((server) => server.id === id)?.state } }))
+      setConnectErrors((current) => ({ ...current, [id]: null }))
+    } catch (e) {
+      if (generation === healthGeneration.current) setConnectErrors((current) => ({ ...current, [id]: humanizeError(e) }))
     }
   }
 
@@ -145,22 +214,23 @@ export default function LinkServiceDrawer({
         // The look is shared by selector (`.claude-trigger, .link-svc-trigger` in
         // styles.css and landing.css), never by wearing the account's class.
         className="link-svc-trigger"
+        ref={triggerRef}
         onClick={() => onToggle(!open)}
         aria-expanded={open}
         aria-haspopup="dialog"
-        title="Link a tenant-owned MCP service"
+        title="Manage linked services for your workspace"
       >
         <span className="ca-k">Linked services</span>
-        <span className={`ca-state ${list.some((s) => s.state === 'connected') ? 'on' : ''}`}>
+        <span className={`ca-state ${list.some((s) => shownState(s) === 'connected') ? 'on' : ''}`}>
           {loading ? 'checking' : listFailed ? 'Unavailable' : `${list.length} linked`}
         </span>
       </button>
 
       {pop.shown && (
-        <div className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Linked services">
+        <div ref={dialogRef} inert={!open ? '' : undefined} aria-hidden={!open || undefined} title={busy ? 'Please wait for the service update.' : undefined} className={`claude-pop${pop.exiting ? ' exit' : ''}`} role="dialog" aria-label="Linked services">
           <div className="ca-head">
             <span>Link a service</span>
-            <EscCap onClick={() => onToggle(false)} label="Close linked services panel" />
+            <EscCap ref={closeRef} onClick={() => onToggle(false)} label="Close linked services panel" />
           </div>
 
           <div className="ca-linked">
@@ -168,23 +238,25 @@ export default function LinkServiceDrawer({
               <div className="field-err" role="alert">
                 <p>Linked services could not be loaded.</p>
                 <p>{humanizeError(error)}</p>
-                <button className="chip-act" onClick={error.retry} disabled={loading}>Retry</button>
+                <button className="chip-act" onClick={error.retry} disabled={loading} title={loading ? 'Checking linked services.' : undefined}>Retry</button>
               </div>
             )}
             {list.length === 0 && !loading && !listFailed && <p className="ca-copy">No services linked yet.</p>}
             <div className="ca-account-list">
               {list.map((server) => {
                 const connectErr = connectErrors[server.id]
-                const health = healthResults[server.id]
+                const result = healthResults[server.id]
+                const health = result && result.sourceState === server.state ? result.state : null
+                const state = shownState(server)
                 return (
                   <div className="ca-account" key={server.id}>
                     <div className="ca-account-main">
                       <b>{server.label}</b>
-                      <span className={`state ${chipClass(server.state)}`}>{chipWord(server.state)}</span>
+                      <span className={`state ${chipClass(state)}`}>{chipWord(state)}</span>
                     </div>
                     <div className="ca-account-meta">
                       {server.host && <span>{server.host}</span>}
-                      {health && <span>health: {health}</span>}
+                      {health && <span>Connection checked: {chipWord(health)}</span>}
                     </div>
                     {connectErr && (
                       <div className="field-err" role="alert"><span className="dot red" />{connectErr}</div>
@@ -210,7 +282,7 @@ export default function LinkServiceDrawer({
           </div>
 
           <div className="ca-setup">
-            <p className="ca-copy">Link an MCP service by its <b>HTTPS</b> address. The connection is authorized server-side; this app never sees a token.</p>
+            <p className="ca-copy">Link a service by its secure <b>HTTPS</b> address. You may be asked to sign in to the service.</p>
             <label className="ca-field">
               <span className="ca-field-k">Service label</span>
               <input
@@ -238,11 +310,12 @@ export default function LinkServiceDrawer({
                 disabled={busy}
               />
             </label>
-            <button className="btn primary ca-act" onClick={submit} disabled={busy || !url.trim() || !label.trim()}>
+            <button className="btn primary ca-act" onClick={submit} disabled={busy || !url.trim() || !label.trim()} title={busy ? 'Please wait for the service update.' : !url.trim() || !label.trim() ? 'Enter a service label and address.' : undefined}>
               {busy ? 'Linking…' : 'Link service'}
             </button>
-            <p className="ca-note">Credentials and upstream tool names stay server-side and never appear in this panel.</p>
+            <p className="ca-note">Your sign-in details are stored securely and are hidden in this panel.</p>
           </div>
+          {registerError && <div className="field-err" role="alert">{registerError}</div>}
           {mutationError && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(mutationError)}</div>}
         </div>
       )}

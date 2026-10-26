@@ -84,8 +84,9 @@ describe('LinkServiceDrawer', () => {
     expect(screen.getByText('Connecting…')).toBeInTheDocument()
   })
 
-  it('Connect opens the server-side OAuth start URL returned by onConnect, in a new tab', async () => {
-    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => {})
+  it('Connect reserves a tab before awaiting the sign-in URL and then navigates it', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)
     const onConnect = vi.fn().mockResolvedValue({ authorize_url: 'https://as.example.test/authorize?x=1' })
     render(<LinkServiceDrawer {...baseProps({
       servers: [server({ id: 'a', label: 'Billing tool' })],
@@ -93,14 +94,16 @@ describe('LinkServiceDrawer', () => {
     })} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
-    await screen.findByRole('button', { name: 'Connect' }) // let the async handler settle
+    await waitFor(() => expect(popup.location.replace).toHaveBeenCalledWith('https://as.example.test/authorize?x=1'))
     expect(onConnect).toHaveBeenCalledWith('a')
-    expect(openSpy).toHaveBeenCalledWith('https://as.example.test/authorize?x=1', '_blank', 'noopener,noreferrer')
+    expect(openSpy).toHaveBeenCalledWith('about:blank', '_blank')
+    expect(popup.opener).toBeNull()
     openSpy.mockRestore()
   })
 
-  it('never opens a tab when onConnect resolves with no authorize_url', async () => {
-    const openSpy = vi.spyOn(window, 'open').mockImplementation(() => {})
+  it('closes the reserved tab and explains when no sign-in URL is returned', async () => {
+    const popup = { close: vi.fn() }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)
     const onConnect = vi.fn().mockResolvedValue({})
     render(<LinkServiceDrawer {...baseProps({
       servers: [server({ id: 'a' })],
@@ -108,8 +111,8 @@ describe('LinkServiceDrawer', () => {
     })} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
-    await Promise.resolve()
-    expect(openSpy).not.toHaveBeenCalled()
+    expect(await screen.findByRole('alert')).toHaveTextContent('The service did not provide a sign-in link. Try Connect again.')
+    expect(popup.close).toHaveBeenCalled()
     openSpy.mockRestore()
   })
 
@@ -121,7 +124,8 @@ describe('LinkServiceDrawer', () => {
     })} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Health' }))
-    expect(await screen.findByText('health: connected')).toBeInTheDocument()
+    expect(await screen.findByText('Connection checked: Connected')).toBeInTheDocument()
+    expect(screen.getByText('Connected', { selector: '.state' })).toBeInTheDocument()
     expect(onHealth).toHaveBeenCalledWith('a')
   })
 
@@ -178,6 +182,15 @@ describe('LinkServiceDrawer', () => {
     expect(container.querySelector('.claude-trigger')).toBeNull()
     expect(container.querySelector('.link-svc-trigger')).not.toBeNull()
   })
+
+  it('keeps focus in an outside editor when the drawer closes', () => {
+    const props = baseProps()
+    const view = render(<><input aria-label="Drawing name" /><LinkServiceDrawer {...props} /></>)
+    const editor = screen.getByLabelText('Drawing name')
+    editor.focus()
+    view.rerender(<><input aria-label="Drawing name" /><LinkServiceDrawer {...props} open={false} /></>)
+    expect(editor).toHaveFocus()
+  })
 })
 
 
@@ -198,7 +211,7 @@ function expectYielded(event) {
 }
 
 async function serviceComposition(marks) {
-  const onRegister = vi.fn().mockResolvedValue(null)
+  const onRegister = vi.fn().mockResolvedValue({ id: 'new-service' })
   render(<LinkServiceDrawer {...baseProps({ onRegister })} />)
   const label = screen.getByLabelText('Service label')
   const input = screen.getByLabelText('Service URL')
