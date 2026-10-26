@@ -124,6 +124,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
   const [landing, setLanding] = useState(false)
   const [mergeConfirming, setMergeConfirming] = useState(false)
   const [merging, setMerging] = useState(false)
+  const activeRefreshRequest = useRef(0)
   const activeLandRequest = useRef(0)
   const activeMergeRequest = useRef(0)
   // Invalidate pending mutations as soon as selection starts, even before
@@ -185,6 +186,8 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
       const created = await proposePlatformChange(title.trim(), body)
       if (version !== selectionVersion.current) return
       ++selectionVersion.current
+      ++activeRefreshRequest.current
+      setRefreshing(false)
       setRecord(created)
       // A new proposal can be acted on while the previous record settles.
       setLanding(false); setMerging(false)
@@ -200,6 +203,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     if (submitting || merging || landing) return
     const id = changeId || record?.change_id
     if (!id) return
+    const requestToken = ++activeRefreshRequest.current
     const version = ++selectionVersion.current
     setRefreshing(true); setErr(null); setLandConfirming(false); setMergeConfirming(false)
     try {
@@ -208,7 +212,7 @@ export default function CustomizePanel({ onDismiss, exiting, tenant }) {
     } catch (e) {
       if (version === selectionVersion.current) setErr(describeError(e))
     } finally {
-      setRefreshing(false)
+      if (requestToken === activeRefreshRequest.current) setRefreshing(false)
     }
   }, [record, submitting, merging, landing])
 
