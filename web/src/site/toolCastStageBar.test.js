@@ -106,7 +106,7 @@ describe('slice 5a: the stage mounts PromptBox where its .tc-bar rows stood', ()
     expect(landing).toMatch(/^\.tc-bar \.bar-input \.tc-bar-input \{$/m)
     expect(landing).toMatch(/^\.tc-bar \.bar \.bar-controls \.tc-run \{$/m)
     // The phone legibility floor (>= 16px) the e2e rows read off .tc-bar-input.
-    expect(landing).toMatch(/^  \.tc-bar \.bar-input \.tc-bar-input \{ min-width: 0; font-size: 16px; \}$/m)
+    expect(landing).toMatch(/^  \.tc-bar \.bar-input \.tc-bar-input \{ min-width: 0; font-size: calc\(var\(--leaf-size-body\) \+ 1px\); \}$/m)
     // Dead CSS retired: .tc-bar-blink had no renderer (the static caret never
     // toggled a class), and its keyframes went with it.
     for (const dead of ['.tc-bar-blink', '@keyframes tc-blink']) {
