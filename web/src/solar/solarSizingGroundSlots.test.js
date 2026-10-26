@@ -1254,7 +1254,7 @@ describe('solarSizingModel on a converted Ground design', () => {
     const before = structuredClone(graph)
     const view = read(graph)
     const built = buildSizingParams({ graph: view, mode: 'global', draft: {
-      module_name: 'Module', full_inverter_name: 'Inverter', bifacial: false, bifacial_coefficient: '.7',
+      module_name: 'Module', module_confirmed: 'Module', full_inverter_name: 'Inverter', bifacial: false, bifacial_coefficient: '.7',
       racking_type: 'fixed_tilt', surface_tilt: '5', surface_azimuth: '180', albedo: '.25', max_voltage: '1500',
       thermal_model_type: 'close mount glass glass', open_circuit_rise: false, grant_ref: 'grant_1' } })
     expect(built.ok).toBe(true)

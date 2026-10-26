@@ -324,6 +324,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       const { signal } = options
       const outcome = await request(checkoutPath(scope.binding), { scope, signal, validate: validCheckout })
       if (outcome.ok && current(scope)) {
+        error = null
         const lease = outcome.data.checkout
         if (capability && (!lease || lease.fence !== checkout?.fence || Date.parse(lease.expires) <= Date.now())) rotate(null, lease)
         else { checkout = lease; publish() }
@@ -367,6 +368,24 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         ...projectSolarIntentExtras(intent.tool, intent) })
       return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body), headers: built.headers, signal,
         validate: (data) => typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted' })
+    }),
+    searchSizingModules: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { q, limit = 20, grantRef, signal } = options
+      assert(typeof q === 'string' && Array.from(q.trim()).length >= 2 && Array.from(q.trim()).length <= 64 &&
+        Number.isInteger(limit) && limit >= 1 && limit <= 50 && typeof grantRef === 'string' &&
+        /^[a-zA-Z0-9_-]{1,64}(?![\s\S])/.test(grantRef))
+      const query = new URLSearchParams({ q: q.trim(), limit: String(limit), grant_ref: grantRef })
+      return request(`/api/solar/sizing-modules?${query}`, { scope, signal, validate: (data) => {
+        const numericKeys = ['stc_w', 'n_s', 'v_oc_ref', 'length_m', 'width_m']
+        return data?.schema_version === 1 && plain(data.catalog) && data.catalog.source === 'pvlib.CeCMod' &&
+          typeof data.catalog.pvlib_version === 'string' && Number.isInteger(data.catalog.count) && data.catalog.count >= 0 &&
+          typeof data.catalog.sha256 === 'string' && /^[0-9a-f]{64}(?![\s\S])/.test(data.catalog.sha256) &&
+          typeof data.truncated === 'boolean' && Array.isArray(data.modules) && data.modules.length <= 50 &&
+          data.modules.every((module) => plain(module) && typeof module.key === 'string' &&
+            Object.keys(module).every((key) => key === 'key' || numericKeys.includes(key)) &&
+            numericKeys.every((key) => module[key] === null || Number.isFinite(module[key])))
+      } })
     }),
     readJob: (jobId, options = {}) => guarded((scope) => {
       assert(plain(options))

@@ -26,7 +26,8 @@ def eventually(predicate, timeout=30):
 @pytest.fixture
 def rig(authority, monkeypatch):
     graph, registry = case("operator-chain")
-    monkeypatch.setattr(worker, "trusted_registry", lambda: registry)
+    projection_registry_for = worker.lab_tool_manifests.registry_for
+    monkeypatch.setattr(worker.lab_tool_manifests, "registry_for", lambda tenant: registry)
     monkeypatch.setattr(worker, "lab_surface_enabled", lambda: True)
     prior_pause = store.paused()
     store.set_paused(False, "test", "test")
@@ -50,7 +51,8 @@ def rig(authority, monkeypatch):
                             "b" * 64, "adapter-1", build)
 
     yield SimpleNamespace(tenant=authority, graph=graph, registry=registry, artifact=artifact,
-                          env=env, metrics=metrics, make=make, create=create)
+                          env=env, metrics=metrics, make=make, create=create,
+                          projection_registry_for=projection_registry_for)
     for instance in workers:
         instance.stop()
     eventually(lambda: all(run.future is None or run.future.done()
@@ -81,6 +83,43 @@ def test_finishes_values_pins_and_status(rig):
     status = next(row for row in store.worker_status() if row["worker_id"] == rig.tenant)
     assert status["build_revision"] == "abc1234" and status["color"] == "active"
     assert any(kind == "age" for kind, value in rig.metrics)
+
+
+def test_projected_tool_registry_and_execution(rig, monkeypatch):
+    from test_lab_tool_nodes import projected_graph
+    projected = projected_graph(monkeypatch)
+    tenants = []
+    lookups = []
+    projection_trusted_for = worker.lab_tool_manifests.trusted_for
+
+    def registry(tenant):
+        tenants.append(tenant)
+        return rig.projection_registry_for(tenant)
+
+    def trusted_lookup(tenant, block_id, version):
+        lookups.append((tenant, block_id, version))
+        return projection_trusted_for(tenant, block_id, version)
+
+    monkeypatch.setattr(worker.lab_tool_manifests, "registry_for", registry)
+    monkeypatch.setattr(worker.lab_tool_manifests, "trusted_for", trusted_lookup)
+    rig.artifact["graph"] = projected.graph
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+
+    class Adapter:
+        admissible = staticmethod(worker.lab_tool_nodes.tool_block_admissible)
+
+        def __call__(self, block_id, trusted, manifest, inputs, settings, **kwargs):
+            assert trusted == projected.trusted
+            return {"outputs": {"result": 7}}
+
+    monkeypatch.setattr(worker.lab_tool_nodes, "ToolNodeAdapter", lambda *args, **kwargs:
+                        Adapter())
+    rig.create()
+    rig.make().tick()
+    eventually(lambda: store.get(rig.tenant, "run")["state"] in ("finished", "failed"))
+    assert tenants == [str(rig.tenant)]
+    assert lookups == [(str(rig.tenant), projected.descriptor.name, projected.descriptor.version)]
+    assert store.get(rig.tenant, "run")["state"] == "finished", events(rig)
 
 
 @pytest.mark.parametrize("mode", ["active", "idle", "disabled", "paused", "rail-off"])
@@ -184,7 +223,7 @@ def test_executing_activation_read_stops_when_cancellation_refresh_loses_hold(ri
     tool = tool_graph(monkeypatch)
     read = replace(tool.trusted, effect="read", execution_class="inline")
     monkeypatch.setattr(activation.lab_registry, "lookup", lambda *args: read)
-    monkeypatch.setattr(worker, "trusted_registry", lambda: tool.registry)
+    monkeypatch.setattr(worker.lab_tool_manifests, "registry_for", lambda tenant: tool.registry)
     monkeypatch.setattr(activation, "tick", lambda now: None)
     monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
     rig.artifact["graph"] = tool.graph
@@ -258,7 +297,7 @@ def test_executing_activation_read_stops_when_cancellation_refresh_loses_hold(ri
 def test_tool_node_flag_and_value_event(rig, monkeypatch, enabled):
     from test_lab_tool_nodes import tool_graph
     tool = tool_graph(monkeypatch)
-    monkeypatch.setattr(worker, "trusted_registry", lambda: tool.registry)
+    monkeypatch.setattr(worker.lab_tool_manifests, "registry_for", lambda tenant: tool.registry)
     rig.artifact["graph"] = tool.graph
     monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1" if enabled else "0")
     calls = []

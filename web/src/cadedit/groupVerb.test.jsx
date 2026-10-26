@@ -55,14 +55,14 @@ describe('named GROUP and UNGROUP in the cockpit', () => {
     const list = Object.assign(entities.slice(), { groups: [{ name: 'RACK', memberIds: ['10', '11'] }] })
     const payload = (inputs) => buildEditPayload('group', '10', inputs, [], list)
     expect(payload({ groupName: 'OTHER', members: '11 11 10' }).payload).toEqual({ name: 'OTHER', members: ['10', '11'] })
-    for (const groupName of ['', '*X', 'X|Y', 'X\nY', 'é', 'X'.repeat(256), 'A/B', 'RA*CK', 'A<B', 'A>B', 'A\\B', 'A"B', 'A:B', 'A;B', 'A?B', 'A,B', 'A=B', 'A`B']) expect(payload({ groupName, members: '11' }).refusal).toContain('group_name_invalid')
+    for (const groupName of ['', '*X', 'X|Y', 'X\nY', 'é', 'X'.repeat(256), 'A/B', 'RA*CK', 'A<B', 'A>B', 'A\\B', 'A"B', 'A:B', 'A;B', 'A?B', 'A,B', 'A=B', 'A`B']) expect(payload({ groupName, members: '11' }).refusal).toContain('Use a group name of 1 to 255 letters, numbers or spaces.')
     expect(payload({ groupName: 'other', members: '11' }).payload).toEqual({ name: 'OTHER', members: ['10', '11'] })
-    expect(payload({ groupName: 'rack', members: '11' }).refusal).toContain('group_name_exists')
-    expect(payload({ groupName: 'ONE', members: '10' }).refusal).toContain('group_needs_two_members')
-    expect(payload({ groupName: 'BAD', members: '999' }).refusal).toContain('group_member_not_editable')
-    expect(buildEditPayload('group', '10', { groupName: 'BAD', members: '11' }, [], [entities[0], { ...entities[1], blockChild: true }]).refusal).toContain('group_member_not_editable')
+    expect(payload({ groupName: 'rack', members: '11' }).refusal).toContain('That group name is already used. Choose another name.')
+    expect(payload({ groupName: 'ONE', members: '10' }).refusal).toContain('Select at least two distinct objects.')
+    expect(payload({ groupName: 'BAD', members: '999' }).refusal).toContain('Select objects that can be edited in the drawing.')
+    expect(buildEditPayload('group', '10', { groupName: 'BAD', members: '11' }, [], [entities[0], { ...entities[1], blockChild: true }]).refusal).toContain('Select objects that can be edited in the drawing.')
     expect(buildEditPayload('ungroup', '', { groupName: 'rack' }, [], list).payload).toEqual({ name: 'RACK' })
-    expect(buildEditPayload('ungroup', '', { groupName: 'missing' }, [], list).refusal).toContain('group_not_found')
+    expect(buildEditPayload('ungroup', '', { groupName: 'missing' }, [], list).refusal).toContain('Enter an existing group name.')
   })
 
   it('arms GROUP, appends two edge picks, posts once, highlights members and ungroups once', () => {
@@ -95,7 +95,7 @@ describe('named GROUP and UNGROUP in the cockpit', () => {
     for (const name of ['A/B', 'RA*CK']) {
       act(() => context.session.actions.applyEdit('group', { groupName: name, members: '11 12' }))
       expect(worker.posted.filter((message) => message.type === 'applyEdit')).toEqual([])
-      expect(context.session.status).toContain('group_name_invalid')
+      expect(context.session.status).toContain('Use a group name of 1 to 255 letters, numbers or spaces.')
     }
     fireEvent.change(screen.getByLabelText('ribbon group name'), { target: { value: 'rack' } })
     fireEvent.keyDown(screen.getByLabelText('ribbon group name'), { key: 'Enter' })
@@ -104,7 +104,7 @@ describe('named GROUP and UNGROUP in the cockpit', () => {
     const groups = [{ id: '240', name: 'RACK', memberIds: ['10', '11', '12'], selectable: true }]
     worker.emit({ type: 'editApplied', op: 'createGroup', ok: true, createdId: '240', entities, groups, entityCount: 3, bytes: new Uint8Array([1]), byteLength: 1 })
     expect(context.session.selectedId).toBe('10')
-    expect(context.session.status).toContain('group 240 created.')
+    expect(context.session.status).toContain('Group created.')
     expect(context.session.undoDepth).toBe(1)
     expect(screen.getByTestId('dock-groups').textContent).toBe('RACK')
     fireEvent.change(screen.getByLabelText('Select group'), { target: { value: 'RACK' } })

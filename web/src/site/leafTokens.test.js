@@ -57,17 +57,44 @@ const SCOPES = [
   { file: 'cockpit.css', css: cockpit, selector: '.studio-shell .app:is([data-surface="cad"], [data-surface="solar"])' },
 ]
 
-it('SSD1-24E light tokens match the ratified paper identity', () => {
+it('SSD1-24E light tokens read the v1 Paper roles', () => {
   const light = declsFor(landing, '.leaf-light')
-  const paper = declsFor(read('src/styles.css'), ':root')
-  for (const name of ['background', 'foreground', 'card', 'border', 'primary', 'primary-hover', 'on-accent', 'muted', 'muted-2']) {
-    expect(light[`--${name}`]).toMatch(/^#[0-9a-f]{6}$/i)
-    expect(light[`--${name}`].toLowerCase()).toBe(paper[`--${name}`].toLowerCase())
+  const roles = {
+    '--background': 'var(--leaf-ground)',
+    '--foreground': 'var(--leaf-ink)',
+    '--card': 'var(--leaf-surface)',
+    '--border': 'var(--leaf-line)',
+    '--primary': 'var(--leaf-accent-text)',
+    '--primary-hover': 'var(--leaf-accent)',
+    '--on-accent': 'var(--leaf-surface)',
+    '--muted': 'var(--leaf-ink-muted)',
+    '--muted-2': 'var(--leaf-ink-muted)',
   }
+  for (const [name, value] of Object.entries(roles)) {
+    expect(light[name], name).toBe(value)
+  }
+  expect(light).not.toHaveProperty('--leaf-on-accent')
 })
 
 it('SSD1-24E light text and tile boundaries meet WCAG contrast', () => {
   const light = declsFor(landing, '.leaf-light')
+  const paper = declsFor(read('src/standard/leaf-standard.css'), '[data-leaf-theme="paper"]')
+  const resolve = (value) => {
+    if (/^#[0-9a-f]{6}$/i.test(value)) return value
+    const ref = value.match(/^var\((--leaf-[\w-]+)\)$/)
+    if (ref) {
+      expect(paper[ref[1]], ref[1]).toMatch(/^#[0-9a-f]{6}$/i)
+      return paper[ref[1]]
+    }
+    const mix = value.match(/^color-mix\(in srgb, (var\(--leaf-[\w-]+\)) (\d+(?:\.\d+)?)%, (var\(--leaf-[\w-]+\))\)$/)
+    expect(mix, value).not.toBeNull()
+    const a = resolve(mix[1]).slice(1).match(/../g)
+    const b = resolve(mix[3]).slice(1).match(/../g)
+    const weight = Number(mix[2]) / 100
+    return `#${a.map((channel, index) => Math.round(
+      parseInt(channel, 16) * weight + parseInt(b[index], 16) * (1 - weight),
+    ).toString(16).padStart(2, '0')).join('')}`
+  }
   const luminance = (hex) => {
     const channels = hex.slice(1).match(/../g).map((value) => {
       const srgb = parseInt(value, 16) / 255
@@ -76,7 +103,7 @@ it('SSD1-24E light text and tile boundaries meet WCAG contrast', () => {
     return channels[0] * 0.2126 + channels[1] * 0.7152 + channels[2] * 0.0722
   }
   const contrast = (a, b) => {
-    const values = [a, b].map((name) => luminance(light[`--${name}`])).sort((x, y) => y - x)
+    const values = [a, b].map((name) => luminance(resolve(light[`--${name}`]))).sort((x, y) => y - x)
     return (values[0] + 0.05) / (values[1] + 0.05)
   }
   for (const [a, b] of [['foreground', 'background'], ['foreground', 'card'], ['muted', 'card'], ['primary', 'card'], ['on-accent', 'primary'], ['on-accent', 'primary-hover']]) {

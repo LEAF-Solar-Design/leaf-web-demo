@@ -1,5 +1,6 @@
 """Runs HTTP contract on SQLite and PostgreSQL authorities."""
 from datetime import timedelta
+import json
 from types import SimpleNamespace
 
 from fastapi import FastAPI
@@ -23,8 +24,10 @@ def rig(authority, monkeypatch):
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
     monkeypatch.setenv("LEAF_BUILD_REVISION", "abc1234")
     monkeypatch.delenv("LEAF_ENTITLEMENTS_FILE", raising=False)
+    monkeypatch.setattr(deps, "effective_tools_with_provenance", lambda tenant: [])
     graph, registry = case()
-    monkeypatch.setattr(lab_runs, "trusted_registry", lambda: registry)
+    projection_registry_for = lab_runs.lab_tool_manifests.registry_for
+    monkeypatch.setattr(lab_runs.lab_tool_manifests, "registry_for", lambda tenant: registry)
     artifact = ledger.save(authority, "doc", graph, None, "member")
     context = deps.TenantContext(authority, tier="hosted_pro", subject="run-actor")
     app = FastAPI()
@@ -33,7 +36,8 @@ def rig(authority, monkeypatch):
     prior = store.paused()
     with TestClient(app, raise_server_exceptions=False) as http:
         yield SimpleNamespace(http=http, tenant=authority, context=context, app=app,
-                              graph=graph, registry=registry, artifact=artifact)
+                              graph=graph, registry=registry, artifact=artifact,
+                              projection_registry_for=projection_registry_for)
     store.set_paused(prior, "", "test")
 
 
@@ -101,13 +105,56 @@ def test_tool_node_admission(rig, monkeypatch, flag, drawing, host, code):
         monkeypatch.setitem(lab_runs.lab_registry.REGISTRY, (tool.trusted.kind, tool.trusted.version),
                             replace(tool.trusted, residency="host"))
     monkeypatch.setenv("LEAF_LAB_TOOL_NODES", flag)
-    monkeypatch.setattr(lab_runs, "trusted_registry", lambda: tool.registry)
+    monkeypatch.setattr(lab_runs.lab_tool_manifests, "registry_for", lambda tenant: tool.registry)
     monkeypatch.setattr(ledger, "get", lambda *args: {**rig.artifact, "graph": tool.graph})
     response = create(rig)
     if code is None:
         assert response.status_code == 202, response.text
     else:
         assert response.status_code == 422, response.text
+        assert response.json() == {"detail": code}
+
+
+@pytest.mark.parametrize("change,code", [
+    (None, None), ("disabled", "lab_graph_effect_refused"),
+    ("stale", "lab_graph_unknown_block"), ("drawing", "lab_graph_invalid_settings"),
+    ("malformed-drawing", "lab_graph_invalid_settings"),
+    ("host", "lab_graph_host_refused"),
+])
+def test_projected_tool_admission(rig, monkeypatch, change, code):
+    from copy import deepcopy
+    from test_lab_tool_nodes import projected_graph
+    projected = projected_graph(monkeypatch)
+    monkeypatch.setattr(lab_runs.lab_tool_manifests, "registry_for", rig.projection_registry_for)
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "0" if change == "disabled" else "1")
+    graph = projected.graph
+    if change == "stale":
+        graph["blocks"][0]["registry"]["code_sha256"] = "0" * 64
+    elif change == "drawing":
+        graph["blocks"][0]["settings"] = {}
+    elif change == "malformed-drawing":
+        graph["blocks"][0]["settings"]["drawing"]["dwg_version"] = "2"
+    elif change == "host":
+        # A typed host source still cannot feed a runnable projected tool.
+        source_graph, source_registry = case("constant-number")
+        source = deepcopy(source_graph["blocks"][0])
+        manifest = deepcopy(next(iter(source_registry.values())))
+        manifest.update(id="host-source", effect="read")
+        target_pin = projected.manifest["inputs"]["max-rows"]
+        for key in ("mode", "unit", "nullable", "schema"):
+            manifest["outputs"]["result"][key] = json.loads(json.dumps(target_pin[key]))
+        source["id"] = "host"
+        source["registry"]["id"] = "host-source"
+        graph["blocks"].insert(0, source)
+        graph["pipes"] = [{"from": {"node": "host", "port": "result"},
+                           "to": {"node": "node", "port": "max-rows"}}]
+        registry = rig.projection_registry_for(str(rig.tenant))
+        registry["host-source@" + source["registry"]["version"]] = manifest
+        monkeypatch.setattr(lab_runs.lab_tool_manifests, "registry_for", lambda tenant: registry)
+    monkeypatch.setattr(ledger, "get", lambda *args: {**rig.artifact, "graph": graph})
+    response = create(rig)
+    assert response.status_code == (202 if code is None else 422), response.text
+    if code is not None:
         assert response.json() == {"detail": code}
 
 
