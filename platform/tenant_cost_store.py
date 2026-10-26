@@ -104,6 +104,8 @@ def validate_cost_event(event: dict) -> dict:
     result["org_id"] = _org_id(event["org_id"])
     result["addon"] = _enum("addon", event["addon"], ADDONS)
     result["mode"] = _enum("mode", event["mode"], ("managed", "byo"))
+    if result["addon"] == "kashbot_runner" and result["mode"] != "byo":
+        raise ValueError("mode must be byo for kashbot_runner")
     result["cost_basis"] = _enum("cost_basis", event["cost_basis"], ("measured", "estimated", "allocated"))
     # Vendor names allow 100 characters; units allow 50 characters.
     result["vendor"] = _text("vendor", event["vendor"], 100)

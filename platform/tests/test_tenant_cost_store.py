@@ -52,6 +52,9 @@ def test_enum_fields_fail_closed():
             with pytest.raises(ValueError, match=field):
                 store.validate_cost_event(event(**{field: value}))
     for addon in store.ADDONS:
+        if addon == "kashbot_runner":
+            assert store.validate_cost_event(event(addon=addon, mode="byo", cost_usd=0))["addon"] == addon
+            continue
         assert store.validate_cost_event(event(addon=addon))["addon"] == addon
 
 
@@ -120,6 +123,32 @@ def test_byo_events_have_zero_platform_cost():
     assert store.validate_cost_event(event(mode="byo", cost_usd=0))["cost_usd"] == 0
     with pytest.raises(ValueError, match="cost_usd"):
         store.validate_cost_event(event(mode="byo"))
+
+
+def test_runner_cost_event_managed_refused():
+    facts = event(addon="kashbot_runner", mode="managed", cost_usd=10)
+    calls = []
+
+    class Connection:
+        def cursor(self):
+            calls.append("cursor")
+            return nullcontext(self)
+
+        def execute(self, query, params):
+            calls.append((query, params))
+
+    with pytest.raises(ValueError, match="^mode must be byo for kashbot_runner$"):
+        store.validate_cost_event(facts)
+    with pytest.raises(ValueError, match="^mode must be byo for kashbot_runner$"):
+        store.record_cost_event(Connection(), facts)
+    assert calls == []
+
+
+def test_runner_cost_event_byo_validates():
+    result = store.validate_cost_event(event(addon="kashbot_runner", mode="byo", cost_usd=0))
+    assert result["addon"] == "kashbot_runner"
+    assert result["mode"] == "byo"
+    assert result["cost_usd"] == 0
 
 
 def test_event_key_is_deterministic_and_binds_each_input():
