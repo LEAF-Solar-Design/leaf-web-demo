@@ -10,7 +10,7 @@
 .widgets-layout { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 280px), 1fr)); gap: 24px; }
 .widgets-editor, .widget-preview { min-width: 0; }
 .widgets-view h2, .widget-preview h3 { margin: 0 0 12px; }
-.widgets-view p, .widget-preview p { font-size: 13px; line-height: 1.5; }
+.widgets-view p, .widget-preview p { font-size: var(--leaf-size-dense); line-height: 1.5; }
 .widgets-fields { display: grid; gap: 8px; }
 .widgets-fields label { display: grid; gap: 6px; }
 .widgets-view button, .widgets-view input, .widgets-view textarea, .widgets-view select {
@@ -22,7 +22,7 @@
   color: inherit;
   background: var(--card, #fff);
   border: 1px solid var(--border, #a1a1aa);
-  border-radius: 6px;
+  border-radius: var(--leaf-radius-control);
 }
 .widgets-view textarea { width: 100%; resize: vertical; }
 .widgets-view button { cursor: pointer; overflow-wrap: anywhere; white-space: normal; }
