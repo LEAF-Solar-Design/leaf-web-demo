@@ -29,7 +29,7 @@ main.center-scroll {
   left: 26px;
   right: 26px;
   bottom: 18px;
-  z-index: 30;
+  z-index: var(--leaf-layer-header);
   padding: 0;
   /* narrower than the content behind it, centered — the island must read as
      its own object, never edge-align with the cards it floats over */
@@ -55,7 +55,7 @@ main.center-scroll {
   grid-row: 2;
   grid-column: 3;
   position: relative;
-  z-index: 40;
+  z-index: var(--leaf-layer-overlay);
   pointer-events: none;
   min-height: 0;
 }
@@ -111,7 +111,7 @@ main.center-scroll {
        top paints the drawer OVER the header (it wins on z-index). Fallbacks
        preserve today's behavior until App publishes measured values. */
     inset: var(--drawer-top, 49px) 0 var(--drawer-bottom, 30px) auto;
-    z-index: 60;
+    z-index: var(--leaf-layer-modal);
   }
   .drawer-layer > .drawer {
     width: min(340px, 92vw);

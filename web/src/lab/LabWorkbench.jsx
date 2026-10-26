@@ -32,7 +32,7 @@ function useHostSource({ enabled, createHostBridge }, onChange) {
   return enabled && createHostBridge ? provider : null
 }
 
-function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSource, onBridge }) {
+function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSource, onBridge, route }) {
   const bridge = useRef(null)
   const root = useRef(null)
   const restoration = useRef(null)
@@ -123,6 +123,13 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
               setHostProposal({ ready: false, problems: ['Proposal refused: host data cannot leave the runtime'] })
             }
           }}>Run graph</button>
+        <a href={formatLabRoute({ view: 'test-trade', params: { ...route?.params, embed: '1' } })}
+          onClick={(event) => {
+            if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
+            event.preventDefault()
+            window.history.pushState(null, '', event.currentTarget.href)
+            window.dispatchEvent(new PopStateEvent('popstate'))
+          }}>Test trade evidence</a>
       </section>
       <LiveValues values={live.values} provider={provider} />
       <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>
@@ -177,8 +184,10 @@ export function LabWorkbench({ route, hidden = false, status, embedded = false, 
         const inactive = hidden || !available || activeView !== id
         return (
           <div key={id} data-lab-view={id} role="region" aria-label={`${label} view`} hidden={inactive}>
-            {embedded && id === 'graph' ? <EmbeddedGraph hidden={inactive} enabled={available && !hidden} onReload={setHostReloaded} createHostBridge={createHostBridge} onHostSource={setHostSource} onBridge={setBridge} />
-              : id === 'widgets' ? <View hidden={inactive} host={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} requestPublication={embedded && bridge ? (request) => bridge.publishWidget(request) : undefined} /> : <View hidden={inactive} />}
+            {embedded && id === 'graph' ? <EmbeddedGraph hidden={inactive} enabled={available && !hidden} onReload={setHostReloaded} createHostBridge={createHostBridge} onHostSource={setHostSource} onBridge={setBridge} route={viewRoute} />
+              : id === 'widgets' ? <View hidden={inactive} host={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} requestPublication={embedded && bridge ? (request) => bridge.publishWidget(request) : undefined} />
+                : id === 'test-trade' ? <View hidden={inactive} provider={embedded && available && !hidden && createHostBridge ? hostSource?.provider ?? null : null} revision={hostSource?.revision} requestTestTrade={embedded && bridge ? () => bridge.requestTestTrade() : undefined} />
+                  : id === 'graph' ? <View hidden={inactive} route={viewRoute} /> : <View hidden={inactive} />}
           </div>
         )
       })}

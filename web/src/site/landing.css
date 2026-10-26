@@ -67,8 +67,8 @@
 .stage-viewer-notice {
   position: absolute; z-index: calc(var(--leaf-layer-base) + 2); left: 50%; top: 74px; transform: translateX(-50%);
   display: flex; align-items: center; gap: 10px; padding: 8px 10px;
-  border: 1px solid rgba(245, 158, 11, .35); border-radius: var(--leaf-radius-key);
-  background: color-mix(in srgb, var(--leaf-raised) 94%, transparent); color: #d4d4d8; font-size: var(--leaf-size-caption);
+  border: 1px solid color-mix(in srgb, var(--leaf-warn) 35%, transparent); border-radius: var(--leaf-radius-key);
+  background: color-mix(in srgb, var(--leaf-raised) 94%, transparent); color: var(--leaf-ink); font-size: var(--leaf-size-caption);
 }
 .stage-viewer-notice button {
   border: 1px solid #3f3f46; border-radius: var(--leaf-radius-key); background: var(--leaf-line);
@@ -200,7 +200,7 @@
 .tc-product-tabs button > span { font: 600 12.5px 'Inter Tight', sans-serif; }
 .tc-product-tabs small { color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption); line-height: 1; }
 .tc-product-tabs small[data-state="available"] { color: var(--leaf-accent-hover); }
-.tc-product-tabs small[data-state="beta"] { color: #facc15; }
+.tc-product-tabs small[data-state="beta"] { color: var(--leaf-warn); }
 .tc-product-shared { margin-left: auto; color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption); white-space: nowrap; }
 
 /* F-8 vision treatment. Motion contract: every rule in this block is either
@@ -295,7 +295,7 @@
 .tc-ios-ship-lane [data-testid="ios-ship-receipt"] { width: 100%; }
 .tc-product-columns { display: grid; grid-template-columns: repeat(2, minmax(0, 320px)); gap: 18px; margin-top: 28px; }
 .tc-product-columns > div { padding: 18px; border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-card); background: var(--leaf-raised); }
-.tc-product-columns h2 { margin: 0 0 12px; color: #d4d4d8; font: 600 13px 'Inter Tight', sans-serif; }
+.tc-product-columns h2 { margin: 0 0 12px; color: var(--leaf-ink); font: 600 13px 'Inter Tight', sans-serif; }
 .tc-product-columns ul { margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 7px; list-style: none; }
 .tc-product-columns li { padding: 5px 8px; border-radius: var(--studio-chip-radius); color: var(--leaf-ink-muted); background: var(--leaf-raised); font-size: var(--leaf-size-caption); }
 .tc-product-note { padding-left: 12px; border-left: 2px solid #52525b; }
@@ -303,7 +303,7 @@
    as the rest of this /try stylesheet; the .app shell re-pins these to tokens
    in styles.css. */
 .tc-product-project-state { display: flex; flex-direction: column; align-items: flex-start; gap: 8px; }
-.tc-product-project-state > strong { color: #d4d4d8; font: 600 13px 'Inter Tight', sans-serif; }
+.tc-product-project-state > strong { color: var(--leaf-ink); font: 600 13px 'Inter Tight', sans-serif; }
 .tc-product-project-state > p { max-width: 560px; margin: 0; color: var(--leaf-ink-muted); font-size: var(--leaf-size-dense); line-height: 1.55; }
 .tc-product-project-act { border: 1px solid #3f3f46; border-radius: var(--leaf-radius-control); padding: 7px 12px; color: var(--leaf-ink); background: var(--leaf-line); cursor: pointer; font-size: var(--leaf-size-caption); }
 @media (hover: hover) and (pointer: fine) {
@@ -333,9 +333,9 @@
 /* A failed refresh is a banner over a still-usable surface, not a replacement
    for it; a failed cold load keeps the flatter -error treatment above. */
 .project-lifecycle-stale {
-  color: #fbbf24; font-size: var(--leaf-size-caption); display: grid; gap: 6px;
-  padding: 6px 8px; border-left: 2px solid rgba(251, 191, 36, .5);
-  background: rgba(251, 191, 36, .06);
+  color: var(--leaf-warn); font-size: var(--leaf-size-caption); display: grid; gap: 6px;
+  padding: 6px 8px; border-left: 2px solid color-mix(in srgb, var(--leaf-warn) 50%, transparent);
+  background: color-mix(in srgb, var(--leaf-warn) 6%, transparent);
 }
 .project-lifecycle-refreshing { color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption); letter-spacing: .04em; }
 
@@ -343,7 +343,7 @@
    these class names had ever been styled; the dialogs in particular render
    aria-modal and MUST NOT sit in inline flow behind an interactive panel. */
 .membership-panel-wrap, .membership, .danger-zone, .receipt-panel {
-  display: grid; gap: 8px; font-size: var(--leaf-size-caption); color: #d4d4d8;
+  display: grid; gap: 8px; font-size: var(--leaf-size-caption); color: var(--leaf-ink);
 }
 .membership-head, .receipt-panel-head, .danger-action-head,
 .clone-dialog-head, .export-dialog-head {
@@ -524,7 +524,7 @@
   white-space: nowrap;
 }
 @media (hover: hover) and (pointer: fine) {
-  .tc-rail-tabs button:hover { color: #d4d4d8; background: color-mix(in srgb, var(--leaf-ink) 3%, transparent); }
+  .tc-rail-tabs button:hover { color: var(--leaf-ink); background: color-mix(in srgb, var(--leaf-ink) 3%, transparent); }
 }
 .tc-rail-tabs button[aria-selected="true"] { color: var(--leaf-ink); background: var(--leaf-raised); }
 .tc-rail-tabs button span { float: right; color: var(--leaf-ink-muted); font-variant-numeric: tabular-nums; }
@@ -632,7 +632,7 @@
 .drawing-upload-engine-opt.selected { opacity: 1; outline: 1px solid var(--leaf-accent); }
 .drawing-upload-engine-opt[disabled] { opacity: 0.35; }
 .drawing-upload-note { font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); }
-.drawing-upload-error { flex: 1 1 100%; font-size: var(--leaf-size-caption); color: #e24947; }
+.drawing-upload-error { flex: 1 1 100%; font-size: var(--leaf-size-caption); color: var(--leaf-error); }
 .drawing-upload-ready { font-size: var(--leaf-size-caption); color: var(--leaf-accent); }
 .session-gate { margin: 12px; padding: 14px; border: 1px solid var(--leaf-line); border-radius: var(--leaf-radius-card); background: var(--leaf-surface); }
 .session-gate h3 { margin: 0 0 8px; font-size: var(--leaf-size-body); }
@@ -670,7 +670,7 @@
   padding: 0 14px 8px; background: rgba(34, 197, 94, .07);
   color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption); line-height: 1.4;
 }
-.tc-panel-error { color: #fca5a5; }
+.tc-panel-error { color: var(--leaf-error); }
 .tc-version-list { display: flex; flex-direction: column; padding: 0 8px 12px; }
 .tc-version-row { border-top: 1px solid var(--leaf-line); }
 .tc-version-row > button:first-child {
@@ -690,7 +690,7 @@
   display: flex; justify-content: space-between; gap: 8px; padding: 8px;
   border-top: 1px solid var(--leaf-line); color: var(--leaf-ink-muted); font-size: var(--leaf-size-caption);
 }
-.tc-trust-row b { color: #d4d4d8; font-weight: 500; }
+.tc-trust-row b { color: var(--leaf-ink); font-weight: 500; }
 .tc-trust-panel .ent-panel { margin-top: 8px; background: var(--leaf-surface); border-color: var(--leaf-line); }
 .tc-trust-panel .ent-head { flex-wrap: wrap; }
 .tc-operator-rail .converse-head,
@@ -730,7 +730,7 @@
   font-size: var(--leaf-size-caption);
   line-height: 1.45;
 }
-.tc-operator-error { color: #fca5a5; }
+.tc-operator-error { color: var(--leaf-error); }
 .tc-version { font-size: var(--leaf-size-caption); color: var(--leaf-ink-muted); font-variant-numeric: tabular-nums; }
 .tc-version-actions { display: flex; gap: 8px; padding: 12px 16px; }
 .tc-version-actions button:disabled { cursor: default; opacity: .32; }
@@ -1010,8 +1010,8 @@
   --muted-2: var(--leaf-ink-muted);
   --status-success: var(--leaf-ok);
   --status-warning: var(--leaf-cad-select-warm);
-  --status-danger: #e24947;
-  --status-info: #43b2e1;
+  --status-danger: var(--leaf-error);
+  --status-info: var(--leaf-info);
   --bar-well: var(--leaf-raised);
   --bar-chip: var(--leaf-raised);
   --bar-focus-ring: rgba(34, 197, 94, .07);
@@ -1022,7 +1022,7 @@
   --accent-tint: color-mix(in srgb, var(--leaf-accent) 8%, transparent);
   --accent-tint-hover: color-mix(in srgb, var(--leaf-accent) 14%, transparent);
   --warn-tint: color-mix(in srgb, var(--leaf-cad-select-warm) 10%, transparent);
-  --danger-tint: rgba(226, 73, 71, .10);
+  --danger-tint: color-mix(in srgb, var(--leaf-error) 10%, transparent);
   --sheet: var(--leaf-ground);
   --code-bg: var(--leaf-surface);
   --grid-line: color-mix(in srgb, var(--leaf-ink) 2%, transparent);
@@ -2012,4 +2012,8 @@
   .lp-index .lp-tab { white-space: nowrap; }
   .lp-stats { flex-wrap: wrap; gap: 16px; }
   .stage-loading { left: 16px; bottom: 96px; }
+  .lp-stmt .lp-cta-row button { min-height: 44px; box-sizing: border-box; }
+  .lp-stmt form input, .lp-stmt form button { min-height: 44px; box-sizing: border-box; }
+  .lp-index .lp-tab { min-height: 44px; box-sizing: border-box; display: inline-flex; align-items: center; }
+  .tc-product-tabs button { min-height: 44px; box-sizing: border-box; }
 }

@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom'
 import JobRail from '../components/JobRail.jsx'
 import ReceiptPanel, { deepRedact } from '../projects/ReceiptPanel.jsx'
 import ShipReceipts from '../ios/ShipReceipts.jsx'
+import ProjectMaterialIntake from './ProjectMaterialIntake.jsx'
 import '../site/projectBoard.css'
 
 export const BOARD_PANE_REASONS = Object.freeze({
@@ -186,20 +187,30 @@ export default function ProjectWorkspacePanels({
   project, workspace, pane, onSelectPane, onBack, receipts, shipReceipts, slots,
   onOpenVersion, onSelectJob, currentJob, mock,
 }) {
+  const heading = useRef(null)
+  const origin = useRef(null)
+  useLayoutEffect(() => {
+    if (!PANE_NAMES.includes(pane)) {
+      origin.current = null
+      return
+    }
+    const active = document.activeElement
+    if (!origin.current || !origin.current.isConnected ||
+        (active !== document.body && !heading.current?.closest('section')?.contains(active))) {
+      origin.current = active
+    }
+    heading.current?.focus()
+  }, [pane])
   if (!PANE_NAMES.includes(pane)) return null
   const title = pane[0].toUpperCase() + pane.slice(1)
-  const material = workspace?.drawing_artifacts || []
   const versions = [...(workspace?.drawing_versions || [])].sort((a, b) =>
     (Date.parse(b.created_at) || 0) - (Date.parse(a.created_at) || 0) || (b.seq || 0) - (a.seq || 0))
   const tools = workspace?.built_tools || []
   let content
   switch (pane) {
     case 'material':
-      content = material.length ? <ul>{material.map((row, index) => (
-        <li key={row.artifact_id || row.drawing_id || index}>
-          <strong>{row.name || row.drawing_id}</strong> · {row.status || 'Not recorded'} · {row.created_at || 'Not recorded'}
-        </li>
-      ))}</ul> : <p>No material attached yet. Upload a drawing to attach it.</p>
+      content = slots?.material ?? <ProjectMaterialIntake project={project || workspace?.project}
+        artifacts={workspace?.drawing_artifacts || []} mock={mock} />
       break
     case 'versions':
       content = versions.length ? <ul>{versions.map((version) => (
@@ -235,8 +246,13 @@ export default function ProjectWorkspacePanels({
   return (
     <section className="ground-pane" data-pane={pane} aria-label={title}>
       <header className="ground-pane-head">
-        <div><h2>{title}</h2><p>{(project || workspace?.project)?.name || (project || workspace?.project)?.label || 'No project open'}</p></div>
-        <button type="button" onClick={onBack}>Back to board</button>
+        <div><h2 ref={heading} tabIndex={-1}>{title}</h2><p>{(project || workspace?.project)?.name || (project || workspace?.project)?.label || 'No project open'}</p></div>
+        <button type="button" onClick={() => {
+          const target = origin.current
+          origin.current = null
+          onBack?.()
+          if (target?.isConnected) target.focus()
+        }}>Back to board</button>
       </header>
       {content}
     </section>

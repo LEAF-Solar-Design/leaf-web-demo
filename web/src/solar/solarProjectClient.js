@@ -349,12 +349,12 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
           params: intent.params, catalog_digest: intent.catalogDigest, idempotency_key: intent.idempotencyKey,
           ...projectSolarRequestExtras(intent.tool, intent) } })
       }
-      const serialized = JSON.stringify(entries)
-      assert(utf8(serialized) <= MAX_BODY)
+      const body = intents.length ? JSON.stringify({ project_runs: entries }) : undefined
+      assert(body === undefined || utf8(body) <= MAX_BODY)
       const b = binding
-      const query = `drawing_id=${b.drawing_id}&project_id=${b.project_id}&input_version_id=${b.input_version_id}` +
-        (intents.length ? `&project_runs=${encodeURIComponent(serialized)}` : '')
-      return request(`/api/capabilities?${query}`, { signal, scope, headers: intents.length ? proof() : {},
+      const query = `drawing_id=${b.drawing_id}&project_id=${b.project_id}&input_version_id=${b.input_version_id}`
+      return request(`/api/capabilities?${query}`, { method: intents.length ? 'POST' : 'GET', body,
+        signal, scope, headers: intents.length ? proof() : {},
         validate: (data) => plain(data) && Array.isArray(data.families) })
     }, false, true),
     submitRun: (supplied, options = {}) => guarded((scope) => {

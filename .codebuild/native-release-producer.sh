@@ -26,8 +26,8 @@ if [[ "$LEAF_NATIVE_MODE" == gate ]]; then
     -r scripts/requirements-ci.txt -r executor/control_plane/requirements.txt \
     -r executor/runtime/requirements.txt
   (cd harness && timeout --kill-after=30s 600s npm ci)
-  (cd web && timeout --kill-after=30s 600s npm ci && timeout --kill-after=30s 600s npx --no-install playwright install --with-deps chromium)
-  timeout --kill-after=30s 600s python -I -m playwright install --with-deps chromium
+  (cd web && timeout --kill-after=30s 600s npm ci && bash ../.codebuild/native-playwright-install.sh npx --no-install playwright install --with-deps chromium)
+  bash .codebuild/native-playwright-install.sh python -I -m playwright install --with-deps chromium
   export LEAF_MANAGED_WEB_BROWSER_MODE=trusted-template-container
   timeout --kill-after=30s 2800s python -I scripts/ci/native_release_producer.py forge
 else

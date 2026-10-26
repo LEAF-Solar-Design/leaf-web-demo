@@ -366,6 +366,84 @@ describe('SolarSizingForm', () => {
     expect(screen.queryByText('A Solar run is in progress. Wait for it to finish.')).toBeNull()
   })
 
+  it.each([true, false])('keeps sizing loaded while busy and re-arms without reading (callback withheld: %s)', async (withheld) => {
+    const h = sizingAvailabilityHarness()
+    const view = render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    r14Fill()
+    await r9Ready()
+    const scopeInput = screen.getByLabelText('Scope')
+    const moduleInput = screen.getByLabelText('Module')
+    const previews = h.client.catalog.mock.calls.length
+    view.rerender(<SolarSizingForm {...h.props} busy
+      onProjectSubmit={withheld ? undefined : h.props.onProjectSubmit} />)
+    await r9Settle()
+    expect(screen.getByLabelText('Scope')).toBe(scopeInput)
+    expect(screen.getByLabelText('Module')).toBe(moduleInput)
+    for (const [label, value] of Object.entries(fields)) expect(screen.getByLabelText(label).value).toBe(value)
+    expect(screen.getByTestId('project-solar-sizing-form').getAttribute('data-mode')).toBe('edit')
+    expect(screen.getByText('A Solar run is in progress. Wait for it to finish.')).toBeTruthy()
+    expect(screen.queryByText('Project Solar submission is not available in this view.')).toBeNull()
+    expect(run().disabled).toBe(true)
+    fireEvent.click(run())
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).toHaveBeenCalledTimes(previews)
+
+    const preview = r9Deferred()
+    h.client.catalog.mockReturnValueOnce(preview.promise)
+    view.rerender(<SolarSizingForm {...h.props} />)
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(previews + 1))
+    expect(run().disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    await act(async () => preview.resolve(r9Preview(r9Tool)))
+    await r9Ready()
+    expect(screen.getByLabelText('Module')).toBe(moduleInput)
+    expect(screen.queryByText('A Solar run is in progress. Wait for it to finish.')).toBeNull()
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['onProjectSubmit', 'newProjectIntentKey'])('loads sizing without %s and keeps it loaded when the callback changes', async (callback) => {
+    const h = sizingAvailabilityHarness()
+    const view = render(<SolarSizingForm {...h.props} {...{ [callback]: undefined }} />)
+    await waitFor(() => expect(screen.getByLabelText('Scope')).toBeTruthy())
+    const scopeInput = screen.getByLabelText('Scope')
+    expect(screen.getByText('Project Solar submission is not available in this view.')).toBeTruthy()
+    expect(run().disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).not.toHaveBeenCalled()
+
+    view.rerender(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).toHaveBeenCalledTimes(1)
+    view.rerender(<SolarSizingForm {...h.props} {...{ [callback]: undefined }} />)
+    await r9Settle()
+    expect(screen.getByLabelText('Scope')).toBe(scopeInput)
+    expect(screen.getByText('Project Solar submission is not available in this view.')).toBeTruthy()
+    expect(screen.getByTestId('project-solar-sizing-form').getAttribute('data-mode')).toBe('edit')
+    expect(run().disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows run in progress while sizing is submitting before the workspace becomes busy', async () => {
+    const h = sizingAvailabilityHarness(), pending = r9Deferred()
+    const context = { ok: true, status: 200, data: r9Context() }
+    h.client.readContext.mockResolvedValue(context)
+    render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    h.client.readContext.mockReturnValueOnce(pending.promise)
+    fireEvent.click(run())
+    expect(screen.getByText('A Solar run is in progress. Wait for it to finish.')).toBeTruthy()
+    expect(screen.getByLabelText('Scope')).toBeTruthy()
+    expect(run().disabled).toBe(true)
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    await act(async () => pending.resolve(context))
+    await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
+    expect(screen.queryByText('A Solar run is in progress. Wait for it to finish.')).toBeNull()
+  })
+
   it('R14D-01 test_project_global_cloud_intent', async () => {
     for (const variant of [{}, { tracker: true }, { parameters: true }]) {
       const h = r14Harness()
@@ -393,7 +471,9 @@ describe('SolarSizingForm', () => {
       expect(screen.getByText('Saved project ZIP: 44224-1234')).toBeTruthy()
       expect(screen.getByText('Saved global string length: 3')).toBeTruthy()
       const catalog = h.fetchImpl.mock.calls.filter(([url]) => url.includes('/api/capabilities?')).at(-1)
-      const preview = JSON.parse(new URL(catalog[0], 'https://example.test').searchParams.get('project_runs'))
+      expect(catalog[1].method).toBe('POST')
+      expect(new URL(catalog[0], 'https://example.test').searchParams.has('project_runs')).toBe(false)
+      const preview = JSON.parse(catalog[1].body).project_runs
       expect(preview[r9Tool]).toEqual({ params: expected, catalog_digest: r9Digest, idempotency_key: intent.idempotencyKey })
       fireEvent.click(run())
       await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
@@ -1024,7 +1104,9 @@ describe('SolarSizingForm', () => {
     expect(contexts).toHaveLength(2)
     expect(contexts[0][0]).toContain('/drawing-versions/' + r9Binding.input_version_id + '/context?drawing_id=' + r9Binding.drawing_id)
     const catalog = requests.find(([url]) => url.includes('/api/capabilities?'))
-    const preview = JSON.parse(new URL(catalog[0], 'https://example.test').searchParams.get('project_runs'))
+    expect(catalog[1].method).toBe('POST')
+    expect(new URL(catalog[0], 'https://example.test').searchParams.has('project_runs')).toBe(false)
+    const preview = JSON.parse(catalog[1].body).project_runs
     expect(preview[r9Tool]).toEqual({ params: h.client.catalog.mock.calls[0][0].intents[0].params,
       catalog_digest: r9Digest, idempotency_key: 'r9-key-1' })
     const submitted = requests.find(([url]) => url.endsWith('/api/run'))[1]

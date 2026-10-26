@@ -58,7 +58,7 @@ describe('workspace open hydration', () => {
     expect(await rehydrating).toBeNull()
     expect(services.openProject).toHaveBeenCalledTimes(1)
     expect(controller.getSnapshot()).toMatchObject({ openProjectId: 'p1', workspace: null,
-      workspaceLoading: false, projectsError: 'Open failed.' })
+      workspaceLoading: false, projectsError: null, workspaceError: 'Something went wrong. Try again.' })
     expect(callbacks.onWorkspaceOpened).not.toHaveBeenCalled()
     expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
     const workspace = { project: { project_id: 'p1' } }
@@ -197,7 +197,7 @@ describe('workspace null-to-org adoption', () => {
     rejectOpen(new Error('Open failed.'))
     expect(await opening).toBeNull()
     expect(controller.getSnapshot()).toMatchObject({ orgId: 'o1', openProjectId: 'p1', workspace: null,
-      canonicalVersionId: null, workspaceLoading: false, projectsError: 'Open failed.' })
+      canonicalVersionId: null, workspaceLoading: false, projectsError: null, workspaceError: 'Something went wrong. Try again.' })
     expect(callbacks.onWorkspaceOpened).not.toHaveBeenCalled()
     expect(callbacks.onWorkspaceRehydrated).not.toHaveBeenCalled()
   })

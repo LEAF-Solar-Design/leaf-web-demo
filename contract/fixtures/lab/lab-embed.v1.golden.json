@@ -167,6 +167,21 @@
         "source": {"artifact_id": "widget", "revision": 1, "digest": "0000000000000000000000000000000000000000000000000000000000000000"},
         "renderer_version": "1.0.0"
       }
+    },
+    {
+      "schema": "leaf.lab-embed.v1",
+      "channel": "00000000000000000000000000000000",
+      "version": 1,
+      "principal_proof": "0000000000000000000000000000000000000000000000000000000000000000",
+      "source_sha": "0000000000000000000000000000000000000000000000000000000000000000",
+      "proposal_revision": 0,
+      "proposal_hash": "0000000000000000000000000000000000000000000000000000000000000000",
+      "sequence": 1,
+      "sent_at_ms": 1000,
+      "expires_at_ms": 2000,
+      "latency_us": 10,
+      "kind": "test-trade.open-request",
+      "payload": {}
     }
   ]
 }

@@ -621,7 +621,9 @@ describe('Canonical Solar settings form through the merged project client', () =
       await readyProject();
       const calls = previewCalls(h);
       const query = new URL(calls[1][0], 'https://synthetic.test').searchParams;
-      expect(JSON.parse(query.get('project_runs'))['solar-settings'].idempotency_key).toBe(intent.idempotencyKey);
+      expect(calls[1][1].method).toBe('POST');
+      expect(query.has('project_runs')).toBe(false);
+      expect(JSON.parse(calls[1][1].body).project_runs['solar-settings'].idempotency_key).toBe(intent.idempotencyKey);
       cleanup();
     }
   });
