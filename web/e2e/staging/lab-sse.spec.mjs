@@ -294,7 +294,10 @@ test.describe('SEL-220 authenticated staging Lab fetch-SSE proof', () => {
     } finally { await initial.close() }
     const cursor = runFrame(first, finishedRun).seq
     const snapshot = await json(`/api/lab/runs/${encodeURIComponent(finishedRun)}/events?after_seq=-1&limit=500`)
-    expect(snapshot.events.some((event) => event.kind === 'finished')).toBe(true)
+    // A finished run records no finished event (server/lab_worker.py _terminal appends
+    // events only for non-finished states); waitFinished already proved the terminal
+    // state from the run row, so the snapshot only needs the block's value event.
+    expect(snapshot.events.some((event) => event.kind === 'value')).toBe(true)
     const expected = snapshot.events.filter((event) => event.seq > cursor)
     const resumed = await openStream(finishedRun, first.id)
     const observed = []
