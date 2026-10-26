@@ -5,7 +5,7 @@
 .tour-root {
   position: fixed;
   inset: 0;
-  z-index: 90;
+  z-index: calc(var(--leaf-layer-toast) + 20);
   pointer-events: none;
 }
 
@@ -53,12 +53,12 @@
 .tour-banner-title {
   font-weight: 600;
   color: var(--foreground);
-  font-size: 13px;
+  font-size: var(--leaf-size-dense);
 }
 
 .tour-banner-sub {
   color: var(--muted);
-  font-size: 12px;
+  font-size: var(--leaf-size-caption);
 }
 
 .tour-banner-exit {
@@ -109,7 +109,7 @@
   background: var(--bar-well);
   border: 1px solid var(--border);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: var(--leaf-size-dense);
   color: var(--foreground);
   word-break: break-word;
 }
@@ -129,7 +129,7 @@
   align-items: center;
   gap: 8px;
   margin-top: 10px;
-  font-size: 12px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted);
 }
 
@@ -202,7 +202,7 @@
   box-sizing: border-box;
   width: auto;
   padding: 10px 12px 12px;
-  border-radius: 10px;
+  border-radius: var(--leaf-radius-card);
 }
 .tour-card.is-coach .tour-card-step {
   display: flex;
@@ -213,10 +213,10 @@
 .tour-card.is-coach .tour-coach-toggle {
   min-height: 28px;
   padding: 0 10px;
-  font-size: 12px;
+  font-size: var(--leaf-size-caption);
 }
 .tour-card.is-coach .tour-card-title { margin: 4px 0 4px; font-size: 14px; }
-.tour-card.is-coach .tour-card-body { font-size: 13px; line-height: 1.45; }
+.tour-card.is-coach .tour-card-body { font-size: var(--leaf-size-dense); line-height: 1.45; }
 .tour-card.is-coach .tour-dots { margin-top: 8px; }
 .tour-card.is-coach .tour-card-actions { margin-top: 10px; flex-wrap: wrap; }
 .tour-card.is-coach .tour-card-actions button { min-height: 36px; }

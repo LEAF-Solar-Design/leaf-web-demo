@@ -225,7 +225,10 @@ it('R11-11 both project hosts preview and hand off one frozen R7 intent on the c
     const query = `drawing_id=${b.drawing_id}&project_id=${b.project_id}&input_version_id=${b.input_version_id}`
     const packed = JSON.stringify({ [PROJECT_EQUIPMENT_TOOL]: { params: intent.params,
       catalog_digest: projectEquipmentDigest, idempotency_key: intent.idempotencyKey } })
-    expect(url).toBe('/api/capabilities?' + query + '&project_runs=' + encodeURIComponent(packed))
+    expect(url).toBe('/api/capabilities?' + query)
+    expect(options.method).toBe('POST')
+    expect(new URL(url, 'https://synthetic.invalid').searchParams.has('project_runs')).toBe(false)
+    expect(JSON.parse(options.body)).toEqual({ project_runs: JSON.parse(packed) })
     expect(options.headers).toMatchObject({ Authorization: 'Bearer synthetic', 'X-Org-Id': b.organization_id,
       'X-Tenant-Id': b.organization_id, 'X-Project-Id': b.project_id, 'X-Checkout-Capability': 'lco1.' + 'c'.repeat(64) })
     expect(h.fetchImpl.mock.calls.find(([path]) => path.includes('/context?'))[0])
@@ -555,7 +558,10 @@ it('R11-24 empty equipment IDs and array order survive preparation preview and i
   await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
   expect(h.props.onProjectSubmit.mock.calls[0][0]).toBe(intent)
   expect(h.props.onProjectSubmit.mock.calls[1][0]).toBe(intent)
-  const packed = JSON.parse(new URL('https://synthetic.invalid' + equipmentPreviewCalls(h).at(-1)[0]).searchParams.get('project_runs'))
+  const [previewUrl, previewOptions] = equipmentPreviewCalls(h).at(-1)
+  expect(previewOptions.method).toBe('POST')
+  expect(new URL(previewUrl, 'https://synthetic.invalid').searchParams.has('project_runs')).toBe(false)
+  const packed = JSON.parse(previewOptions.body).project_runs
   expect(packed[PROJECT_EQUIPMENT_TOOL].params.equipment).toEqual(equipment)
   expect(Object.keys(packed[PROJECT_EQUIPMENT_TOOL].params).sort()).toEqual(['assignments', 'drawing_id', 'equipment', 'expected_rev'])
   // This is transport preservation; no server creation or execution is inferred from the fixture.
@@ -650,7 +656,7 @@ it('SolarToolForm renders only the visible keys', () => {
 })
 
 it('SolarToolForm submits defaults merged with edits once and closes', () => {
-  const onSubmit = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'armed' } }))
   const onClose = vi.fn()
   render(<SolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose} />)
   fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '3' } })
@@ -773,6 +779,7 @@ it('TF1 the conversion form starts at the drawing graph revision and submits it'
   await waitFor(() => expect(screen.getByLabelText('Expected rev').value).toBe('7'))
   expect(readIntake).toHaveBeenCalledTimes(1)
   expect(readIntake).toHaveBeenCalledWith('d1', 3)
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(false))
   fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
   expect(onSubmit).toHaveBeenCalledWith(conversionTool, { expected_rev: 7 })
 })
@@ -810,10 +817,19 @@ it('TF3 an intake of another version, a malformed intake or a failed read prefil
       onSubmit={onSubmit} onClose={vi.fn()} />)
     await waitFor(() => expect(readIntake).toHaveBeenCalledTimes(1))
     await act(async () => { await new Promise((done) => setTimeout(done, 0)) })
-    // An absent revision is shown as empty and submitted without a key.
+    // An absent required revision stays empty and blocks submission until supplied.
     expect(screen.getByLabelText('Expected rev').value, `answer ${index}`).toBe('')
-    fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
-    expect(onSubmit, `answer ${index}`).toHaveBeenCalledWith(conversionTool, {})
+    const run = screen.getByRole('button', { name: 'Review & run' })
+    await waitFor(() => {
+      expect(run.title).toBe('')
+      expect(run.disabled, `answer ${index}`).toBe(true)
+    })
+    fireEvent.click(run)
+    expect(onSubmit, `answer ${index}`).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '5' } })
+    await waitFor(() => expect(run.disabled).toBe(false))
+    fireEvent.click(run)
+    expect(onSubmit, `answer ${index}`).toHaveBeenCalledWith(conversionTool, { expected_rev: 5 })
     view.unmount()
   }
 })
@@ -884,10 +900,18 @@ it('TF8 a failed or graphless new read leaves the schema default instead of the 
     const view = render(<SolarToolForm {...props} drawingVersion={3} />)
     await waitFor(() => expect(screen.getByLabelText('Expected rev').value).toBe('7'))
     view.rerender(<SolarToolForm {...props} drawingVersion={4} />)
-    await waitFor(() => expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(false))
+    const run = screen.getByRole('button', { name: 'Review & run' })
+    await waitFor(() => {
+      expect(run.title).toBe('')
+      expect(run.disabled).toBe(true)
+    })
     expect(screen.getByLabelText('Expected rev').value).toBe('')
-    fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
-    expect(props.onSubmit).toHaveBeenCalledWith(conversionTool, {})
+    fireEvent.click(run)
+    expect(props.onSubmit).not.toHaveBeenCalled()
+    fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '5' } })
+    await waitFor(() => expect(run.disabled).toBe(false))
+    fireEvent.click(run)
+    expect(props.onSubmit).toHaveBeenCalledWith(conversionTool, { expected_rev: 5 })
     view.unmount()
   }
 })
@@ -930,8 +954,20 @@ it('TF11 a changed drawing or tool clears the automatic revision to the current 
     expect(screen.getByLabelText('Expected rev').value).toBe(changeTool ? '2' : '')
     expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(true)
     await act(async () => { pending.resolve(null) })
-    expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(false)
+    const run = screen.getByRole('button', { name: 'Review & run' })
+    await waitFor(() => {
+      expect(run.title).toBe('')
+      expect(run.disabled).toBe(!changeTool)
+    })
     expect(screen.getByLabelText('Expected rev').value).toBe(changeTool ? '2' : '')
+    if (!changeTool) {
+      fireEvent.click(run)
+      expect(props.onSubmit).not.toHaveBeenCalled()
+      fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '5' } })
+      await waitFor(() => expect(run.disabled).toBe(false))
+      fireEvent.click(run)
+      expect(props.onSubmit).toHaveBeenCalledWith(conversionTool, { expected_rev: 5 })
+    }
     view.unmount()
   }
 })
@@ -939,7 +975,7 @@ it('TF11 a changed drawing or tool clears the automatic revision to the current 
 const presetRevisionField = () => screen.getByLabelText('Graph revision')
 
 it('FORM21 invalid Solar JSON blocks submit and close until corrected', () => {
-  const onSubmit = vi.fn(), onClose = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'armed' } })), onClose = vi.fn()
   render(<SolarToolForm tool={tool} onSubmit={onSubmit} onClose={onClose} />)
   fireEvent.change(screen.getByLabelText('Changes'), { target: { value: '{' } })
   const run = screen.getByRole('button', { name: 'Review & run' })
@@ -961,8 +997,17 @@ it('FORM23a clearing the Solar tool revision counts as a touch before intake', a
   fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '' } })
   await act(async () => { pending.resolve(intakeAt(3, 7)) })
   expect(screen.getByLabelText('Expected rev').value).toBe('')
-  fireEvent.click(screen.getByRole('button', { name: 'Review & run' }))
-  expect(onSubmit).toHaveBeenCalledWith(conversionTool, {})
+  const run = screen.getByRole('button', { name: 'Review & run' })
+  await waitFor(() => {
+    expect(run.title).toBe('')
+    expect(run.disabled).toBe(true)
+  })
+  fireEvent.click(run)
+  expect(onSubmit).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByLabelText('Expected rev'), { target: { value: '5' } })
+  await waitFor(() => expect(run.disabled).toBe(false))
+  fireEvent.click(run)
+  expect(onSubmit).toHaveBeenCalledWith(conversionTool, { expected_rev: 5 })
 })
 it('FORM29 a change to another Solar field leaves the revision automatic', async () => {
   const pending = deferred(), onSubmit = vi.fn()
@@ -981,7 +1026,7 @@ const STALE = (label) => `${label} has a value this tool no longer accepts. Choo
 
 it('FORM32 a nullable boolean default submits and closes the Solar form', () => {
   const nullableTool = { ...tool, params: { properties: { x: { type: ['boolean', 'null'], default: null } } } }
-  const onSubmit = vi.fn(), onClose = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'armed' } })), onClose = vi.fn()
   render(<SolarToolForm tool={nullableTool} onSubmit={onSubmit} onClose={onClose} />)
   const input = screen.getByLabelText('X')
   expect(input.getAttribute('aria-invalid')).toBe('false')
@@ -1015,7 +1060,7 @@ it('FORM43 a nullable sibling keeps revision intake automatic after another fiel
 })
 
 function openPresetRead(props = {}) {
-  const bound = { tool: presetTool, drawingId: 'd1', drawingVersion: 3, onSubmit: vi.fn(), onClose: vi.fn(), ...props }
+  const bound = { tool: presetTool, drawingId: 'd1', drawingVersion: 3, onSubmit: vi.fn(() => ({ runIntent: { intentId: 'armed' } })), onClose: vi.fn(), ...props }
   return { ...render(<SolarToolForm {...bound} />), props: bound }
 }
 const presetName = () => fireEvent.change(screen.getByLabelText('Preset name'), { target: { value: 'Alpha' } })

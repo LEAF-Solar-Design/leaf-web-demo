@@ -67,9 +67,12 @@ assert(
 
 // (3) Write-verb honesty branch: delete requests are drawing.write and the
 // preview must NOT claim read-only.
-const c = authorMock('delete panels near the roof edge')
+const c = authorMock('delete the selected panel near the roof edge')
 assert(Array.isArray(c.tool.capabilities) && c.tool.capabilities.includes('drawing.write'), `delete request must include 'drawing.write', got ${JSON.stringify(c.tool.capabilities)}`)
 assert(!/read-only/i.test(c.preview), `write preview must not contain "read-only": ${JSON.stringify(c.preview)}`)
+
+const bulkDelete = authorMock('delete panels near the roof edge')
+assert(bulkDelete.unsupported === true && !bulkDelete.tool, 'plural bulk-delete request must be unsupported and produce no tool')
 
 // (4) Genuine read requests keep exactly ['drawing.read'] and the read-only preview.
 const d = authorMock('count panels per layer')

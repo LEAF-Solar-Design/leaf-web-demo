@@ -52,7 +52,6 @@ function useBandHeight(ref) {
     if (!host) return undefined
     const shell = el.closest('.studio-shell')
     const app = el.closest('.app')
-    const toolbar = host.querySelector('.viewer-toolbar')
     let bandToolbar = host.querySelector('.viewer-toolbar') || app?.querySelector('.viewer-toolbar') || shell?.querySelector('.viewer-toolbar') || null
     let bandObserved = false
     const publish = () => {
@@ -61,8 +60,8 @@ function useBandHeight(ref) {
       host.style.setProperty(RIBBON_HEIGHT_VAR, `${Math.round(el.offsetHeight)}px`)
       // The narrow ground is a sibling of the app. Publish its real band
       // edge on their shared shell, including the document tabs and nav.
-      if (shell && toolbar && window.innerWidth <= 1023 && window.innerHeight >= 500) {
-        shell.style.setProperty('--cockpit-stack-top', `${toolbar.getBoundingClientRect().bottom}px`)
+      if (shell && bandToolbar && window.innerWidth <= 1023 && window.innerHeight >= 500) {
+        shell.style.setProperty('--cockpit-stack-top', `${bandToolbar.getBoundingClientRect().bottom}px`)
       } else shell?.style.removeProperty('--cockpit-stack-top')
       // Desktop canvas top follows a pushed-down band bottom; overlays never move up.
       if (shell && bandToolbar && window.innerWidth >= 1024) {
@@ -318,8 +317,8 @@ export default function DraftingRibbon({ clusters = [], tab = 'draw', children =
       let used = 0
       const limit = available - more.getBoundingClientRect().width
       groups.forEach((group, index) => {
-        used += widths[index]
-        const hide = needsOverflow && (visiblePanelCount !== null ? index >= visiblePanelCount : used > limit)
+        const hide = needsOverflow && (visiblePanelCount !== null ? index >= visiblePanelCount : used + widths[index] > limit)
+        if (!hide) used += widths[index]
         if (hide && group.contains(document.activeElement)) more.focus()
         group.hidden = hide
       })

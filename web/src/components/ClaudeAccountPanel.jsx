@@ -6,6 +6,7 @@ import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { absoluteWithZone, relativeTime } from '../lib/railTime.js'
 import useRelativeNow from '../lib/useRelativeNow.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
+import { humanizeError } from '../errorHumanize.js'
 
 function detectKind(token) {
   if (/^sk-ant-api/i.test((token || '').trim())) return 'api_key'
@@ -86,8 +87,8 @@ export default function ClaudeAccountPanel({
   const submit = async () => {
     const value = token.trim()
     if (!canManage || !value || busy || (kind === 'oauth' && (!label.trim() || !plan))) return
-    await onLink(value, kind, label.trim(), kind === 'oauth' ? plan : undefined)
-    setToken('')
+    const result = await onLink(value, kind, label.trim(), kind === 'oauth' ? plan : undefined)
+    if (result?.linked === true) setToken('')
   }
 
   const stateLabel = signedOut ? 'sign in' : loading ? 'checking' : restricted ? 'access restricted'
@@ -115,6 +116,7 @@ export default function ClaudeAccountPanel({
           </div>
 
           {signedOut && <p className="ca-copy" role="status">Sign in to view or link Claude accounts.</p>}
+          {!signedOut && loading && <p className="ca-copy" role="status">Checking your Claude accounts...</p>}
           {!signedOut && !loading && !known && (
             <p className="ca-copy" role="status">
               {restricted
@@ -213,7 +215,7 @@ export default function ClaudeAccountPanel({
               <p className="ca-note">Credentials stay server-side, tenant-isolated, and never appear again after mounting.</p>
             </div>
           )}
-          {!signedOut && error && <div className="field-err" role="alert"><span className="dot red" />{error}</div>}
+          {!signedOut && error && <div className="field-err" role="alert"><span className="dot red" />{humanizeError(error)}</div>}
         </div>
       )}
     </span>

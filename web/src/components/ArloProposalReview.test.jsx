@@ -49,7 +49,7 @@ describe('ARLO review in the existing workspace result panel', () => {
     render(panel(envelope()))
     await waitFor(() => expect(screen.getByRole('button',{name:'Reject proposal'})).toBeEnabled())
     fireEvent.click(screen.getByRole('button',{name:'Reject proposal'}))
-    await screen.findByRole('alert')
+    expect(await screen.findByRole('alert')).toHaveTextContent('Decision not confirmed saved. Connection lost')
     expect(screen.queryByText('Proposal rejected.')).not.toBeInTheDocument()
     fireEvent.click(screen.getByRole('button',{name:'Reject proposal'}))
     await screen.findByText('Proposal rejected.')

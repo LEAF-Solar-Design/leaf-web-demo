@@ -28,7 +28,7 @@ import { afterEach, describe, expect, it } from 'vitest'
 import { cleanup, render, screen } from '@testing-library/react'
 import CheckoutChip from './CheckoutChip.jsx'
 import CheckoutControls from './CheckoutControls.jsx'
-import { normalizeCheckout, lockState } from '../checkoutIdentity.js'
+import { normalizeCheckout, lockState, getSessionHolderId } from '../checkoutIdentity.js'
 import createCheckoutController from '../controllers/checkout/createCheckoutController.js'
 
 afterEach(cleanup)
@@ -42,10 +42,30 @@ const leaseEndingIn = (offsetMs) => ({
 })
 
 describe('CheckoutChip expiry horizon', () => {
+  it('describes an unproven own lock as you in another tab', async () => {
+    const holder = getSessionHolderId()
+    const controller = createCheckoutController({
+      drawingId: 'demo', holder,
+      services: { loadVersions: async () => ({ checkout: { holder, expires: at(3600e3) } }) },
+    })
+    await controller.refresh()
+    const snapshot = controller.getSnapshot()
+    render(<CheckoutChip checkout={snapshot.lockedByOther} />)
+    expect(screen.getByRole('status').textContent).toContain('Editing locked by you in another tab')
+    expect(snapshot.writeLocked).toBe(true)
+    expect(snapshot.heldByUs).toBe(false)
+    expect(controller.getCapability()).toBeNull()
+  })
+
+  it('describes the temporary save holder in words', () => {
+    render(<CheckoutChip checkout={{ holder: 'cad-edit-save' }} />)
+    expect(screen.getByRole('status').textContent).toContain('Editing locked by a save in progress')
+  })
+
   it('names the horizon while the lease is still live', () => {
     render(<CheckoutChip checkout={leaseEndingIn(4 * 3600e3)} />)
     const chip = screen.getByRole('status')
-    expect(chip.textContent).toContain(`Editing locked by ${HOLDER}`)
+    expect(chip.textContent).toContain('Editing locked by another session')
     expect(chip.textContent).toContain('until ~4 h')
     // The chip is inline-flex with a gap, so every child is its own flex item
     // and a fragment that OPENS with punctuation renders that mark floating
@@ -59,7 +79,7 @@ describe('CheckoutChip expiry horizon', () => {
     render(<CheckoutChip checkout={leaseEndingIn(-4 * 3600e3)} />)
     const chip = screen.getByRole('status')
     // The holder is still named — the lock is still what suppresses writes.
-    expect(chip.textContent).toContain(`Editing locked by ${HOLDER}`)
+    expect(chip.textContent).toContain('Editing locked by another session')
     expect(chip.textContent).not.toContain('until')
     // The holder id itself carries hyphen-digit pairs, so the assertion is on
     // the rendered horizon token, not on "a minus sign anywhere in the line".
@@ -73,7 +93,7 @@ describe('CheckoutChip expiry horizon', () => {
     // rail say "until banana" and "this lease looks expired" at once.
     render(<CheckoutChip checkout={{ holder: HOLDER, expires: 'banana' }} />)
     const chip = screen.getByRole('status')
-    expect(chip.textContent).toContain(`Editing locked by ${HOLDER}`)
+    expect(chip.textContent).toContain('Editing locked by another session')
     expect(chip.textContent).not.toContain('until')
     expect(chip.textContent).not.toContain('banana')
     expect(chip.querySelector('.t-rel')).toBe(null)

@@ -1,4 +1,4 @@
-"""GET /api/capabilities — capability catalog (CONTRACT-ADDENDUM section 9).
+"""GET/POST /api/capabilities — capability catalog (CONTRACT-ADDENDUM section 9).
 
 Internal/QA tools are filtered SERVER-SIDE by default. X-Internal-Role: qa
 requests the projection, but the existing X-Ops-Secret credential authorizes it.
@@ -35,12 +35,8 @@ router = APIRouter()
 _Header = Annotated[Optional[str], Header()]
 
 
-def _project_requests(text, names, drawing_id):
-    """Decode bounded exact requests without retaining caller query text."""
-    if text is None:
-        return {}
-    if len(text.encode("utf-8")) > 262144:
-        raise ValueError()
+def _project_json(text):
+    """Use the same strict JSON decoder for query requests and POST bodies."""
     def pairs(items):
         result = {}
         for key, value in items:
@@ -55,7 +51,19 @@ def _project_requests(text, names, drawing_id):
         return number
     def invalid(value):
         raise ValueError()
-    requests = json.loads(text, object_pairs_hook=pairs, parse_float=finite, parse_constant=invalid)
+    return json.loads(text, object_pairs_hook=pairs, parse_float=finite, parse_constant=invalid)
+
+
+def _project_requests(text, names, drawing_id):
+    """Validate exact requests from a bounded query string or decoded POST body."""
+    if text is None:
+        return {}
+    if isinstance(text, dict):
+        requests = text
+    else:
+        if len(text.encode("utf-8")) > 262144:
+            raise ValueError()
+        requests = _project_json(text)
     if not isinstance(requests, dict):
         raise ValueError()
     for name, entry in requests.items():
@@ -97,6 +105,12 @@ def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSON
     }))
 
 
+def _project_requests_error() -> JSONResponse:
+    return error_response(ErrorCode.BAD_PARAMS,
+        "project_runs must contain valid project admission requests",
+        retryable=False, status_code=400)
+
+
 @router.get("/api/capabilities")
 def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  x_ops_secret: Optional[str] = Header(default=None),
@@ -110,6 +124,53 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
                  x_project_id: _Header = None,
                  authorization: _Header = None,
                  x_checkout_capability: _Header = None) -> Any:
+    return _capabilities(
+        x_internal_role=x_internal_role, x_ops_secret=x_ops_secret, tenant=tenant,
+        drawing_id=drawing_id, project_id=project_id, drawing_version=drawing_version,
+        input_version_id=input_version_id, project_runs=project_runs, x_org_id=x_org_id,
+        x_project_id=x_project_id, authorization=authorization,
+        x_checkout_capability=x_checkout_capability)
+
+
+@router.post("/api/capabilities")
+async def submit_capabilities(request: Request,
+                              x_internal_role: Optional[str] = Header(default=None),
+                              x_ops_secret: Optional[str] = Header(default=None),
+                              tenant=Depends(deps.require_tenant),
+                              drawing_id: Optional[str] = None,
+                              project_id: Optional[str] = None,
+                              drawing_version: str = "head",
+                              input_version_id: Optional[str] = None,
+                              x_org_id: _Header = None,
+                              x_project_id: _Header = None,
+                              authorization: _Header = None,
+                              x_checkout_capability: _Header = None) -> Any:
+    body = bytearray()
+    async for chunk in request.stream():
+        # Retain at most the limit plus one byte, and never consume another
+        # chunk after an oversized body is established.
+        body.extend(chunk[:262145 - len(body)])
+        if len(body) > 262144:
+            return _project_requests_error()
+    try:
+        payload = _project_json(body.decode("utf-8"))
+        if (not isinstance(payload, dict) or set(payload) != {"project_runs"}
+                or not isinstance(payload["project_runs"], dict)):
+            raise ValueError()
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        return _project_requests_error()
+    return await run_in_threadpool(
+        _capabilities,
+        x_internal_role=x_internal_role, x_ops_secret=x_ops_secret, tenant=tenant,
+        drawing_id=drawing_id, project_id=project_id, drawing_version=drawing_version,
+        input_version_id=input_version_id, project_runs=payload["project_runs"],
+        x_org_id=x_org_id, x_project_id=x_project_id, authorization=authorization,
+        x_checkout_capability=x_checkout_capability)
+
+
+def _capabilities(x_internal_role, x_ops_secret, tenant, drawing_id, project_id,
+                  drawing_version, input_version_id, project_runs, x_org_id,
+                  x_project_id, authorization, x_checkout_capability) -> Any:
     """Capability catalog, TENANT-SCOPED for the folded portion (wave 4): globals for
     everyone, only the requesting tenant's OWN repo tools folded in."""
     include_internal = (x_internal_role or "").strip().lower() == "qa"
@@ -198,9 +259,7 @@ def capabilities(x_internal_role: Optional[str] = Header(default=None),
         try:
             requests = _project_requests(project_runs, names, drawing_id)
         except (ValueError, TypeError, UnicodeError, RecursionError):
-            return error_response(ErrorCode.BAD_PARAMS,
-                "project_runs must contain valid project admission requests",
-                retryable=False, status_code=400)
+            return _project_requests_error()
         states = {}
         for family in families:
             for row in family.get("capabilities") or []:

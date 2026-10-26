@@ -177,7 +177,7 @@ it.each(['approval_consumed', 'approval_tuple_mismatch'])('B4D row6 preserves th
   const { result } = mount()
   await flush()
   await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
-  expect(result.current.sourcesError).toBe(`Approval refused: ${code}`)
+  expect(result.current.sourcesError).toBe('Something went wrong. Try again.')
   expect(result.current.approving).toBe(false)
   expect(fetchIosShipSources).toHaveBeenCalledTimes(2)
 })
@@ -233,7 +233,7 @@ it('B4D row9 rejects secret fields and incomplete tuples without exposing their 
   ]) {
     fetchIosShipSources.mockResolvedValueOnce(data)
     await act(async () => { expect(await result.current.refreshSources()).toBeNull() })
-    expect(result.current.sourcesError).toContain(field)
+    expect(result.current.sourcesError).not.toContain(field)
     expect(result.current.sourcesError).not.toContain('do-not-display')
     expect(result.current.sources).toBe(previous)
   }
@@ -285,7 +285,7 @@ it('B4D row22 rejects invalid source grammars by field and retains the previous 
     expect(failure.message).not.toContain(value)
     fetchIosShipSources.mockResolvedValueOnce(data)
     await act(async () => { expect(await result.current.refreshSources()).toBeNull() })
-    expect(result.current.sourcesError).toContain(field)
+    expect(result.current.sourcesError).not.toContain(field)
     expect(result.current.sourcesError).not.toContain(value)
     expect(result.current.sources).toBe(previousSources)
     expect(result.current.approvals).toBe(previousApprovals)
@@ -358,13 +358,13 @@ it('B4D row27 holds a 503 outcome but permits retry after a 409 refusal', async 
     requestIosShipApproval.mockResolvedValue({ status, error: { code: 'approval_unavailable', message: `Approval refused (${status})` } })
     fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
     await act(async () => { await result.current.approve(sourceOne.source_revision) })
-    expect(result.current.sourcesError).toBe(`Approval refused (${status})`)
+    expect(result.current.sourcesError).toBe('Something went wrong. Try again.')
     fetchIosShipSources.mockRejectedValueOnce(new Error('catalog unavailable'))
     await act(async () => { await result.current.approve(sourceOne.source_revision) })
     expect(requestIosShipApproval).toHaveBeenCalledTimes(status === 503 ? 1 : 2)
     expect(result.current.sourcesError).toBe(status === 503
       ? "The last approval's outcome is unknown. Refresh the sources to confirm it before approving again."
-      : 'Approval refused (409)')
+      : 'Something went wrong. Try again.')
     unmount()
     fetchIosShipSources.mockReset().mockResolvedValue(sourceCatalog())
   }
@@ -391,17 +391,14 @@ it('B4D row29 refuses a trailing newline in sync status and accepts its full mat
   await expect(readSources({ projectId: 'p1' })).resolves.toMatchObject({ sync: { status: 'ok' } })
 })
 
-it('B4D row30 bounds server error text and preserves short messages', async () => {
+it('B4D row30 replaces unreadable server errors with a short sentence', async () => {
   const { result } = mount()
   await flush()
   for (const length of [5000, 100]) {
     const text = 'x'.repeat(length)
     requestIosShipApproval.mockResolvedValueOnce({ status: 409, error: { code: 'approval_unavailable', message: text } })
     await act(async () => { await result.current.approve(sourceOne.source_revision) })
-    if (length > 300) {
-      expect(result.current.sourcesError.length).toBeLessThanOrEqual(300)
-      expect(result.current.sourcesError.endsWith('…')).toBe(true)
-    } else expect(result.current.sourcesError).toBe(text)
+    expect(result.current.sourcesError).toBe('Something went wrong. Try again.')
   }
 })
 
@@ -427,7 +424,7 @@ it('B4D row23 validates approval responses and holds retry while their outcome i
   await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeNull() })
   expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
   await act(async () => { rejectReadBack(new Error('catalog unavailable')); await pending })
-  expect(result.current.sourcesError).toContain('approval_id')
+  expect(result.current.sourcesError).toBe('Something went wrong. Try again.')
   await act(async () => { expect(await result.current.approve(sourceOne.source_revision)).toBeUndefined() })
   expect(requestIosShipApproval).toHaveBeenCalledTimes(1)
   fetchIosShipSources.mockResolvedValueOnce(sourceCatalog({ approvals: [sourceApproval()] }))
@@ -601,7 +598,7 @@ it('I1 row7 stops following at thirty minutes and refresh resumes it', async () 
   await flush()
   await launch(result)
   await tick(30 * 60 * 1000)
-  expect(result.current.error).toBe('still running; refresh to keep following')
+  expect(result.current.error).toBe('Status updates paused. Resume to check the build.')
   const calls = getIosShipExecution.mock.calls.length
   await tick(10000)
   expect(getIosShipExecution).toHaveBeenCalledTimes(calls)
@@ -746,7 +743,7 @@ it('I1 row16 a stale follower rejection cannot restart the current follower or i
   await tick(1)
   expect(getIosShipExecution).toHaveBeenCalledTimes(3)
   await tick(30 * 60 * 1000 - 4000)
-  expect(result.current.error).toBe('still running; refresh to keep following')
+  expect(result.current.error).toBe('Status updates paused. Resume to check the build.')
   expect(getIosShipExecution).toHaveBeenCalledTimes(900)
   await tick(4000)
   expect(getIosShipExecution).toHaveBeenCalledTimes(900)

@@ -5,7 +5,8 @@ import { pathToFileURL } from 'node:url'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 import { PROJECT_SOLAR_GRAPH_TOOLS, PROJECT_SOLAR_GRAPH_REASONS, projectSolarGraphReason,
   parseProjectSolarInsertionPoint, deriveProjectSolarGraphFormState, buildProjectSolarGraphRequest,
-  exactProjectSolarGraphPreview, projectSolarGraphFeedback } from './solarProjectGraphFormModel.js'
+  exactProjectSolarGraphPreview, projectSolarGraphFeedback, panelGroupAngleKey, proposePanelGroups,
+  validatePanelGroups, panelHandleValid } from './solarProjectGraphFormModel.js'
 
 const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
@@ -29,6 +30,115 @@ function row(changes = {}, flags = {}) {
 }
 const preview = (rows = [row()], changes = {}) => exactProjectSolarGraphPreview({ tool: 'solar-homeruns',
   catalogDigest: digest, outcome: { ok: true, data: { families: [{ capabilities: rows }] } }, ...changes })
+
+const panel = (id, angle = 0, changes = {}) => ({ id, angle, frame_ref: null,
+  provenance: { source_handle: id }, ...changes })
+const groupGraph = () => ({ panels: [panel('b'), panel('a'), panel('d', 90), panel('c', 90)], frames: [] })
+const groupNames = [{ key: '0.0', name: ' Group 1 ' }, { key: '90.0', name: 'Group 2' }]
+const groupNumbers = { module_width_along_row: '2', module_height_across_row: '1', alignment_tolerance: '0.01' }
+
+it('W1C-26b accepts exactly the specified Python hexadecimal handle syntax', () => {
+  for (const handle of ['1A', '1a', ' 1a ', '+1a', '-1a', '0x1A', '0X1a', '0x_1a', '1_a']) {
+    expect(panelHandleValid(handle)).toBe(true)
+  }
+  for (const handle of ['', ' ', '_1a', '1a_', '1__a', '0x', 'g1', '1a1g', '0x1a_', '１', null, 12]) {
+    expect(panelHandleValid(handle)).toBe(false)
+  }
+})
+it('W1C-26b excludes invalid handles from buckets, singletons and the ungrouped count', () => {
+  const graph = groupGraph()
+  graph.panels.push(panel('bad', 0, { provenance: { source_handle: 'g1' } }),
+    panel('bad-single', 45, { provenance: { source_handle: '_1a' } }))
+  expect(proposePanelGroups(graph)).toEqual({ ...proposePanelGroups(groupGraph()), invalid_handles: 2 })
+})
+it('W1C-26b refuses handles repeated within or across proposals and passes the refusal through validation', () => {
+  for (const duplicateId of ['b', 'c']) {
+    const graph = groupGraph()
+    graph.panels = graph.panels.map((entry) => ({ ...entry, provenance: {
+      source_handle: entry.id === 'a' ? 'A1' : entry.id === duplicateId ? 'a1' : entry.id,
+    } }))
+    expect(proposePanelGroups(graph).refused).toBe('ambiguous_panel_handle')
+    expect(validatePanelGroups(graph, groupNames, groupNumbers))
+      .toEqual({ ok: false, reason: 'ambiguous_panel_handle' })
+  }
+})
+it('W1C-26b compares the original handles in proposals without numeric normalization or singleton collisions', () => {
+  const graph = { panels: [panel('a', 0, { provenance: { source_handle: '1a' } }),
+    panel('b', 0, { provenance: { source_handle: '0x1a' } }),
+    panel('c', 90, { provenance: { source_handle: '1A' } })] }
+  expect(proposePanelGroups(graph).refused).toBe(null)
+})
+
+it('W1C-26 mirrors the server angle conversion, folding and exact binary rounding', () => {
+  // math.radians -> r_to_d snaps -> fmod -> fold -> Decimal(float) HALF_UP.
+  // 179.95 and the folded -0.05 are binary values below the .95 midpoint:
+  // both round to 179.9. 359.96 folds to 179.96 and rounds to 180.0 (no second fold).
+  for (const [angle, expected] of [[0, '0.0'], [179.95, '179.9'], [180, '0.0'],
+    [-0.05, '179.9'], [359.96, '180.0'], [90.0005, '90.0'], [NaN, null], [Infinity, null]]) {
+    expect(panelGroupAngleKey(angle)).toBe(expected)
+  }
+})
+it('W1C-26 proposes sorted angle buckets and reports singletons without mutating panels', () => {
+  const graph = groupGraph()
+  graph.panels.reverse()
+  graph.panels.push(panel('single', 45, { provenance: { source_handle: 'e' } }), panel('framed', 0, { frame_ref: 'frame' }),
+    panel('missing', 0, { provenance: {} }), panel(42), panel('nan', NaN, { provenance: { source_handle: 'f' } }))
+  const before = graph.panels.slice()
+  expect(proposePanelGroups(graph)).toEqual({ proposals: [
+    { key: '0.0', angle_key: '0.0', panel_refs: ['a', 'b'], count: 2 },
+    { key: '90.0', angle_key: '90.0', panel_refs: ['c', 'd'], count: 2 },
+  ], singletons: 1, ungrouped: 5, invalid_handles: 1, refused: null })
+  expect(graph.panels).toEqual(before)
+})
+it('W1C-26 refuses limits without truncating', () => {
+  const many = { panels: Array.from({ length: 129 }, (_, index) =>
+    [panel(`${index}a`, index), panel(`${index}b`, index)]).flat() }
+  many.panels[1].provenance.source_handle = many.panels[0].provenance.source_handle
+  expect(proposePanelGroups(many).refused).toBe('too_many_groups')
+  expect(proposePanelGroups(many).proposals).toHaveLength(129)
+  expect(validatePanelGroups(many, [], groupNumbers).reason).toBe('too_many_groups')
+  const large = { panels: Array.from({ length: 4097 }, (_, index) => panel(String(index))) }
+  large.panels[1].provenance.source_handle = large.panels[0].provenance.source_handle
+  expect(proposePanelGroups(large).refused).toBe('group_too_large')
+  expect(proposePanelGroups(large).proposals[0].panel_refs).toHaveLength(4097)
+  expect(validatePanelGroups(large, [], groupNumbers).reason).toBe('group_too_large')
+})
+it('W1C-26 validates names, numeric bounds and exact proposal coverage', () => {
+  const graph = groupGraph()
+  const check = (groups = groupNames, numbers = groupNumbers) => validatePanelGroups(graph, groups, numbers)
+  expect(check().value[0]).toEqual({ name: 'Group 1', panel_refs: ['a', 'b'],
+    module_width_along_row: 2, module_height_across_row: 1, alignment_tolerance: 0.01 })
+  expect(validatePanelGroups({ panels: [] }, [], groupNumbers).reason).toBe('no_panel_groups')
+  for (const names of [[], groupNames.slice().reverse(), [{ ...groupNames[0], key: 'missing' }, groupNames[1]]]) {
+    expect(check(names).reason).toBe('panel_groups_stale')
+  }
+  for (const name of ['', ' ', 'x'.repeat(256), 'bad[name', null]) {
+    expect(check([{ key: '0.0', name }, groupNames[1]]).reason).toBe('group_name_invalid')
+  }
+  expect(check([{ key: '0.0', name: 'group 2' }, groupNames[1]]).reason).toBe('group_name_collision')
+  graph.frames.push({ name: 'GROUP 1' })
+  expect(check().reason).toBe('group_name_collision')
+  graph.frames = [{ name: 'Straße' }]
+  expect(check([{ key: '0.0', name: 'STRASSE' }, groupNames[1]]).reason).toBe('group_name_collision')
+  graph.frames = [{ name: 'ẞ' }]
+  expect(check([{ key: '0.0', name: 'ss' }, groupNames[1]]).reason).toBe('group_name_collision')
+  graph.frames = []
+  for (const key of Object.keys(groupNumbers)) {
+    for (const value of ['', ' ', 'NaN', 'Infinity', '0', '-1', '1000001', '2x', null]) {
+      expect(check(groupNames, { ...groupNumbers, [key]: value }).reason).toBe('group_numbers_invalid')
+    }
+    expect(check(groupNames, { ...groupNumbers, [key]: '1000000' }).ok).toBe(true)
+  }
+})
+it('W1C-26 builds exactly the panel-groups request and leaves panel import unchanged', () => {
+  const groups = validatePanelGroups(groupGraph(), groupNames, groupNumbers).value
+  expect(build({ tool: 'solar-panel-groups', groups })).toEqual({ ok: true, request: {
+    tool: 'solar-panel-groups', params: { drawing_id: binding.drawing_id, expected_rev: 6, groups },
+    catalogDigest: digest, idempotencyKey: 'graph-intent' } })
+  expect(build({ tool: 'solar-panel-groups' }).reason).toBe('request_invalid')
+  expect(build({ tool: 'solar-panels-from-drawing', groups }).request.params)
+    .toEqual({ drawing_id: binding.drawing_id, expected_rev: 6 })
+})
 
 it('R13C-01 builds panel import', () => {
   expect(build({ tool: 'solar-panels-from-drawing' })).toEqual({ ok: true, request: {
@@ -95,7 +205,7 @@ it('R13C-09 accepts bounded insertion text', () => {
   }
 })
 it('R13C-10 closes the request surface', () => {
-  expect(PROJECT_SOLAR_GRAPH_TOOLS).toEqual(['solar-panels-from-drawing', 'solar-homeruns', 'solar-feeders', 'solar-schedule'])
+  expect(PROJECT_SOLAR_GRAPH_TOOLS).toEqual(['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-feeders', 'solar-schedule'])
   expect(Object.isFrozen(PROJECT_SOLAR_GRAPH_TOOLS)).toBe(true)
   expect(build({ tool: 'solar-settings' })).toEqual({ ok: false, reason: 'tool_unsupported' })
   expect(build({ insertionPointText: '1,2' })).toEqual({ ok: false, reason: 'request_invalid' })
@@ -151,6 +261,14 @@ it('R13C-14 freezes local and status sentences', () => {
     idempotency_key_required: 'This Solar request could not be identified. Review it again.',
     request_invalid: 'This Solar request could not be prepared. Review the inputs.',
     insertion_invalid: 'Enter two or three comma-separated coordinates, each between -1000000000000 and 1000000000000.',
+    no_panel_groups: 'No panel angles have at least two ungrouped panels.',
+    too_many_groups: 'There are more than 128 proposed groups. No groups have been omitted.',
+    group_too_large: 'A proposed group has more than 4096 panels. No panels have been omitted.',
+    ambiguous_panel_handle: 'Two panels share a drawing handle, so they cannot be grouped. Re-import the panels.',
+    panel_groups_stale: 'The proposed panel groups changed. Refresh the preview before continuing.',
+    group_name_invalid: 'Enter a group name of 1 to 255 characters without [.',
+    group_name_collision: 'Group names must be unique, including existing panel groups.',
+    group_numbers_invalid: 'Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.',
     tool_unsupported: 'This tool has no project form in this view.',
     submit_unavailable: 'Project Solar submission is unavailable in this view.',
     run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
@@ -180,7 +298,14 @@ it('R13C-14 freezes local and status sentences', () => {
   expect(Object.isFrozen(PROJECT_SOLAR_GRAPH_REASONS)).toBe(true)
   for (const [code, sentence] of Object.entries(expected)) {
     expect(sentence.length).toBeGreaterThanOrEqual(12)
-    expect(projectSolarGraphReason(code, 'solar-feeders')).toBe(sentence)
+    if (['no_panel_groups', 'too_many_groups', 'group_too_large', 'ambiguous_panel_handle',
+      'panel_groups_stale', 'group_name_invalid', 'group_name_collision', 'group_numbers_invalid'].includes(code)) {
+      expect(projectSolarGraphReason(code, 'solar-panel-groups')).toBe(sentence)
+      expect(projectSolarGraphReason(code, 'solar-feeders')).toBe(expected.request_refused)
+      expect(projectSolarGraphReason(code, 'solar-panels-from-drawing')).toBe(expected.request_refused)
+    } else {
+      expect(projectSolarGraphReason(code, 'solar-feeders')).toBe(sentence)
+    }
   }
   for (const [code, key] of [['SIP_R7_BINDING_INVALID', 'binding_invalid'], ['SIP_R7_SCOPE_STALE', 'scope_stale'],
     ['SIP_R7_REQUEST_INVALID', 'request_invalid'], ['SIP_R13B_RUN_IN_PROGRESS', 'run_in_progress'],

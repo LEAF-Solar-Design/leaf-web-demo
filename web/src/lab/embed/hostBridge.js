@@ -237,6 +237,12 @@ export function createLabHostBridge({
           ? { ok: true } : { ok: false, reason: 'too_large' }
       }).then((result) => result || { ok: false, reason: 'not_admitted' })
     },
+    requestTestTrade() {
+      if (!admitted || stopped) return Promise.resolve({ ok: false, reason: 'not_admitted' })
+      return enqueue(() => post('test-trade.open-request', {}, null)
+        ? { ok: true } : { ok: false, reason: 'not_admitted' })
+        .then(result => result || { ok: false, reason: 'not_admitted' })
+    },
     run(triggeredAt = clock()) {
       if (!admitted || stopped) return Promise.resolve(false)
       return enqueue(() => proposalHash && proposalState === null ? post('signed-request', { request_hash: proposalHash, handoff: 'server-sign' }, triggeredAt) : false)

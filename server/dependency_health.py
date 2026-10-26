@@ -49,7 +49,7 @@ _WORKER_COVERAGE_TTL_S = 5.0
 _WORKER_COVERAGE_MAX_ENTRIES = 64
 _WORKER_COVERAGE_LOCK = threading.Lock()
 _WORKER_COVERAGE_CACHE: Dict[
-    tuple[str, Optional[str], float], tuple[bool, float]] = {}
+    tuple[str, float], tuple[bool, float]] = {}
 
 
 def _try_acquire_probe_slot() -> bool:
@@ -306,11 +306,34 @@ def _worker_probe(
         raise DependencyUnavailable() from exc
 
 
-def _expected_worker_revision(env: Mapping[str, str]) -> Optional[str]:
-    revision = env.get("LEAF_EXPECTED_WORKER_REVISION", "").strip().lower() or None
-    if revision is not None and not _REVISION_RE.fullmatch(revision):
-        return "__invalid__"
-    return revision
+def _worker_coverage_probe(
+        timeout: float, tool_name: str, max_age_seconds: float) -> None:
+    """Check heartbeat freshness without reading the worker's revision identity."""
+    try:
+        _db, psycopg, url, statement_timeout_ms = _database_parts(timeout)
+        with psycopg.connect(
+                url, connect_timeout=max(1, math.ceil(timeout))) as conn:
+            with conn.cursor() as cur:
+                _configure_statement_timeout(cur, statement_timeout_ms)
+                cur.execute(
+                    "SELECT observed_at "
+                    "FROM canonical_worker_heartbeats WHERE tool_name = %s "
+                    "ORDER BY observed_at DESC LIMIT 1",
+                    (tool_name,),
+                )
+                row = cur.fetchone()
+        if not row:
+            raise DependencyDegraded()
+        observed_at = row[0]
+        if observed_at.tzinfo is None:
+            observed_at = observed_at.replace(tzinfo=timezone.utc)
+        age = (datetime.now(timezone.utc) - observed_at).total_seconds()
+        if age < 0 or age > max_age_seconds:
+            raise DependencyDegraded()
+    except DependencyDegraded:
+        raise
+    except Exception as exc:
+        raise DependencyUnavailable() from exc
 
 
 def reset_worker_coverage_cache() -> None:
@@ -323,7 +346,7 @@ def canonical_worker_covers(
         tool_name: str, env: Optional[Mapping[str, str]] = None) -> bool:
     """Check required per-tool coverage with the readiness probe's query bounds.
 
-    Missing, stale, future or wrong-revision heartbeats mean no coverage;
+    Missing, stale or future heartbeats mean no coverage;
     store failures remain DependencyUnavailable so callers can distinguish them.
     Local stacks that do not require a worker perform no lookup.
     Definite results are cached for five seconds, with at most 64 entries.
@@ -333,8 +356,7 @@ def canonical_worker_covers(
         return True
     max_age = _bounded_float(
         current, "LEAF_WORKER_HEARTBEAT_MAX_AGE_S", 30.0, 1.0, 300.0)
-    revision = _expected_worker_revision(current)
-    key = (tool_name, revision, max_age)
+    key = (tool_name, max_age)
     # Serialize misses as well as cache access so concurrent callers share a probe.
     with _WORKER_COVERAGE_LOCK:
         cached = _WORKER_COVERAGE_CACHE.get(key)
@@ -343,7 +365,7 @@ def canonical_worker_covers(
                 return cached[0]
             del _WORKER_COVERAGE_CACHE[key]
         try:
-            _worker_probe(_timeout_seconds(current), tool_name, max_age, revision)
+            _worker_coverage_probe(_timeout_seconds(current), tool_name, max_age)
         except DependencyDegraded:
             covered = False
         else:
@@ -433,7 +455,11 @@ def default_specs(
         _truthy(current, "LEAF_AUTHORED_EXECUTION") or bool(harness_base)
     )
     build_required = _truthy(current, "LEAF_BUILD_REVISION_REQUIRED")
-    expected_worker_revision = _expected_worker_revision(current)
+    expected_worker_revision = current.get(
+        "LEAF_EXPECTED_WORKER_REVISION", "").strip().lower() or None
+    if (expected_worker_revision is not None and
+            not _REVISION_RE.fullmatch(expected_worker_revision)):
+        expected_worker_revision = "__invalid__"
 
     def unavailable_or_degraded(required: bool) -> None:
         if required:

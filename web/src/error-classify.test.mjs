@@ -23,9 +23,14 @@ describe('classifyAgentError', () => {
     assert.equal(classifyAgentError({ status: 409, errorCode: 'BAD_PARAMS' }), 'approval_stale')
     assert.equal(classifyAgentError({ status: 410, errorCode: 'BAD_PARAMS' }), 'confirmation_expired')
     assert.equal(classifyAgentError({ status: 409, errorCode: 'turn_in_progress' }), 'busy')
-    assert.equal(classifyAgentError({ status: 401 }), 'grant')
-    assert.equal(classifyAgentError({ status: 403 }), 'entitlement')
+    assert.equal(classifyAgentError({ status: 401 }), 'authentication')
+    assert.equal(classifyAgentError({ status: 403 }), 'workspace')
     assert.equal(classifyAgentError({ status: 502 }), 'unreachable')
+  })
+
+  it('preserves explicit grant and entitlement classifications', () => {
+    assert.equal(classifyAgentError({ status: 401, errorCode: 'grant_required' }), 'grant')
+    assert.equal(classifyAgentError({ status: 403, errorCode: 'entitlement_required' }), 'entitlement')
   })
 
   it('gives the too_large kind its own panel message', () => {

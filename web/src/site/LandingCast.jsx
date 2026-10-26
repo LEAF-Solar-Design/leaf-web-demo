@@ -10,6 +10,7 @@ import { useEffect, useState } from 'react'
 import { navigate } from './router.js'
 import { loadDemoSolve } from './intakeCache.js'
 import { submitDemandCapture } from '../api.js'
+import { humanizeError } from '../errorHumanize.js'
 
 export function enterWorkspace() {
   navigate('/try')
@@ -26,15 +27,17 @@ export function enterDemo() {
 }
 
 const SHEETS = [
-  { code: '02', label: '02 The problem' },
-  { code: '03', label: '03 How Branch works' },
-  { code: '04', label: '04 Proof' },
-  { code: '05', label: '05 Pricing' },
-  { code: '06', label: '06 Docs' },
+  { code: '02', target: 'a-101', label: '02 The problem' },
+  { code: '03', target: 'a-102', label: '03 How Branch works' },
+  { code: '04', target: 'e-401', label: '04 Proof' },
+  { code: '05', target: 'c-201', label: '05 Pricing' },
+  { code: '06', target: 's-501', label: '06 Docs' },
 ]
 
 export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = enterDemo }) {
   const [solve, setSolve] = useState(null)
+  const [solveError, setSolveError] = useState('')
+  const [solveAttempt, setSolveAttempt] = useState(0)
   const [email, setEmail] = useState('')
   const [demandStatus, setDemandStatus] = useState('idle')
   async function registerInterest(event) {
@@ -50,11 +53,19 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
   }
   useEffect(() => {
     let live = true
+    setSolveError('')
     loadDemoSolve()
-      .then((d) => { if (live) setSolve(d) })
-      .catch(() => { /* widget keeps showing the pending state */ })
+      .then((d) => {
+        if (d?.ok === false || d?.electrical?.max_modules_per_string == null) {
+          throw new Error('String length unavailable')
+        }
+        if (live) setSolve(d)
+      })
+      .catch(() => {
+        if (live) setSolveError(humanizeError('Could not load the string length. Please retry.'))
+      })
     return () => { live = false }
-  }, [])
+  }, [solveAttempt])
   const maxString = solve?.electrical?.max_modules_per_string
 
   return (
@@ -63,10 +74,10 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
           site cluster dissolves with the site cast. */}
       <div className="lp-topbar" data-cast="both">
         <img className="lp-lockup" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="Leaf Automation" height="24" />
-        <span className="lp-brandsub">/ Leaf Build · utility-estimation</span>
+        <span className="lp-brandsub">/ Leaf Automation Studio</span>
         <div className="lp-top-slot">
           <div className="lp-top-site" data-cast="site" style={{ '--rank': 0 }}>
-            <span className="lp-sheetno">Sheet 01 of 07, Cover</span>
+            <span className="lp-sheetno">Sheet 01 of {String(SHEETS.length + 1).padStart(2, '0')}, Cover</span>
             <button type="button" className="lp-trial" onClick={onTryTool}>Open workspace</button>
           </div>
         </div>
@@ -114,12 +125,14 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
           <span className="lp-solver-title">String solver</span>
         </div>
         <div className="lp-solver-row">
-          <span className="lp-solver-field">Q.Peak 425 <span className="lp-solver-caret">▾</span></span>
+          <span>Q.Peak 425</span>
           <button type="button" className="lp-solver-open" onClick={onTryTool}>Open in workspace</button>
         </div>
         <div className="lp-solver-out">
           <span className="lp-solver-label">Max string · NEC 690.7</span>
-          {maxString == null
+          {solveError
+            ? <><span role="alert">{solveError}</span><button type="button" className="lp-solver-open" onClick={() => setSolveAttempt((attempt) => attempt + 1)}>Retry</button></>
+            : maxString == null
             ? <span className="lp-solver-pending"><span className="lp-pulse" /> Solving</span>
             : <span className="lp-solver-big">{maxString} <span className="lp-solver-unit">modules</span></span>}
         </div>
@@ -133,7 +146,7 @@ export default function LandingCast({ onTryTool = enterWorkspace, onTryDemo = en
             key={s.code}
             type="button"
             className="lp-tab"
-            onClick={() => navigate(`/sheets#${s.code}`)}
+            onClick={() => navigate(`/sheets#${s.target}`)}
           >
             {s.label}
           </button>

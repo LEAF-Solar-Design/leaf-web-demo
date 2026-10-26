@@ -1,6 +1,7 @@
 import { expect } from '@playwright/test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createActionRecorder, classifyStagingOutcome, stagingActionRecorder } from '../walk/stagingEvidence.mjs'
+import { stagingDelivery } from '../walk/stagingDelivery.mjs'
 import {
   allowedStagingOrigins, assertAllowedStagingHost, assertPageOnAllowedOrigin,
   assertResponseOnAllowedOrigin, assertStagingTokenIdentity, collectBearerLeaks,
@@ -105,11 +106,23 @@ export function observeStagingNetwork(page, records, recorder) {
   }
 }
 
-export function stagingNetworkFailure(records, consoleMessages = []) {
+export function stagingNetworkFailure(records, consoleMessages = [], actions) {
   const safeRecords = [], safeConsole = []
   for (const record of records) appendStagingRequest(safeRecords, record)
   for (const message of consoleMessages) appendStagingConsole(safeConsole, message)
-  return `Staging network: ${JSON.stringify(safeRecords)}\nStaging console: ${JSON.stringify(safeConsole)}`
+  const diagnostic = `Staging network: ${JSON.stringify(safeRecords)}\nStaging console: ${JSON.stringify(safeConsole)}`
+  if (actions === undefined) return diagnostic
+  const safeActions = { actions: actions.actions.slice(-20).map(window => {
+    const requests = []
+    let truncated = window.truncated === true || window.requests.length > 40
+    for (const request of window.requests.slice(-40)) {
+      try {
+        if (!appendStagingRequest(requests, request)) truncated = true
+      } catch { truncated = true }
+    }
+    return { action: redactSolarDiagnostic(window.action, { maxLength: 80 }), requests, truncated }
+  }), truncated: actions.truncated === true || actions.actions.length > 20 }
+  return `${diagnostic}\nStaging actions: ${JSON.stringify(safeActions)}`
 }
 
 async function persistStagingEvidence(evidence, title) {
@@ -119,7 +132,18 @@ async function persistStagingEvidence(evidence, title) {
   await writeFile(new URL(`${name}.json`, directory), JSON.stringify(evidence, null, 2))
 }
 
-export async function stagingEvidenceStep(runtime, testInfo, action, persist = persistStagingEvidence) {
+export async function stagingEvidenceStep(runtime, testInfo, action, persist = persistStagingEvidence, deliveryOptions = {}) {
+  if (runtime.stack?.baseURL) {
+    const delivery = runtime.evidence.projectSolar.delivery = await stagingDelivery(runtime.stack.baseURL, deliveryOptions)
+    if (delivery.decision === 'stale') {
+      runtime.evidence.projectSolar.skipReason = 'infra_stale_delivery'
+      runtime.evidence.projectSolar.classification = classifyStagingOutcome({ skipped: 'infra_stale_delivery', delivery })
+      testInfo.annotations.push({ type: 'infra_stale_delivery', description: JSON.stringify(delivery) })
+      try { await persist(runtime.evidence, testInfo.title) } catch { /* Keep the actual skip even if evidence IO fails. */ }
+      testInfo.skip(true, 'infra_stale_delivery')
+      return
+    }
+  }
   const records = runtime.evidence.projectSolar.network = []
   const consoleMessages = runtime.evidence.projectSolar.console = []
   const recorder = createActionRecorder()
@@ -147,11 +171,12 @@ export async function stagingEvidenceStep(runtime, testInfo, action, persist = p
     runtime.page.off('console', onConsole)
     await finish()
     recorder.end()
-    runtime.evidence.projectSolar.actions = recorder.snapshot()
+    const actions = recorder.snapshot()
+    runtime.evidence.projectSolar.actions = actions
     runtime.evidence.projectSolar.classification = classifyStagingOutcome({ error: skipReason ? null : failure,
-      skipped: skipReason, network: records })
+      skipped: skipReason, network: records, delivery: runtime.evidence.projectSolar.delivery })
     if (skipReason) runtime.evidence.projectSolar.skipReason = skipReason
-    if (!skipReason && failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages)}`
+    if (!skipReason && failure instanceof Error) failure.message += `\n${stagingNetworkFailure(records, consoleMessages, actions)}`
     try {
       await persist(runtime.evidence, testInfo.title)
     } catch { /* Evidence IO must not replace the step's verdict. */ }
@@ -326,13 +351,13 @@ export function monitorStagingSolar(page, solar) {
   }
 }
 
-export async function withStagingProject(page, baseURL, projectId, token, testInfo, action) {
+export async function withStagingProject(page, baseURL, projectId, token, testInfo, action, options = {}) {
   assertAllowedStagingHost(baseURL)
   assertStagingTokenIdentity(token, process.env)
   const runtime = { page, stack: { baseURL }, cleanup: [], evidence: { projectSolar: { steps: [] } },
     projectSolar: { apiBase: baseURL, traffic: { runCount: 0 }, catalog: [] } }
-  const finish = monitorStagingSolar(page, runtime.projectSolar)
   return stagingEvidenceStep(runtime, testInfo, async () => {
+  const finish = monitorStagingSolar(page, runtime.projectSolar)
   try {
     await page.addInitScript(({ token, allowedOrigins }) => {
       if (allowedOrigins.includes(location.origin.toLowerCase())) localStorage.setItem('leaf.jwt', token)
@@ -366,7 +391,7 @@ export async function withStagingProject(page, baseURL, projectId, token, testIn
       await finish()
     }
   }
-  })
+  }, options.persist, options.delivery)
 }
 
 export async function reviewStagingProposal(runtime, {

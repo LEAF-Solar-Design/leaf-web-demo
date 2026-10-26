@@ -98,7 +98,18 @@ export default function VersionHistory({
   // mount. The root keeps its data-escape-owner marker for the command-line
   // armer; the stack knows the marker is its own through `scope`.
   const rootRef = useRef(null)
-  useEscapeOwner('version-history', !exiting, () => onClose?.(), { layer: 'history', scope: rootRef })
+  const openerRef = useRef(null)
+  useEffect(() => {
+    if (!exiting && !rootRef.current?.contains(document.activeElement)) {
+      openerRef.current = document.activeElement
+    }
+  }, [exiting])
+  function dismiss() {
+    const returnFocus = rootRef.current?.contains(document.activeElement)
+    onClose?.()
+    if (returnFocus && openerRef.current?.isConnected) openerRef.current.focus()
+  }
+  useEscapeOwner('version-history', !exiting, dismiss, { layer: 'history', scope: rootRef })
 
   // The EFFECT of a restore; VersionList owns the confirm/pending/error UX and
   // rethrows nothing it did not receive, so a failure here surfaces on the row
@@ -129,7 +140,7 @@ export default function VersionHistory({
     <div ref={rootRef} className={`drawer drawer-fixed${exiting ? ' exit' : ''}`} role="dialog" aria-label="Version history" data-escape-owner>
       <div className="drawer-head">
         <span className="drawer-title">Version history{effective ? ` · ${rows.length}` : ''}</span>
-        <EscCap onClick={onClose} label="Close version history" />
+        <EscCap onClick={dismiss} label="Close version history" />
       </div>
 
       <div className="drawer-body">

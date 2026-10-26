@@ -108,7 +108,7 @@ test.describe('JobInbox recovery', () => {
     // takes the pointer over the expanded inbox, so the row is driven the way
     // JobInbox.jsx:12 documents for keyboard users: focus plus Enter on the
     // native button, which fires the same onClick a pointer press would.
-    const retry = retryRow.getByRole('button', { name: 'Retry · Re-run count-panels', exact: true })
+    const retry = retryRow.getByRole('button', { name: 'Re-run count-panels', exact: true })
     await expect(retry).toBeEnabled()
     await expect(retryRow.locator('.lock-note')).toHaveCount(0)
     await retry.press('Enter')
@@ -273,15 +273,16 @@ test.describe('DrawingUploadControl policy refusal', () => {
     const log = await openTry(page, { status: 503, body: { detail: 'upload policy unavailable' } })
     const control = page.locator('.drawing-upload')
     const alert = control.getByRole('alert')
-    await expect(alert).toHaveText('Uploads are unavailable right now.')
-    await expect(alert).toHaveAttribute('title', 'GET /api/site/guest-upload-policy -> 503')
+    await expect(alert).toHaveText('The service had a temporary problem. Try again.', { timeout: 15_000 })
+    await expect(alert).not.toHaveAttribute('title', /.+/)
+    await expect(control.locator('.drawing-upload-note')).toHaveText('Uploads unavailable')
     await expect(control.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeDisabled()
     await refusesFile(page, log)
   })
 })
 
 test.describe('OperatorEntry probe', () => {
-  for (const status of [401, 404, 503]) {
+  for (const status of [401, 403, 404, 503]) {
     test(`a ${status} probe hides the operator entry and is never repeated`, async ({ page }) => {
       test.setTimeout(90_000)
       await signIn(page)

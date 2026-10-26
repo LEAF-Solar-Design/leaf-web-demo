@@ -98,13 +98,16 @@ export function inspectRun(request, apiBase, expected, tool, checkParams = () =>
     catalogDigest: body.catalog_digest, authenticated: true, keyPresent: true, checkoutPresent: true, actorHeaderAbsent: true }
 }
 export function inspectPreview(request, body, status, apiBase) {
-  const { url, headers } = requestParts(request, apiBase, 'GET', '/api/capabilities')
-  if (!url.searchParams.has('project_runs')) return []
+  const method = request.method()
+  demand(method === 'POST' || method === 'GET', 'endpoint mismatch')
+  const { url, headers } = requestParts(request, apiBase, method, '/api/capabilities')
+  if (method === 'GET' && !url.searchParams.has('project_runs')) return []
   const binding = projectBinding({ organization_id: headers['x-org-id'], project_id: url.searchParams.get('project_id'),
     drawing_id: url.searchParams.get('drawing_id'), input_version_id: url.searchParams.get('input_version_id') })
   demand(headers['x-project-id'] === binding.project_id && headerProof(headers).authenticated, 'preview authority mismatch')
   let intents
-  try { intents = JSON.parse(url.searchParams.get('project_runs')) } catch { throw new Error('R13-H preview JSON invalid') }
+  try { intents = method === 'POST' ? request.postDataJSON()?.project_runs : JSON.parse(url.searchParams.get('project_runs')) }
+  catch { throw new Error('R13-H preview JSON invalid') }
   demand(status === 200 && plain(intents) && plain(body) && Array.isArray(body.families), 'preview response mismatch')
   return Object.entries(intents).map(([tool, intent]) => {
     const rows = body.families.flatMap(family => { demand(Array.isArray(family.capabilities), 'preview family mismatch'); return family.capabilities }).filter(row => row.name === tool)
@@ -213,9 +216,10 @@ export function observeProjectTraffic(page, apiBase) {
     const work = (async () => {
       const request = response.request(), url = new URL(response.url())
       if (url.origin !== origin) return
-      // Query strings can contain project intent material; evidence stores paths only.
+      // Query strings and POST bodies can contain project intent material; evidence stores paths only.
       endpoints.add(`${request.method()} ${url.pathname} ${response.status()}`)
-      if (request.method() === 'GET' && url.pathname === '/api/capabilities' && url.searchParams.has('project_runs')) {
+      if (url.pathname === '/api/capabilities' && (request.method() === 'POST' ||
+          (request.method() === 'GET' && url.searchParams.has('project_runs')))) {
         previews.push(...inspectPreview(request, await response.json(), response.status(), origin))
       } else if (request.method() === 'GET' && url.pathname === '/api/projects' && response.status() === 200) {
         const body = await response.json(), proof = headerProof(request.headers())
@@ -431,6 +435,30 @@ if (process.argv[1] && resolve(process.argv[1]) === fileURLToPath(import.meta.ur
     assert.equal(previewHasParams(refused, params), true)
     assert.equal(previewHasParams(refused, { ...params, expected_rev: 99 }), false)
     row.catalog_digest = `sha256:${'f'.repeat(64)}`; assert.throws(() => inspectPreview(previewRequest, body, 200, api))
+  })
+  test('POST previews match legacy GET fingerprints and response observations omit intent material', async () => {
+    const intents = { 'solar-size-strings': { params, catalog_digest: digest, idempotency_key: 'intent-1' } }
+    const url = new URL(`${api}/api/capabilities`)
+    for (const [key, value] of Object.entries({ project_id: ids[1], drawing_id: ids[2], input_version_id: ids[3] })) url.searchParams.set(key, value)
+    const postRequest = request({ project_runs: intents }, { url: String(url), method: 'POST' })
+    url.searchParams.set('project_runs', JSON.stringify(intents))
+    const getRequest = request(undefined, { url: String(url), method: 'GET' })
+    const body = { families: [{ capabilities: [{ name: 'solar-size-strings', catalog_digest: digest,
+      availability: { admission_checked: true, admission: { status_code: 200, error: null }, refusal_reasons: [],
+        entitled: true, engine_ready: true, implemented: true, input_ready: true, runnable: true } }] }] }
+    const expected = inspectPreview(getRequest, body, 200, api)
+    assert.deepEqual(inspectPreview(postRequest, body, 200, api), expected)
+    assert.equal(expected[0].signature, inspectRun(request(), api, binding, 'solar-size-strings').signature)
+    const page = new EventEmitter(), observer = observeProjectTraffic(page, api)
+    try {
+      for (const previewRequest of [postRequest, getRequest]) {
+        page.emit('response', { request: () => previewRequest, url: () => previewRequest.url(),
+          status: () => 200, json: async () => body })
+      }
+      await observer.drain()
+      assert.deepEqual(observer.previews, [...expected, ...expected])
+      assert.deepEqual([...observer.endpoints], ['POST /api/capabilities 200', 'GET /api/capabilities 200'])
+    } finally { observer.dispose() }
   })
   test('response observer drains asynchronous errors and disposes listeners', async () => {
     const page = new EventEmitter(), observer = observeProjectTraffic(page, api)

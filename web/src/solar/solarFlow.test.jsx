@@ -1281,6 +1281,11 @@ it('R13D-27 busy reaches every specialized project editor and clears', async () 
     const action = name === 'solar-string-conductors' ? 'Apply to selected strings' : 'Review & run'
     await waitFor(() => expect(screen.getByRole('button', { name: action }).disabled).toBe(false))
     expect(boundary.disabled).toBe(false)
+    if (name === 'solar-string-conductors') {
+      const checkbox = within(screen.getByLabelText('Select A1')).getByRole('checkbox', { name: 'Include A1' })
+      expect(checkbox).toBeChecked()
+      expect(checkbox).toBeEnabled()
+    }
     fireEvent.click(screen.getByRole('button', { name: 'Toggle busy' }))
     expect(screen.getByTestId('project-solar-step-boundary')).toBe(boundary)
     expect(boundary.disabled).toBe(true)
@@ -1288,6 +1293,12 @@ it('R13D-27 busy reaches every specialized project editor and clears', async () 
     expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
     expect(screen.queryByText('Resume here')).toBeNull()
     expect(boundary.querySelector('#solar-step-editor')).toBe(mountedEditor)
+    if (name === 'solar-string-conductors') {
+      // Busy project forms withdraw the rows until editing resumes.
+      expect(screen.queryByLabelText('Select A1')).toBeNull()
+      expect(within(screen.getByRole('table', { name: 'String conductors' })).queryByRole('checkbox')).toBeNull()
+      expect(draft).toBeDisabled()
+    }
     if (draftLabel) {
       expect(screen.getByLabelText(draftLabel)).toBe(draft)
       expect(draft.value).toBe(draftValue)
@@ -1306,7 +1317,11 @@ it('R13D-27 busy reaches every specialized project editor and clears', async () 
     else await waitFor(() => expect(screen.getByLabelText('Scope').value).toBe('manual-global'))
     expect(boundary.querySelector('#solar-step-editor')).toBe(mountedEditor)
     if (draftLabel) expect(screen.getByLabelText(draftLabel)).toBe(draft)
-    if (name === 'solar-string-conductors') await waitFor(() => expect(screen.getByLabelText('Select A1').getAttribute('aria-selected')).toBe('true'))
+    if (name === 'solar-string-conductors') {
+      await waitFor(() => expect(within(screen.getByLabelText('Select A1')).getByRole('checkbox', { name: 'Include A1' })).toBeChecked())
+      expect(within(screen.getByLabelText('Select A1')).getByRole('checkbox', { name: 'Include A1' })).toBeEnabled()
+      expect(draft).toBeEnabled()
+    }
     if ([STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL].includes(name)) {
       expect(screen.getByText('1 selections')).toBeTruthy()
       if (name === STRING_MULTI_ADD_TOOL) expect(screen.getByLabelText('String length').value).toBe('3')

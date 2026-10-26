@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useId, useState } from 'react'
 import ToolHistory from './ToolHistory.jsx'
 import { isWriteTool } from '../lib/toolRecord.js'
 import SchemaForm, { defaultsOf, sentence } from './SchemaForm.jsx'
@@ -27,6 +27,7 @@ function provenanceLine(t) {
 // ladder's active rung — a shown cap is never inert, never double-firing.
 export default function ToolsPanel({ tools, error, running, selectedTool, onRequestRun, onOpenTool, onReviseTool, onCatalogChanged, onRetry, retryKey, subtitle, writeLocked, writeLockNote = null, writeEntitled = true, runDisabled = false, runDisabledNote = null }) {
   const [openName, setOpenName] = useState(null)
+  const regionPrefix = useId()
   const [paramsByTool, setParamsByTool] = useState({})
   const [validByTool, setValidByTool] = useState({})
 
@@ -42,6 +43,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
       )}
       <div className="tool-list">
         {tools.map((t) => {
+          const regionId = `${regionPrefix}-${encodeURIComponent(t.name)}`
           const open = openName === t.name
           const params = paramsByTool[t.name] ?? defaultsOf(t.params)
           const isRunningThis = running && selectedTool?.name === t.name
@@ -55,6 +57,8 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
             <div key={t.name} className={`tool-card ${open ? 'open' : ''}`}>
               <button
                 className="tool-head"
+                aria-expanded={open}
+                aria-controls={regionId}
                 onClick={() => {
                   const next = open ? null : t.name
                   setOpenName(next)
@@ -81,7 +85,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
                 {provLine && <span className="prov-line">{provLine}</span>}
               </button>
               {open && (
-                <div className="tool-body">
+                <div className="tool-body" id={regionId}>
                   <SchemaForm
                     schema={t.params}
                     values={params}
