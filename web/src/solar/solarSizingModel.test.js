@@ -35,6 +35,19 @@ const r9Oracle = JSON.parse(readFileSync(`${process.cwd()}/src/solar/__fixtures_
 const r9Manual = () => ({ ...raw(), settings: { ...raw().settings, panels_in_sequence: 3 }, project: { zip_code: '' }, electrical_zones: [] })
 
 describe('solarSizingModel', () => {
+  it('allows an unconfirmed standalone module but still requires a nonempty name', () => {
+    const args = { graph: read(), mode: 'global', draft: { ...draft(), module_confirmed: undefined } }
+    const result = buildSizingParams({ ...args, moduleCatalog: false })
+    expect(result.ok).toBe(true)
+    expect(result.params.requests.S.module_name).toBe('Module')
+    expect(JSON.stringify(result.params)).not.toContain('module_confirmed')
+    for (const module_name of ['', '   ', undefined]) {
+      expect(buildSizingParams({ ...args, moduleCatalog: false, draft: { ...args.draft, module_name } }))
+        .toMatchObject({ ok: false, reason: 'sizing_fields_invalid', invalid: ['module_name'] })
+    }
+    expect(buildSizingParams(args)).toMatchObject({ ok: false, reason: 'sizing_module_unconfirmed', invalid: ['module_name'] })
+  })
+
   it('requires an exact confirmed global module and keeps the confirmation out of params', () => {
     for (const changes of [{ module_confirmed: undefined }, { module_confirmed: '' },
       { module_confirmed: 'Other module' }, { module_name: undefined }, { module_name: '' }]) {

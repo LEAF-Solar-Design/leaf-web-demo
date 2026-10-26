@@ -136,7 +136,7 @@ export function sizingTargets(graph, mode) {
   return { ok: true, targets: graph.zones.map((zone) => zone.id) }
 }
 
-export function buildSizingParams({ graph, mode, draft = {} }) {
+export function buildSizingParams({ graph, mode, draft = {}, moduleCatalog = true }) {
   if (!graph?.ok) return fail('sizing_graph_unavailable')
   if (mode === 'manual-global') {
     const targets = sizingTargets(graph, mode)
@@ -176,7 +176,7 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
       else moduleParameters[key] = numeric
     }
   }
-  if (mode === 'global' && (!draft.module_name || !draft.module_confirmed || draft.module_confirmed !== draft.module_name)) {
+  if (moduleCatalog && mode === 'global' && (!draft.module_name || !draft.module_confirmed || draft.module_confirmed !== draft.module_name)) {
     if (!invalid.includes('module_name')) invalid.push('module_name')
     return fail('sizing_module_unconfirmed', invalid)
   }

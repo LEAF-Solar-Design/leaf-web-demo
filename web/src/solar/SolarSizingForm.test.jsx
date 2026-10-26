@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import SolarSizingForm from './SolarSizingForm.jsx'
+import SolarStepEditor from './SolarStepEditor.jsx'
 import { projectSizingConductorFeedback, useProjectSizingConductor } from './SolarSizingForm.jsx'
 import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason, MODULE_PARAMETER_KEYS,
   deriveProjectSizingState, buildProjectSizingRequest } from './solarSizingModel.js'
@@ -51,7 +52,7 @@ const fill = async (skip = []) => {
   })
   await act(async () => { await vi.advanceTimersByTimeAsync(300) })
   vi.useRealTimers()
-  if (!skip.includes('Module')) await chooseTypedModule()
+  if (!skip.includes('Module') && screen.queryByRole('combobox', { name: 'Module' })) await chooseTypedModule()
 }
 const view = (graph, version = 3) => ({ version, intake: { solar_design_graph: graph } })
 async function mount(graph = G7(), overrides = {}, mode = 'global') {
@@ -63,8 +64,7 @@ async function mount(graph = G7(), overrides = {}, mode = 'global') {
   return { ...result, props }
 }
 function invalid(label) {
-  expect(screen.getByText(label === 'Module' ? 'Choose a module from the sizer catalog.' :
-    'Check the marked sizing fields before submitting.')).toBeTruthy()
+  expect(screen.getByText('Check the marked sizing fields before submitting.')).toBeTruthy()
   expect(screen.getByLabelText(label).getAttribute('aria-invalid')).toBe('true')
   expect(run().disabled).toBe(true)
 }
@@ -212,6 +212,43 @@ describe('SolarSizingForm', () => {
   }
   const debounce = async (ms = 300) => { await act(async () => { await vi.advanceTimersByTimeAsync(ms) }) }
 
+  it('submits a standalone global draft without a module catalog client', async () => {
+    const { props } = await mount(G7(), { projectClient: undefined })
+    expect(screen.getByRole('textbox', { name: 'Module' })).toBeTruthy()
+    expect(screen.queryByRole('combobox', { name: 'Module' })).toBeNull()
+    await fill()
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(screen.queryByText(/module catalog|sizer catalog|modules match/i)).toBeNull()
+    expect(run().disabled).toBe(false)
+    fireEvent.click(run())
+    expect(props.onSubmit).toHaveBeenCalledExactlyOnceWith(props.row, {
+      expected_rev: 7, mode: 'global', requests: { [S]: R }, grant_ref: 'grant_1', confirm: true,
+    })
+    expect(JSON.stringify(props.onSubmit.mock.calls[0][1])).not.toContain('module_confirmed')
+  })
+
+  it('closes module options before the real step editor on successive Escapes', async () => {
+    const h = r14Harness()
+    render(<SolarStepEditor {...h.props} />)
+    await r9Ready()
+    change('Scope', 'global')
+    await fill(['Module'])
+    vi.useFakeTimers()
+    change('Module', 'cs6u')
+    await debounce()
+    const input = screen.getByRole('combobox', { name: 'Module' })
+    expect(screen.getByRole('listbox')).toBeTruthy()
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(screen.queryByRole('listbox')).toBeNull()
+    expect(input.getAttribute('aria-expanded')).toBe('false')
+    expect(h.props.onClose).not.toHaveBeenCalled()
+    expect(input.value).toBe('cs6u')
+    expect(screen.getByLabelText('Surface tilt').value).toBe('5')
+    expect(screen.getByLabelText('Grant reference').value).toBe('grant_1')
+    fireEvent.keyDown(input, { key: 'Escape' })
+    expect(h.props.onClose).toHaveBeenCalledTimes(1)
+  })
+
   it.each(['click', 'Enter'])('debounces module searches and confirms a catalog key by %s', async (method) => {
     const search = vi.fn(async () => ({ ok: true, data: { modules: [
       { key: 'CS6U_330', stc_w: 330, n_s: 72 },
@@ -293,7 +330,7 @@ describe('SolarSizingForm', () => {
     expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
   })
 
-  it.each(['drawingId', 'drawingVersion'])('keeps module confirmation when standalone %s changes until the name is edited', async (scope) => {
+  it.each(['drawingId', 'drawingVersion'])('keeps editable module text when standalone %s changes', async (scope) => {
     const { props, rerender } = await mount(G7(), {
       readIntake: vi.fn(async (_id, version) => view(G7(), version)),
     })
@@ -304,26 +341,26 @@ describe('SolarSizingForm', () => {
     expect(screen.getByLabelText('Module').value).toBe(R.module_name)
     expect(screen.queryByText('Choose a module from the sizer catalog.')).toBeNull()
     change('Module', R.module_name + 'x')
-    await screen.findByText('Choose a module from the sizer catalog.')
-    expect(run().disabled).toBe(true)
+    expect(run().disabled).toBe(false)
     fireEvent.click(run())
-    expect(props.onSubmit).not.toHaveBeenCalled()
+    expect(props.onSubmit.mock.calls[0][1].requests[S].module_name).toBe(R.module_name + 'x')
+    expect(props.projectClient.searchSizingModules).not.toHaveBeenCalled()
   })
 
   it('hides old catalog options on the first commit after a drawing change, before passive effects', async () => {
     const observations = []
     function ObserveForm(props) {
       React.useLayoutEffect(() => {
-        observations.push({ drawingId: props.drawingId,
+        observations.push({ drawingId: props.solarBinding.drawing_id,
           option: screen.queryByRole('option', { name: 'Old (595.5 W, 72 cells)' }),
-          controls: screen.queryByRole('combobox', { name: 'Module' })?.getAttribute('aria-controls') })
-      }, [props.drawingId])
+          controls: screen.queryByRole('combobox', { name: 'Module' })?.getAttribute('aria-controls') ?? null })
+      }, [props.solarBinding.drawing_id])
       return <SolarSizingForm {...props} />
     }
     const search = vi.fn(async () => moduleResult('Old'))
-    const props = { row: { name: 'solar-size-strings' }, drawingId: 'd1', drawingVersion: 3,
-      readIntake: vi.fn(async () => view(G7())), onSubmit: vi.fn(),
-      projectClient: { searchSizingModules: search } }
+    const h = r14Harness()
+    h.client.searchSizingModules = search
+    const props = h.props
     const rendered = render(<ObserveForm {...props} />)
     await r9Settle()
     change('Scope', 'global')
@@ -332,8 +369,8 @@ describe('SolarSizingForm', () => {
     change('Module', 'old')
     await debounce()
     expect(screen.getByRole('option', { name: 'Old (595.5 W, 72 cells)' })).toBeTruthy()
-    rendered.rerender(<ObserveForm {...props} drawingId="d2" />)
-    expect(observations.at(-1)).toEqual({ drawingId: 'd2', option: null, controls: null })
+    rendered.rerender(<ObserveForm {...props} solarBinding={{ ...r9Binding, drawing_id: r9Job }} />)
+    expect(observations.at(-1)).toEqual({ drawingId: r9Job, option: null, controls: null })
     expect(screen.queryByRole('option', { name: 'Old (595.5 W, 72 cells)' })).toBeNull()
     expect(search).toHaveBeenCalledTimes(1)
     await r9Settle()
