@@ -14,8 +14,8 @@ afterEach(() => {
 function viewport(width) {
   const listeners = new Set()
   const media = {
-    matches: width < 640,
-    media: '(max-width: 639px)',
+    matches: width < 600,
+    media: '(max-width: 599px)',
     addEventListener: vi.fn((_, listener) => listeners.add(listener)),
     removeEventListener: vi.fn((_, listener) => listeners.delete(listener)),
   }
@@ -33,7 +33,7 @@ function viewport(width) {
     media,
     resize(nextWidth) {
       act(() => {
-        media.matches = nextWidth < 640
+        media.matches = nextWidth < 600
         listeners.forEach(listener => listener({ matches: media.matches }))
       })
     },
@@ -64,7 +64,7 @@ describe('DetailsDrawer phone sheet', () => {
   it('opens at medium with the Esc cap focused and leaves background controls usable', () => {
     viewport(390)
     const { sheet, onClose } = mount()
-    expect(window.matchMedia).toHaveBeenCalledWith('(max-width: 639px)')
+    expect(window.matchMedia).toHaveBeenCalledWith('(max-width: 599px)')
     expect(sheet.classList.contains('drawer-sheet')).toBe(true)
     expect(sheet.parentElement.classList.contains('drawer-sheet-layer')).toBe(true)
     expect(sheet.dataset.detent).toBe('medium')
@@ -148,7 +148,7 @@ describe('DetailsDrawer phone sheet', () => {
     expect(sheetCSS).toContain('prefers-reduced-motion: reduce')
   })
 
-  it.each([640, 1024])('preserves the right drawer and modal trap at %i px', width => {
+  it.each([600, 1024])('preserves the right drawer and modal trap at %i px', width => {
     viewport(width)
     const { sheet } = mount()
     expect(sheet.className).toBe('drawer enter')

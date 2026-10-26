@@ -220,6 +220,95 @@ def test_response_cannot_change_request_voltage_limit(case):
             project.plan_sizing_request(params, case["graph"], INTAKE, MANIFEST)
 
 
+def test_project_accepts_shorter_real_plugin_length(case):
+    plugin = json.loads((REPO / "server/tests/fixtures/w1_plugin_stringsizer_response.json").read_bytes())
+    params = _params(case["graph"], plugin["request"])
+    raw = canonical_bytes(plugin["response"])
+    parsed = cloud.parse_response_bytes(raw)
+    assert parsed["sizing"]["panels_in_sequence"] == 28
+    before = copy.deepcopy((case["graph"], params, parsed))
+
+    def build(parameters):
+        return project.build_sizing_evidence(
+            parameters, case["graph"], INTAKE, MANIFEST, raw, identity=case["identity"],
+            parent_version_id="fixture-version", producer=case["producer"], classification="synthetic")
+
+    with pytest.raises(GraphValidationError, match="^COLD_VOLTAGE_FAILED:"):
+        build(params)
+    length = parsed["sizing"]["voc_cold"]["suggested_string_length"]
+    accepted = dict(params, accepted_string_length=length)
+    evidence = build(accepted)
+    assert evidence["input"]["parameters"]["accepted_string_length"] == length
+    assert evidence["derived"]["panels_in_sequence"] == length
+    cold = evidence["derived"]["voc_cold"]
+    assert cold["passes"] is True and cold["override_accepted"] is False
+    assert cold["suggested_string_length"] == 0
+    assert cold["per_module"] == parsed["sizing"]["voc_cold"]["per_module"]
+    plan = project.plan_sizing_request(accepted, case["graph"], INTAKE, MANIFEST)
+    baseline = project.plan_sizing_request(params, case["graph"], INTAKE, MANIFEST)
+    assert plan["wire_bytes"] == baseline["wire_bytes"]
+    assert plan["canonical_sha256"] == baseline["canonical_sha256"]
+    expected = dict(case["expected"], parameters=accepted, evidence_sha256=cloud.digest(evidence))
+    proven = project.prove_sizing_evidence(
+        evidence, plan["wire_bytes"], raw, case["graph"], expected=expected,
+        allow_synthetic_for_test=True)
+    graph = proven["graph"]
+    target = graph["settings"]["id"]
+    stored = cloud.require_sizing(graph)["records"][target]
+    assert stored["accepted_string_length"] == length
+    assert stored["sizing"]["panels_in_sequence"] == length
+    assert stored["response"] == plugin["response"]
+    assert stored["request"] == plugin["request"]
+    for altered in (length - 1, None, True, "27", 27.0, 4097):
+        changed = copy.deepcopy(graph)
+        changed["settings"]["extra"]["string_sizing"]["records"][target]["accepted_string_length"] = altered
+        with pytest.raises(GraphValidationError, match="^SIZING_CONFIRMATION_REQUIRED:"):
+            cloud.require_sizing(changed)
+    with pytest.raises(GraphValidationError, match="^CLOUD_RESPONSE_INVALID:"):
+        build(dict(params, accepted_string_length=29))
+    with pytest.raises(GraphValidationError, match="^COLD_VOLTAGE_FAILED:"):
+        build(dict(params, accepted_string_length=28))
+    assert (case["graph"], params, parsed) == before
+
+
+@pytest.mark.parametrize("length", [0, 4097, True, "27", 27.0, None])
+def test_project_invalid_accepted_length(case, length):
+    params = dict(case["params"], accepted_string_length=length)
+    with pytest.raises(GraphValidationError, match="^INVALID_SIZING_REQUEST:"):
+        project.plan_sizing_request(params, case["graph"], INTAKE, MANIFEST)
+    evidence = copy.deepcopy(case["record"])
+    evidence["input"]["parameters"]["accepted_string_length"] = length
+    with pytest.raises(GraphValidationError, match="^SIP_R14_EVIDENCE_REJECTED:"):
+        project.validate_sizing_evidence(evidence)
+
+
+@pytest.mark.parametrize("mode", ["zones", "manual-global"])
+def test_project_accepted_length_requires_global(case, mode):
+    params = dict(case["params"], mode=mode, accepted_string_length=9)
+    with pytest.raises(GraphValidationError, match="^INVALID_SIZING_REQUEST:"):
+        project.plan_sizing_request(params, case["graph"], INTAKE, MANIFEST)
+
+
+def test_absent_accepted_length_preserves_normalized_params_and_record(case):
+    plan = project.plan_sizing_request(case["params"], case["graph"], INTAKE, MANIFEST)
+    original_params = {**case["params"], "cancel": False}
+    assert canonical_bytes(plan["normalized_params"]) == canonical_bytes(original_params)
+    parsed = cloud.parse_response_bytes(case["raw"])
+    request = cloud.SizingRequest.model_validate(plan["normalized_request"])
+    original_record = {
+        "endpoint": cloud.SIZING_URL, "adapter_version": cloud.ADAPTER_VERSION,
+        "tenant_id": "fixture-org", "job_id": "fixture-job", "request": request.wire(),
+        "response": parsed["response"], "sizing": parsed["sizing"],
+        "request_sha256": cloud.digest(request.wire()),
+        "response_sha256": parsed["canonical_sha256"], "wire_response_sha256": parsed["wire_sha256"],
+    }
+    target = case["graph"]["settings"]["id"]
+    record = case["applied"]["records"][target]
+    assert canonical_bytes(record) == canonical_bytes(original_record)
+    assert cloud.digest({"parameters": plan["normalized_params"], "record": record}) == cloud.digest(
+        {"parameters": original_params, "record": original_record})
+
+
 def test_request_wire_limit(case, monkeypatch):
     real_wire = cloud.wire_bytes
     padded = case["request_bytes"] + b" " * (project.MAX_REQUEST_BYTES - len(case["request_bytes"]))

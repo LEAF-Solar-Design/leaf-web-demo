@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import sys
 import threading
 from types import SimpleNamespace
@@ -301,6 +302,12 @@ def _transport_caused(exc):
     return False
 
 
+class _ColdVoltageFailed(GraphValidationError):
+    def __init__(self, cold_voltage):
+        super().__init__("COLD_VOLTAGE_FAILED")
+        self.cold_voltage = cold_voltage
+
+
 def _preparation_error(exc):
     reason = getattr(exc, "reason_code", getattr(exc, "code", None))
     if isinstance(exc, cloud.CloudError):
@@ -318,6 +325,8 @@ def _preparation_error(exc):
              "message": "canonical Solar graph preparation failed", "retryable": retryable}
     if isinstance(reason, str):
         error["reason_code"] = reason
+    if isinstance(exc, _ColdVoltageFailed):
+        error["cold_voltage"] = exc.cold_voltage
     return error
 
 
@@ -395,8 +404,26 @@ def _cloud_prepare(job, guard):
                 context.intake_sha256, expected["tool_manifest_sha256"], exchange["response_bytes"],
                 identity=expected["identity"], parent_version_id=expected["parent_version_id"],
                 producer=expected["producer"], classification=exchange["classification"])
-        except GraphValidationError:
+        except GraphValidationError as exc:
             store.refuse_exchange(scope, lease, reason_code="cloud_response_invalid")
+            if exc.code == "COLD_VOLTAGE_FAILED":
+                try:
+                    parsed = cloud.parse_response_bytes(exchange["response_bytes"])
+                    response = cloud.SizingResponse.model_validate(parsed["response"])
+                    cold = cloud.recommend(response)["voc_cold"]
+                    details = {"standard_string_length": int(response.simulation_results.standard.string_length),
+                               "suggested_string_length": cold["suggested_string_length"],
+                               **{key: float(cold[key]) for key in
+                                  ("per_module", "string_voltage", "max_dc_voltage")}}
+                    if (type(details["suggested_string_length"]) is not int
+                            or details["suggested_string_length"] < 1
+                            or not all(math.isfinite(details[key]) for key in
+                                       ("per_module", "string_voltage", "max_dc_voltage"))):
+                        raise ValueError("invalid cold voltage details")
+                except Exception:
+                    pass  # Keep the existing invalid-response failure if diagnostics fail.
+                else:
+                    raise _ColdVoltageFailed(details) from None
             raise cloud.CloudError("cloud_response_invalid", 502) from None
         raw = graph.local.canonical_bytes(evidence)
         try:

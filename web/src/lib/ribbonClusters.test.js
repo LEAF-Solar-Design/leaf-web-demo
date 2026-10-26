@@ -187,7 +187,7 @@ describe('solar-ui-rail', () => {
     const row = solarRow('future-refusal', {
       availability: { ...ready, input_ready: false, refusal_reasons: ['constructor'] },
     })
-    expect(project([row])[1]).toMatchObject({ disabled: true, reason: 'The server refused this solar tool (constructor)' })
+    expect(project([row])[1]).toMatchObject({ disabled: true, reason: 'The server refused this solar tool' })
   })
 
   it('solar rows sort by wave, order and name inside their C-04B seat', () => {
@@ -1612,11 +1612,11 @@ describe('solar refusal copy', () => {
 
   it('RC2 unknown codes keep the fallback', () => {
     expect(solarRailReason(availabilityFor('solar_future_code')))
-      .toBe('The server refused this solar tool (solar_future_code)')
+      .toBe('The server refused this solar tool')
     expect(solarRailReason(availabilityFor('toString')))
-      .toBe('The server refused this solar tool (toString)')
+      .toBe('The server refused this solar tool')
     expect(solarRailReason({ ...availabilityFor('frames_required'), refusal_reasons: ['frames_required', 'solar_future_code'] }))
-      .toBe('Create panel groups first; The server refused this solar tool (solar_future_code)')
+      .toBe('Create panel groups first; The server refused this solar tool')
   })
 
   it('RC3 the rail seat renders the new copy', () => {
