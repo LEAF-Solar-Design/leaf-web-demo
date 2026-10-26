@@ -4925,16 +4925,19 @@ export default function App() {
             actions={surfaceSlots.ground === 'board' ? {
               transferProjectId: openProjectId || '',
               transferStatus: boardTransferStatus,
-              onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? (raw) => {
-                const result = resolveVersionTransfer(raw, {
+              onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? async (raw) => {
+                const scope = boardTransferScopeRef.current
+                const result = await resolveVersionTransfer(raw, {
                   projectId: openProjectId,
                   drawingId: drawingState.drawing_id,
                   versions: workspace.drawing_versions || [],
                 })
+                if (boardTransferScopeRef.current !== scope) return
                 if (result.ok) {
                   boardPreviewRunRef.current ??= createPreviewRunner()
-                  const scope = boardTransferScopeRef.current
-                  boardPreviewRunRef.current(result.seq, onPreviewVersionTracked, (message) => {
+                  boardPreviewRunRef.current(result.seq, (seq) => {
+                    if (boardTransferScopeRef.current === scope) return onPreviewVersionTracked(seq)
+                  }, (message) => {
                     if (boardTransferScopeRef.current === scope) setBoardTransferStatus(message)
                   })
                 } else {

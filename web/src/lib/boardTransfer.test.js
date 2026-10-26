@@ -1,9 +1,96 @@
 import { expect, it, vi } from 'vitest'
+import { readFileSync } from 'node:fs'
+import { parse } from '@babel/parser'
 import { BOARD_TRANSFER_TYPE, MAX_TRANSFER_CHARS, createPreviewRunner, describePreviewOutcome, encodeVersionRef, resolveVersionTransfer } from './boardTransfer.js'
 
 const ref = { projectId: 'project1', drawingId: 'drawing1', versionId: 'version1', seq: 2 }
 const payload = { kind: 'version', ...ref }
 const context = { projectId: ref.projectId, drawingId: ref.drawingId, versions: [{ version_id: ref.versionId, drawing_id: ref.drawingId, seq: ref.seq }] }
+
+// Exercise App's actual drop callback without mounting the drawing renderer.
+const appSource = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8')
+const appTree = parse(appSource, { sourceType: 'module', plugins: ['jsx'] })
+function transferCallback(node = appTree) {
+  if (!node || typeof node.type !== 'string') return null
+  if (node.type === 'ObjectProperty' && node.key.name === 'onTransferVersion') return node.value.consequent
+  for (const value of Object.values(node)) {
+    for (const child of Array.isArray(value) ? value : [value]) {
+      if (child && typeof child.type === 'string') {
+        const found = transferCallback(child)
+        if (found) return found
+      }
+    }
+  }
+  return null
+}
+function dropHarness(resolveTransfer = resolveVersionTransfer) {
+  const boardTransferScopeRef = { current: { projectId: ref.projectId, drawingId: ref.drawingId } }
+  const onPreviewVersionTracked = vi.fn(() => ({ version: ref.seq }))
+  const setBoardTransferStatus = vi.fn()
+  const bindings = {
+    openProjectId: ref.projectId, workspace: { drawing_versions: context.versions },
+    drawingState: { drawing_id: ref.drawingId }, boardTransferScopeRef,
+    boardPreviewRunRef: { current: null }, resolveVersionTransfer: resolveTransfer,
+    createPreviewRunner, onPreviewVersionTracked, setBoardTransferStatus,
+  }
+  const callback = transferCallback()
+  expect(callback).not.toBeNull()
+  const drop = new Function(...Object.keys(bindings), `return (${appSource.slice(callback.start, callback.end)})`)(...Object.values(bindings))
+  return { drop, boardTransferScopeRef, onPreviewVersionTracked, setBoardTransferStatus }
+}
+
+it('ignores a successful board drop resolved after switching project or drawing', async () => {
+  for (const change of [{ projectId: 'project2' }, { drawingId: 'drawing2' }]) {
+    let finish
+    const resolveTransfer = vi.fn(() => new Promise(resolve => { finish = resolve }))
+    const h = dropHarness(resolveTransfer)
+    const pending = h.drop(encodeVersionRef(ref))
+    expect(resolveTransfer).toHaveBeenCalledTimes(1)
+    h.boardTransferScopeRef.current = { ...h.boardTransferScopeRef.current, ...change }
+    finish({ ok: true, seq: ref.seq })
+    await pending
+    await Promise.resolve()
+    expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+    expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+  }
+})
+
+it('ignores a failed board drop resolved after switching project or drawing', async () => {
+  for (const change of [{ projectId: 'project2' }, { drawingId: 'drawing2' }]) {
+    let finish
+    const h = dropHarness(() => new Promise(resolve => { finish = resolve }))
+    const pending = h.drop(encodeVersionRef(ref))
+    h.boardTransferScopeRef.current = { ...h.boardTransferScopeRef.current, ...change }
+    finish({ ok: false, message: 'Choose v2 from the current project to preview it.' })
+    await pending
+    expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+    expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+  }
+})
+
+it('previews and reports board drops while their scope is still current', async () => {
+  const h = dropHarness()
+  await h.drop(encodeVersionRef(ref))
+  expect(h.onPreviewVersionTracked).toHaveBeenCalledTimes(1)
+  expect(h.onPreviewVersionTracked).toHaveBeenCalledWith(ref.seq)
+  await vi.waitFor(() => expect(h.setBoardTransferStatus).toHaveBeenLastCalledWith('Previewing v2 in the drawing'))
+  await h.drop('{')
+  expect(h.setBoardTransferStatus).toHaveBeenLastCalledWith('Drag a version from the Versions card again.')
+})
+
+it('does not start a queued preview after its project scope changes', async () => {
+  const h = dropHarness()
+  const pending = h.drop(encodeVersionRef(ref))
+  // The result is accepted first, but the preview runner starts in a later microtask.
+  await Promise.resolve()
+  h.boardTransferScopeRef.current = { projectId: 'project2', drawingId: 'drawing2' }
+  h.setBoardTransferStatus.mockClear()
+  await pending
+  await Promise.resolve()
+  await Promise.resolve()
+  expect(h.onPreviewVersionTracked).not.toHaveBeenCalled()
+  expect(h.setBoardTransferStatus).not.toHaveBeenCalled()
+})
 
 it('SSD1-24D caps an encoded reference at the transfer limit', () => {
   const escaped = '\\'.repeat(200)
