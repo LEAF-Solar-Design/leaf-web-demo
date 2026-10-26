@@ -12,6 +12,7 @@ export const ADDON_LABELS = {
   gpu_inference: { label: 'GPU inference', description: 'Run models with Leaf Automation, or your own GPU provider.' },
   ios_build: { label: 'iOS builds', description: 'Build iOS apps with Leaf Automation, or your own build service.' },
   app_auth: { label: 'App sign-in', description: 'Manage app sign-in with Leaf Automation, or your own authentication provider.' },
+  kashbot_runner: { label: 'Kashbot runner', description: 'Use your linked Kashbot runner.' },
 }
 
 export const ADDON_READER_VERSION = 1
@@ -36,6 +37,7 @@ export function readAddonCatalog(payload, readerVersion = ADDON_READER_VERSION) 
     const mode = isObject(entry) && Object.hasOwn(entry, 'mode') ? entry.mode : null
     const ref = isObject(entry) && Object.hasOwn(entry, 'byo_ref') ? entry.byo_ref : null
     if (!isVersion(minimum) || !['managed', 'byo', 'off'].includes(mode)
+      || (addon === 'kashbot_runner' && mode === 'managed')
       || (mode === 'byo' && (typeof ref !== 'string' || !ref.length))) {
       settings[addon] = { mode: 'off', byo_ref: null }
     } else {
@@ -71,7 +73,8 @@ export async function getAddons(orgId) {
 }
 
 export async function setAddonMode(orgId, addon, mode, byoRef) {
-  if (!Object.hasOwn(ADDON_LABELS, addon) || !['managed', 'byo', 'off'].includes(mode)) {
+  if (!Object.hasOwn(ADDON_LABELS, addon) || !['managed', 'byo', 'off'].includes(mode)
+    || (addon === 'kashbot_runner' && mode === 'managed')) {
     throw new Error('Choose a valid add-on and mode.')
   }
   const body = { mode }

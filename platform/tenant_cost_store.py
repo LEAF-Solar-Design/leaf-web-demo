@@ -15,6 +15,7 @@ from decimal import Decimal, InvalidOperation, localcontext
 ADDONS = (
     "aps_solve", "e2b_exec", "marathon", "forge_hosting", "aws_resources",
     "storage", "canonical_solve", "tool_ci", "gpu_inference", "ios_build", "app_auth",
+    "kashbot_runner",
 )
 EVENT_FIELDS = (
     "org_id", "addon", "mode", "vendor", "unit", "quantity", "unit_cost_usd",
@@ -103,6 +104,8 @@ def validate_cost_event(event: dict) -> dict:
     result["org_id"] = _org_id(event["org_id"])
     result["addon"] = _enum("addon", event["addon"], ADDONS)
     result["mode"] = _enum("mode", event["mode"], ("managed", "byo"))
+    if result["addon"] == "kashbot_runner" and result["mode"] != "byo":
+        raise ValueError("mode must be byo for kashbot_runner")
     result["cost_basis"] = _enum("cost_basis", event["cost_basis"], ("measured", "estimated", "allocated"))
     # Vendor names allow 100 characters; units allow 50 characters.
     result["vendor"] = _text("vendor", event["vendor"], 100)
@@ -201,9 +204,22 @@ def validate_addon_mode(org_id, addon, mode, *, byo_ref=None, actor) -> dict:
     """Validate settings independently of a connection."""
     org = _org_id(org_id)
     _enum("addon", addon, ADDONS)
+    if addon == "kashbot_runner" and mode not in ("byo", "off"):
+        raise ValueError("mode must be byo or off for kashbot_runner")
     _enum("mode", mode, ("managed", "byo", "off"))
     # Credential names have 1 to 128 characters; actors have at most 200.
-    if mode == "byo":
+    if mode == "byo" and addon == "kashbot_runner":
+        message = "byo_ref must be kashbot-runner:<runner_uuid>"
+        if not isinstance(byo_ref, str) or not byo_ref.startswith("kashbot-runner:"):
+            raise ValueError(message)
+        runner_id = byo_ref[len("kashbot-runner:"):]
+        try:
+            canonical = str(uuid.UUID(runner_id))
+        except ValueError as exc:
+            raise ValueError(message) from exc
+        if runner_id != canonical:
+            raise ValueError(message)
+    elif mode == "byo":
         if not isinstance(byo_ref, str) or not re.fullmatch(r"[A-Za-z0-9_./:-]{1,128}", byo_ref):
             raise ValueError("byo_ref must be a credential name of 1 to 128 characters")
     elif byo_ref is not None:
