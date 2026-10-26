@@ -1474,20 +1474,15 @@ export async function listOperatorSessions(mock) {
 // GET /api/search?q=&drawing_id= — slice 10c's search index, consumed by the
 // bar's find scope. Tenant-scoped and bounded server-side (server/routers/
 // search.py); this wrapper adds its own client-side timeout so a slow
-// backend never stalls the resolver's arrow/Enter keys, and folds any
-// failure into the honest empty-result shape rather than an error the
-// resolver has no row to render.
+// backend never stalls the resolver's arrow/Enter keys. Failures reject so
+// the resolver can show an error and offer a retry.
 export async function searchIndex(mock, q, { drawingId = null } = {}) {
   if (mock) return { query: String(q || ''), results: [] }
   const params = new URLSearchParams({ q: String(q || '') })
   if (drawingId) params.set('drawing_id', drawingId)
-  try {
-    return await http(`/api/search?${params.toString()}`, {
-      headers: { 'X-Tenant-Id': TENANT },
-    }, 4000)
-  } catch {
-    return { query: String(q || ''), results: [] }
-  }
+  return await http(`/api/search?${params.toString()}`, {
+    headers: { 'X-Tenant-Id': TENANT },
+  }, 4000)
 }
 
 // --- Single-writer checkout take / release (3B) -------------------------

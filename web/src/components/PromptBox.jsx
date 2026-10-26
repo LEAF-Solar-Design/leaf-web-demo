@@ -356,7 +356,7 @@ export default function PromptBox({
   // Find-scope search (slice 10c): one request per query, debounced by a
   // short settle delay so arrow-key/backspace bursts while typing don't fan
   // out a request per keystroke. The wrapper itself is bounded (4s client
-  // timeout, server-side caps) and never throws.
+  // timeout, server-side caps); failures show a retry below.
   useEffect(() => {
     setFindResults(null)
     setFindLoading(false)
@@ -471,6 +471,7 @@ export default function PromptBox({
   // Tab: complete the name into the input (trailing space closes the menu and
   // starts args mode). Enter: complete and hand off to dispatch in one act.
   const changePrompt = (nextValue, nextCaret = String(nextValue ?? '').length) => {
+    setAttachmentError(null)
     historyRef.current = setPromptHistoryValue(historyRef.current, nextValue)
     setCaret(nextCaret)
     onChange(nextValue)
@@ -491,6 +492,12 @@ export default function PromptBox({
   }
   const onPaste = (e) => {
     if (!imageAttachmentsEnabled) {
+      const items = Array.from(e.clipboardData?.items || [])
+      if (!items.some((item) => item.kind === 'string') && items.some((item) => item.kind === 'file' && isAttachableImage(item))) {
+        e.preventDefault()
+        setAttachmentError('Image paste is available in the assistant reply box.')
+        return
+      }
       setAttachmentError(null)
       return
     }

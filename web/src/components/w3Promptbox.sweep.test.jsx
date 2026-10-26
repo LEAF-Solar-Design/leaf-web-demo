@@ -3,6 +3,7 @@ import { useState } from 'react'
 import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import PromptBox from './PromptBox.jsx'
+import * as api from '../api.js'
 import { getDrawingVersions, listOperatorSessions, searchIndex } from '../api.js'
 
 vi.mock('../api.js', async (importOriginal) => ({
@@ -10,7 +11,6 @@ vi.mock('../api.js', async (importOriginal) => ({
   getStoredOrgId: () => null,
   getDrawingVersions: vi.fn(),
   listOperatorSessions: vi.fn(),
-  searchIndex: vi.fn(),
 }))
 
 function Harness({ initialValue = '', ...props }) {
@@ -35,10 +35,10 @@ beforeEach(() => {
   vi.clearAllMocks()
   getDrawingVersions.mockResolvedValue({ versions: [] })
   listOperatorSessions.mockResolvedValue({ sessions: [] })
-  searchIndex.mockResolvedValue({ results: [] })
+  vi.spyOn(api, 'searchIndex').mockResolvedValue({ results: [] })
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue({ ok: true, json: async () => ({ servers: [] }) }))
 })
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 
 it('S1-46 preserves text paste when an office clipboard also carries an image', () => {
   render(<Harness />)
@@ -48,6 +48,32 @@ it('S1-46 preserves text paste when an office clipboard also carries an image', 
   } })
   fireEvent(input(), event)
   expect(event.defaultPrevented).toBe(false)
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+it('S1-46 lets catalog text and image clipboard items paste as text', () => {
+  render(<Harness imageAttachmentsEnabled={false} />)
+  const event = createEvent.paste(input(), { clipboardData: {
+    items: [{ kind: 'file', type: 'image/png' }, { kind: 'string', type: 'text/html' }],
+    getData: () => 'Panel count\t24',
+  } })
+  fireEvent(input(), event)
+  expect(event.defaultPrevented).toBe(false)
+  // jsdom does not perform the browser's default text insertion.
+  fireEvent.change(input(), { target: { value: event.clipboardData.getData('text/plain') } })
+  expect(input()).toHaveValue('Panel count\t24')
+  expect(screen.queryByRole('alert')).toBeNull()
+})
+
+it('S1-46 explains image-only catalog paste and clears the warning on input', () => {
+  render(<Harness imageAttachmentsEnabled={false} />)
+  const event = createEvent.paste(input(), { clipboardData: {
+    items: [{ kind: 'file', type: 'image/png' }],
+  } })
+  fireEvent(input(), event)
+  expect(event.defaultPrevented).toBe(true)
+  expect(screen.getByRole('alert')).toHaveTextContent('Image paste is available in the assistant reply box.')
+  fireEvent.change(input(), { target: { value: 'count panels' } })
   expect(screen.queryByRole('alert')).toBeNull()
 })
 
@@ -98,6 +124,26 @@ it('S1-48 reports a search rejection safely and retries from the input', async (
   expect(input()).toHaveFocus()
   await waitFor(() => expect(searchIndex).toHaveBeenCalledTimes(2))
   await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+})
+
+it('S1-48 reports a real search fetch failure and re-requests on Retry', async () => {
+  api.searchIndex.mockRestore()
+  const fetch = vi.fn()
+    .mockRejectedValueOnce(new TypeError('Failed to fetch'))
+    .mockResolvedValue({ ok: true, json: async () => ({ results: [] }) })
+  vi.stubGlobal('fetch', fetch)
+  render(<Harness initialValue="roof" mock={false} />)
+  chooseScope('find')
+  expect(await screen.findByRole('alert')).toHaveTextContent('Search could not be completed. Try again.')
+  expect(screen.getByRole('alert')).not.toHaveTextContent(/Failed to fetch|\/api\//)
+  expect(fetch).toHaveBeenCalledTimes(1)
+  expect(fetch.mock.calls[0][0]).toContain('/api/search?q=roof')
+  fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
+  expect(input()).toHaveFocus()
+  await waitFor(() => expect(fetch).toHaveBeenCalledTimes(2))
+  expect(fetch.mock.calls[1][0]).toBe(fetch.mock.calls[0][0])
+  await waitFor(() => expect(screen.queryByRole('alert')).toBeNull())
+  expect(screen.getByText('No results for “roof”')).toBeTruthy()
 })
 
 it('S1-48 shows saved-item loading and a retry after a failed versions read', async () => {

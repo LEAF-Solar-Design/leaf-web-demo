@@ -147,15 +147,15 @@ describe('the G2 drop well', () => {
     expect(ingestStrip()).toHaveTextContent('Files cannot be uploaded here. Use the drawing upload control.')
   })
 
-  it('with the flag off an image paste leaves native text paste available', () => {
+  it('with the flag off an image-only paste is blocked with the reply-box sentence', () => {
     mount({ imageAttachmentsEnabled: false })
     const file = png('roof.png', 800)
     const accepted = fireEvent.paste(screen.getByTestId('command-bar'), {
       clipboardData: { items: [{ kind: 'file', type: 'image/png', getAsFile: () => file }] },
     })
     expect(chips()).toHaveLength(0)
-    expect(accepted).toBe(true)
-    expect(screen.queryByRole('alert')).toBeNull()
+    expect(accepted).toBe(false)
+    expect(screen.getByRole('alert').textContent).toBe('Image paste is available in the assistant reply box.')
   })
 })
 
