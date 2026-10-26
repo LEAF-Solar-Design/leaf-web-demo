@@ -1,5 +1,56 @@
 # Lab worker operator guide
 
+## Canvas performance proof
+
+The isolated production proof renders 500 blocks and 1000 pipes using the real
+LabCanvas and embedded manifests. It builds only the performance entry into
+`web/dist-lab-perf`, then serves it with Vite preview on port 5195. It needs no
+backend or credentials. Run from the repository root with installed web
+dependencies and the Playwright Chromium browser:
+
+```powershell
+$env:LAB_PERF_SHA = git rev-parse HEAD
+Push-Location web
+npx playwright test e2e/lab-canvas-perf.spec.mjs --config playwright.lab-perf.config.mjs --reporter=line
+$a = $LASTEXITCODE
+Pop-Location
+exit $a
+```
+
+For the release proof, use the Mac mini through the shared tooling's
+`scripts/mini_e2e.py` (the script is outside this repository). From the repository
+root, using its installed Windows path:
+
+```powershell
+python "$HOME/.claude/scripts/mini_e2e.py" run --worktree . --config playwright.lab-perf.config.mjs --host mac-mini --log-dir <dir>
+```
+
+The limits are mount <= 500 ms, pan frame p50 <= 16.7 ms and p95 <= 33 ms.
+Pan samples span at least two seconds. Relayout, both pipe budget states and
+all four inspector tabs must also succeed. Video and trace are off. Timings
+depend on hardware; this config is deliberately outside the CI gate catalog.
+The receipt is `web/test-results/lab-canvas-perf-receipt.json`, schema
+`leaf.lab-canvas-perf.v1`. The same compact JSON is printed on one line prefixed
+`LAB_PERF_RECEIPT=` so snapshot runs retain evidence in their logs. Preserve
+that line and the routed run log in the program receipt folder outside git;
+the remote snapshot's receipt file may not return. `LAB_PERF_SHA` is used when
+available, otherwise the test reads `git rev-parse HEAD` from the repository
+root with a five-second timeout and falls back to `unknown` on error. Bind
+routed evidence to the runner's source snapshot SHA before treating it as
+release evidence.
+
+The graph cap stays **200 blocks / 400 pipes** until a passing receipt on the
+release candidate supports raising it in a later change. The harness constructs
+its oversized rendering fixture directly, without calling the admission API or
+validator. LabCanvas still runs its own validation and reports the existing cap;
+this proof does not attest graph admission or execution. Mount ends at the first
+animation frame after all 500 node cards enter the DOM; initial dependency layout
+finishes separately before pan measurement. See [WAVE2-REPLAY.md](WAVE2-REPLAY.md).
+
+Measured hardware: Apple M4 Pro, 12 cores, 48 GB, macOS (darwin 27.0.0), headless Chromium 148.0.7778.96 (Mac mini, mini_e2e job 147a73d9, 2026-10-26).
+
+Measured: mount 134.9 ms (budget 500), pan p50 12.8 ms (16.7), pan p95 27 ms (33), relayout 2.43 s, 500 nodes and 1000 edges rendered. The 200-block / 400-pipe document cap is unchanged; raising it needs this receipt passing on the release candidate.
+
 All Lab endpoints require the Lab surface rail, live authentication, and a
 verified tenant. Run creation, reads, events, and cancellation require `build`.
 Worker pause and resume also require `deploy`. Worker control is global: a

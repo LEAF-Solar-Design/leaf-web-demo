@@ -62,9 +62,9 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     expect(planIntersectVerb('trim', session([H], '7'), { edge: '9', x: '8', y: '0' }).refusal).toBe('Trim refused: the cutting edge is no longer in the document.')
     // The typed path names only what a canvas pick could: a read-only entity is refused, never rewritten.
     expect(planIntersectVerb('fillet', session([H, { ...V, editable: false }], '7'), { edge: '9', r: '1', x: '2', y: '0', ex: '5', ey: '3' }).refusal)
-      .toBe('Fillet refused: the second object is read-only in the browser engine.')
+      .toBe('Fillet refused: the second object is read-only here.')
     expect(planIntersectVerb('trim', session([H, { ...V, editable: false }], '7'), { edge: '9', x: '8', y: '0' }).refusal)
-      .toBe('Trim refused: the cutting edge is read-only in the browser engine.')
+      .toBe('Trim refused: the cutting edge is read-only here.')
     expect(planIntersectVerb('trim', session([H, V], '7'), { edge: '', x: '8', y: '0' }).refusal).toMatch(/select the cutting edge/)
     // The geometry's own refusal comes through the same door.
     expect(planIntersectVerb('trim', session([H, V], '7'), { edge: '9', x: '5', y: '0' }).refusal).toBe('Trim refused: click on the part to remove, away from the crossing.')
@@ -80,8 +80,8 @@ describe('W4g-6 store: the planner over the session and the lowering to the work
     const DIM_ENTITY = { id: 'd1', handle: 'd1', type: 'DIMENSION', dimtype: 'LINEAR', def1: [0, 0], def2: [1, 1], dimline: [0, 1], rotationDeg: 0, style: 'Standard', layer: 'A', editable: false }
     const inputs = { edge: '9', x: '1', y: '1', r: '1', d1: '1', d2: '1', ex: '5', ey: '3' }
     for (const op of ['trim', 'extend', 'fillet', 'chamfer']) {
-      expect(planIntersectVerb(op, session([INSERT_ENTITY, V], 'i1'), inputs).refusal).toBe('an INSERT is placed, not edited, in this round')
-      expect(planIntersectVerb(op, session([DIM_ENTITY, V], 'd1'), inputs).refusal).toBe('a dimension is placed, not edited, in this round')
+      expect(planIntersectVerb(op, session([INSERT_ENTITY, V], 'i1'), inputs).refusal).toBe('A block can be placed here but not edited.')
+      expect(planIntersectVerb(op, session([DIM_ENTITY, V], 'd1'), inputs).refusal).toBe('A dimension can be placed here but not edited.')
     }
   })
 
@@ -337,7 +337,7 @@ describe('W4g-6 ribbon: a fillet posts ONE batch and its reply selects the arc u
     })
     expect(context.session.busy).toBe(false)
     expect(context.session.selectedId).toBe('11')
-    expect(context.session.status).toMatch(/^fillet applied: entity 11 drawn\./)
+    expect(context.session.status).toMatch(/^Drawing applied: entity created\./)
     expect(context.session.undoDepth).toBe(1)
   })
 
@@ -382,7 +382,7 @@ describe('W4g-6 ribbon: a fillet posts ONE batch and its reply selects the arc u
     expect(lastPost()).toMatchObject({ op: 'batch', payload: { verb: 'trim', steps: [{ op: 'setVertices', payload: { entityId: '7', points: [0, 0, 5, 0], closed: false } }] } })
     workers[0].emit({ type: 'editApplied', op: 'batch', ok: false, reason: 'step_0_setVertices:line_zero_length' })
     expect(context.session.busy).toBe(false)
-    expect(context.session.status).toBe('Edit refused (trim): step_0_setVertices:line_zero_length')
+    expect(context.session.status).toBe('The line needs two different endpoints. Choose another point and retry.')
     expect(context.session.entities).toHaveLength(2)
     expect(context.session.selectedId).toBe('7')
   })

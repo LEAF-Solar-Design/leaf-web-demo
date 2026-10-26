@@ -153,7 +153,7 @@ describe('planMatchprop: one batch of the layer plus only the properties that di
   it('still refuses a non-INSERT read-only destination by name', () => {
     const roDim = { id: 'dim', layer: 'B', aci: 256, linetype: 'ByLayer', lineweight: -1, editable: false, type: 'DIMENSION' }
     expect(planMatchprop({ entities: [source, roDim], selectedId: 's1' }, { edge: 'dim' }))
-      .toEqual({ refusal: 'Match refused: the destination object is read-only in the browser engine.' })
+      .toEqual({ refusal: 'Match refused: the destination object is read-only here.' })
   })
 
   // W4g-7b-03c-g F6: an ACI-only compare misses a true-coloured destination

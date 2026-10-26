@@ -107,6 +107,11 @@
             "type": "object",
             "maxProperties": 4096
           },
+          "accepted_string_length": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 4096
+          },
           "grant_ref": {
             "type": "string",
             "pattern": "^[a-zA-Z0-9_-]{1,64}$"

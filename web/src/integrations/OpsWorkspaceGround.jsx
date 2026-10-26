@@ -367,7 +367,7 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
     data-studio-shell={studioShell ? 'cockpit' : undefined} aria-label="Ops workspace" aria-hidden={leaving ? 'true' : undefined}
     inert={leaving ? '' : undefined} data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}>
     <div className="ops-workspace" style={windowStyle(win)}>
-      <h1>Ops workspace</h1><p>{projectLabel || 'Project'}{projectId ? ` · ${projectId}` : ''}</p>
+      <h1>Ops workspace</h1><p>{projectLabel?.trim() || (projectId ? 'Project name unavailable' : 'No project open')}</p>
       {message ? <p role="status">{message}</p> : visible && <>
         <p role="status" aria-live="polite" tabIndex={-1} ref={resultRef}>{state.notice || state.pending}</p>
         {state.error && <div role="alert"><p>{humanizeError(state.error)}</p>{state.retryable && <button onClick={() => setRetry((value) => value + 1)}>Retry integrations</button>}</div>}
@@ -413,7 +413,9 @@ export function OpsWorkspaceGround({ active = false, projectId = null, projectLa
             onForbidden={() => { const ctx = context.current; if (ctx) fail({ status: 403 }, ctx) }}
             onDatasetReady={refreshSetupDataset} />}
           <section aria-label="Integration datasets"><h2>Datasets</h2>
-            {!state.datasets.length && <p>No connection or dataset is available. Integration setup is needed.</p>}
+            {!state.datasets.length && <p>{state.scope.projectRole === 'owner'
+              ? 'No datasets are available yet. Use integration setup to connect your data.'
+              : 'No datasets are available yet. Ask the project owner to connect your data.'}</p>}
             <ul>{state.datasets.map((item) => <li key={`${item.reference.id}:${item.reference.version}`}>{item.title} · version {item.reference.version}</li>)}</ul>
             {state.datasetCursor && <button disabled={pending} onClick={() => loadMore('datasets')}>Load more datasets</button>}
           </section>

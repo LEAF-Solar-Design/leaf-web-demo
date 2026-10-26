@@ -661,7 +661,7 @@ it('names demo and empty setup honestly without fake provider activity', async (
   const original = fetchImpl.getMockImplementation()
   fetchImpl.mockImplementation((url, options) => url.includes('/datasets?') || url.includes('/elements?') ? Promise.resolve(response(page([]))) : original(url, options))
   rerender(<OpsWorkspaceGround {...props} />)
-  expect(await screen.findByText('No connection or dataset is available. Integration setup is needed.')).toBeInTheDocument()
+  expect(await screen.findByText('No datasets are available yet. Use integration setup to connect your data.')).toBeInTheDocument()
 })
 it('partitions cache identity by verified tenant, principal, binding, role, project, and session generation', () => {
   const original = scopeCacheIdentity(scope, 1)

@@ -957,7 +957,7 @@ describe('SolarStepEditor', () => {
     expect(screen.getByRole('button', { name: 'Review & run' }).disabled).toBe(true)
 
     rerender(<SolarStepEditor {...props} status="failed" failureCode="stale_rev" />)
-    expect(screen.getByRole('alert').textContent).toContain('stale_rev')
+    expect(screen.getByRole('alert').textContent).toContain('The drawing changed. Review it before trying again. Your inputs are kept.')
     fireEvent.click(screen.getByRole('button', { name: 'Retry' }))
     expect(onSubmit).toHaveBeenCalledTimes(2)
     expect(onSubmit.mock.calls[1][0]).toBe(step)

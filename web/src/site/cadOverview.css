@@ -1,8 +1,8 @@
 .cad-overview {
   position: fixed; right: 18px; top: calc(var(--ck-canvas-top-live, var(--ck-canvas-top, 140px)) + 124px); z-index: 24;
   width: 182px; box-sizing: border-box; pointer-events: auto;
-  color: var(--ck-ink, #e2e2e2); background: var(--ck-glass-panel, #1e2227);
-  border: 1px solid var(--ck-edge, #424242); border-radius: var(--leaf-radius-key);
+  color: var(--ck-ink, var(--leaf-ink)); background: var(--ck-glass-panel, var(--leaf-glass-panel));
+  border: 1px solid var(--ck-edge, var(--leaf-line)); border-radius: var(--leaf-radius-key);
   font: var(--leaf-size-caption)/1.4 var(--ck-font, system-ui);
 }
 .cad-overview[data-collapsed="true"] { width: auto; }
@@ -12,7 +12,7 @@
 }
 .cad-overview .cad-overview-toggle { min-height: 44px; padding: 4px 10px; }
 .cad-overview .cad-overview-map { line-height: 0; }
-.cad-overview button:focus-visible { outline: 2px solid var(--ck-sel, #00b4ff); outline-offset: 2px; }
+.cad-overview button:focus-visible { outline: 2px solid var(--ck-sel, var(--leaf-cad-selection)); outline-offset: 2px; }
 .cad-overview-map svg { display: block; width: 100%; height: auto; }
 .cad-overview-outline { fill: var(--leaf-cad-canvas); stroke: var(--leaf-cad-ink-dim); }
 .cad-overview-context { fill: var(--leaf-cad-ink-dim); fill-opacity: .18; stroke: var(--leaf-cad-ink-dim); stroke-opacity: .35; stroke-width: .5; }

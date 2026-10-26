@@ -12,12 +12,13 @@ import pytest
 
 import catalog
 import deps
+import lab_tool_manifests
 import mcp_tool_projection
 from lab_registry import KASHBOT_CLASSES
 
 ROOT = Path(__file__).resolve().parents[2]
 PATH = ROOT / "contract/lab-capability-coverage.v1.json"
-COVERAGE_SHA256 = "ad83557b234f41193821f5d7e20f529da3cc254e8c06ced540fc2391d1a47e97"
+COVERAGE_SHA256 = "f41bb0ddccfdca5454909ddef3363e0aa0a94eb5166d4a5bf106ed846e7b29dd"
 STATUSES = {"runnable", "readable", "explicit-handoff", "unavailable-with-reason"}
 
 
@@ -50,13 +51,20 @@ def check_coverage(coverage, families, sources, source_families):
                        default="unavailable-with-reason")
         assert record["status"] == expected, f"family:{family} strongest status"
         if not entries:
-            assert record.get("reason") == "no Lab adapter in wave 2", f"family:{family} reason"
+            if family == "mcp":
+                assert record == {"family": "mcp", "status": "unavailable-with-reason",
+                                  "adapter_owner": "server.mcp_tool_projection", "host": "production",
+                                  "reason": "no connected MCP tools project into Lab"}, f"family:{family} reason"
+            else:
+                assert record.get("reason") == "no Lab adapter in wave 2", f"family:{family} reason"
 
 
 @pytest.fixture
 def inventory(monkeypatch, tmp_path):
     # Use the tracked tenant tier, rather than operator-local tenant settings.
     tenant_tools = json.loads((ROOT / "harness/test/fixtures/tenant-repo/registry.json").read_text(encoding="utf-8"))["tools"]
+    import customization_service
+    monkeypatch.setattr(customization_service, "load_authoritative_tenant_tools", lambda _tenant: tenant_tools)
     monkeypatch.setattr(deps, "load_tenant_repo_tools", lambda _tenant: tenant_tools)
     monkeypatch.setattr(deps, "_AUTHORED", [])
     monkeypatch.setenv("LEAF_TENANT_MCP_DIR", str(tmp_path / "mcp"))
@@ -70,7 +78,7 @@ def inventory(monkeypatch, tmp_path):
                        for tool in tools}
     source_families.update({"mcp:" + tool["name"]: catalog.family_for_persist(tool)
                             for tool in mcp_tools})
-    return [family["family_id"] for family in config["families"]], sources, source_families
+    return [family["family_id"] for family in config["families"]] + ["mcp"], sources, source_families
 
 
 def load():
@@ -78,7 +86,20 @@ def load():
 
 
 def test_complete(inventory):
-    check_coverage(load(), *inventory)
+    coverage = load()
+    check_coverage(coverage, *inventory)
+    rows = {row["name"]: (row, source)
+            for row, source in deps.effective_tools_with_provenance("coverage-tenant")}
+    for row in catalog.seed_tools():
+        rows.setdefault(row["name"], (row, "catalog_seed"))
+    for entry in coverage["entries"]:
+        if entry["source"].startswith("studio-tool:"):
+            row, source = rows[entry["source"].removeprefix("studio-tool:")]
+            projected = lab_tool_manifests.project_tool(row, source).manifest is not None
+            assert (entry["status"] == "runnable") == projected, entry["source"]
+            if projected:
+                assert entry["adapter_owner"] == "server.lab_tool_manifests", entry["source"]
+    assert mcp_tool_projection.projected_tools("coverage-tenant") == []
 
 
 def test_missing_entry_named(inventory):

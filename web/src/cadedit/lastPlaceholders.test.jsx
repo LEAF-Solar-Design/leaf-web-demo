@@ -140,8 +140,8 @@ describe('W4g-4b MATCHPROP', () => {
     // W4g-7b-03c-f: an INSERT reference is a matchable destination (its own
     // properties, never its block children); only a non-INSERT read-only
     // kind still refuses by name.
-    expect(planMatchprop(session([H, RO], '7'), { edge: '11' })).toEqual({ refusal: 'Match refused: an INSERT keeps its layer in this round.' })
-    expect(planMatchprop(session([H, RO_DIM], '7'), { edge: '12' }).refusal).toBe('Match refused: the destination object is read-only in the browser engine.')
+    expect(planMatchprop(session([H, RO], '7'), { edge: '11' })).toEqual({ refusal: 'Match refused: the block keeps its layer. Choose another property to copy.' })
+    expect(planMatchprop(session([H, RO_DIM], '7'), { edge: '12' }).refusal).toBe('Match refused: the destination object is read-only here.')
     // W4g-7b-03c: MATCHPROP now checks the layer AND the three properties, so
     // "nothing would change" covers all four rather than naming the layer alone.
     expect(planMatchprop(session([H, { ...V, layer: 'Source' }], '7'), { edge: '9' }).refusal).toBe('Match refused: nothing to match.')
