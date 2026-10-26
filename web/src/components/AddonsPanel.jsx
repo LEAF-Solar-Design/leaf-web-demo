@@ -18,11 +18,16 @@ function AddonRow({ orgId, addon, setting }) {
   const [saved, setSaved] = useState(false)
   const save = async () => {
     if (busy) return
+    if (isRunner && mode === 'byo' && !/^kashbot-runner:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(name.trim())) {
+      setError('Runner reference must be kashbot-runner: followed by the runner id.')
+      setSaved(false)
+      return
+    }
     setBusy(true)
     setError('')
     setSaved(false)
     try {
-      await setAddonMode(orgId, addon, mode, mode === 'byo' ? name : undefined)
+      await setAddonMode(orgId, addon, mode, mode === 'byo' ? (isRunner ? name.trim() : name) : undefined)
       if (isRunner && mode === 'off') setName('')
       setSaved(true)
     } catch (failure) {
@@ -38,13 +43,18 @@ function AddonRow({ orgId, addon, setting }) {
       <div className="ca-choice" role="radiogroup" aria-label={`${label} mode`}>
         {MODES.filter(([value]) => !isRunner || value !== 'managed').map(([value, text]) => (
           <button key={value} type="button" role="radio" aria-checked={mode === value}
-            className={`ca-opt${mode === value ? ' on' : ''}`} disabled={busy || (isRunner && value === 'byo' && !name)}
+            className={`ca-opt${mode === value ? ' on' : ''}`} disabled={busy}
             onClick={() => { setMode(value); setSaved(false) }}>{text}</button>
         ))}
       </div>
-      {isRunner && (name
-        ? <p className="ca-note">Runner reference: <code>{name}</code></p>
-        : <p className="ca-note">Link a runner to use Your own.</p>)}
+      {mode === 'byo' && isRunner && (
+        <label className="ca-field">
+          <span className="ca-field-k">Runner reference</span>
+          <input type="text" value={name} disabled={busy} autoComplete="off" spellCheck={false} maxLength={128}
+            placeholder="kashbot-runner:<runner id>"
+            onChange={(event) => { setName(event.target.value); setSaved(false) }} />
+        </label>
+      )}
       {mode === 'byo' && !isRunner && (
         <>
           <label className="ca-field">
@@ -56,7 +66,7 @@ function AddonRow({ orgId, addon, setting }) {
           <p className="ca-note" id={`${addon}-help`}>Enter only the credential name. The value is stored in your tenant's credential store, not here.</p>
         </>
       )}
-      <button type="button" className="btn ca-act" onClick={save} disabled={busy || (mode === 'byo' && (isRunner || !name.trim()))}>
+      <button type="button" className="btn ca-act" onClick={save} disabled={busy || (mode === 'byo' && !name.trim())}>
         {busy ? 'Saving...' : 'Save'}
       </button>
       {saved && <p className="ca-note" role="status">Saved</p>}
