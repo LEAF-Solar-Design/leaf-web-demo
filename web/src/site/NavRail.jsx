@@ -65,6 +65,9 @@ export default function NavRail({
   toolsErr = null,
   onRetryTools = null,
   writeLocked = false,
+  writeLockNote = 'Editing is paused. Take the edit lock to run editing tools.',
+  runDisabled = false,
+  runDisabledNote = null,
   writeEntitled = false,
   running = false,
   selectedTool = null,
@@ -143,6 +146,9 @@ export default function NavRail({
               tools={tools}
               onCatalogChanged={onCatalogChanged}
               writeLocked={writeLocked}
+              writeLockNote={writeLockNote}
+              runDisabled={runDisabled || running}
+              runDisabledNote={runDisabledNote || 'A run is in progress or an older version is open. Wait for the run to finish or return to the latest version.'}
               writeEntitled={writeEntitled}
               error={toolsErr}
               onRetry={onRetryTools}
@@ -179,6 +185,9 @@ export default function NavRail({
             tools={fam.capabilities}
             onCatalogChanged={onCatalogChanged}
             writeLocked={writeLocked}
+            writeLockNote={writeLockNote}
+            runDisabled={runDisabled || running}
+            runDisabledNote={runDisabledNote || 'A run is in progress or an older version is open. Wait for the run to finish or return to the latest version.'}
             writeEntitled={writeEntitled}
             subtitle={fam.description}
             error={toolsErr}

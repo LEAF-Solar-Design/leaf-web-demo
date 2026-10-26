@@ -632,14 +632,14 @@ describe('author start failures: the panel', () => {
     }
     // An account whose plan has no authoring never sees the link gate either.
     panel(await classified(make, runStage), { resumable: true }, { notLinked: true, buildEntitled: false })
-    expect(screen.getByText(/Your plan doesn.t include tool authoring/)).toBeTruthy()
+    expect(screen.getByText(/Tool authoring is unavailable for this account or site/)).toBeTruthy()
     expect(screen.queryByText(LINK_GATE)).toBeNull()
     expect(screen.getByTestId('author-start-failure').textContent).toBe(SENTENCES.grant)
   })
 
   it('C8A-29 a grant refusal the link gate cannot voice is said by its sentence', async () => {
     const make = () => fail('forbidden', { status: 403, body: { grant_required: true } })
-    const plan = /Your plan doesn.t include tool authoring/
+    const plan = /Tool authoring is unavailable for this account or site/
     const grant = await classified(make)
 
     // The plan gate holds the screen: the sentence, and nothing to press beside it.

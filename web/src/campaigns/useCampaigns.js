@@ -73,12 +73,12 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
     if (current()) setSnapshot(previous => ({ ...(previous.scope === scope ? previous : empty()), scope, ...patch }))
   }, [current, scope])
 
-  const loadRequest = useCallback(async ({ refresh = true, preferredId = context.selectedId, onChoicesError } = {}) => {
+  const loadRequest = useCallback(async ({ refresh = true, silent = false, preferredId = context.selectedId, onChoicesError } = {}) => {
     if (!enabled || !projectId || !current()) return null
     const generation = ++generationRef.current
     const view = context.view
     const live = () => current(view) && generationRef.current === generation
-    update({ ...(refresh ? { refreshing: true } : { status: 'loading' }), error: null, errorAction: null })
+    if (!silent) update({ ...(refresh ? { refreshing: true } : { status: 'loading' }), error: null, errorAction: null })
     try {
       const list = await api.listCampaigns(projectId)
       if (!live()) return null
@@ -127,9 +127,10 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       context.enrollments = enrollment.enrollments
       context.completion = completion
       update({ campaigns, selectedId, selected, completion, questions, answers, status: 'ready', refreshing: false,
+        error: null, errorAction: null,
         capabilities, capabilityError, submissions, invocationResults, recoveryUnavailable: storageUnavailableRef.current,
         enrollments: enrollment.enrollments, allowedMachines: enrollment.allowed_machines, enrollmentError,
-        executionLoading: !!selectedId, ...(changedSelection || !selectedId ? { execution: null, executionError: null } : {}) })
+        executionLoading: !silent && !!selectedId, ...(changedSelection || !selectedId ? { execution: null, executionError: null } : {}) })
       if (selectedId) {
         try {
           const result = await api.getExecution(projectId, selectedId)
@@ -163,7 +164,7 @@ export default function useCampaigns(projectId, { enabled = true, authorityProvi
       if (context.read !== read) return
       context.read = null
       if (current(view) && pollRelease(context.completion)) {
-        context.pollTimer = setTimeout(() => { context.pollTimer = null; load() }, 5000)
+        context.pollTimer = setTimeout(() => { context.pollTimer = null; load({ silent: true }) }, 5000)
       }
     })
     context.read = read

@@ -6,8 +6,11 @@ import {
   getJob as defaultGetJob,
   listJobs as defaultListJobs,
   recordToEnvelope as defaultRecordToEnvelope,
+  subscribeUnauthorized,
 } from '../api.js'
 import { track } from '../telemetry.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 
 export const INFLIGHT_JOB_KEY = 'leaf.inflightJob'
 
@@ -42,6 +45,8 @@ export function clearInflightJob(jobId = null, storage = browserStorage()) {
 // sign-in redirect so the user can review and run it again. Bounded (size,
 // age, grammar) and read fail closed: anything malformed is removed, never used.
 export const PENDING_RUN_KEY = 'leaf.pendingRun'
+export const PENDING_RUN_LOGOUT_KEY = 'leaf.pendingRun.logout'
+const PENDING_RUN_SESSION_KEY = 'leaf.pendingRun.session'
 export const PENDING_RUN_TTL_MS = 1800000
 export const MAX_PENDING_RUN_BYTES = 65536
 // Results that finished after a newer run started, newest first.
@@ -60,9 +65,20 @@ const isPlainParams = (value) => !!value && typeof value === 'object' && !Array.
 
 export function clearPendingRun(storage = browserStorage()) {
   try { storage?.removeItem(PENDING_RUN_KEY) } catch { /* storage is best effort */ }
+  try { window.sessionStorage.removeItem(PENDING_RUN_SESSION_KEY) } catch { /* storage is best effort */ }
 }
 
-export function readPendingRun(storage = browserStorage(), now = Date.now()) {
+export function pendingRunAccount(storage = browserStorage()) {
+  return readActiveScope(storage)
+}
+
+// Anonymous records are browser-wide, so every signed-out tab may see them.
+export function canSeePendingRun(record, currentAccount) {
+  const account = typeof currentAccount === 'string' && currentAccount ? currentAccount : null
+  return !!record && record.account === account
+}
+
+export function readPendingRun(storage = browserStorage(), now = Date.now(), account = pendingRunAccount(storage)) {
   let raw
   try { raw = storage?.getItem(PENDING_RUN_KEY) } catch { return null }
   if (raw == null) return null
@@ -71,22 +87,47 @@ export function readPendingRun(storage = browserStorage(), now = Date.now()) {
     record = typeof raw === 'string' && raw.length <= MAX_PENDING_RUN_BYTES ? JSON.parse(raw) : null
   } catch { record = null }
   const age = record && Number.isFinite(record.ts) ? now - record.ts : NaN
-  const valid = isPlainParams(record) && record.v === 1 && isToolName(record.tool)
+  const valid = isPlainParams(record) && record.v === 2
+    && (record.account === null || typeof record.account === 'string') && isToolName(record.tool)
     && isPlainParams(record.params) && age >= 0 && age <= PENDING_RUN_TTL_MS
   if (!valid) {
+    clearPendingRun(storage)
+    return null
+  }
+  // Another account/org may return later for its saved inputs. Legacy iss:sub
+  // owner strings no longer match the full scope: hide them without deleting.
+  if (typeof record.account === 'string' && typeof account === 'string' && record.account !== account) return null
+  // An expired token cannot identify the returning account yet. Keep its
+  // bounded record private until sign-in establishes who is returning.
+  if (account === null && record.account !== null) return null
+  if (record.account === null && account !== null) {
+    // Only the tab/session that paused this anonymous submission may bind it
+    // to the first sign-in. The proof survives the sign-in redirect.
+    try {
+      if (window.sessionStorage.getItem(PENDING_RUN_SESSION_KEY) !== raw) return null
+      record.account = account
+      storage?.setItem(PENDING_RUN_KEY, JSON.stringify(record))
+      window.sessionStorage.removeItem(PENDING_RUN_SESSION_KEY)
+    } catch { return null }
+  }
+  if (!canSeePendingRun(record, account)) {
     clearPendingRun(storage)
     return null
   }
   return { tool: record.tool, params: record.params, ts: record.ts }
 }
 
-export function savePendingRun(tool, params, storage = browserStorage(), now = Date.now()) {
+export function savePendingRun(tool, params, storage = browserStorage(), now = Date.now(), account = pendingRunAccount(storage)) {
   const body = params == null ? {} : params
   if (!isToolName(tool) || !isPlainParams(body)) return null
   let serialized
-  try { serialized = JSON.stringify({ v: 1, tool, params: body, ts: now }) } catch { return null }
+  try { serialized = JSON.stringify({ v: 2, account, tool, params: body, ts: now }) } catch { return null }
   if (typeof serialized !== 'string' || serialized.length > MAX_PENDING_RUN_BYTES) return null
   try { storage?.setItem(PENDING_RUN_KEY, serialized) } catch { return null }
+  try {
+    if (account === null) window.sessionStorage.setItem(PENDING_RUN_SESSION_KEY, serialized)
+    else window.sessionStorage.removeItem(PENDING_RUN_SESSION_KEY)
+  } catch { /* anonymous binding fails closed when session storage is unavailable */ }
   return { tool, params: body, ts: now }
 }
 
@@ -148,6 +189,58 @@ export default function useJobController({
   const [pollGeneration, setPollGeneration] = useState(0)
   const [staleResults, setStaleResults] = useState([])
   const [pendingRun, setPendingRun] = useState(() => (mock ? null : readPendingRun(storage)))
+  const storageRef = useRef(storage)
+  storageRef.current = storage
+  const pendingAccountRef = useRef(pendingRunAccount(storage))
+  const currentAccount = pendingRunAccount(storage)
+  if (currentAccount) pendingAccountRef.current = currentAccount
+  const publishPendingRun = useCallback(() => {
+    const target = storageRef.current ?? browserStorage()
+    const account = pendingRunAccount(target)
+    let owner = null
+    try {
+      owner = JSON.parse(target?.getItem(PENDING_RUN_KEY) || 'null')?.account ?? null
+    } catch { /* readPendingRun validates and clears malformed records below */ }
+    let scoped = null
+    if (typeof owner === 'string' && !canSeePendingRun({ account: owner }, account)) {
+      readPendingRun(target, Date.now(), owner)
+    } else {
+      scoped = readPendingRun(target, Date.now(), account)
+    }
+    setPendingRun(scoped)
+    return scoped
+  }, [])
+  useEffect(() => {
+    const clearSaved = () => {
+      pendingIntentRef.current += 1
+      pendingAccountRef.current = null
+      clearPendingRun(storageRef.current)
+      setPendingRun(null)
+    }
+    const refreshSaved = () => {
+      const nextAccount = pendingRunAccount(storageRef.current)
+      if (nextAccount && pendingAccountRef.current !== nextAccount) pendingIntentRef.current += 1
+      if (nextAccount) pendingAccountRef.current = nextAccount
+      publishPendingRun()
+    }
+    const clear = subscribeBeforeLogout(() => {
+      // Only explicit logout publishes this marker. A 401 removes the token
+      // too, but must preserve the saved inputs in other tabs.
+      try {
+        const target = storageRef.current ?? browserStorage()
+        target?.setItem(PENDING_RUN_LOGOUT_KEY, `${Date.now()}:${Math.random()}`)
+      } catch { /* storage is best effort */ }
+      clearSaved()
+    })
+    const refresh = subscribeTokenStored(refreshSaved)
+    const unauthorized = subscribeUnauthorized(refreshSaved)
+    const activeScope = subscribeActiveScope(refreshSaved)
+    const onStorage = event => {
+      if (event.key === PENDING_RUN_LOGOUT_KEY || event.key === null) clearSaved()
+    }
+    window.addEventListener('storage', onStorage)
+    return () => { clear(); refresh(); unauthorized(); activeScope(); window.removeEventListener('storage', onStorage) }
+  }, [publishPendingRun])
 
   const sequenceRef = useRef(0)
   // Bumped by reset(): a result from before a reset belongs to a context this
@@ -156,7 +249,6 @@ export default function useJobController({
   const runningSinceRef = useRef(null)
   const callbacksRef = useRef({ formatError, onCompleteVersion, onNotice, onAuthRequired })
   const servicesRef = useRef(services)
-  const storageRef = useRef(storage)
   const drawingKeyRef = useRef(drawingKey)
   drawingKeyRef.current = drawingKey
   // Read at entry points and after every await: while a known guest's reads are paused, nothing reads,
@@ -177,7 +269,6 @@ export default function useJobController({
   const [reattachGeneration, setReattachGeneration] = useState(0)
   callbacksRef.current = { formatError, onCompleteVersion, onNotice, onAuthRequired }
   servicesRef.current = { ...defaultServices, ...services }
-  storageRef.current = storage
 
   const setJobId = useCallback((jobId) => {
     setCurrentJobId(jobId)
@@ -398,10 +489,11 @@ export default function useJobController({
   const runJob = useCallback(async ({ toolName, execute, submission = null }) => {
     if (!execute) throw new TypeError('runJob requires an execute callback')
     const intent = ++pendingIntentRef.current
+    const runAccount = pendingAccountRef.current
     if (readsPausedRef.current) {
-      if (submission) {
-        const saved = savePendingRun(toolName, submission.params, storageRef.current)
-        if (saved) setPendingRun(saved)
+      if (submission && pendingIntentRef.current === intent) {
+        const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
+        if (saved) publishPendingRun()
       }
       setAuth(true)
       return null
@@ -436,8 +528,8 @@ export default function useJobController({
         // pointer and let the job reattach after sign-in.
         keepPointer = true
       } else if ((sequenceRef.current === sequence || supersededByPause) && pendingIntentRef.current === intent && submission) {
-        const saved = savePendingRun(toolName, submission.params, storageRef.current)
-        if (saved) setPendingRun(saved)
+        const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
+        if (saved) publishPendingRun()
       }
       setAuth(true)
     }
@@ -492,7 +584,7 @@ export default function useJobController({
       if (submittedJobId && !keepPointer) clearInflightJob(submittedJobId, storageRef.current)
       if (!mock) refreshJobs()
     }
-  }, [acceptStatus, finishEnvelope, mock, refreshJobs, resetActivity, setAuth, setJobId])
+  }, [acceptStatus, finishEnvelope, mock, publishPendingRun, refreshJobs, resetActivity, setAuth, setJobId])
 
   const takePendingRun = useCallback(() => {
     if (readsPausedRef.current) return null
