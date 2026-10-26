@@ -66,7 +66,7 @@ it('B5 an org owner saves a display name for a roster member', async () => {
   })
   fireEvent.click(screen.getByRole('button', { name: 'Save display name for Editor Two' }))
   await waitFor(() => expect(onSetLabel).toHaveBeenCalledWith('u-editor', 'Ada Lovelace'))
-  await waitFor(() => expect(screen.getByRole('button', { name: 'Save display name for Editor Two' }).disabled).toBe(false))
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Save display name for Editor Two' }).disabled).toBe(true))
   fireEvent.change(screen.getByLabelText('Display name for Editor Two'), { target: { value: '   ' } })
   fireEvent.click(screen.getByRole('button', { name: 'Save display name for Editor Two' }))
   await waitFor(() => expect(onSetLabel).toHaveBeenLastCalledWith('u-editor', ''))
@@ -121,9 +121,11 @@ describe('acceptance #1: owner invites/demotes/revokes; revoked member drops the
   })
 
   it('an owner revokes a member', async () => {
+    const confirm = vi.spyOn(window, 'confirm').mockReturnValueOnce(true)
     const { onRevoke } = setup()
     fireEvent.click(screen.getByRole('button', { name: /revoke reviewer three/i }))
     await waitFor(() => expect(onRevoke).toHaveBeenCalledWith('u-reviewer'))
+    confirm.mockRestore()
   })
 
   it("a revoked member's UI drops the whole project on next read, not just their own row", () => {
@@ -203,7 +205,9 @@ describe('w4h-b4 scoped picker and roster labels', () => {
 
   it.each([[], undefined])('offers no invite when identities are empty or unavailable: %s', (identities) => {
     setup({ identities })
-    expect(screen.getByRole('status').textContent).toMatch(/organization members.*(available|unavailable)/i)
+    expect(screen.getByRole('status').textContent).toBe(identities == null
+      ? 'Load organization members to choose someone to invite.'
+      : 'No organization members are available to invite.')
     expect(screen.queryByLabelText('Invite member')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Invite' })).toBeNull()
   })
@@ -215,7 +219,7 @@ describe('w4h-b4 scoped picker and roster labels', () => {
       { member_id: 'three', email: 'reader@example.com', role: 'reviewer' },
       { member_id: 'four', binding_id: '12345678-abcd-4321-8765-123456789abc', role: 'read-only' },
     ] })
-    for (const label of ['Owner label', 'Display name', 'reader@example.com', 'Member 12345678']) {
+    for (const label of ['Owner label', 'Display name', 'reader@example.com', 'Unnamed member']) {
       expect(screen.getByLabelText(`Role for ${label}`)).toBeTruthy()
     }
     expect(screen.getByText('(you)')).toBeTruthy()

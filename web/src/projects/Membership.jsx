@@ -8,10 +8,10 @@
  *      inferred client-side; a read-only viewer sees no mutation affordances.
  *
  * Purely props-driven (ApprovalCard.jsx / EntitlementGate.jsx pattern): this
- * component owns no fetch, no polling, no client-side role math. `authority`
+ * component owns no fetch or polling. `authority`
  * and `members` are the server's answer to "what can this viewer do, and who
- * is actually on the project right now" — every gate below reads a flag off
- * `authority`, never compares role strings itself. The parent re-fetches and
+ * is actually on the project right now". Authority flags gate actions, with
+ * the server's owner-only restrictions applied to protected roles. The parent re-fetches and
  * passes fresh `members`/`authority` after any mutation; that fresh read is
  * what "next read" means here — if the viewer's own record is gone from it,
  * this component drops the whole project instead of rendering stale rows.
@@ -24,7 +24,7 @@ export const ROLES = ['owner', 'editor', 'reviewer', 'read-only']
 export function memberLabel(member) {
   return [member.label, member.display_name, member.name, member.email]
     .find((value) => typeof value === 'string' && value.trim())?.trim()
-    || `Member ${String(member.binding_id || member.member_id || '').slice(0, 8)}`
+    || 'Unnamed member'
 }
 
 function identityText(identity) {
@@ -59,6 +59,7 @@ export default function Membership({
   const [pendingLabelIds, setPendingLabelIds] = useState(() => new Set())
   const pendingLabelsRef = useRef(new Set())
   const [error, setError] = useState(null)
+  const panelRef = useRef(null)
 
   if (!authority) return null // no server authority read yet — render nothing, never a guessed matrix
 
@@ -69,7 +70,7 @@ export default function Membership({
   // revoked. Drop the project entirely; do not render any stale roster row.
   if (viewerId && !viewerRecord) {
     return (
-      <section className="membership-panel" aria-label="Membership">
+      <section ref={panelRef} tabIndex={-1} className="membership-panel" aria-label="Membership">
         <p className="membership-revoked" role="status">
           You no longer have access to this project.
         </p>
@@ -80,6 +81,10 @@ export default function Membership({
   const canInvite = authority.can_invite === true
   const canManage = authority.can_manage === true
   const canLabel = authority.can_label === true && typeof onSetLabel === 'function'
+  const isOwner = authority.role === 'owner'
+  const allowedRoles = isOwner ? ROLES : ROLES.filter((role) => !['owner', 'editor'].includes(role))
+  const selectedInviteRole = allowedRoles.includes(inviteRole) ? inviteRole : 'read-only'
+  const canManageMember = (member) => canManage && (isOwner || !['owner', 'editor'].includes(member.role))
   const choices = identities || []
   const filteredChoices = choices.filter((identity) =>
     identityText(identity).toLowerCase().includes(search.trim().toLowerCase()))
@@ -103,12 +108,12 @@ export default function Membership({
 
   const submitInvite = async (event) => {
     event.preventDefault()
-    if (!selected || invitingRef.current) return
+    if (!canInvite || !selected || invitingRef.current) return
     invitingRef.current = true
     setInviting(true)
     setError(null)
     try {
-      await onInvite(selected.binding_id, inviteRole)
+      await onInvite(selected.binding_id, selectedInviteRole)
       setInviteBinding('')
       setSearch('')
       setInviteRole('read-only')
@@ -122,8 +127,9 @@ export default function Membership({
 
   const saveLabel = async (member) => {
     const id = member.member_id
-    if (pendingLabelsRef.current.has(id)) return
-    const trimmed = (labelDrafts[id] ?? memberLabel(member)).trim()
+    if (pendingLabelsRef.current.has(id) || !Object.hasOwn(labelDrafts, id)) return
+    const trimmed = labelDrafts[id].trim()
+    if (trimmed === memberLabel(member)) return
     setError(null)
     if (Array.from(trimmed).length > 100) {
       setError('A display name can be at most 100 characters.')
@@ -150,14 +156,25 @@ export default function Membership({
     }
   }
 
-  const changeRole = (memberId, role) =>
-    withPending(setPendingRoleIds, memberId, () => onChangeRole(memberId, role))()
+  const changeRole = (member, role) => {
+    if (!canManageMember(member) || !allowedRoles.includes(role)) return
+    return withPending(setPendingRoleIds, member.member_id, () => onChangeRole(member.member_id, role))()
+  }
 
-  const revoke = (memberId) =>
-    withPending(setPendingRevokeIds, memberId, () => onRevoke(memberId))()
+  const revoke = (member) => {
+    if (!canManageMember(member) || pendingRevokeIds.has(member.member_id)) return
+    const question = member.member_id === viewerId
+      ? 'Remove your own access? You will no longer be able to open this project.'
+      : `Remove ${memberLabel(member)} from this project? They will lose access.`
+    if (!window.confirm(question)) return
+    return withPending(setPendingRevokeIds, member.member_id, async () => {
+      await onRevoke(member.member_id)
+      panelRef.current?.focus()
+    })()
+  }
 
   return (
-    <section className="membership-panel" aria-label="Membership">
+    <section ref={panelRef} tabIndex={-1} className="membership-panel" aria-label="Membership">
       <div className="membership-head">
         <span className="membership-title">Members</span>
         <span className="membership-role">your role: {authority.role || 'unknown'}</span>
@@ -165,7 +182,7 @@ export default function Membership({
 
       {canInvite && choices.length === 0 && (
         <p role="status">{identities == null
-          ? 'Organization members are unavailable. No one can be invited yet.'
+          ? 'Load organization members to choose someone to invite.'
           : 'No organization members are available to invite.'}</p>
       )}
       {canInvite && choices.length > 0 && (
@@ -180,6 +197,7 @@ export default function Membership({
               value={search}
               onChange={(event) => { setSearch(event.target.value); setInviteBinding('') }}
               disabled={inviting}
+              title={inviting ? 'Wait for the invite to finish.' : undefined}
             />
           </label>
           <label>
@@ -188,6 +206,7 @@ export default function Membership({
               value={selected ? inviteBinding : ''}
               onChange={(event) => setInviteBinding(event.target.value)}
               disabled={inviting || filteredChoices.length === 0}
+              title={inviting ? 'Wait for the invite to finish.' : filteredChoices.length === 0 ? 'No members match your search.' : undefined}
               required
             >
               <option value="">Choose an organization member</option>
@@ -201,14 +220,17 @@ export default function Membership({
             Role
             <select
               aria-label="Invite role"
-              value={inviteRole}
+              value={selectedInviteRole}
               onChange={(event) => setInviteRole(event.target.value)}
               disabled={inviting}
+              title={inviting ? 'Wait for the invite to finish.' : undefined}
             >
-              {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+              {allowedRoles.map((r) => <option key={r} value={r}>{r}</option>)}
             </select>
           </label>
-          <button type="submit" className="chip-act" disabled={inviting || !selected}>
+          {!isOwner && <p>Only an owner can invite owners or editors.</p>}
+          <button type="submit" className="chip-act" disabled={inviting || !selected}
+            title={inviting ? 'Wait for the invite to finish.' : !selected ? 'Choose an organization member first.' : undefined}>
             {inviting ? 'Inviting…' : 'Invite'}
           </button>
         </form>
@@ -220,6 +242,7 @@ export default function Membership({
           const label = memberLabel(member)
           const roleBusy = pendingRoleIds.has(id)
           const revokeBusy = pendingRevokeIds.has(id)
+          const labelChanged = Object.hasOwn(labelDrafts, id) && labelDrafts[id].trim() !== label
           return (
             <li key={id} className="membership-row">
               <span className="membership-member">{label}{member.created_at && ` · joined ${member.created_at.slice(0, 10)}`}</span>
@@ -234,12 +257,14 @@ export default function Membership({
                     value={labelDrafts[id] ?? label}
                     onChange={(event) => setLabelDrafts((prev) => ({ ...prev, [id]: event.target.value }))}
                     disabled={pendingLabelIds.has(id)}
+                    title={pendingLabelIds.has(id) ? 'Wait for the display name to finish saving.' : undefined}
                   />
                   <button
                     type="button"
                     className="chip-act"
                     aria-label={`Save display name for ${label}`}
-                    disabled={pendingLabelIds.has(id)}
+                    disabled={pendingLabelIds.has(id) || !labelChanged}
+                    title={pendingLabelIds.has(id) ? 'Wait for the display name to finish saving.' : !labelChanged ? 'Edit the display name before saving.' : undefined}
                     onClick={() => saveLabel(member)}
                   >
                     {pendingLabelIds.has(id) ? 'Saving…' : 'Save display name'}
@@ -251,16 +276,18 @@ export default function Membership({
                   <select
                     aria-label={`Role for ${label}`}
                     value={member.role}
-                    disabled={roleBusy}
-                    onChange={(event) => changeRole(id, event.target.value)}
+                    disabled={roleBusy || !canManageMember(member)}
+                    title={!canManageMember(member) ? 'Only an owner can change an owner or editor.' : roleBusy ? 'Wait for the role change to finish.' : undefined}
+                    onChange={(event) => changeRole(member, event.target.value)}
                   >
-                    {ROLES.map((r) => <option key={r} value={r}>{r}</option>)}
+                    {ROLES.filter((r) => allowedRoles.includes(r) || r === member.role).map((r) => <option key={r} value={r}>{r}</option>)}
                   </select>
                   <button
                     type="button"
                     className="chip-act membership-revoke"
-                    disabled={revokeBusy}
-                    onClick={() => revoke(id)}
+                    disabled={revokeBusy || !canManageMember(member)}
+                    title={!canManageMember(member) ? 'Only an owner can remove an owner or editor.' : revokeBusy ? 'Wait for access removal to finish.' : undefined}
+                    onClick={() => revoke(member)}
                   >
                     {revokeBusy ? 'Revoking…' : `Revoke ${label}`}
                   </button>
