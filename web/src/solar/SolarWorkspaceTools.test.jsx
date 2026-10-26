@@ -1093,7 +1093,7 @@ function chooseCombiner() {
   return file
 }
 function combinerHardware() {
-  for (const [label, value] of [['Model', 'Combiner'], ['DC voltage', '480'], ['AC power', '10']]) {
+  for (const [label, value] of [['Model', 'Combiner'], ['DC voltage (V)', '480'], ['AC power (kW)', '10']]) {
     fireEvent.change(screen.getByLabelText(label), { target: { value } })
   }
 }
@@ -2422,7 +2422,7 @@ describe('combiner workspace integration', () => {
     expect(props.onRunPlacement).toHaveBeenCalledTimes(1)
     expect(props.onRunPlacement).toHaveBeenCalledWith({ expected_rev: 7,
       hardware: { model: 'Combiner', max_dc_voltage: 480, max_ac_power_kw: 10 } })
-    fireEvent.change(screen.getByLabelText('DC voltage'), { target: { value: '0' } })
+    fireEvent.change(screen.getByLabelText('DC voltage (V)'), { target: { value: '0' } })
     fireEvent.click(combinerRun())
     expect(props.onRunPlacement).toHaveBeenCalledTimes(1)
     combinerHardware()
@@ -2455,8 +2455,8 @@ describe('combiner workspace integration', () => {
       .toBe(COMBINER_INTAKE_REASONS.COMBINER_IMPORT_STORE_UNAVAILABLE + '. This import can be retried.'))
     expect(combinerFile().files[0]).toBe(file)
     expect(screen.getByLabelText('Model').value).toBe('Combiner')
-    expect(screen.getByLabelText('DC voltage').value).toBe('480')
-    expect(screen.getByLabelText('AC power').value).toBe('10')
+    expect(screen.getByLabelText('DC voltage (V)').value).toBe('480')
+    expect(screen.getByLabelText('AC power (kW)').value).toBe('10')
     expect(props.onDrawingVersionChanged).not.toHaveBeenCalled()
     await importCombiner()
     expect(props.transport.fetchImpl).toHaveBeenCalledTimes(2)

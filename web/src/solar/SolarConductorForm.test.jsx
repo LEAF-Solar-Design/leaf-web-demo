@@ -23,7 +23,7 @@ const choose = () => {
 }
 const stringRow = (tag) => screen.getByLabelText(`Select ${tag}`)
 const stringRows = () => [...document.querySelectorAll('tr[data-string-id]')]
-const isSelected = (item) => item.getAttribute('aria-selected') === 'true'
+const isSelected = (item) => item.querySelector('input[type="checkbox"]').checked
 const selectedIds = () => stringRows().filter(isSelected).map((item) => item.dataset.stringId)
 // jsdom may lack PointerEvent; React reads pointerType off whatever native event arrives.
 function pointer(node, type, { pointerType = 'touch', ...init } = {}) {
@@ -303,7 +303,7 @@ describe('SolarConductorForm', () => {
     h.context = r9Context(four().intake.solar_design_graph)
     const view = render(<SolarConductorForm {...h.props} />)
     await waitFor(() => expect(stringRows()).toHaveLength(4))
-    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(4)
     expect(stringRows().every((item) => item.tabIndex === 0)).toBe(true)
     fireEvent.click(stringRow('A1'))
     fireEvent.click(stringRow('A3'), { shiftKey: true })
@@ -585,18 +585,18 @@ describe('SolarConductorForm', () => {
     }
   })
 
-  it('CF19 has no checkbox column: rows carry the selection and take keyboard focus', async () => {
+  it('CF19 exposes selection through labeled checkboxes and retains row shortcuts', async () => {
     const { container } = await setup()
-    expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(0)
-    expect(screen.queryAllByRole('checkbox')).toHaveLength(0)
+    expect(container.querySelectorAll('input[type="checkbox"]')).toHaveLength(2)
+    expect(screen.queryAllByRole('checkbox')).toHaveLength(2)
     expect(screen.queryByRole('columnheader', { name: 'Select' })).toBeNull()
     for (const item of stringRows()) {
       expect(item.tabIndex).toBe(0)
-      expect(item).toHaveAttribute('aria-selected', 'false')
+      expect(isSelected(item)).toBe(false)
     }
     expect(screen.getByRole('table', { name: 'String conductors' })).toHaveAccessibleDescription(/Shift-click selects a range/)
     fireEvent.click(stringRow('A2'))
-    expect(stringRow('A2')).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('checkbox', { name: 'Include A2' })).toBeChecked()
     expect(stringRow('A2')).toHaveTextContent('A2 (selected)8 AWG')
   })
 

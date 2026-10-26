@@ -22,6 +22,249 @@ import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErr
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
 import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled } from './fixtures.mjs'
+import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
+
+const stagingBase = 'https://platform-staging.leafdesign.ai'
+const stagingIds = [1, 2, 3, 4, 5, 6].map(id => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
+const deliveryExpected = 'a'.repeat(40), deliveryOld = 'b'.repeat(40), deliveryWeb = 'c'.repeat(40)
+const deliveryEnv = { LEAF_E2E_EXPECTED_SHA: deliveryExpected }
+function deliveryResponse(path, body, status = 200, extra = {}) {
+  const bytes = Buffer.from(typeof body === 'string' ? body : JSON.stringify(body))
+  let read = false
+  return { url: `${stagingBase}${path}`, status, redirected: false,
+    body: { getReader: () => ({ read: async () => {
+      if (read) return { done: true }
+      read = true
+      return { done: false, value: bytes }
+    }, cancel: async () => {} }) }, ...extra }
+}
+function deliveryFetch(app = { source_sha: deliveryOld }, web = { source_sha: deliveryWeb }) {
+  return async url => {
+    const path = new URL(url).pathname
+    return deliveryResponse(path, path === '/api/health' ? app : web)
+  }
+}
+const deliveryOptions = (extra = {}) => ({ env: deliveryEnv, fetchImpl: deliveryFetch(), ancestry: async () => 'ancestor', ...extra })
+
+test('staging delivery reads both public identities without credentials', async () => {
+  const calls = []
+  const evidence = await stagingDelivery(stagingBase, deliveryOptions({ fetchImpl: async (url, options) => {
+    calls.push(url)
+    assert.deepEqual(Object.keys(options).sort(), ['cache', 'credentials', 'method', 'redirect', 'signal'])
+    assert.equal(options.method, 'GET')
+    assert.equal(options.credentials, 'omit')
+    assert.equal(options.redirect, 'error')
+    assert.equal(options.cache, 'no-store')
+    assert.equal(options.signal.aborted, false)
+    return deliveryFetch()(url)
+  } }))
+  assert.deepEqual(calls, [`${stagingBase}/api/health`, `${stagingBase}/health.json`])
+  assert.equal(evidence.expected_sha, deliveryExpected)
+  assert.equal(evidence.app.source_sha, deliveryOld)
+  assert.equal(evidence.web.source_sha, deliveryWeb)
+  assert.equal(evidence.schema, 'leaf.staging-delivery.v1')
+  assert.match(evidence.checkedAt, /Z$/)
+})
+
+test('staging delivery skips only proven older components', async () => {
+  for (const app of ['equal', 'ancestor', 'not_ancestor', 'unknown', 'absent', 'invalid']) {
+    for (const web of ['equal', 'ancestor', 'not_ancestor', 'unknown', 'absent', 'invalid']) {
+      const source = (relation, old) => relation === 'equal' ? deliveryExpected
+        : relation === 'absent' ? undefined : relation === 'invalid' ? 'private-short-sha' : old
+      const result = await stagingDelivery(stagingBase, deliveryOptions({
+        fetchImpl: deliveryFetch({ source_sha: source(app, deliveryOld) }, { source_sha: source(web, deliveryWeb) }),
+        ancestry: async served => served === deliveryOld ? app : web,
+      }))
+      const eligible = [app, web].every(value => ['equal', 'ancestor'].includes(value))
+      assert.equal(result.decision === 'stale', eligible && (app === 'ancestor' || web === 'ancestor'), `${app}/${web}`)
+      if (app === 'equal' && web === 'equal') assert.equal(result.decision, 'current')
+      assert.doesNotMatch(JSON.stringify(result), /private-short-sha/)
+    }
+  }
+  assert.equal(decideStagingDelivery({ relation: 'equal' }, { relation: 'not_ancestor' }), 'mismatch')
+})
+
+test('staging delivery does not mistake image adoption for a missing release', async () => {
+  const rows = [
+    [{ source_identity: 'adopted', release_source_sha: deliveryExpected }, false],
+    [{ source_identity: 'build_unknown', release_source_sha: deliveryExpected }, false],
+    [{ source_identity: 'built', release_source_sha: deliveryExpected }, false],
+    [{ source_identity: 'built', release_source_sha: deliveryOld }, true],
+    [{ source_identity: 'unattested', release_source_sha: null }, true],
+    [{}, true], [{ source_identity: 'private-invalid', release_source_sha: 'private-invalid' }, false],
+    [{ source_identity: 'unattested', release_source_sha: 'private-invalid' }, false],
+    [{ source_identity: 'built' }, false], [{ release_source_sha: deliveryOld }, false],
+  ]
+  for (const [metadata, eligible] of rows) {
+    const result = await stagingDelivery(stagingBase, deliveryOptions({
+      fetchImpl: deliveryFetch({ source_sha: deliveryOld, ...metadata }),
+    }))
+    assert.equal(result.decision, eligible ? 'stale' : 'unverified', JSON.stringify(metadata))
+    assert.equal(result.app.source_sha, deliveryOld)
+    assert.doesNotMatch(JSON.stringify(result), /private-invalid/)
+  }
+})
+
+test('staging delivery local ancestry is offline and bounded', async () => {
+  for (const [exit, shallow, wanted] of [[0, 'true', 'ancestor'], [1, 'false', 'not_ancestor'],
+    [1, 'true', 'unknown'], [2, 'false', 'unknown'], ['ETIMEDOUT', 'false', 'unknown'], ['ENOENT', 'false', 'unknown']]) {
+    const calls = []
+    const compare = createLocalAncestry({ now: () => 100, run: async (args, options) => {
+      calls.push(args)
+      assert.equal(options.cwd, deliveryRepo)
+      assert.equal(options.shell, false)
+      assert.equal(options.timeout, 2000)
+      assert.equal(options.maxBuffer, 4096)
+      assert.equal(options.env.GIT_NO_LAZY_FETCH, '1')
+      assert.equal(options.env.GIT_NO_REPLACE_OBJECTS, '1')
+      return { code: args[0] === 'merge-base' ? exit : 0, stdout: shallow }
+    } })
+    assert.equal(await compare(deliveryOld, deliveryExpected), wanted)
+    assert.deepEqual(calls.slice(0, 3), [['cat-file', '-e', `${deliveryOld}^{commit}`],
+      ['cat-file', '-e', `${deliveryExpected}^{commit}`], ['merge-base', '--is-ancestor', deliveryOld, deliveryExpected]])
+    assert.deepEqual(calls.slice(3), exit === 1 ? [['rev-parse', '--is-shallow-repository']] : [])
+  }
+  let clock = 0, calls = 0
+  const bounded = createLocalAncestry({ now: () => clock, run: async (args, options) => {
+    assert.equal(options.timeout, calls === 0 ? 2000 : 800)
+    calls++
+    clock += 1200
+    return { code: 0 }
+  } })
+  assert.equal(await bounded(deliveryOld, deliveryExpected), 'unknown')
+  assert.equal(await bounded(deliveryWeb, deliveryExpected), 'unknown')
+  assert.equal(calls, 2)
+  for (const run of [async () => ({ code: 128 }), async () => { throw new Error('missing executable private') }]) {
+    assert.equal(await createLocalAncestry({ run })(deliveryOld, deliveryExpected), 'unknown')
+  }
+  const inert = createLocalAncestry({ run: () => assert.fail('equal/invalid needs no Git') })
+  assert.equal(await inert(deliveryExpected, deliveryExpected), 'equal')
+  assert.equal(await inert('invalid', deliveryExpected), 'unknown')
+})
+
+test('staging delivery validates expected input without changing optional mode', async () => {
+  for (const env of [{}, { LEAF_E2E_EXPECTED_SHA: '' }]) {
+    const page = new EventEmitter(), runtime = { page, stack: { baseURL: stagingBase }, evidence: { projectSolar: {} } }
+    let actions = 0
+    assert.equal(await stagingEvidenceStep(runtime, { title: 'optional' }, async () => { actions++; return 7 }, async () => {},
+      { env, fetchImpl: () => assert.fail('optional fetch'), ancestry: () => assert.fail('optional Git') }), 7)
+    assert.equal(actions, 1)
+    assert.equal(runtime.evidence.projectSolar.delivery.decision, 'not_configured')
+  }
+  for (const invalid of ['bad-private-value', 'A'.repeat(40), 'a'.repeat(39), null]) {
+    await assert.rejects(stagingDelivery(stagingBase, deliveryOptions({ env: { LEAF_E2E_EXPECTED_SHA: invalid },
+      fetchImpl: () => assert.fail('invalid input I/O') })), /PROD_CONFIG_INVALID LEAF_E2E_EXPECTED_SHA/)
+  }
+  const result = await stagingDelivery(stagingBase, deliveryOptions({
+    fetchImpl: deliveryFetch({ source_sha: 'private-invalid' }, { source_sha: 'private-invalid' }),
+    ancestry: () => assert.fail('invalid deployed input Git'),
+  }))
+  assert.equal(result.app.source_sha, null)
+  assert.equal(result.web.source_sha, null)
+  assert.doesNotMatch(JSON.stringify(result), /private-invalid/)
+})
+
+test('staging delivery preflight persists a real skip before browser work', async () => {
+  for (const title of ['project-solar-open', 'project-solar-form-switch', 'project-solar-published', 'project-solar-proposal-review']) {
+    const skip = new Error('Test is skipped: infra_stale_delivery')
+    const page = { on: () => assert.fail('no monitor installation'), addInitScript: () => assert.fail('no init'),
+      goto: () => assert.fail('no navigation'), evaluate: () => assert.fail('no project reads or writes') }
+    let persisted
+    const testInfo = { title, annotations: [], skip: (condition, reason) => {
+      assert.equal(condition, true)
+      assert.equal(reason, 'infra_stale_delivery')
+      assert.equal(persisted.projectSolar.delivery.decision, 'stale')
+      throw skip
+    } }
+    await assert.rejects(withStagingProject(page, stagingBase, stagingIds[1], '', testInfo,
+      () => assert.fail('no action/checkout'), { delivery: deliveryOptions(),
+        persist: async evidence => { persisted = structuredClone(evidence) } }), error => error === skip)
+    const delivery = persisted.projectSolar.delivery
+    assert.equal(delivery.expected_sha, deliveryExpected)
+    assert.equal(delivery.app.source_sha, deliveryOld)
+    assert.equal(delivery.web.source_sha, deliveryWeb)
+    assert.equal(persisted.projectSolar.skipReason, 'infra_stale_delivery')
+    assert.equal(persisted.projectSolar.classification.reasonCode, 'infra_stale_delivery')
+    assert.deepEqual(testInfo.annotations, [{ type: 'infra_stale_delivery', description: JSON.stringify(delivery) }])
+  }
+})
+
+test('staging delivery cannot hide UI or security failures', async () => {
+  const stale = await stagingDelivery(stagingBase, deliveryOptions())
+  assert.equal(classifyStagingOutcome({ error: new Error('UI barrier'), delivery: stale }).status, 'failed')
+  assert.equal(classifyStagingOutcome({ error: new Error('UI barrier'), skipped: 'infra_stale_delivery', delivery: stale }).status, 'failed')
+  assert.deepEqual(classifyStagingOutcome({ skipped: 'named', delivery: stale }),
+    { status: 'skipped', barrierFailure: null, observations: [] })
+  for (const base of ['https://app.leafdesign.ai', 'https://platform-staging.leafdesign.ai:444', 'https://user:password@platform-staging.leafdesign.ai']) {
+    await assert.rejects(withStagingProject({}, base, stagingIds[1], '', {}, () => assert.fail('unsafe action'),
+      { delivery: deliveryOptions({ fetchImpl: () => assert.fail('unsafe fetch') }) }))
+  }
+  await assert.rejects(withStagingProject({}, stagingBase, stagingIds[1], 'invalid-token', {}, () => assert.fail('identity action'),
+    { delivery: deliveryOptions({ fetchImpl: () => assert.fail('identity fetch') }) }))
+  await assert.rejects(stagingDelivery(stagingBase, deliveryOptions({ fetchImpl: async () =>
+    deliveryResponse('/api/health', {}, 200, { url: 'https://foreign.invalid/api/health' }) })), /origin mismatch/)
+  const currentOptions = deliveryOptions({ fetchImpl: deliveryFetch({ source_sha: deliveryExpected }, { source_sha: deliveryExpected }),
+    ancestry: () => assert.fail('equal needs no Git') })
+  for (const fail of [false, true]) {
+    const page = new EventEmitter(), runtime = { page, stack: { baseURL: stagingBase }, evidence: { projectSolar: {} } }
+    const failure = new Error('UI barrier')
+    const run = () => stagingEvidenceStep(runtime, { title: 'current' }, async () => {
+      emitStagingEvidenceResponse(page, '/api/tenant/claude-grant', 502)
+      if (fail) throw failure
+      return 9
+    }, async () => {}, currentOptions)
+    if (fail) await assert.rejects(run(), error => error === failure)
+    else assert.equal(await run(), 9)
+    assert.equal(runtime.evidence.projectSolar.delivery.decision, 'current')
+    assert.equal(runtime.evidence.projectSolar.classification.status, fail ? 'failed' : 'passed')
+    assert.equal(runtime.evidence.projectSolar.classification.observations[0].status, 502)
+  }
+})
+
+test('staging delivery unavailable health stays diagnostic', async () => {
+  for (const factory of [
+    path => deliveryResponse(path, 'private-body', 404), path => deliveryResponse(path, 'private-body', 502),
+    path => deliveryResponse(path, 'private-invalid-json'), path => deliveryResponse(path, { source_sha: 'unknown' }),
+    path => deliveryResponse(path, { source_sha: 'abc' }), path => deliveryResponse(path, 'x'.repeat(4097)),
+    path => deliveryResponse(path, {}, 302),
+    () => { throw new Error('private-redirect-header') },
+    path => deliveryResponse(path, {}, 200, { body: { getReader: () => ({ read: () => new Promise(() => {}), cancel: async () => {} }) } }),
+    () => new Promise(() => {}),
+  ]) {
+    let calls = 0
+    const evidence = await stagingDelivery(stagingBase, deliveryOptions({ timeoutMs: 1, fetchImpl: async url => {
+      calls++
+      return factory(new URL(url).pathname)
+    }, ancestry: () => assert.fail('unavailable cannot use Git') }))
+    assert.equal(calls, 2)
+    assert.equal(evidence.decision, 'unverified')
+    assert.doesNotMatch(JSON.stringify(evidence), /private-|xxxx|redirect-header/)
+    assert.equal(evidence.app.source_sha, null)
+    assert.equal(evidence.web.source_sha, null)
+  }
+  const result = await observeDeliveryHealth(stagingBase, '/health.json', { timeoutMs: 1,
+    fetchImpl: () => new Promise(() => {}) })
+  assert.deepEqual(result, { source_sha: null, observation: 'unavailable', http_status: null })
+})
+
+test('staging delivery evidence IO cannot change the verdict', async () => {
+  const badDisk = async () => { throw new Error('disk unavailable') }
+  const sentinel = new Error('Test is skipped: infra_stale_delivery')
+  await assert.rejects(withStagingProject({ on: () => assert.fail('no monitor') }, stagingBase, stagingIds[1], '',
+    { title: 'skip-io', annotations: [], skip: () => { throw sentinel } }, () => assert.fail('no action'),
+    { persist: badDisk, delivery: deliveryOptions() }), error => error === sentinel)
+  for (const fail of [false, true]) {
+    const page = new EventEmitter(), runtime = { page, stack: { baseURL: stagingBase }, evidence: { projectSolar: {} } }
+    const original = new Error('real failure')
+    const run = () => stagingEvidenceStep(runtime, { title: 'io' }, async () => { if (fail) throw original; return 3 },
+      badDisk, deliveryOptions({ env: {} }))
+    if (fail) await assert.rejects(run(), error => error === original)
+    else assert.equal(await run(), 3)
+    assert.equal(runtime.evidence.projectSolar.classification.status, fail ? 'failed' : 'passed')
+    assert.equal(page.listenerCount('response'), 0)
+    assert.equal(page.listenerCount('console'), 0)
+  }
+})
 
 test('walk form helpers pass default and explicit timeouts and preserve enabled booleans', async () => {
   for (const [options, timeout] of [[undefined, 15_000], [{ timeout: 7_000 }, 7_000]]) {
@@ -237,8 +480,6 @@ function fakeAuth(value) {
   return headers
 }
 
-const stagingBase = 'https://platform-staging.leafdesign.ai'
-const stagingIds = [1, 2, 3, 4, 5, 6].map(id => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
 const stagingBinding = { organization_id: stagingIds[0], project_id: stagingIds[1],
   drawing_id: stagingIds[2], input_version_id: stagingIds[3] }
 const stagingResponse = (path, body, status = 200, method = 'GET') => ({

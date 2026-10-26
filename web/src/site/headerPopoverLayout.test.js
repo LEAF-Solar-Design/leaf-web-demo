@@ -13,6 +13,16 @@ const declaration = (body, property) => body.match(
   new RegExp(`(?:^|;)\\s*${property}\\s*:\\s*([^;]+);`),
 )?.[1].trim()
 
+const LAYERS = { base: 0, raised: 10, sticky: 20, header: 30, overlay: 40, popover: 50, modal: 60, toast: 70 }
+const layerValue = (v) => {
+  if (/^-?\d+$/.test(v)) return Number(v)
+  const token = v?.match(/^var\(--leaf-layer-([a-z]+)\)$/)
+  if (token) return LAYERS[token[1]]
+  const calc = v?.match(/^calc\(var\(--leaf-layer-([a-z]+)\) ([+-]) (\d+)\)$/)
+  if (calc) return LAYERS[calc[1]] + (calc[2] === '+' ? 1 : -1) * Number(calc[3])
+  return NaN
+}
+
 describe('header popover layout', () => {
   it('wraps card text while preserving the desktop anchor and trigger labels', () => {
     const popover = styles.match(/^\.claude-pop\s*\{([^{}]*)\}/m)?.[1]
@@ -55,7 +65,7 @@ describe('header popover layout', () => {
   it('lifts the header above the product nav while a header popover is open', () => {
     const header = landing.match(/^\.studio-shell header\.top:has\(\.claude-pop\)\s*\{([^{}]*)\}/m)?.[1]
     expect(header).toBeDefined()
-    expect(Number(declaration(header, 'z-index'))).toBeGreaterThan(6)
+    expect(layerValue(declaration(header, 'z-index'))).toBeGreaterThan(6)
   })
 
   it('cancels the header backdrop filter on phones so the fixed sheet escapes the header', () => {
