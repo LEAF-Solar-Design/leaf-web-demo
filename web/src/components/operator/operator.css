@@ -1,5 +1,6 @@
 /* ============================================================================
-   Operator console (Lane E) — dark, probe-gated surface. NEW classes only,
+   Operator console (Lane E) — dark, probe-gated surface.
+   It sets data-leaf-theme="stage" and reads the v1 Stage roles. NEW classes only,
    named operator-*; reuses the styles.css token vocabulary (--primary,
    --muted, --muted-2, --status-warning, --accent-tint, --font-mono). The
    console is a modal-style panel; no tenant-facing class is redefined here.
@@ -15,7 +16,7 @@
 
 .operator-console {
   position: fixed; inset: 6vh 8vw; z-index: var(--leaf-layer-modal); display: flex; flex-direction: column;
-  background: var(--panel-bg, #101418); color: inherit;
+  background: var(--leaf-surface); color: inherit;
   border: 1px solid var(--accent-tint); border-radius: var(--leaf-radius-card);
   box-shadow: 0 12px 40px rgba(0, 0, 0, .45); overflow: hidden;
 }

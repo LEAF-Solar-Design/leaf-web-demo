@@ -59,6 +59,7 @@ export default function OperatorConsole({ onClose }) {
     <div
       ref={rootRef}
       className="operator-console"
+      data-leaf-theme="stage"
       role="dialog"
       aria-modal="true"
       aria-label="Operator console"
