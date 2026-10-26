@@ -35,8 +35,8 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0090_lab_git_authority.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0090"
+    assert manifest[-1]["name"] == "0091_kashbot_runner.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0091"
 
     class Schema:
         absent = None
@@ -101,6 +101,78 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     status = db.schema_status()
     assert not status["ok"]
     assert "unit_economics_observations_org_class_check:definition-mismatch" in status["invalid_constraints"]
+
+
+def test_runner_registry(monkeypatch):
+    from contextlib import nullcontext
+    from leaf_platform.tenant_cost_store import ADDONS
+
+    sql = (db._PKG_DIR / "migrations/0091_kashbot_runner.sql").read_text(encoding="utf-8")
+    catalog = db.required_catalog_for_selected_authorities({})
+    columns = db.required_columns_for_selected_authorities({})
+    manifest = db.migration_manifest()
+    inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
+    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 92)]
+    assert [item["name"][:4] for item in manifest] == inventory["scope"]["migration_ids"]
+    assert len(ADDONS) == 12
+    assert "-- expand-contract: contract-of=0083" in sql
+    names = [f"{table}_addon_check" for table in ("tenant_cost_events", "tenant_addon_settings")]
+    for name in names:
+        match = re.search(rf"ADD CONSTRAINT {name} CHECK \(addon IN \((.*?)\)\)", sql, re.S)
+        assert match is not None
+        assert set(re.findall(r"'([^']+)'", match[1])) == set(ADDONS)
+        definition = " ".join(catalog["constraints"][name]["definition_fragments"])
+        assert set(re.findall(r"'([^']+)'", definition)) == set(ADDONS)
+
+    class Schema:
+        old_check = None
+
+        def cursor(self):
+            return nullcontext(self)
+
+        def connection(self):
+            return nullcontext(self)
+
+        def execute(self, sql, params=None):
+            self.sql = sql
+
+        def fetchall(self):
+            if "information_schema.columns" in self.sql:
+                required = {**columns, db._MIGRATION_LEDGER_TABLE: db._MIGRATION_LEDGER_COLUMNS}
+                return [{"table_name": table, "column_name": column}
+                        for table, fields in required.items() for column in fields]
+            for kind, source, field in (("constraints", "pg_constraint", "conname"),
+                                        ("indexes", "pg_index", "indexname"),
+                                        ("triggers", "pg_trigger", "tgname")):
+                if source in self.sql:
+                    rows = []
+                    for name, contract in catalog[kind].items():
+                        definition = " ".join(contract["definition_fragments"])
+                        if name == self.old_check:
+                            definition = definition.replace(", 'kashbot_runner'", "")
+                        rows.append({field: name, "relation_name": contract["relation"],
+                                     "definition": definition, "validated": True,
+                                     "valid": True, "ready": True, "enabled": "O"})
+                    return rows
+            assert "FROM leaf_schema_migrations" in self.sql
+            return manifest
+
+        def fetchone(self):
+            return {"database": "offline", "schema": "public"}
+
+    schema = Schema()
+    monkeypatch.setattr(db, "get_pool", lambda: schema)
+    monkeypatch.setattr(db, "required_columns_for_selected_authorities", lambda: dict(columns))
+    monkeypatch.setattr(db, "required_catalog_for_selected_authorities", lambda: catalog)
+    assert db.schema_status()["ok"]
+    for name in names:
+        schema.old_check = name
+        status = db.schema_status()
+        assert not status["ok"]
+        assert status["invalid_constraints"] == [f"{name}:definition-mismatch"]
+        assert status["missing_migrations"] == []
+    schema.old_check = None
+    assert db.schema_status()["ok"]
 
 
 def test_sip_r1_schema_contract_complete():
@@ -189,9 +261,9 @@ def test_sip_r1_schema_contract_complete():
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 91)]
+    ids = [f"{n:04d}" for n in range(1, 92)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0090_lab_git_authority.sql"
+    assert db.migration_manifest()[-1]["name"] == "0091_kashbot_runner.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
@@ -384,12 +456,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0090_lab_git_authority.sql",
+        manifest_names[-1], "0091_kashbot_runner.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0090",
+        inventory["scope"]["migration_ids"][-1], "0091",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )

@@ -4,7 +4,7 @@ import AddonsPanel from './AddonsPanel.jsx'
 import * as addonsApi from '../addons.js'
 
 const LABELS = ['Autodesk processing', 'Hosted execution', 'Long-running tasks', 'Repository hosting',
-  'Cloud resources', 'File storage', 'Drawing solves', 'Tool checks', 'GPU inference', 'iOS builds', 'App sign-in']
+  'Cloud resources', 'File storage', 'Drawing solves', 'Tool checks', 'GPU inference', 'iOS builds', 'App sign-in', 'Kashbot runner']
 const statement = {
   placeholder: true,
   lines: [
@@ -84,23 +84,75 @@ describe('Studio Add-ons', () => {
     expect(fetch).not.toHaveBeenCalled()
   })
 
-  it('renders all eleven labels with equally styled mode buttons', async () => {
+  it('renders all twelve labels with equally styled mode buttons', async () => {
     mockFetch()
     panel()
     await loadedRow()
-    expect(Object.keys(addonsApi.ADDON_LABELS)).toHaveLength(11)
+    expect(Object.keys(addonsApi.ADDON_LABELS)).toHaveLength(12)
     for (const label of LABELS) {
       const row = within(screen.getByRole('region', { name: label }))
       const choices = row.getAllByRole('radio')
-      expect(choices.map((choice) => choice.textContent)).toEqual(['Managed', 'Your own', 'Off'])
-      expect(choices.map((choice) => choice.tagName)).toEqual(['BUTTON', 'BUTTON', 'BUTTON'])
-      expect(choices.map((choice) => choice.className.replace(/ on$/, ''))).toEqual(['ca-opt', 'ca-opt', 'ca-opt'])
+      expect(choices.map((choice) => choice.textContent)).toEqual(
+        label === 'Kashbot runner' ? ['Your own', 'Off'] : ['Managed', 'Your own', 'Off'])
+      expect(choices.every((choice) => choice.tagName === 'BUTTON')).toBe(true)
+      expect(choices.every((choice) => choice.className.replace(/ on$/, '') === 'ca-opt')).toBe(true)
       for (const choice of choices) {
+        if (choice.disabled) continue
         fireEvent.click(choice)
         expect(choice).toHaveClass('on')
         expect(choice).toHaveAttribute('aria-checked', 'true')
       }
     }
+  })
+
+  it('test_runner_panel', async () => {
+    const ref = 'kashbot-runner:7b51687d-2d39-47ac-b598-54f3d1fd9e22'
+    const fetch = mockFetch({ catalog: {
+      schema: 'leaf.addons.v1', reader_version: 2, extra: { ignored: true },
+      addons: {
+        kashbot_runner: { mode: 'byo', byo_ref: ref, min_reader_version: 1, extra: true },
+        future_addon: { mode: 'byo', byo_ref: 'ignored' },
+      },
+    }, put: (_url, options) => response(JSON.parse(options.body)) })
+    panel()
+    const row = within(await loadedRow('Kashbot runner'))
+    expect(Object.keys(addonsApi.ADDON_LABELS)).toEqual([
+      'aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage',
+      'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth', 'kashbot_runner',
+    ])
+    expect(screen.getAllByRole('radiogroup')).toHaveLength(12)
+    expect(row.getAllByRole('radio').map((choice) => choice.textContent)).toEqual(['Your own', 'Off'])
+    expect(row.getByRole('radio', { name: 'Your own' })).toHaveAttribute('aria-checked', 'true')
+    expect(row.getByText(ref)).toBeInTheDocument()
+    expect(row.queryByRole('textbox')).not.toBeInTheDocument()
+    expect(row.queryByText(/credential/i)).not.toBeInTheDocument()
+    expect(row.getByRole('button', { name: 'Save' })).toBeDisabled()
+    const calls = fetch.mock.calls.length
+    await expect(addonsApi.setAddonMode('org-1', 'kashbot_runner', 'managed'))
+      .rejects.toThrow('Choose a valid add-on and mode.')
+    expect(fetch).toHaveBeenCalledTimes(calls)
+    fireEvent.click(row.getByRole('radio', { name: 'Off' }))
+    fireEvent.click(row.getByRole('button', { name: 'Save' }))
+    expect(await row.findByRole('status')).toHaveTextContent('Saved')
+    const writes = fetch.mock.calls.filter(([, options]) => options.method === 'PUT')
+    expect(writes).toHaveLength(1)
+    expect(writes[0][0]).toContain('/addons/kashbot_runner')
+    expect(JSON.parse(writes[0][1].body)).toEqual({ mode: 'off' })
+    expect(row.queryByText(ref)).not.toBeInTheDocument()
+    expect(row.getByRole('radio', { name: 'Off' })).toHaveAttribute('aria-checked', 'true')
+    expect(row.getByRole('radio', { name: 'Your own' })).toBeDisabled()
+    expect(row.queryByRole('textbox')).not.toBeInTheDocument()
+    // The link flow can still save a validated reference through the existing helper.
+    await addonsApi.setAddonMode('org-1', 'kashbot_runner', 'byo', ref)
+    expect(JSON.parse(fetch.mock.calls.at(-1)[1].body)).toEqual({ mode: 'byo', byo_ref: ref })
+    const future = addonsApi.readAddonCatalog({ addons: {
+      kashbot_runner: { mode: 'byo', byo_ref: ref, min_reader_version: 2 },
+      future_addon: { anything: [] },
+    } })
+    expect(Object.hasOwn(future, 'kashbot_runner')).toBe(false)
+    expect(Object.hasOwn(future, 'future_addon')).toBe(false)
+    expect(addonsApi.readAddonCatalog({ addons: { kashbot_runner: { mode: 'managed' } } }).kashbot_runner)
+      .toEqual({ mode: 'off', byo_ref: null })
   })
 
   it('saves only the BYO credential name, shows busy state and the API error', async () => {

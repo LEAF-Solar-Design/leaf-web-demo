@@ -160,6 +160,22 @@ def test_byo_usage_has_zero_money(book):
     assert {line[field] for field in ("cost_usd", "fee_usd", "total_usd")} == {"0.00"}
 
 
+def test_runner_nonbillable(book):
+    expected = {"aps_solve", "e2b_exec", "marathon", "forge_hosting", "aws_resources",
+                "storage", "canonical_solve", "tool_ci", "gpu_inference", "ios_build",
+                "app_auth", "kashbot_runner"}
+    assert set(book["addons"]) == set(ADDONS) == expected
+    assert book["addons"]["kashbot_runner"] == {"billable": False}
+    result = statements.compute_statement(
+        [event(addon="kashbot_runner", mode="byo", cost_usd=Decimal("0"))], ORG, PERIOD, book)
+    assert len(result["lines"]) == 1
+    line = result["lines"][0]
+    assert (line["addon"], line["mode"]) == ("kashbot_runner", "byo")
+    assert line["quantity_by_unit"] == {"seconds": "2"}
+    assert {line[field] for field in ("cost_usd", "fee_usd", "total_usd")} == {"0.00"}
+    assert result["totals"] == {"cost_usd": "0.00", "fee_usd": "0.00", "total_usd": "0.00"}
+
+
 def test_nonbillable_has_cost_without_fee(book):
     book["addons"]["aps_solve"]["billable"] = False
     line = statements.compute_statement([event()], ORG, PERIOD, book)["lines"][0]

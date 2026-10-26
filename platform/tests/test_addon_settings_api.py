@@ -187,6 +187,53 @@ def test_put_round_trip_and_verified_actor(route, setting):
     assert state["writes"] == [("aps_solve", setting["mode"], setting["byo_ref"], SUBJECT)]
 
 
+def test_runner_put(route):
+    client, state = route
+    addon = "kashbot_runner"
+    ref = "kashbot-runner:7b51687d-2d39-47ac-b598-54f3d1fd9e22"
+    setting = {"mode": "byo", "byo_ref": ref}
+    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"][addon] == {
+        "mode": "off", "byo_ref": None, "min_reader_version": 1}
+    response = put(client, setting, addon=addon)
+    assert response.status_code == 200
+    assert response.json() == setting
+    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"][addon] == {
+        **setting, "min_reader_version": 1}
+    assert state["writes"] == [(addon, "byo", ref, SUBJECT)]
+    connections = list(state["connections"])
+    for body, detail in (
+        ({"mode": "managed"}, "mode must be byo or off for kashbot_runner"),
+        ({"mode": "byo"}, "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "byo", "byo_ref": ref.upper()}, "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "byo", "byo_ref": "kashbot-runner:" + str(ORG).upper()},
+         "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "byo", "byo_ref": "credentials/runner"}, "byo_ref must be kashbot-runner:<runner_uuid>"),
+        ({"mode": "off", "byo_ref": ref}, "byo_ref must be null unless mode is byo"),
+    ):
+        response = put(client, body, addon=addon)
+        assert response.status_code == 422
+        assert response.json() == {"detail": detail}
+    assert put(client, {**setting, "actor": "forged"}, addon=addon).status_code == 422
+    assert put(client, setting, org=uuid.uuid4(), addon=addon).status_code == 404
+    state["known"] = False
+    assert put(client, setting, addon=addon).status_code == 404
+    state["known"] = True
+    state["role"] = "reviewer"
+    response = put(client, setting, addon=addon)
+    assert response.status_code == 403
+    assert response.json() == {"detail": "platform role does not permit mutation"}
+    assert state["writes"] == [(addon, "byo", ref, SUBJECT)]
+    assert state["settings"][addon] == setting
+    assert state["connections"] == connections
+    state["role"] = "editor"
+    response = put(client, {"mode": "off"}, addon=addon)
+    assert response.status_code == 200
+    assert response.json() == {"mode": "off", "byo_ref": None}
+    assert state["writes"][-1] == (addon, "off", None, SUBJECT)
+    assert client.get(f"/api/orgs/{ORG}/addons").json()["addons"][addon] == {
+        "mode": "off", "byo_ref": None, "min_reader_version": 1}
+
+
 @pytest.mark.parametrize("body,field", [
     ({"mode": "byo"}, "byo_ref"),
     ({"mode": "byo", "byo_ref": "a secret value"}, "byo_ref"),

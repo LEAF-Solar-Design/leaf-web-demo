@@ -10,6 +10,7 @@ const MODES = [['managed', 'Managed'], ['byo', 'Your own'], ['off', 'Off']]
 
 function AddonRow({ orgId, addon, setting }) {
   const { label, description } = ADDON_LABELS[addon]
+  const isRunner = addon === 'kashbot_runner'
   const [mode, setMode] = useState(setting?.mode || 'off')
   const [name, setName] = useState(setting?.byo_ref || '')
   const [busy, setBusy] = useState(false)
@@ -22,6 +23,7 @@ function AddonRow({ orgId, addon, setting }) {
     setSaved(false)
     try {
       await setAddonMode(orgId, addon, mode, mode === 'byo' ? name : undefined)
+      if (isRunner && mode === 'off') setName('')
       setSaved(true)
     } catch (failure) {
       setError(humanizeError(failure))
@@ -34,13 +36,16 @@ function AddonRow({ orgId, addon, setting }) {
       <div className="ca-account-main"><b>{label}</b></div>
       <p className="ca-copy">{description}</p>
       <div className="ca-choice" role="radiogroup" aria-label={`${label} mode`}>
-        {MODES.map(([value, text]) => (
+        {MODES.filter(([value]) => !isRunner || value !== 'managed').map(([value, text]) => (
           <button key={value} type="button" role="radio" aria-checked={mode === value}
-            className={`ca-opt${mode === value ? ' on' : ''}`} disabled={busy}
+            className={`ca-opt${mode === value ? ' on' : ''}`} disabled={busy || (isRunner && value === 'byo' && !name)}
             onClick={() => { setMode(value); setSaved(false) }}>{text}</button>
         ))}
       </div>
-      {mode === 'byo' && (
+      {isRunner && (name
+        ? <p className="ca-note">Runner reference: <code>{name}</code></p>
+        : <p className="ca-note">Link a runner to use Your own.</p>)}
+      {mode === 'byo' && !isRunner && (
         <>
           <label className="ca-field">
             <span className="ca-field-k">Credential name for {label}</span>
@@ -51,7 +56,7 @@ function AddonRow({ orgId, addon, setting }) {
           <p className="ca-note" id={`${addon}-help`}>Enter only the credential name. The value is stored in your tenant's credential store, not here.</p>
         </>
       )}
-      <button type="button" className="btn ca-act" onClick={save} disabled={busy || (mode === 'byo' && !name.trim())}>
+      <button type="button" className="btn ca-act" onClick={save} disabled={busy || (mode === 'byo' && (isRunner || !name.trim()))}>
         {busy ? 'Saving...' : 'Save'}
       </button>
       {saved && <p className="ca-note" role="status">Saved</p>}

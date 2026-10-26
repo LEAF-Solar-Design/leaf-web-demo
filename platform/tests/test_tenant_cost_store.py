@@ -1,5 +1,6 @@
 """Pure validation always runs; PostgreSQL coverage uses isolated fixture orgs."""
 from copy import deepcopy
+from contextlib import nullcontext
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import uuid
@@ -155,6 +156,42 @@ def test_other_modes_require_null_ref():
         assert store.validate_addon_mode(ORG, "aps_solve", mode, actor="operator")["byo_ref"] is None
         with pytest.raises(ValueError, match="byo_ref"):
             store.validate_addon_mode(ORG, "aps_solve", mode, byo_ref="vault/key", actor="operator")
+
+
+def test_runner_modes():
+    ref = "kashbot-runner:b15f227e-ecb7-4c58-82ad-05360542a56c"
+    writes = []
+
+    class Connection:
+        def cursor(self):
+            return nullcontext(self)
+
+        def execute(self, query, params):
+            writes.append(params)
+
+    conn = Connection()
+    store.set_addon_mode(conn, ORG, "kashbot_runner", "byo", byo_ref=ref, actor="operator")
+    assert writes == [{"org_id": ORG, "addon": "kashbot_runner", "mode": "byo",
+                       "byo_ref": ref, "actor": "operator"}]
+    for invalid in (None, "", 123, [], {}, "kashbot-runner:not-a-uuid", str(ORG),
+                    ref.replace("kashbot-runner:", "runner:"), ref.upper(),
+                    "kashbot-runner:" + str(ORG).upper(),
+                    ref.replace("-", "", 1), "kashbot-runner:" + ORG.hex,
+                    "kashbot-runner:{" + str(ORG) + "}",
+                    "kashbot-runner:urn:uuid:" + str(ORG), ref + "\n", " " + ref):
+        with pytest.raises(ValueError) as exc:
+            store.set_addon_mode(conn, ORG, "kashbot_runner", "byo", byo_ref=invalid, actor="operator")
+        assert str(exc.value) == "byo_ref must be kashbot-runner:<runner_uuid>"
+    with pytest.raises(ValueError) as exc:
+        store.set_addon_mode(conn, ORG, "kashbot_runner", "managed", actor="operator")
+    assert str(exc.value) == "mode must be byo or off for kashbot_runner"
+    with pytest.raises(ValueError) as exc:
+        store.set_addon_mode(conn, ORG, "kashbot_runner", "off", byo_ref=ref, actor="operator")
+    assert str(exc.value) == "byo_ref must be null unless mode is byo"
+    assert len(writes) == 1
+    store.set_addon_mode(conn, ORG, "kashbot_runner", "off", actor="operator")
+    assert writes[-1] == {"org_id": ORG, "addon": "kashbot_runner", "mode": "off",
+                          "byo_ref": None, "actor": "operator"}
 
 
 def test_list_validation_precedes_database_access():

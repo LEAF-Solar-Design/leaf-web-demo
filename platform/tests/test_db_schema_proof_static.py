@@ -145,6 +145,19 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
     _assert_lab_immutable_ledger_contract()
 
 
+def test_runner_migration_proof():
+    name = "0091_kashbot_runner.sql"
+    manifest = db.migration_manifest()
+    assert manifest[-1] == {
+        "name": name,
+        "sha256": sha256((db._PKG_DIR / "migrations" / name).read_bytes()).hexdigest(),
+    }
+    assert db._migration_proof(manifest)["missing_migrations"] == []
+    assert db._migration_proof(manifest[:-1])["missing_migrations"] == [name]
+    drifted = [*manifest[:-1], {"name": name, "sha256": "0" * 64}]
+    assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
+
+
 def _assert_lab_immutable_ledger_contract():
     selected = {"LEAF_LAB_STORE": "postgres"}
     columns = db.required_columns_for_selected_authorities(selected)

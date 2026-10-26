@@ -745,7 +745,7 @@ _REQUIRED_CONSTRAINTS = {
     "tenant_cost_events_event_key_key": _catalog_contract(
         "tenant_cost_events", "UNIQUE (event_key)"),
     "tenant_cost_events_addon_check": _catalog_contract(
-        "tenant_cost_events", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth'])"),
+        "tenant_cost_events", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth', 'kashbot_runner'])"),
     "tenant_cost_events_mode_check": _catalog_contract(
         "tenant_cost_events", "CHECK", "mode = ANY (ARRAY['managed', 'byo'])"),
     # Vendor names have 1 to 100 characters; units have 1 to 50 characters.
@@ -775,7 +775,7 @@ _REQUIRED_CONSTRAINTS = {
     "tenant_addon_settings_org_id_fkey": _catalog_contract(
         "tenant_addon_settings", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
     "tenant_addon_settings_addon_check": _catalog_contract(
-        "tenant_addon_settings", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth'])"),
+        "tenant_addon_settings", "CHECK", "addon = ANY (ARRAY['aps_solve', 'e2b_exec', 'marathon', 'forge_hosting', 'aws_resources', 'storage', 'canonical_solve', 'tool_ci', 'gpu_inference', 'ios_build', 'app_auth', 'kashbot_runner'])"),
     "tenant_addon_settings_mode_check": _catalog_contract(
         "tenant_addon_settings", "CHECK", "mode = ANY (ARRAY['managed', 'byo', 'off'])"),
     # Credential names have 1 to 128 characters.
