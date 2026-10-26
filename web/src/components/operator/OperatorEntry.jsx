@@ -20,6 +20,7 @@ export default function OperatorEntry() {
   useEffect(() => {
     let cancelled = false
     probeOperatorConsole().then((enabled) => { if (!cancelled) setVisible(enabled) })
+      .catch(() => { if (!cancelled) setVisible(false) })
     return () => { cancelled = true }
   }, [])
 

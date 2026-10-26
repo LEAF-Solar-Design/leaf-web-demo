@@ -88,7 +88,7 @@ describe('scoped widget designer', () => {
     const fetchImpl = vi.fn()
     vi.stubGlobal('fetch', fetchImpl)
     render(<WidgetsView />)
-    expect(screen.getByRole('status')).toHaveTextContent('Choose a project')
+    expect(screen.getByRole('status')).toHaveTextContent('Enter a Document ID, then choose New or Load.')
     expect(screen.queryByRole('button', { name: 'Add text' })).not.toBeInTheDocument()
     expect(fetchImpl).not.toHaveBeenCalled()
     fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'my-widget' } })

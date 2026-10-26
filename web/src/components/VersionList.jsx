@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 
 // THE ONE version-list primitive (standardization slice 6a).
 //
@@ -210,7 +211,7 @@ export default function VersionList({
       await restore.run(v)
       setConfirming(null)
     } catch (cause) {
-      setFailure({ version: v, message: cause?.message || `${verb} failed.` })
+      setFailure({ version: v, message: humanizeError(cause), cause })
     } finally {
       setPending(null)
     }

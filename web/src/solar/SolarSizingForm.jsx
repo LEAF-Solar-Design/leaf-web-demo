@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 import { solarSizingRunSentence, SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { buildSizingParams, MODULE_PARAMETER_KEYS, sizingGraph, sizingTargets, SOLAR_SIZING_REASONS,
   deriveProjectSizingState, buildProjectSizingRequest, exactProjectSizingConductorPreview,
@@ -437,7 +438,8 @@ function StandaloneSolarSizingForm({
         if (current) setLoaded({ drawingId, drawingVersion, graph: sizingGraph(view, drawingVersion),
           savedZip: view?.intake?.solar_design_graph?.project?.zip_code })
       })
-      .catch(() => { if (current) setLoaded(null) })
+      .catch(() => { if (current) setLoaded({ drawingId, drawingVersion,
+        error: humanizeError('Could not load the drawing. Try loading it again.') }) })
     return () => { current = false }
   }, [drawingId, drawingVersion, scoped, refresh])
 
@@ -449,6 +451,8 @@ function StandaloneSolarSizingForm({
   useEffect(() => { lock.current = false })
 
   const graph = loaded?.drawingId === drawingId && loaded?.drawingVersion === drawingVersion ? loaded.graph : null
+  const currentLoad = loaded?.drawingId === drawingId && loaded?.drawingVersion === drawingVersion ? loaded : null
+  const loading = scoped && currentLoad === null
   const built = !scoped ? { ok: false, reason: 'sizing_project_scope' }
     : buildSizingParams({ graph, mode, draft })
   const targets = scoped && graph?.ok ? sizingTargets(graph, mode) : null
@@ -480,7 +484,11 @@ function StandaloneSolarSizingForm({
     </div>)}
     <SizingCloudFields mode={mode} draft={draft} change={change} busy={busy} invalid={invalid} />
     </>}
-    {!built.ok && <p role="status">{SOLAR_SIZING_REASONS[built.reason]}</p>}
+    {loading && <p role="status">Loading the drawing.</p>}
+    {currentLoad?.error && <p role="alert">{currentLoad.error}</p>}
+    {!loading && !currentLoad?.error && !built.ok && <p role="status">{SOLAR_SIZING_REASONS[built.reason]}</p>}
+    {currentLoad?.error && <button type="button" disabled={busy}
+      onClick={() => setRefresh((value) => value + 1)}>Retry loading</button>}
     {busy && <p role="status">This step is running. Confirm or wait for it to finish.</p>}
     {status === 'failed' && <p role="alert">{solarSizingRunSentence(failureCode)}</p>}
     {status === 'finished' && <p role="status">String sizing applied.</p>}

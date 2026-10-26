@@ -30,6 +30,7 @@
 import { useEffect, useRef } from 'react'
 
 import { REACH_STATE, useEngineSessionContext } from './EngineSessionProvider.jsx'
+import { humanizeError } from '../errorHumanize.js'
 
 export { REACH_STATE }
 
@@ -39,6 +40,18 @@ export function headDocumentId(drawingId, version) {
 }
 
 const HEAD_DOC = /-v\d+\.dxf$/
+
+export function drawingOpenFailure(error) {
+  const raw = String(error?.message || '')
+  const status = Number(error?.status) || Number(raw.match(/(?:HTTP\s+|->\s*)(\d{3})\b/i)?.[1])
+  let message = 'The drawing could not be opened. Try again or import a DXF file.'
+  if (status === 401 || status === 403) message = 'You do not have permission to open this drawing. Sign in or ask the project owner for access.'
+  else if (status === 404) message = 'The drawing file could not be found. Choose another drawing or import a DXF file.'
+  else if (status === 413) message = 'This drawing is too large to open in the browser. Try a smaller DXF file.'
+  else if (/fetch|network|connection|timeout|timed? ?out|\d+\s*ms\b|aborted/i.test(raw)) message = 'Could not load the drawing. Check your connection and try again.'
+  else if (status >= 500) message = 'The drawing service is temporarily unavailable. Try again in a moment.'
+  return { sentence: humanizeError(message), details: { message: raw, status: error?.status ?? (status || null) } }
+}
 
 /**
  * Provenance, not the filename, says the engine holds this drawing's head: the
@@ -69,6 +82,9 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, st
   sessionRef.current = session
   // What this opener has opened or tried: one attempt per (drawing, source, head).
   const attemptRef = useRef('')
+  // Keep transport details available for debugging without sending them to
+  // the shared reach state, whose sentence is repeated across the ribbon.
+  const failureDetailsRef = useRef(null)
   // The source of the last head this opener loaded (null until it loads
   // one); the engine-save shortcut applies only within that source.
   const openedSourceRef = useRef(null)
@@ -181,9 +197,10 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, st
       if (session.busy) return undefined
     }
     attemptRef.current = key
+    failureDetailsRef.current = null
     const generation = generationRef.current
     const source = sourceKey
-    setReach({ state: REACH_STATE.OPENING, sentence: `opening ${drawingId} in the browser engine...` })
+    setReach({ state: REACH_STATE.OPENING, sentence: 'Opening the drawing...' })
     let cancelled = false
     // Settled = this attempt reached a terminal verdict (loaded, refused,
     // stood down). A cancel BEFORE that (the session changed under the
@@ -225,9 +242,11 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, st
         if (cancelled || generation !== generationRef.current) return
         settled = true
         release()
+        const failure = drawingOpenFailure(error)
+        failureDetailsRef.current = failure.details
         setReach({
           state: REACH_STATE.FAILED,
-          sentence: `the drawing could not be opened in the browser engine: ${error?.message || 'fetch failed'}; import a DXF instead`,
+          sentence: failure.sentence,
         })
         return
       }
@@ -268,7 +287,7 @@ export default function EngineHeadOpener({ drawingId = null, enabled = false, st
       // toString, not instanceof: a Uint8Array from another realm (a
       // worker, a test harness) is still bytes.
       if (Object.prototype.toString.call(bytes) !== '[object Uint8Array]' || !Number.isInteger(version) || version < 1) {
-        setReach({ state: REACH_STATE.FAILED, sentence: 'the drawing could not be opened in the browser engine: the server answered without a document; import a DXF instead' })
+        setReach({ state: REACH_STATE.FAILED, sentence: humanizeError('The server answered without a document. Try again or import a DXF file.') })
         return
       }
       // W4g-3b: this document IS the head, so the store keeps the entity

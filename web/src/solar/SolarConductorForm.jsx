@@ -88,7 +88,7 @@ function ProjectSolarConductorForm(props) {
     return newest ?? id
   }
 
-  // Selection has no checkbox column. A plain click or Enter selects only the
+  // Checkboxes toggle individual strings. A plain click or Enter selects only the
   // row, Shift selects a range from the anchor in graph order (Ctrl or Cmd
   // with it adds the range), Ctrl or Cmd alone toggles one row, and after a
   // touch long press, taps toggle until the selection is empty again.
@@ -118,7 +118,7 @@ function ProjectSolarConductorForm(props) {
         <tbody>{rows.map((item) => {
           const isSelected = currentSelected.has(item.id)
           return (
-            <tr key={item.id} data-string-id={item.id} aria-label={`Select ${item.tag}`} aria-selected={isSelected}
+            <tr key={item.id} data-string-id={item.id} aria-label={`Select ${item.tag}`}
               aria-disabled={disabled || undefined} tabIndex={disabled ? -1 : 0}
               onClick={(event) => {
                 const pointer = lastPointer.current
@@ -173,7 +173,11 @@ function ProjectSolarConductorForm(props) {
               onPointerCancel={cancelPress}
               onContextMenu={(event) => { if (swallowClick.current) event.preventDefault() }}
             >
-              <td>{item.tag}{isSelected && <span aria-hidden="true"> (selected)</span>}</td>
+              <td><input type="checkbox" aria-label={`Include ${item.tag}`} checked={isSelected} disabled={disabled}
+                onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onChange={() => { anchor.current = item.id; setSelected((previous) => toggled(previous, item.id)) }} />
+                {item.tag}{isSelected && <span> (selected)</span>}</td>
               <td>{item.gauge.trim() ? item.gauge : 'Not set'}</td>
             </tr>
           )
@@ -289,7 +293,7 @@ function StandaloneSolarConductorForm({
     return newest ?? id
   }
 
-  // Selection has no checkbox column. A plain click or Enter selects only the
+  // Checkboxes toggle individual strings. A plain click or Enter selects only the
   // row, Shift selects a range from the anchor in graph order (Ctrl or Cmd
   // with it adds the range), Ctrl or Cmd alone toggles one row, and after a
   // touch long press, taps toggle until the selection is empty again.
@@ -318,7 +322,7 @@ function StandaloneSolarConductorForm({
         <tbody>{rows.map((item) => {
           const isSelected = selected.has(item.id)
           return (
-            <tr key={item.id} data-string-id={item.id} aria-label={`Select ${item.tag}`} aria-selected={isSelected}
+            <tr key={item.id} data-string-id={item.id} aria-label={`Select ${item.tag}`}
               aria-disabled={disabled || undefined} tabIndex={disabled ? -1 : 0}
               onClick={(event) => {
                 const pointer = lastPointer.current
@@ -372,7 +376,11 @@ function StandaloneSolarConductorForm({
               onPointerCancel={cancelPress}
               onContextMenu={(event) => { if (swallowClick.current) event.preventDefault() }}
             >
-              <td>{item.tag}{isSelected && <span aria-hidden="true"> (selected)</span>}</td>
+              <td><input type="checkbox" aria-label={`Include ${item.tag}`} checked={isSelected} disabled={disabled}
+                onClick={(event) => event.stopPropagation()} onKeyDown={(event) => event.stopPropagation()}
+                onPointerDown={(event) => event.stopPropagation()}
+                onChange={() => { anchor.current = item.id; setSelected((previous) => toggled(previous, item.id)) }} />
+                {item.tag}{isSelected && <span> (selected)</span>}</td>
               <td>{item.gauge.trim() ? item.gauge : 'Not set'}</td>
             </tr>
           )

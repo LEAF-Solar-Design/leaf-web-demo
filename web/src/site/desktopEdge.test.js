@@ -35,6 +35,10 @@ const phoneAndWideSources = [
 ]
 
 describe('Studio desktop edge', () => {
+  it('landing.css retires the previous phone and wide bands', () => {
+    expect(read('./landing.css')).not.toMatch(/max-width\s*:\s*(?:600|1279|1200)px\s*\)/)
+  })
+
   it.each(phoneAndWideSources)('%s retires the previous phone, wide and special bands', (path) => {
     const source = read(path)
     expect(source).not.toMatch(/max-width\s*:\s*600px\s*\)/)

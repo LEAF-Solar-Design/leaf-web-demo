@@ -23,7 +23,7 @@ function jsonResponse(body, ok = true, status = 200) {
 function mount(props = {}) {
   return render(
     <div data-testid="host">
-      <PromptBox value={props.value ?? ''} onChange={props.onChange ?? noop} onDispatch={props.onDispatch ?? noop}
+      <PromptBox liveCallsAllowed value={props.value ?? ''} onChange={props.onChange ?? noop} onDispatch={props.onDispatch ?? noop}
         projectName="cat-panels" {...props} />
     </div>,
   )
@@ -150,7 +150,7 @@ describe('find scope: consumes GET /api/search', () => {
     openScope(container, 'find')
     const input = container.querySelector('.bar-field')
     fireEvent.change(input, { target: { value: 'panel' } })
-    rerender(<div data-testid="host"><PromptBox value="panel" onChange={onChange} onDispatch={noop} projectName="cat-panels" /></div>)
+    rerender(<div data-testid="host"><PromptBox liveCallsAllowed value="panel" onChange={onChange} onDispatch={noop} projectName="cat-panels" /></div>)
     await waitFor(() => expect(screen.getByText('panel-cut')).toBeTruthy(), { timeout: 2000 })
     expect(screen.getByText(/cuts panels/)).toBeTruthy()
   })

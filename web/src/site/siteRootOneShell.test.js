@@ -268,6 +268,34 @@ describe('rollback contract', () => {
     expect(css).toContain('--ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px));')
   })
 
+  it('non-CAD surfaces other than iOS keep the own-row product nav from 1440 px up', () => {
+    const css = read('./studioShell.css')
+    const selector = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]) .tc-product-nav'
+    const wideSelector = '.studio-shell .app[data-studio-shell="cockpit"][data-surface]:not([data-surface="cad"]):not([data-surface="ios"]) .tc-product-nav'
+    const mediaBlocks = []
+    const media = /@media\s*([^{}]+)\{/g
+    let match
+    while ((match = media.exec(css))) {
+      const start = media.lastIndex
+      let depth = 1
+      let end = start
+      for (; end < css.length && depth; end++) {
+        if (css[end] === '{') depth++
+        if (css[end] === '}') depth--
+      }
+      expect(depth).toBe(0)
+      mediaBlocks.push({ header: match[0].slice(0, -1).trim(), start, end })
+    }
+    const rules = [...css.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
+    const enclosingHeader = rule => mediaBlocks
+      .filter(block => block.start <= rule.index && rule.index < block.end).pop()?.header
+    expect(rules.some(rule => rule[1].trim() === wideSelector
+      && /position:\s*relative;/.test(rule[2])
+      && enclosingHeader(rule) === '@media (min-width: 1440px)')).toBe(true)
+    expect(rules.some(rule => rule[1].trim() === selector
+      && enclosingHeader(rule) === '@media (min-width: 1024px) and (max-width: 1439px)')).toBe(true)
+  })
+
   it('puts the Solar surface tabs on their own row from 1440px up', () => {
     const css = read('./studioShell.css')
     const shell = '.studio-shell .app[data-studio-shell="cockpit"][data-surface="solar"]'
@@ -286,7 +314,7 @@ describe('rollback contract', () => {
       mediaBlocks.push({ header: match[0].slice(0, -1).trim(), body: css.slice(start, end - 1) })
       media.lastIndex = end
     }
-    const block = mediaBlocks.find(block => block.header === '@media (min-width: 1440px)')
+    const block = mediaBlocks.find(block => block.header === '@media (min-width: 1440px)' && block.body.includes(`${shell} .tc-product-nav`))
     expect(block).toBeDefined()
     const rules = [...block.body.matchAll(/([^{}]+)\{([^{}]*)\}/g)]
     const nav = rules.find(rule => rule[1].trim() === `${shell} .tc-product-nav`)

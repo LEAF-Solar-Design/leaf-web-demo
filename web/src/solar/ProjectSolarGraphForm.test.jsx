@@ -4,7 +4,10 @@ import { afterEach, expect, it, vi } from 'vitest'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
 
-afterEach(cleanup)
+afterEach(() => {
+  cleanup()
+  vi.useRealTimers()
+})
 
 const binding = { kind: 'project', organization_id: '11111111-1111-1111-1111-111111111111',
   project_id: '22222222-2222-2222-2222-222222222222', drawing_id: '33333333-3333-3333-3333-333333333333',
@@ -98,6 +101,286 @@ async function assertRefusal(name, code, sentence) {
   return h
 }
 
+function panelGroupHarness() {
+  const h = harness('solar-panel-groups')
+  h.graph = { panels: [
+    { id: 'a', angle: 0, frame_ref: null, provenance: { source_handle: 'A' } },
+    { id: 'b', angle: 0, frame_ref: null, provenance: { source_handle: 'B' } },
+    { id: 'c', angle: 90, frame_ref: null, provenance: { source_handle: 'C' } },
+    { id: 'd', angle: 90, frame_ref: null, provenance: { source_handle: 'D' } },
+    { id: 'e', angle: 45, frame_ref: null, provenance: { source_handle: 'E' } },
+  ], frames: [] }
+  h.client.readContext.mockImplementation(() => {
+    const data = context()
+    Object.assign(data.intake.solar_design_graph, h.graph)
+    return Promise.resolve({ ok: true, data })
+  })
+  return h
+}
+function fillGroupNumbers() {
+  for (const label of ['Module width along row', 'Module height across row', 'Alignment tolerance']) {
+    fireEvent.change(screen.getByRole('spinbutton', { name: label }), { target: { value: '1' } })
+  }
+}
+it.each([true, false])('W1C-31 reports the busy state when panel-group submission is unavailable (busy=%s)', (busy) => {
+  const h = panelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} busy={busy} onProjectSubmit={undefined} />)
+  const inProgress = 'A Solar run is in progress. Wait for it to finish.'
+  const unavailable = 'Project Solar submission is unavailable in this view.'
+  expect(screen.getByText(busy ? inProgress : unavailable)).toBeTruthy()
+  expect(screen.queryByText(busy ? unavailable : inProgress)).toBeNull()
+  expect(action().disabled).toBe(true)
+})
+it('W1C-26 renders angle proposals and requires all shared dimensions before preview and submission', async () => {
+  const h = panelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await waitFor(() => expect(screen.getByRole('textbox', { name: 'Group 1 name' }).value).toBe('Group 1'))
+  expect(screen.getByRole('textbox', { name: 'Group 2 name' }).value).toBe('Group 2')
+  expect(screen.getByText('2 panels, angle 0.0°')).toBeTruthy()
+  expect(screen.getByText('2 panels, angle 90.0°')).toBeTruthy()
+  expect(screen.getByText('1 singleton panels cannot be grouped.')).toBeTruthy()
+  expect(action().disabled).toBe(true)
+  for (const label of ['Module width along row', 'Module height across row', 'Alignment tolerance']) {
+    expect(screen.getByRole('spinbutton', { name: label }).value).toBe('')
+  }
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Module width along row' }), { target: { value: '1' } })
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Module height across row' }), { target: { value: '1' } })
+  await act(async () => {})
+  expect(action().disabled).toBe(true)
+  expect(h.client.catalog).not.toHaveBeenCalled()
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Alignment tolerance' }), { target: { value: '0' } })
+  await act(async () => {})
+  expect(action().disabled).toBe(true)
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Alignment tolerance' }), { target: { value: '0.01' } })
+  await submitAndWait(h)
+  expect(h.submit.mock.calls[0][0].params.groups).toEqual([
+    { name: 'Group 1', panel_refs: ['a', 'b'], module_width_along_row: 1, module_height_across_row: 1, alignment_tolerance: 0.01 },
+    { name: 'Group 2', panel_refs: ['c', 'd'], module_width_along_row: 1, module_height_across_row: 1, alignment_tolerance: 0.01 },
+  ])
+})
+it('W1C-26 shows existing frame name collisions and invalidates preview on name and number edits', async () => {
+  const h = panelGroupHarness()
+  h.graph.frames.push({ name: 'GROUP 1' })
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByRole('textbox', { name: 'Group 1 name' })
+  fillGroupNumbers()
+  await screen.findByText('Group names must be unique, including existing panel groups.')
+  expect(action().disabled).toBe(true)
+  fireEvent.change(screen.getByRole('textbox', { name: 'Group 1 name' }), { target: { value: 'North' } })
+  await arm()
+  const delayed = deferred()
+  h.previews.push(delayed.promise)
+  fireEvent.change(screen.getByRole('textbox', { name: 'Group 1 name' }), { target: { value: 'South' } })
+  expect(action().disabled).toBe(true)
+  await waitFor(() => expect(h.client.catalog.mock.calls.length).toBe(2))
+  await act(async () => delayed.resolve(catalog(h.name)))
+  await arm()
+  fireEvent.change(screen.getByRole('spinbutton', { name: 'Alignment tolerance' }), { target: { value: '' } })
+  expect(action().disabled).toBe(true)
+  await screen.findByText('Enter all three dimensions and tolerances as finite numbers greater than 0 and at most 1000000.')
+  expect(h.submit).not.toHaveBeenCalled()
+})
+it('W1C-26b keeps submission disabled when the panel-groups preview refuses sizing readiness', async () => {
+  const h = panelGroupHarness()
+  h.code = 'sizing_confirmation_required'
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByRole('textbox', { name: 'Group 1 name' })
+  fillGroupNumbers()
+  await waitFor(() => expect(feedback()).toContain('sizing_confirmation_required'))
+  expect(feedback()).toContain(generic)
+  expect(screen.getByTestId('project-solar-graph-feedback').getAttribute('role')).toBe('status')
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog.mock.calls[0][0].intents[0]).toMatchObject({ tool: 'solar-panel-groups',
+    params: { groups: [expect.objectContaining({ panel_refs: ['a', 'b'] }),
+      expect.objectContaining({ panel_refs: ['c', 'd'] })] } })
+  expect(action().disabled).toBe(true)
+  fireEvent.click(action())
+  expect(h.submit).not.toHaveBeenCalled()
+  expect(screen.queryByText(/private path|hostile detail/)).toBe(null)
+})
+it('W1C-26b reports invalid handle exclusions and refuses duplicate handles before preview', async () => {
+  const h = panelGroupHarness()
+  h.graph.panels.push({ id: 'bad', angle: 0, frame_ref: null, provenance: { source_handle: 'g1' } })
+  h.graph.panels[2].provenance.source_handle = 'a'
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByText('Two panels share a drawing handle, so they cannot be grouped. Re-import the panels.')
+  expect(screen.getByText('1 panels have a drawing handle that cannot be grouped.')).toBeTruthy()
+  expect(screen.getByText('2 panels, angle 0.0°')).toBeTruthy()
+  expect(action().disabled).toBe(true)
+  expect(h.client.prepareRun).not.toHaveBeenCalled()
+})
+it('W1C-26 refuses changed proposal membership on the fresh submit context', async () => {
+  const h = panelGroupHarness()
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByRole('textbox', { name: 'Group 1 name' })
+  fillGroupNumbers()
+  await arm()
+  h.graph = { ...h.graph, panels: h.graph.panels.map(panel => panel.id === 'a' ? { ...panel, id: 'new' } : panel) }
+  fireEvent.click(action())
+  await screen.findByText('The proposed panel groups changed. Refresh the preview before continuing.')
+  expect(action().disabled).toBe(true)
+  expect(h.submit).not.toHaveBeenCalled()
+})
+it('W1C-26 disables an empty proposal set with a status reason', async () => {
+  const h = panelGroupHarness()
+  h.graph.panels = []
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByText('No panel angles have at least two ungrouped panels.')
+  expect(action().disabled).toBe(true)
+  expect(h.client.catalog).not.toHaveBeenCalled()
+})
+it('W1C-26 shows a refused proposal set without preparing a partial request', async () => {
+  const h = panelGroupHarness()
+  h.graph.panels = Array.from({ length: 4097 }, (_, index) => ({ id: String(index), angle: 0,
+    frame_ref: null, provenance: { source_handle: index.toString(16) } }))
+  render(<ProjectSolarGraphForm {...h.props} />)
+  await screen.findByText('A proposed group has more than 4096 panels. No panels have been omitted.')
+  expect(screen.getByText('4097 panels, angle 0.0°')).toBeTruthy()
+  expect(action().disabled).toBe(true)
+  expect(h.client.prepareRun).not.toHaveBeenCalled()
+})
+
+const advancePreview = async (milliseconds) => act(async () => { await vi.advanceTimersByTimeAsync(milliseconds) })
+async function armedPanelGroupPreview() {
+  vi.useFakeTimers()
+  const h = panelGroupHarness()
+  let mounted
+  await act(async () => { mounted = render(<ProjectSolarGraphForm {...h.props} />) })
+  fillGroupNumbers()
+  await advancePreview(300)
+  expect(action().disabled).toBe(false)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  return { h, mounted }
+}
+function changeGroupNumber(label, value) {
+  fireEvent.change(screen.getByRole('spinbutton', { name: label }), { target: { value } })
+}
+it('W1C-28 reuses context and previews only the final three numbers after 300 ms without input', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '38.4688')
+  expect(action().disabled).toBe(true)
+  expect(screen.getByText('Reading the selected project drawing version.')).toBeTruthy()
+  await advancePreview(200)
+  changeGroupNumber('Module height across row', '76.9376')
+  await advancePreview(200)
+  changeGroupNumber('Alignment tolerance', '0.01')
+  await advancePreview(299)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  await advancePreview(1)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog.mock.calls[1][0].intents[0].params.groups).toEqual([
+    { name: 'Group 1', panel_refs: ['a', 'b'], module_width_along_row: 38.4688,
+      module_height_across_row: 76.9376, alignment_tolerance: 0.01 },
+    { name: 'Group 2', panel_refs: ['c', 'd'], module_width_along_row: 38.4688,
+      module_height_across_row: 76.9376, alignment_tolerance: 0.01 },
+  ])
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 previews separated input changes individually without reading context again', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  await advancePreview(301)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+  changeGroupNumber('Module height across row', '3')
+  await advancePreview(300)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(3)
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 Refresh immediately replaces the kept context', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  h.graph = { ...h.graph, panels: h.graph.panels.filter(panel => panel.id !== 'e') }
+  await act(async () => { fireEvent.click(refresh()) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('0 singleton panels cannot be grouped.')).toBeTruthy()
+  expect(action().disabled).toBe(false)
+  await advancePreview(300)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  changeGroupNumber('Module width along row', '3')
+  await advancePreview(300)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(3)
+})
+it('W1C-28 reads fresh context immediately when busy ends', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  mounted.rerender(<ProjectSolarGraphForm {...h.props} busy />)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  await act(async () => { mounted.rerender(<ProjectSolarGraphForm {...h.props} />) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+})
+it.each(['rejecting', 'non-ok'])('W1C-28 never reuses a %s context read', async (failure) => {
+  const { h } = await armedPanelGroupPreview()
+  if (failure === 'rejecting') h.client.readContext.mockRejectedValueOnce(new Error('Unreadable context'))
+  else h.client.readContext.mockResolvedValueOnce({ ok: false, status: 503 })
+  await act(async () => { fireEvent.click(refresh()) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(screen.getByText('This project drawing version could not be read. Reload it and try again.')).toBeTruthy()
+  changeGroupNumber('Module width along row', '2')
+  await advancePreview(299)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await advancePreview(1)
+  expect(h.client.readContext).toHaveBeenCalledTimes(3)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 unmount cancels a waiting preview before preparation or catalog', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  await advancePreview(299)
+  mounted.unmount()
+  await advancePreview(301)
+  expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+})
+it('W1C-28 a stale checkout discards kept context and cancels the waiting preview', async () => {
+  const { h } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  act(() => h.rotate())
+  await advancePreview(300)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  await act(async () => { changeGroupNumber('Module height across row', '3') })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+})
+it('W1C-28 replacing the scope cancels its wait and immediately reads context for the new scope', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  changeGroupNumber('Module width along row', '2')
+  await act(async () => {
+    h.move(binding, 'authority-b')
+    mounted.rerender(<ProjectSolarGraphForm {...h.props} authorityKey="authority-b" />)
+  })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  await advancePreview(300)
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.prepareRun).toHaveBeenCalledTimes(1)
+  expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  expect(action().disabled).toBe(true)
+})
+it('W1C-28 a changed catalog digest immediately reads context again', async () => {
+  const { h, mounted } = await armedPanelGroupPreview()
+  const nextDigest = 'sha256:' + 'e'.repeat(64)
+  const nextCatalog = catalog(h.name)
+  nextCatalog.data.families[0].capabilities[0].catalog_digest = nextDigest
+  h.client.catalog.mockResolvedValueOnce(nextCatalog)
+  await act(async () => { mounted.rerender(<ProjectSolarGraphForm {...h.props} catalogDigest={nextDigest} />) })
+  expect(h.client.readContext).toHaveBeenCalledTimes(2)
+  expect(h.client.catalog).toHaveBeenCalledTimes(2)
+  expect(action().disabled).toBe(false)
+})
+
 it('R13C-15 renders equipment assignment refusal', async () => {
   for (const code of ['EQUIPMENT_ASSIGNMENT_REQUIRED', 'equipment_assignment_required']) {
     await assertRefusal('solar-homeruns', code,
@@ -149,6 +432,9 @@ it('R13C-24 renders panel import refusals', async () => {
     'PANEL_LIMIT_EXCEEDED', 'INVALID_PANEL_HANDLE', 'UNSUPPORTED_PANEL_OUTLINE']) {
     await assertRefusal('solar-panels-from-drawing', code, generic)
   }
+})
+it('keeps ambiguous panel import handles on the generic refusal message', async () => {
+  await assertRefusal('solar-panels-from-drawing', 'AMBIGUOUS_PANEL_HANDLE', generic)
 })
 it('R13C-25 renders routing and feeder refusals', async () => {
   for (const code of ['INVALID_ROUTING_REQUEST', 'PERSISTED_GRAPH_UNAVAILABLE', 'INVALID_FEEDER_REQUEST',
@@ -587,7 +873,7 @@ it('R13C-49 a replaced receipt predicate withdraws published feedback', async ()
     mounted.unmount()
   }
 })
-it('R13C-50 a run in progress does not hide an expired receipt', async () => {
+it('R13C-50 a run in progress keeps expired receipt feedback hidden', async () => {
   const h = harness()
   const mounted = render(<ProjectSolarGraphForm {...h.props} />)
   await submitAndWait(h)
@@ -601,8 +887,11 @@ it('R13C-50 a run in progress does not hide an expired receipt', async () => {
   receiptCurrent = false
   mounted.rerender(<ProjectSolarGraphForm {...h.props} projectOutcome={projectOutcome} busy />)
   expect(screen.queryByTestId('project-solar-graph-feedback')).toBe(null)
+  expect(screen.getByText('A Solar run is in progress. Wait for it to finish.')).not.toBe(null)
+  expect(screen.queryByText('The drawing or session changed. Refresh before continuing.')).toBe(null)
+  mounted.rerender(<ProjectSolarGraphForm {...h.props} projectOutcome={projectOutcome} />)
   expect(screen.getByText('The drawing or session changed. Refresh before continuing.')).not.toBe(null)
-  expect(screen.queryByText('A Solar run is in progress. Wait for it to finish.')).toBe(null)
+  expect(screen.queryByTestId('project-solar-graph-feedback')).toBe(null)
   mounted.unmount()
 })
 it('R13C-51 a completion job id is read once', async () => {

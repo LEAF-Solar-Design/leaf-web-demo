@@ -17,6 +17,7 @@
  * this component drops the whole project instead of rendering stale rows.
  */
 import { useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 
 export const ROLES = ['owner', 'editor', 'reviewer', 'read-only']
 
@@ -34,7 +35,7 @@ function identityText(identity) {
 }
 
 function errorMessage(e, fallback) {
-  return e?.body?.detail || e?.message || fallback
+  return humanizeError(typeof e?.body?.detail === 'string' ? e.body.detail : e || fallback)
 }
 
 export default function Membership({

@@ -20,10 +20,11 @@
  * render as terminal — "This can't be undone" — before the typed
  * confirmation is even shown.
  */
-import { useState } from 'react'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
 
 function errorMessage(e, fallback) {
-  return e?.body?.detail || e?.message || fallback
+  return humanizeError(typeof e?.body?.detail === 'string' ? e.body.detail : e || fallback)
 }
 
 function DangerAction({
@@ -40,6 +41,18 @@ function DangerAction({
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
   const [receipt, setReceipt] = useState(null)
+  const triggerRef = useRef(null)
+  const inputRef = useRef(null)
+  const openedRef = useRef(false)
+
+  useLayoutEffect(() => {
+    if (open) {
+      openedRef.current = true
+      inputRef.current?.focus()
+    } else if (openedRef.current) {
+      triggerRef.current?.focus()
+    }
+  }, [open])
 
   const matches = typed.trim() === projectName
 
@@ -79,7 +92,7 @@ function DangerAction({
       </div>
 
       {!open && (
-        <button type="button" className="chip-danger" onClick={start}>
+        <button ref={triggerRef} type="button" className="chip-danger" onClick={start}>
           {confirmLabel}
         </button>
       )}
@@ -97,6 +110,7 @@ function DangerAction({
           <label className="danger-action-typed">
             Type <strong>{projectName}</strong> to confirm
             <input
+              ref={inputRef}
               type="text"
               value={typed}
               onChange={(event) => setTyped(event.target.value)}

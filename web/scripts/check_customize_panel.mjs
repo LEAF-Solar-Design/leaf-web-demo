@@ -68,6 +68,7 @@ assert(/\{signedIn && customizeExit\.shown && <CustomizePanel\b/.test(app), 'the
 const allowedConsumers = new Set([
   join(srcDir, 'App.jsx'),
   join(srcDir, 'components', 'CustomizePanel.jsx'),
+  join(srcDir, 'components', 'arloErrorText.test.jsx'),
 ])
 for (const file of await walk(srcDir)) {
   if (allowedConsumers.has(file)) continue

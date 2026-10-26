@@ -232,6 +232,7 @@ describe('App project Solar scope ownership', () => {
       solarFlow: { flow: 'layout' }, checkoutCapabilityRef: { current: vi.fn(() => 'capability') },
       refuseProjectSolar: vi.fn(() => false), SOLAR_SETTINGS_TOOL_NAME: 'solar-settings',
       loadCatalog: vi.fn(), seatCompletedVersion: vi.fn(), onRunCombinerPlacement: vi.fn(), catalogDigestOf: vi.fn(),
+      onStageSolarEdgeAccept: vi.fn(),
       solarFlowRetainedRef: { current: new Map([[flowEditor.name, { drawingId: context.drawingId, values: retained }]]) },
       onSubmitSolarFlowStep: vi.fn(), onCloseSolarFlowStep: vi.fn(), projectSolarAppReason,
     }
@@ -350,6 +351,7 @@ describe('App project Solar scope ownership', () => {
       expect(components.SolarWorkspaceTools.mock.calls.length).toBe(mock ? 0 : 1)
       if (!mock) {
         const workspace = components.SolarWorkspaceTools.mock.calls[0][0]
+        expect(workspace.onStageSolarEdgeAccept).toBe(inputs.onStageSolarEdgeAccept)
         for (const [key, value] of Object.entries({ drawingId: context.drawingId, projectId: null,
           drawingVersion: context.drawingVersion, flow: inputs.solarFlow, checkoutHeld: inputs.heldByUs,
           busy: true, onRunPlacement: inputs.onRunCombinerPlacement, catalogDigestOf: inputs.catalogDigestOf })) expect(workspace[key]).toBe(value)

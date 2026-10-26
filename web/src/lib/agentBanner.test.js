@@ -15,17 +15,17 @@ describe('agentBannerFor', () => {
       kind: 'quota',
       message: 'AI paused. Your built tools keep working.',
     })
-    expect(agentBannerFor({ status: 401 })).toEqual({
+    expect(agentBannerFor({ status: 401, errorCode: 'grant_required' })).toEqual({
       kind: 'grant',
       message: 'Chat needs a linked Claude account.',
     })
-    expect(agentBannerFor({ status: 403 })).toEqual({
+    expect(agentBannerFor({ status: 403, errorCode: 'entitlement_required' })).toEqual({
       kind: 'entitlement',
       message: 'Chat isn’t included in your plan. Your built tools keep working.',
     })
     expect(agentBannerFor({ status: 409, errorCode: 'turn_in_progress' })).toEqual({
       kind: 'busy',
-      message: 'The assistant is mid-turn, routed deterministically instead.',
+      message: 'The assistant is working. You can still run your existing tools.',
     })
   })
 
@@ -34,12 +34,12 @@ describe('agentBannerFor', () => {
       kind: 'quota',
       message: 'AI paused. Your built tools keep working.',
     })
-    expect(agentBannerFor({ status: 403 }, { copy: OPERATOR_AGENT_BANNER_COPY })).toEqual({
+    expect(agentBannerFor({ status: 403, errorCode: 'entitlement_required' }, { copy: OPERATOR_AGENT_BANNER_COPY })).toEqual({
       kind: 'entitlement',
       message: 'Chat is not included in your plan. Your built tools keep working.',
     })
     expect(agentBannerFor({ status: 409, errorCode: 'turn_in_progress' }, { copy: OPERATOR_AGENT_BANNER_COPY }))
-      .toEqual({ kind: 'busy', message: 'The assistant is mid-turn. The catalog route is still available.' })
+      .toEqual({ kind: 'busy', message: 'The assistant is working. You can still run your existing tools.' })
   })
 
   it('normalizes ANY unmatched kind — including classifyAgentError\'s own "unreachable" — to the unreachable entry', () => {

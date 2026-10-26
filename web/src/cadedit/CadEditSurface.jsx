@@ -41,7 +41,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ENV_CAD_EDIT } from './flag.js'
 import { DEFAULT_EDIT_INPUTS, useEngineSessionOptional } from './EngineSessionProvider.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from '../components/LiveRegion.jsx'
-import DrawingObjectList from './DrawingObjectList.jsx'
+import DrawingObjectList, { objectGeometryDescription } from './DrawingObjectList.jsx'
+import { engineIntake, projectionWarning } from './engineIntake.js'
 import DrawingCameraControls from '../site/DrawingCameraControls.jsx'
 
 function fmt(n) {
@@ -84,6 +85,9 @@ export default function CadEditSurface({
     documentId = '', entities = [], entityCount = 0, selectedId = '', selectedIds = [], selected = null,
     status = '', savedBytes = null, busy = false,
   } = session ?? {}
+  const incompleteView = useMemo(() => session?.engineParsed
+    ? projectionWarning(engineIntake(entities, documentId).diagnostics) : '',
+  [session?.engineParsed, entities, documentId])
 
   const downloadUrl = useMemo(() => {
     if (!savedBytes) return ''
@@ -126,7 +130,8 @@ export default function CadEditSurface({
         {entities.length > 0 ? <DrawingObjectList session={session} announce={announce} /> : <p>No drawing objects are loaded.</p>}
       </div>}
     </details>
-    <LiveRegion atomic visuallyHidden={HIDE_WITH_STYLE} label="Drawing navigation" data-testid="drawing-navigation-live">{announcement}</LiveRegion>
+    <LiveRegion atomic visuallyHidden={HIDE_WITH_STYLE} data-testid="drawing-navigation-live">{announcement}</LiveRegion>
+    {incompleteView && <p data-testid="drawing-incomplete-view">{incompleteView}</p>}
     <section className="cad-edit-workbench" data-testid="cad-edit-workbench" aria-label="CAD editing surface">
       <h3 className="cad-edit-workbench-title">Edit a DXF drawing</h3>
       <p className="cad-edit-workbench-hint">
@@ -178,7 +183,7 @@ export default function CadEditSurface({
                   disabled={entity.editable === false}
                 />
                 {entity.type} on layer {entity.layer}
-                {' '}· {entity.vertices?.length ?? 0} vertices{entity.closed ? ' · closed' : ''}
+                {' '}· {objectGeometryDescription(entity)}{entity.closed ? ' · closed' : ''}
                 {entity.editable === false ? ' · read-only' : ''}
                 {entity.vertices?.length > 0 && (
                   <span className="cad-edit-entity-verts">

@@ -32,7 +32,7 @@ const supply = () => fireEvent.click(screen.getByLabelText('Supply the settings'
 const action = (value) => type('Action', value)
 const reason = (key) => expect(screen.getByTestId('solar-preset-reason').textContent).toBe(SOLAR_PRESET_REASONS[key])
 function open(props = {}) {
-  const onSubmit = vi.fn(), onClose = vi.fn()
+  const onSubmit = vi.fn(() => ({ runIntent: { intentId: 'armed' } })), onClose = vi.fn()
   return { ...render(<SolarPresetForm tool={tool} onSubmit={onSubmit} onClose={onClose} {...props} />), onSubmit, onClose }
 }
 
@@ -64,6 +64,36 @@ it('PF2 submits Create with settings omitted then closes', () => {
   expect(Object.hasOwn(onSubmit.mock.calls[0][1], 'current_settings')).toBe(false)
   expect(onClose).toHaveBeenCalledTimes(1)
   expect(onSubmit.mock.invocationCallOrder[0]).toBeLessThan(onClose.mock.invocationCallOrder[0])
+})
+
+it('keeps preset inputs open when the run is refused', () => {
+  const { onSubmit, onClose } = open({ listing: LIST_TWO, revision: 2 })
+  onSubmit.mockReturnValue(undefined)
+  type('Preset name', 'Gamma')
+  supply()
+  type('String layer', 'Edited strings')
+  fireEvent.click(button())
+  expect(onSubmit).toHaveBeenCalledTimes(1)
+  expect(onClose).not.toHaveBeenCalled()
+  expect(screen.getByLabelText('Preset name').value).toBe('Gamma')
+  expect(screen.getByLabelText('Graph revision').value).toBe('2')
+  expect(screen.getByLabelText('Supply the settings').checked).toBe(true)
+  expect(screen.getByLabelText('String layer').value).toBe('Edited strings')
+})
+
+it('unlocks a refused preset submit and closes only after a retry is armed', () => {
+  const { container, onSubmit, onClose } = open({ revision: 2 })
+  onSubmit.mockReturnValueOnce(undefined)
+  type('Preset name', 'Gamma')
+  fireEvent.submit(container.querySelector('form'))
+  expect(onClose).not.toHaveBeenCalled()
+  type('Preset name', 'Delta')
+  fireEvent.submit(container.querySelector('form'))
+  expect(onSubmit).toHaveBeenCalledTimes(2)
+  expect(onSubmit).toHaveBeenLastCalledWith(tool, { expected_rev: 2, subcommand: 'Create', name: 'Delta' })
+  expect(onClose).toHaveBeenCalledTimes(1)
+  fireEvent.submit(container.querySelector('form'))
+  expect(onSubmit).toHaveBeenCalledTimes(2)
 })
 
 it('PF3 refuses a complete default object and explains layer syncing', () => {

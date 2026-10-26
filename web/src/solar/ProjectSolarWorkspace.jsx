@@ -7,7 +7,7 @@ import ProjectSolveReview, { ProjectSolarSchemaForm } from './ProjectSolveReview
 
 const STEP_TOOLS = ['solar-size-strings', 'solar-string-add', 'solar-string-multi-add',
   'solar-string-conductors', 'solar-assign-equipment']
-const GRAPH_TOOLS = ['solar-panels-from-drawing', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
+const GRAPH_TOOLS = ['solar-panels-from-drawing', 'solar-panel-groups', 'solar-homeruns', 'solar-schedule', 'solar-feeders']
 const READ_TOOLS = ['solar-string-data', 'solar-electrical-schedules', 'solar-cable-export']
 const SOLVE_TOOLS = ['solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string']
 const DIGEST = new RegExp('^sha256:[0-9a-f]{64}$')

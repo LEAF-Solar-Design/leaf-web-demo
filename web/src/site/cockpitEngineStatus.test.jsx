@@ -9,6 +9,18 @@ vi.mock('../cadedit/EngineSessionProvider.jsx', () => ({ useEngineSessionOptiona
 afterEach(() => { cleanup(); vi.resetAllMocks() })
 
 describe('CockpitEngineStatus', () => {
+  it('keeps transport details out of a save failure announcement', () => {
+    useEngineSessionOptional.mockReturnValue({ session: { status: 'Save failed: POST /api/drawings/private/versions/edited -> 502', errorKind: 'save' } })
+    render(<CockpitEngineStatus />)
+    expect(screen.getByRole('status').textContent).toBe('Save failed: The service had a temporary problem. Try again.')
+  })
+
+  it('keeps network details out of a save refusal announcement', () => {
+    useEngineSessionOptional.mockReturnValue({ session: { status: 'Save refused: Failed to fetch', errorKind: 'save' } })
+    render(<CockpitEngineStatus />)
+    expect(screen.getByRole('status').textContent).toBe("Save refused: Couldn't reach the service. Check the connection and retry.")
+  })
+
   it('shows and politely announces the latest session sentence', () => {
     useEngineSessionOptional.mockReturnValue({ session: { status: 'createLine applied: entity 7 drawn', errorKind: null } })
     const { rerender } = render(<CockpitEngineStatus />)

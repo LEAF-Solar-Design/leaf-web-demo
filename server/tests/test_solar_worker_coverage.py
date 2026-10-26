@@ -45,6 +45,7 @@ def coverage(monkeypatch):
                 if state.failure == "query":
                     raise ConnectionError("private-store-marker")
                 self.tool = args[0]
+                self.with_revision = "SELECT source_revision, observed_at " in sql
             else:
                 assert sql == "SELECT set_config('statement_timeout', %s, true)"
                 assert args == ("200ms",)
@@ -54,7 +55,7 @@ def coverage(monkeypatch):
             if not matching:
                 return None
             latest = max(matching, key=lambda row: row[2])
-            return latest[1:]
+            return latest[1:] if self.with_revision else latest[2:]
 
     class Connection:
         def __enter__(self):
@@ -81,7 +82,8 @@ def coverage(monkeypatch):
     return state
 
 
-def heartbeat(coverage, tool="solar-settings", *, age=0, revision="abc1234", naive=False):
+def heartbeat(coverage, tool="solar-settings", *, age=0, revision="sha256:" + "a" * 64,
+              naive=False):
     observed = datetime.now(timezone.utc) - timedelta(seconds=age)
     if naive:
         observed = observed.replace(tzinfo=None)
@@ -130,8 +132,7 @@ def test_worker_coverage_cache_expires_and_never_caches_store_failure(
     assert query_count() == 5
 
 
-@pytest.mark.parametrize("missing", ["absent", "stale", "future", "other-tool",
-                                     "wrong-revision", "invalid-revision"])
+@pytest.mark.parametrize("missing", ["absent", "stale", "future", "other-tool"])
 def test_uncovered_tool_refused_without_insert(lane, coverage, monkeypatch, missing):
     if missing == "stale":
         heartbeat(coverage, age=31)
@@ -139,10 +140,6 @@ def test_uncovered_tool_refused_without_insert(lane, coverage, monkeypatch, miss
         heartbeat(coverage, age=-10)
     elif missing == "other-tool":
         heartbeat(coverage, tool="solar-panels-from-drawing")
-    elif missing in ("wrong-revision", "invalid-revision"):
-        heartbeat(coverage)
-        monkeypatch.setenv("LEAF_EXPECTED_WORKER_REVISION",
-                           "def5678" if missing == "wrong-revision" else "invalid")
 
     response = routes.run(lane)
 
@@ -163,7 +160,10 @@ def test_covered_tool_submits_unchanged(lane, coverage, monkeypatch, tool, naive
         params = {"expected_rev": context.graph["rev"]}
         changes["dwg"] = str(context.parent_version_id)
     heartbeat(coverage, tool, naive=naive)
-    monkeypatch.setenv("LEAF_EXPECTED_WORKER_REVISION", " ABC1234 ")
+    monkeypatch.setenv("LEAF_CANONICAL_WORKER_REQUIRED", "1")
+    monkeypatch.setenv("LEAF_EXPECTED_WORKER_REVISION",
+                       "760d3888018f762e0ab8dbe289dae8a2871216ea")
+    assert dependency_health.canonical_worker_covers(tool) is True
 
     response = routes.run(lane, params, name=tool, **changes)
 
@@ -175,6 +175,36 @@ def test_covered_tool_submits_unchanged(lane, coverage, monkeypatch, tool, naive
     assert lane.a.events.count("insert") == 1
     assert lane.a.accepted[0][3] == tool
     assert coverage.calls[-1][1] == (tool,)
+
+
+def test_readiness_still_rejects_wrong_revision(coverage):
+    heartbeat(coverage)
+    env = {
+        "DATABASE_URL": "postgresql://coverage-test",
+        "LEAF_CANONICAL_WORKER_REQUIRED": "1",
+        "LEAF_CANONICAL_WORKER_TOOL": "solar-settings",
+        "LEAF_EXPECTED_WORKER_REVISION": "760d3888018f762e0ab8dbe289dae8a2871216ea",
+        "LEAF_READINESS_TIMEOUT_S": "0.2",
+    }
+    assert dependency_health.canonical_worker_covers("solar-settings", env) is True
+    worker = next(spec for spec in dependency_health.default_specs(env)
+                  if spec.name == "worker")
+    assert worker.required is True
+    with pytest.raises(dependency_health.DependencyDegraded):
+        worker.probe()
+
+
+def test_coverage_never_reads_expected_revision(coverage):
+    class CoverageEnv(dict):
+        def get(self, key, default=None):
+            assert key != "LEAF_EXPECTED_WORKER_REVISION"
+            return super().get(key, default)
+
+    heartbeat(coverage)
+    env = CoverageEnv(LEAF_CANONICAL_WORKER_REQUIRED="1",
+                      LEAF_READINESS_TIMEOUT_S="0.2")
+    assert dependency_health.canonical_worker_covers("solar-settings", env) is True
+    assert all("source_revision" not in sql for sql, _args in coverage.calls)
 
 
 def test_existing_refusals_take_precedence(lane, coverage, monkeypatch):
