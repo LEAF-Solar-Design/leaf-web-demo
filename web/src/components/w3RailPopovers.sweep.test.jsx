@@ -112,24 +112,26 @@ describe('w3 monitor and account popovers', () => {
     expect(popup.close).toHaveBeenCalled()
   })
 
-  it('updates the connection chip after returning from authorization', async () => {
+  it('rechecks reachability after returning without overriding authorization', async () => {
     const onHealth = vi.fn().mockResolvedValue({ state: 'connecting' })
     render(<LinkServiceDrawer {...drawerProps} servers={[service]} onHealth={onHealth} />)
-    await waitFor(() => expect(screen.getByText('Connection checked: Connecting…')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Connection checked: Reachable')).toBeInTheDocument())
     onHealth.mockResolvedValue({ state: 'connected' })
     fireEvent.focus(window)
-    expect(await screen.findByText('Connected', { selector: '.state' })).toBeInTheDocument()
-    expect(screen.queryByText('Connecting…', { selector: '.state' })).not.toBeInTheDocument()
+    await waitFor(() => expect(onHealth).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Sign in needed', { selector: '.state' })).toBeInTheDocument()
+    expect(screen.queryByText('Connected', { selector: '.state' })).not.toBeInTheDocument()
   })
 
-  it('refreshes a connecting chip when reopening the drawer', async () => {
+  it('rechecks reachability when reopening the drawer', async () => {
     const onHealth = vi.fn().mockResolvedValue({ state: 'connecting' })
     const props = { ...drawerProps, servers: [service], onHealth }
     const view = render(<LinkServiceDrawer {...props} />)
-    await waitFor(() => expect(screen.getByText('Connection checked: Connecting…')).toBeInTheDocument())
+    await waitFor(() => expect(screen.getByText('Connection checked: Reachable')).toBeInTheDocument())
     view.rerender(<LinkServiceDrawer {...props} open={false} />)
     onHealth.mockResolvedValue({ state: 'connected' })
     view.rerender(<LinkServiceDrawer {...props} />)
-    expect(await screen.findByText('Connected', { selector: '.state' })).toBeInTheDocument()
+    await waitFor(() => expect(onHealth).toHaveBeenCalledTimes(2))
+    expect(screen.getByText('Sign in needed', { selector: '.state' })).toBeInTheDocument()
   })
 })

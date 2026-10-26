@@ -18,10 +18,9 @@ import { humanizeError } from '../errorHumanize.js'
 // rules in styles.css/popovers.css are a generic popover primitive, not
 // Claude-specific, so a second consumer costs zero new CSS.
 //
-// State chips read the ROUTER's own state word — registered | connecting |
-// connected | error — through the shared `.state` status-word primitive
-// (styles.css: .sub hollow-muted, .prog pulsing, .done filled-primary,
-// .fail danger). The router's list/health routes never project an error
+// State chips use the registry's authorization state as their source of truth.
+// Health checks report reachability separately and can downgrade a row to
+// unreachable, but can never upgrade a row to connected. The router's list/health routes never project an error
 // reason (tenant_mcp.py `_project()` — id/label/host/state/linked_at only),
 // so "error" never claims a cause it was not given; the one place a reason
 // IS available is a connect call's own synchronous failure response, shown
@@ -31,6 +30,9 @@ import { humanizeError } from '../errorHumanize.js'
 // off a server record — never a spread, never a raw dump — so an upstream
 // tool name or a credentialed URL riding along in a hostile payload has no
 // path to the DOM even if a record carried one.
+const authorizationState = (server) => (server.state === 'connected' ? 'connected' : 'sign-in-needed')
+const reachabilityState = (result) => (result?.state === 'error' ? 'unreachable' : 'reachable')
+
 export default function LinkServiceDrawer({
   mock,
   servers,
@@ -55,17 +57,22 @@ export default function LinkServiceDrawer({
   const dialogRef = useRef(null)
   const closeRef = useRef(null)
   const wasOpen = useRef(false)
-  const healthGeneration = useRef(0)
+  const healthGeneration = useRef({})
+  const automaticallyCheckedIds = useRef(new Set())
+  const drawerOpenRef = useRef(open)
   const pop = useExit(open)
   const list = Array.isArray(servers) ? servers : []
+  const serverIdsKey = JSON.stringify([...new Set(list.map((server) => server.id))].sort())
   const listFailed = error?.kind === 'list'
   const mutationError = listFailed ? error.mutationError : error
   const shownState = (server) => {
     const result = healthResults[server.id]
-    return result && result.sourceState === server.state ? result.state : server.state
+    if (result?.sourceState === server.state && result.reachability === 'unreachable') return 'unreachable'
+    return authorizationState(server)
   }
   const healthContext = useRef(null)
   healthContext.current = { list, onHealth }
+  drawerOpenRef.current = open
 
   useLayoutEffect(() => {
     if (mock) return
@@ -75,32 +82,53 @@ export default function LinkServiceDrawer({
   }, [open, mock])
 
   useEffect(() => {
-    if (!open || mock) return undefined
-    const check = async (server, generation) => {
+    if (!open || mock) {
+      automaticallyCheckedIds.current.clear()
+      return undefined
+    }
+    const currentIds = new Set(healthContext.current.list.map((server) => server.id))
+    automaticallyCheckedIds.current.forEach((id) => {
+      if (!currentIds.has(id)) automaticallyCheckedIds.current.delete(id)
+    })
+    const check = async (server) => {
+      const generation = (healthGeneration.current[server.id] || 0) + 1
+      healthGeneration.current[server.id] = generation
       try {
         const result = await healthContext.current.onHealth?.(server.id)
-        if (generation !== healthGeneration.current) return
+        if (!drawerOpenRef.current || generation !== healthGeneration.current[server.id]) return
         if (!result?.state) return
-        setHealthResults((current) => ({ ...current, [server.id]: { state: result.state, sourceState: server.state } }))
+        setHealthResults((current) => ({
+          ...current,
+          [server.id]: { reachability: reachabilityState(result), sourceState: server.state },
+        }))
       } catch (e) {
-        if (generation === healthGeneration.current) setConnectErrors((current) => ({ ...current, [server.id]: humanizeError(e) }))
+        if (drawerOpenRef.current && generation === healthGeneration.current[server.id]) {
+          setHealthResults((current) => ({
+            ...current,
+            [server.id]: { reachability: 'unreachable', sourceState: server.state },
+          }))
+          setConnectErrors((current) => ({ ...current, [server.id]: humanizeError(e) }))
+        }
       }
     }
     const refresh = () => {
-      const generation = ++healthGeneration.current
-      healthContext.current.list.forEach((server) => { void check(server, generation) })
+      healthContext.current.list.forEach((server) => { void check(server) })
     }
-    // Recheck connection status on open and when returning from service sign-in.
-    refresh()
+    // Check each row once when it first appears, including rows loaded after opening.
+    healthContext.current.list.forEach((server) => {
+      if (automaticallyCheckedIds.current.has(server.id)) return
+      automaticallyCheckedIds.current.add(server.id)
+      void check(server)
+    })
+    // Recheck reachability when returning from service sign-in.
     const onVisible = () => { if (document.visibilityState === 'visible') refresh() }
     window.addEventListener('focus', refresh)
     document.addEventListener('visibilitychange', onVisible)
     return () => {
-      healthGeneration.current += 1
       window.removeEventListener('focus', refresh)
       document.removeEventListener('visibilitychange', onVisible)
     }
-  }, [open, mock])
+  }, [open, mock, serverIdsKey])
 
   // S27: Escape is the owner stack's (menu layer: this is an anchored popover).
   useEscapeOwner('link-service', !!open && !mock, () => onToggle(false), { layer: 'menu', scope: rootRef })
@@ -174,21 +202,36 @@ export default function LinkServiceDrawer({
   }
 
   const runHealth = async (id) => {
-    const generation = ++healthGeneration.current
+    const generation = (healthGeneration.current[id] || 0) + 1
+    healthGeneration.current[id] = generation
     try {
       const result = await onHealth(id)
-      if (generation !== healthGeneration.current) return
+      if (generation !== healthGeneration.current[id]) return
       if (!result?.state) throw new Error('Connection status is unavailable. Try Health again.')
-      setHealthResults((current) => ({ ...current, [id]: { state: result.state, sourceState: list.find((server) => server.id === id)?.state } }))
+      setHealthResults((current) => ({
+        ...current,
+        [id]: {
+          reachability: reachabilityState(result),
+          sourceState: list.find((server) => server.id === id)?.state,
+        },
+      }))
       setConnectErrors((current) => ({ ...current, [id]: null }))
     } catch (e) {
-      if (generation === healthGeneration.current) setConnectErrors((current) => ({ ...current, [id]: humanizeError(e) }))
+      if (generation === healthGeneration.current[id]) {
+        setHealthResults((current) => ({
+          ...current,
+          [id]: { reachability: 'unreachable', sourceState: list.find((server) => server.id === id)?.state },
+        }))
+        setConnectErrors((current) => ({ ...current, [id]: humanizeError(e) }))
+      }
     }
   }
 
   const runUnlink = async (id) => {
     try {
       await onUnlink(id)
+      healthGeneration.current[id] = (healthGeneration.current[id] || 0) + 1
+      automaticallyCheckedIds.current.delete(id)
       setConnectErrors((current) => { const next = { ...current }; delete next[id]; return next })
       setHealthResults((current) => { const next = { ...current }; delete next[id]; return next })
     } catch (e) {
@@ -201,15 +244,13 @@ export default function LinkServiceDrawer({
 
   const chipClass = (state) => (
     state === 'connected' ? 'done'
-      : state === 'connecting' ? 'prog'
-        : state === 'error' ? 'fail'
-          : 'sub' // 'registered' and any unrecognized word both read as queued, never a guess at a happier state
+      : state === 'unreachable' ? 'fail'
+        : 'sub'
   )
   const chipWord = (state) => (
     state === 'connected' ? 'Connected'
-      : state === 'connecting' ? 'Connecting…'
-        : state === 'error' ? 'Error'
-          : 'Registered'
+      : state === 'unreachable' ? 'Unreachable'
+        : 'Sign in needed'
   )
 
   return (
@@ -253,7 +294,7 @@ export default function LinkServiceDrawer({
               {list.map((server) => {
                 const connectErr = connectErrors[server.id]
                 const result = healthResults[server.id]
-                const health = result && result.sourceState === server.state ? result.state : null
+                const health = result && result.sourceState === server.state ? result.reachability : null
                 const state = shownState(server)
                 return (
                   <div className="ca-account" key={server.id}>
@@ -263,7 +304,7 @@ export default function LinkServiceDrawer({
                     </div>
                     <div className="ca-account-meta">
                       {server.host && <span>{server.host}</span>}
-                      {health && <span>Connection checked: {chipWord(health)}</span>}
+                      {health && <span>Connection checked: {health === 'unreachable' ? 'Unreachable' : 'Reachable'}</span>}
                     </div>
                     {connectErr && (
                       <div className="field-err" role="alert"><span className="dot red" />{connectErr}</div>

@@ -64,7 +64,7 @@ describe('LinkServiceDrawer', () => {
     expect(container).toBeEmptyDOMElement()
   })
 
-  it('lists registered servers with a state chip per row', () => {
+  it('lists servers with authorization state chips per row', () => {
     render(<LinkServiceDrawer {...baseProps({
       servers: [
         server({ id: 'a', label: 'Billing tool', state: 'registered' }),
@@ -75,13 +75,11 @@ describe('LinkServiceDrawer', () => {
     })} />)
 
     expect(screen.getByText('Billing tool')).toBeInTheDocument()
-    expect(screen.getByText('Registered')).toBeInTheDocument()
+    expect(screen.getAllByText('Sign in needed')).toHaveLength(3)
     expect(screen.getByText('Roof scanner')).toBeInTheDocument()
     expect(screen.getByText('Connected')).toBeInTheDocument()
     expect(screen.getByText('Flaky server')).toBeInTheDocument()
-    expect(screen.getByText('Error')).toBeInTheDocument()
     expect(screen.getByText('Mid-flight')).toBeInTheDocument()
-    expect(screen.getByText('Connecting…')).toBeInTheDocument()
   })
 
   it('Connect reserves a tab before awaiting the sign-in URL and then navigates it', async () => {
@@ -133,7 +131,7 @@ describe('LinkServiceDrawer', () => {
     openSpy.mockRestore()
   })
 
-  it('Health shows the returned state word inline, keyed to its own row', async () => {
+  it('Health shows reachability without upgrading the registry authorization state', async () => {
     const onHealth = vi.fn().mockResolvedValue({ id: 'a', state: 'connected' })
     render(<LinkServiceDrawer {...baseProps({
       servers: [server({ id: 'a', label: 'Billing tool' })],
@@ -141,9 +139,36 @@ describe('LinkServiceDrawer', () => {
     })} />)
 
     fireEvent.click(screen.getByRole('button', { name: 'Health' }))
-    expect(await screen.findByText('Connection checked: Connected')).toBeInTheDocument()
-    expect(screen.getByText('Connected', { selector: '.state' })).toBeInTheDocument()
+    expect(await screen.findByText('Connection checked: Reachable')).toBeInTheDocument()
+    expect(screen.getByText('Sign in needed', { selector: '.state' })).toBeInTheDocument()
     expect(onHealth).toHaveBeenCalledWith('a')
+  })
+
+  it('keeps sign-in required when a 401 health response reports the service as reachable', async () => {
+    const onHealth = vi.fn().mockResolvedValue({ id: 'a', state: 'connected', status: 401 })
+    render(<LinkServiceDrawer {...baseProps({
+      servers: [server({ id: 'a', state: 'registered' })],
+      onHealth,
+    })} />)
+
+    expect(await screen.findByText('Connection checked: Reachable')).toBeInTheDocument()
+    expect(screen.getByText('Sign in needed', { selector: '.state' })).toBeInTheDocument()
+    expect(screen.queryByText('Connected', { selector: '.state' })).not.toBeInTheDocument()
+  })
+
+  it('checks rows that arrive after opening exactly once', async () => {
+    const onHealth = vi.fn().mockResolvedValue({ id: 'late', state: 'connected' })
+    const props = baseProps({ onHealth })
+    const view = render(<LinkServiceDrawer {...props} />)
+    expect(onHealth).not.toHaveBeenCalled()
+
+    view.rerender(<LinkServiceDrawer {...props} servers={[server({ id: 'late' })]} />)
+    await waitFor(() => expect(onHealth).toHaveBeenCalledTimes(1))
+    expect(onHealth).toHaveBeenCalledWith('late')
+    expect(await screen.findByText('Connection checked: Reachable')).toBeInTheDocument()
+
+    view.rerender(<LinkServiceDrawer {...props} servers={[server({ id: 'late' })]} />)
+    await waitFor(() => expect(onHealth).toHaveBeenCalledTimes(1))
   })
 
   it('Unlink requires a second confirming click, and Keep cancels it', async () => {
