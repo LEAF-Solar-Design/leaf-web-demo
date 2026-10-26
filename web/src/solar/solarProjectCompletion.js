@@ -68,6 +68,7 @@ export function projectSolarRunFailure(code) {
   }
   const key = code.toLowerCase()
   switch (key) {
+    case 'cold_voltage_failed': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.cold_voltage })
     case 'cloud_auth_missing': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.grant_missing })
     case 'cloud_tenant_unauthorized': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.grant_scope })
     case 'cloud_upstream_failure': return Object.freeze({ reasonCode: key, message: SOLAR_SIZING_RUN_REASONS.cloud_unavailable })

@@ -61,9 +61,11 @@ def _prepare_project(graph: dict, params: dict) -> tuple[dict, cloud.SizingReque
     _bounded_request_json(params)
     if type(params) is not dict:
         raise GraphValidationError("INVALID_SIZING_REQUEST")
+    cloud._check_accepted_string_length(params)
     if params.get("mode") != "global":
         raise GraphValidationError("INVALID_SIZING_MODE")
-    if (set(params) - {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel"}
+    if (set(params) - {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel",
+                       "accepted_string_length"}
             or params.get("confirm") is not True or params.get("cancel", False) is not False):
         raise GraphValidationError("INVALID_SIZING_REQUEST")
     requests = params.get("requests")
@@ -81,6 +83,8 @@ def _prepare_project(graph: dict, params: dict) -> tuple[dict, cloud.SizingReque
         "requests": {target_id: parsed.request.wire()}, "grant_ref": parsed.grant_ref,
         "confirm": True, "cancel": False,
     }
+    if "accepted_string_length" in params:
+        normalized["accepted_string_length"] = params["accepted_string_length"]
     _bounded_request_json(normalized)
     _request_voltage(parsed.request)
     try:
@@ -97,7 +101,8 @@ def _parse_response(raw):
         raise GraphValidationError("CLOUD_RESPONSE_INVALID") from None
 
 
-def _derive_project_result(request: cloud.SizingRequest, parsed_response: dict) -> dict:
+def _derive_project_result(request: cloud.SizingRequest, parsed_response: dict,
+                           accepted_string_length=None) -> dict:
     voltage = _request_voltage(request)
     try:
         _keys(parsed_response, {"wire_bytes", "response", "sizing", "wire_sha256",
@@ -109,7 +114,7 @@ def _derive_project_result(request: cloud.SizingRequest, parsed_response: dict) 
         response = cloud.SizingResponse.model_validate(fresh["response"])
         if voltage != Decimal(str(response.simulation_results.standard.string_design_voltage)):
             raise ValueError()
-        sizing = cloud.recommend(response)
+        sizing = cloud.recommend(response, accepted_string_length)
     except (KeyError, ValueError, TypeError, RecursionError, InvalidOperation):
         raise GraphValidationError("CLOUD_RESPONSE_INVALID") from None
     if sizing["voc_cold"]["passes"] is not True:
@@ -156,7 +161,11 @@ def _producer(value):
 
 
 def _normalized_parameters(value, target_id):
-    _keys(value, {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel"})
+    keys = {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel"}
+    if type(value) is dict and "accepted_string_length" in value:
+        keys.add("accepted_string_length")
+    _keys(value, keys)
+    cloud._check_accepted_string_length(value)
     if (type(value["expected_rev"]) is not int or value["expected_rev"] < 0
             or value["mode"] != "global" or value["confirm"] is not True
             or value["cancel"] is not False):
@@ -226,8 +235,9 @@ def apply_project_sizing(graph: dict, params: dict, parsed_response: dict, *,
         _id(job_id)
     except ValueError:
         raise GraphValidationError("CLOUD_REQUEST_INVALID") from None
-    _derive_project_result(request, parsed_response)
-    record = cloud.sizing_record(request, parsed_response, organization_id, job_id)
+    accepted = params.get("accepted_string_length")
+    _derive_project_result(request, parsed_response, accepted)
+    record = cloud.sizing_record(request, parsed_response, organization_id, job_id, accepted)
     return cloud.apply_sizing_records(prepared, {next(iter(prepared["targets"])): record})
 
 
@@ -249,7 +259,7 @@ def build_sizing_evidence(params: dict, parent_graph: dict, parent_intake_sha256
         parent_graph, plan["normalized_params"], parsed,
         organization_id=identity["organization_id"], job_id=identity["job_id"])
     derived = _derive_project_result(cloud.SizingRequest.model_validate(plan["normalized_request"]),
-                                     parsed)
+                                     parsed, plan["normalized_params"].get("accepted_string_length"))
     derived["output_graph_sha256"] = cloud.digest(applied["graph"])
     record = {
         "schema": EVIDENCE_SCHEMA, "identity": copy.deepcopy(identity),
