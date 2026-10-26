@@ -317,6 +317,72 @@ def test_real_response_fails_the_guard_and_cannot_confirm(graph, plugin, passing
     assert graph["rev"] == 0
 
 
+def test_accepted_length_legacy_broker_rechecks_real_response(graph, plugin, service, monkeypatch):
+    monkeypatch.setattr(cloud, "post_string_length",
+                        lambda *a: cloud.canonical_bytes(plugin["response"]))
+    length = outcome(plugin)["voc_cold"]["suggested_string_length"]
+    params = sizing_params(graph, plugin, accepted_string_length=length)
+    prepared = cloud.prepare_graph_sizing(graph, params)
+    target = graph["settings"]["id"]
+    assert prepared["validated"][target]["accepted_string_length"] == length
+    result = confirm(graph, params)
+    record = cloud.require_sizing(result["graph"])["records"][target]
+    assert record["accepted_string_length"] == length
+    assert record["sizing"]["panels_in_sequence"] == length
+    assert record["sizing"]["voc_cold"]["passes"] is True
+    assert record["request"] == plugin["request"]
+    assert record["response"] == plugin["response"]
+    with pytest.raises(CloudError, match="^cloud_response_invalid$"):
+        confirm(graph, sizing_params(graph, plugin, accepted_string_length=29))
+    with pytest.raises(GraphValidationError, match="^COLD_VOLTAGE_FAILED:"):
+        confirm(graph, sizing_params(graph, plugin, accepted_string_length=28))
+
+
+@pytest.mark.parametrize("length", [0, 4097, True, "27", 27.0, None])
+def test_invalid_accepted_length_before_transport(graph, plugin, service, length):
+    with pytest.raises(GraphValidationError, match="^INVALID_SIZING_REQUEST:"):
+        confirm(graph, sizing_params(graph, plugin, accepted_string_length=length))
+    with pytest.raises(CloudError, match="^cloud_request_invalid$"):
+        cloud.size({"grant_ref": "fixture-grant", "request": plugin["request"],
+                    "mode": "global", "accepted_string_length": length},
+                   "fixture-tenant", "fixture-job")
+    assert service == []
+
+
+@pytest.mark.parametrize("mode", ["zones", "manual-global"])
+def test_accepted_length_requires_global_mode(graph, plugin, service, mode):
+    params = sizing_params(graph, plugin, mode, accepted_string_length=27)
+    with pytest.raises(GraphValidationError, match="^INVALID_SIZING_REQUEST:"):
+        cloud.prepare_graph_sizing(graph, params)
+    with pytest.raises(GraphValidationError, match="^INVALID_SIZING_REQUEST:"):
+        confirm(graph, params)
+    with pytest.raises(CloudError, match="^cloud_request_invalid$"):
+        cloud.size({"grant_ref": "fixture-grant", "request": plugin["request"],
+                    "mode": mode, "accepted_string_length": 27}, "fixture-tenant", "fixture-job")
+    assert service == []
+
+
+def test_direct_broker_accepted_length_requires_explicit_global(plugin, monkeypatch):
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *a: pytest.fail("invalid request resolved grant"))
+    with pytest.raises(CloudError, match="^cloud_request_invalid$"):
+        cloud.size({"grant_ref": "fixture-grant", "request": plugin["request"],
+                    "accepted_string_length": 27}, "fixture-tenant", "fixture-job")
+
+
+@pytest.mark.parametrize("length", [1, 27, 28])
+def test_recommend_accepted_length_guard(plugin, length):
+    response = cloud.SizingResponse.model_validate(plugin["response"])
+    sizing = cloud.recommend(response, length)
+    assert sizing == {"panels_in_sequence": length, "voc_cold": {
+        "passes": length <= 27, "override_accepted": False,
+        "suggested_string_length": 0 if length <= 27 else 27,
+        "per_module": PER_MODULE, "string_voltage": PER_MODULE * length,
+        "max_dc_voltage": 1500.0}}
+    assert cloud.recommend(response, None) == outcome(plugin)
+    with pytest.raises(ValueError):
+        cloud.recommend(response, 29)
+
+
 def test_partial_zone_service_failure_is_atomic(graph, passing, service, monkeypatch):
     other = copy.deepcopy(graph["electrical_zones"][0])
     other["id"] = app_id("zone-el", 2)

@@ -148,10 +148,15 @@ def compute_voc_cold(voc_stc, temp_coeff_pct_per_c, temp_min_c):
     return voc_stc * (1.0 + temp_coeff_pct_per_c / 100.0 * delta)
 
 
-def recommend(response):
+def recommend(response, accepted_string_length=None):
     """Plugin recommendation and StringSizerVocColdGuard.Evaluate on the standard scenario."""
     standard = response.simulation_results.standard
     length = int(standard.string_length)  # C# (int) cast truncates toward zero
+    if accepted_string_length is not None:
+        if (type(accepted_string_length) is not int
+                or not 1 <= accepted_string_length <= min(4096, length)):
+            raise ValueError("invalid accepted string length")
+        length = accepted_string_length
     max_dc_voltage = float(int(standard.string_design_voltage))
     per_module = compute_voc_cold(response.voc, response.bvoc, response.min_temp)
     if length < 1 or not math.isfinite(per_module) or per_module <= 0:
@@ -239,33 +244,59 @@ def parse_response_bytes(raw: bytes) -> dict:
 
 
 def sizing_record(request: SizingRequest, parsed_response: dict, tenant_id: str,
-                  job_id: str) -> dict:
+                  job_id: str, accepted_string_length=None) -> dict:
     request = request.wire()
     response = copy.deepcopy(parsed_response["response"])
     sizing = copy.deepcopy(parsed_response["sizing"])
-    return {"endpoint": SIZING_URL, "adapter_version": ADAPTER_VERSION, "tenant_id": tenant_id,
+    record = {"endpoint": SIZING_URL, "adapter_version": ADAPTER_VERSION, "tenant_id": tenant_id,
             "job_id": job_id, "request": request, "response": response, "sizing": sizing,
             "request_sha256": digest(request), "response_sha256": parsed_response["canonical_sha256"],
             "wire_response_sha256": parsed_response["wire_sha256"]}
+    if accepted_string_length is not None:
+        record["accepted_string_length"] = accepted_string_length
+        record["sizing"] = recommend(SizingResponse.model_validate(response), accepted_string_length)
+    return record
+
+
+def _check_accepted_string_length(params):
+    if "accepted_string_length" in params:
+        length = params["accepted_string_length"]
+        if (params.get("mode") != "global" or type(length) is not int
+                or not 1 <= length <= 4096):
+            raise GraphValidationError("INVALID_SIZING_REQUEST")
 
 
 def size(params, tenant_id, job_id):
+    accepted = None
+    if type(params) is dict and "accepted_string_length" in params:
+        try:
+            _check_accepted_string_length(params)
+        except GraphValidationError:
+            raise CloudError("cloud_request_invalid", 400) from None
+        params = dict(params)
+        accepted = params.pop("accepted_string_length")
+        params.pop("mode")
     parsed = validate_params(params)
     if any(type(value) is not str or not 1 <= len(value) <= 256 for value in (tenant_id, job_id)):
         raise CloudError("cloud_request_invalid", 400)
     grant = resolve_grant(parsed.grant_ref, tenant_id)
     raw = post_string_length(parsed.request, grant)
     response = parse_response_bytes(raw)
-    return sizing_record(parsed.request, response, tenant_id, job_id)
+    try:
+        return sizing_record(parsed.request, response, tenant_id, job_id, accepted)
+    except (ValueError, TypeError):
+        raise CloudError("cloud_response_invalid", 502) from None
 
 
 def prepare_graph_sizing(graph: dict, params: dict) -> dict:
     _bounded_json(params)
     if (type(params) is not dict
-            or set(params) - {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel"}
+            or set(params) - {"expected_rev", "mode", "requests", "grant_ref", "confirm", "cancel",
+                              "accepted_string_length"}
             or type(params.get("cancel", False)) is not bool
             or type(params.get("confirm", False)) is not bool):
         raise GraphValidationError("INVALID_SIZING_REQUEST")
+    _check_accepted_string_length(params)
     result = checked_graph(graph, params.get("expected_rev"))
     if params.get("cancel", False):
         return {"graph": result, "cancelled": True}
@@ -284,6 +315,8 @@ def prepare_graph_sizing(graph: dict, params: dict) -> dict:
                                 or parsed.request.full_inverter_name != target["inverter_model_a"]):
             raise GraphValidationError("SIZING_MODEL_MISMATCH")
         validated[target_id] = {"grant_ref": parsed.grant_ref, "request": parsed.request.wire()}
+        if "accepted_string_length" in params:
+            validated[target_id].update(mode=mode, accepted_string_length=params["accepted_string_length"])
     project_zip = result["project"]["zip_code"].strip()[:5]
     if not project_zip or any(request["request"]["zip_code"] != project_zip
                               for request in validated.values()):
@@ -471,13 +504,19 @@ class _LegacyResponse(StrictModel):
 def _record_outcome(record):
     """(sizing, module model, inverter model) re-derived from one evidence record."""
     if record["adapter_version"] == ADAPTER_VERSION:
+        if "accepted_string_length" in record:
+            length = record["accepted_string_length"]
+            if type(length) is not int or not 1 <= length <= 4096:
+                raise ValueError()
         request = SizingRequest.model_validate(record["request"])
         if (record["request"] != request.wire()
                 or record["response_sha256"] != digest(record["response"])
-                or record["sizing"] != recommend(SizingResponse.model_validate(record["response"]))):
+                or record["sizing"] != recommend(SizingResponse.model_validate(record["response"]),
+                                                  record.get("accepted_string_length"))):
             raise ValueError()
         return record["sizing"], request.module_name, request.full_inverter_name
-    if record["adapter_version"] != LEGACY_ADAPTER_VERSION:
+    if (record["adapter_version"] != LEGACY_ADAPTER_VERSION
+            or "accepted_string_length" in record):
         raise ValueError()
     request = _LegacyRequest.model_validate(record["request"])
     response = _LegacyResponse.model_validate(record["response"]).model_dump()
@@ -537,6 +576,8 @@ def require_sizing(graph, tables=None):
             raise ValueError()
         for target_id, target in targets.items():
             record = evidence["records"][target_id]
+            if "accepted_string_length" in record and evidence["mode"] != "global":
+                raise ValueError()
             sizing, module_model, inverter_model = _record_outcome(record)
             if (record["endpoint"] != SIZING_URL
                     or record["request_sha256"] != digest(record["request"])
