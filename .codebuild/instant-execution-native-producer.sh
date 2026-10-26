@@ -73,6 +73,7 @@ import stat
 import subprocess
 import sys
 
+stage = 'inputs'
 scratch, version, scanner = sys.argv[1:]
 work = Path(scratch)
 registry = '807034087062.dkr.ecr.us-east-1.amazonaws.com'
@@ -165,18 +166,23 @@ try:
     require(not output.is_relative_to(source) and not source.is_relative_to(output))
     require(stat.S_IMODE(output.stat().st_mode) == 0o700 and next(output.iterdir(), None) is None)
     os.chdir(source)
+    stage = 'git'
     require(run(['git', 'rev-parse', '--show-toplevel'], 10, capture=True).strip() == str(source))
     require(run(['git', 'rev-parse', 'HEAD'], 10, capture=True).strip() == revision)
     require(run(['git', 'rev-parse', 'HEAD^{tree}'], 10, capture=True).strip() == tree)
     run(['git', 'status', '--porcelain', '--untracked-files=all'], 10)
     require((work / 'command.log').stat().st_size == 0)
+    stage = 'build'
     dockerfile = source / 'deploy/Dockerfile.instant-execution'
     require(dockerfile.is_file() and not dockerfile.is_symlink() and dockerfile.resolve().is_relative_to(source))
     uri = registry + '/leaf-platform-instant-execution:sha-' + revision
     run(['docker', 'buildx', 'build', '--load', '--file', 'deploy/Dockerfile.instant-execution',
          '--build-arg', 'LEAF_SOURCE_SHA=' + revision, '--tag', uri, '.'], 1050)
+    stage = 'inspect'
     identity = inspect(uri, revision)
+    stage = 'scanner_pull'
     run(['docker', 'pull', scanner], 150)
+    stage = 'scan'
     run(['docker', 'run', '--rm', '--volume', '/var/run/docker.sock:/var/run/docker.sock',
          '--volume', scratch + ':/work', scanner, 'image', '--cache-dir', '/work/cache',
          '--db-repository', 'public.ecr.aws/aquasecurity/trivy-db:2',
@@ -185,14 +191,18 @@ try:
          '--format', 'json', '--output', '/work/scan-report.json', uri], 540)
     report = bounded(work / 'scan-report.json', 16777216)
     require(type(json.loads(report, object_pairs_hook=pairs)) is dict)
+    stage = 'inspect'
     require(inspect(uri, revision) == identity)
+    stage = 'ecr_login'
     (work / 'login-attempted').write_bytes(b'1')
     run(['bash', '--noprofile', '--norc', '-o', 'pipefail', '-c',
          'timeout --kill-after=30s 60s aws ecr get-login-password --region us-east-1 | '
          'timeout --kill-after=30s 60s docker login --username AWS --password-stdin ' + registry + ' >/dev/null 2>&1'], 65)
+    stage = 'push'
     pushed = run(['docker', 'push', uri], 150, capture=True)
     digests = re.findall(r'^sha-' + revision + r': digest: (sha256:[0-9a-f]{64}) size: [1-9][0-9]*\s*$', pushed, re.MULTILINE)
     require(len(digests) == 1)
+    stage = 'receipt'
     result = dict(schema='leaf.native-instant-execution.producer.v1', source_revision=revision,
                   source_tree=tree, image_uri=uri, image_digest=digests[0], local_image_id=identity,
                   scan=dict(status='passed', scanner='trivy', scanner_version=version,
@@ -211,7 +221,7 @@ try:
         # A cross-filesystem move can leave a partial copy on an I/O failure.
         destination.unlink(missing_ok=True)
         raise
-except Exception:
-    print('Instant execution producer refused publication or evidence', file=sys.stderr)
+except Exception as error:
+    print(f'Instant execution producer refused publication or evidence (stage={stage}, error={type(error).__name__})', file=sys.stderr)
     sys.exit(1)
 PY

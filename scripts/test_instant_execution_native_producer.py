@@ -4,6 +4,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
 import shutil
 import subprocess
 import sys
@@ -47,7 +48,9 @@ if name == 'aws':
     if fault == 'aws': sys.exit(1)
     print('secret-password')
 elif args[:2] == ['buildx', 'build']:
-    if fault == 'build': sys.exit(1)
+    if fault == 'build':
+        print(str(root) + '/secret-password', file=sys.stderr)
+        sys.exit(1)
 elif args[:2] == ['image', 'inspect']:
     counter = root / 'inspect-count'
     count = int(counter.read_text()) + 1 if counter.exists() else 1
@@ -69,7 +72,9 @@ elif args[0] == 'run':
     elif fault == 'large-report': report.write_bytes(b' ' * 16777217)
     else: report.write_text('{"Results":[]}')
     if fault == 'vulnerability': sys.exit(1)
-    if fault == 'scanner-error': sys.exit(2)
+    if fault == 'scanner-error':
+        print(str(work) + '/secret-password', file=sys.stderr)
+        sys.exit(2)
 elif args[0] == 'login':
     assert sys.stdin.read().strip() == 'secret-password'
     if fault == 'login': sys.exit(1)
@@ -294,6 +299,25 @@ def test_invalid_input_has_no_provider_calls(tmp_path, fault):
     assert completed.returncode != 0
     assert not any(call[0] in ('aws', 'docker') for call in calls)
     assert not (output / 'producer-result.json').exists()
+
+
+@POSIX
+@pytest.mark.parametrize('fault, stage', [('git', 'git'), ('build', 'build'), ('scanner-error', 'scan')])
+def test_refusal_names_stage_without_leaking_details(tmp_path, fault, stage):
+    source, output, request, env = case(tmp_path)
+    if fault == 'git':
+        (source / 'secret-password').write_text('untracked')
+    else:
+        env['FAKE_FAULT'] = fault
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=' + stage + r', error=[A-Za-z_][A-Za-z0-9_]*\)\n', completed.stderr)
+    for private in (str(tmp_path), str(source), env['LEAF_FORGE_REQUEST_FILE'],
+                    '/tmp/leaf-instant-producer.', 'secret-password'):
+        assert private not in completed.stderr
+    no_publication(output, calls)
 
 
 @POSIX
