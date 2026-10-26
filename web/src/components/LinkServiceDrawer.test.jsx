@@ -101,6 +101,23 @@ describe('LinkServiceDrawer', () => {
     openSpy.mockRestore()
   })
 
+  it('resolves a relative sign-in URL against the app and keeps the reserved tab open', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)
+    const onConnect = vi.fn().mockResolvedValue({ authorize_url: '/api/registry/start?x=1' })
+    try {
+      render(<LinkServiceDrawer {...baseProps({ servers: [server()], onConnect })} />)
+
+      fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+      await waitFor(() => expect(popup.location.replace).toHaveBeenCalledWith(`${window.location.origin}/api/registry/start?x=1`))
+      expect(openSpy).toHaveBeenCalledWith('about:blank', '_blank')
+      expect(popup.close).not.toHaveBeenCalled()
+      expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    } finally {
+      openSpy.mockRestore()
+    }
+  })
+
   it('closes the reserved tab and explains when no sign-in URL is returned', async () => {
     const popup = { close: vi.fn() }
     const openSpy = vi.spyOn(window, 'open').mockReturnValue(popup)

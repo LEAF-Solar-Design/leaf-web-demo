@@ -144,23 +144,30 @@ export default function LinkServiceDrawer({
     setConnectErrors((current) => ({ ...current, [id]: null }))
     // Reserve the tab during the click, before the asynchronous authorization request.
     let popup
+    let result
     try {
       popup = window.open('about:blank', '_blank')
       if (popup) popup.opener = null
-      const result = await onConnect(id)
-      const startUrl = result?.authorize_url
-      if (typeof startUrl === 'string' && /^https:\/\//i.test(startUrl)) {
+      result = await onConnect(id)
+    } catch (e) {
+      popup?.close()
+      const reason = e?.body?.error?.message || humanizeError(e)
+      setConnectErrors((current) => ({ ...current, [id]: reason }))
+      return
+    }
+    const startUrl = result?.authorize_url
+    try {
+      if (typeof startUrl === 'string' && startUrl.trim()) {
         if (!popup || popup.closed) {
           setConnectErrors((current) => ({ ...current, [id]: 'The sign-in tab was blocked or closed. Allow pop-ups and try Connect again.' }))
         } else {
-          popup.location.replace(startUrl)
+          popup.location.replace(new URL(startUrl, window.location.href).toString())
         }
       } else {
         popup?.close()
         setConnectErrors((current) => ({ ...current, [id]: 'The service did not provide a sign-in link. Try Connect again.' }))
       }
     } catch (e) {
-      popup?.close()
       const reason = e?.body?.error?.message || humanizeError(e)
       setConnectErrors((current) => ({ ...current, [id]: reason }))
     }
