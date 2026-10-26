@@ -68,7 +68,7 @@ function authoredProvLine(res) {
     const grants = Array.isArray(p.grants) ? (p.grants.length ? p.grants.join(' ') : 'none') : String(p.grants)
     parts.push(`grants ${grants}`)
   }
-  if (p.reviewer !== undefined) parts.push(`reviewer ${p.reviewer || '—'}`)
+  if (p.reviewer !== undefined) parts.push(`reviewer ${p.reviewer || 'not set'}`)
   // The params parsed out of the sentence (e.g. `distance_in: 18`) — the proof
   // the description was actually understood. Capped so a many-param live tool
   // can't run the line long; absent-safe for tools with no defaults.
@@ -100,7 +100,7 @@ function TelemetryChip({ telemetry }) {
   const inT = Number(telemetry.input_tokens)
   const outT = Number(telemetry.output_tokens)
   const tokTitle = (Number.isFinite(inT) || Number.isFinite(outT))
-    ? `tokens · in ${Number.isFinite(inT) ? inT.toLocaleString() : '—'} · out ${Number.isFinite(outT) ? outT.toLocaleString() : '—'}`
+    ? `tokens · in ${Number.isFinite(inT) ? inT.toLocaleString() : 'unknown'} · out ${Number.isFinite(outT) ? outT.toLocaleString() : 'unknown'}`
     : 'authoring-agent telemetry'
   return (
     <span className="telemetry-chip" role="status" title={tokTitle}>
@@ -147,7 +147,7 @@ function AuthorGate({ onLinkClaude }) {
     <div className="author-gate" role="status">
       <div className="author-gate-body">
         <b>Link your Claude account to author with the agent.</b>{' '}
-        Templated authoring still works below without it — linking your Claude subscription lets the
+        Templated authoring still works below without it. Linking your Claude subscription lets the
         real agent write richer tools.
         {onLinkClaude && (
           <div className="author-gate-act">
@@ -580,7 +580,7 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
         <div className="inline-error" role={startFailure ? 'alert' : undefined}>
           {startFailure ? <span data-testid="author-start-failure">{startFailure.message}</span> : <>
           <span>
-            Couldn’t author the tool — {authorError.message}
+            Couldn’t author the tool: {authorError.message}
             {authorError.code && <> <code className="dim">{authorError.code}</code></>}
           </span>
           {authorError.nextAction && <span className="dim">Next: {authorError.nextAction}</span>}

@@ -538,7 +538,7 @@ describe('author start failures: the panel', () => {
   it('C8A-13 an unclassified failure keeps the whole generic line and no alert role', async () => {
     panel(fail('boom'))
     expect(box().getAttribute('role')).toBeNull()
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . boomRetry RYour description is preserved\.$/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: boomRetry RYour description is preserved\.$/)
     expect(screen.queryByTestId('author-start-failure')).toBeNull()
     expect(screen.getByRole('button', { name: /Retry/ })).toBeTruthy()
     cleanup()
@@ -553,7 +553,7 @@ describe('author start failures: the panel', () => {
     panel(busy, { resumable: true })
     expect(box().getAttribute('role')).toBeNull()
     expect(box().textContent).toMatch(
-      /^Couldn.t author the tool . The workspace is busy\. BUSYNext: Wait for the other requestSupportResume authoringYour description is preserved\.$/,
+      /^Couldn.t author the tool: The workspace is busy\. BUSYNext: Wait for the other requestSupportResume authoringYour description is preserved\.$/,
     )
     expect(screen.queryByTestId('author-start-failure')).toBeNull()
   })
@@ -575,7 +575,7 @@ describe('author start failures: the panel', () => {
     expect(screen.getAllByText(LINK_GATE)).toHaveLength(1)
     expect(screen.queryByTestId('author-start-failure')).toBeNull()
     expect(box().getAttribute('role')).toBeNull()
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . forbiddenResume authoringYour description is preserved\.$/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: forbiddenResume authoringYour description is preserved\.$/)
     expect(document.body.textContent).not.toContain(SENTENCES.grant)
     cleanup()
 
@@ -591,7 +591,7 @@ describe('author start failures: the panel', () => {
     panel(await classified(make, runStage), { resumable: true }, { notLinked: true })
     expect(screen.getAllByText(LINK_GATE)).toHaveLength(1)
     expect(screen.queryByTestId('author-start-failure')).toBeNull()
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . forbiddenResume authoringYour description is preserved\.$/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: forbiddenResume authoringYour description is preserved\.$/)
     expect(document.body.textContent).not.toContain(SENTENCES.grant)
     cleanup()
 
@@ -706,14 +706,14 @@ describe('author start failures: the panel', () => {
     // Declared limit, as before this change: a failure line already on screen is
     // not replaced by a grant refusal that arrives behind a gate.
     const stale = panel(fail('boom'))
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . boom/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: boom/)
     stale.rerender(view(fail('bad', { status: 503 }), {}))
     expect(screen.getByText(SERVICE_GATE)).toBeTruthy()
     stale.rerender(view(await classified(make), {}))
     expect(screen.queryByText(LINK_GATE)).toBeNull()
     expect(screen.queryByTestId('author-start-failure')).toBeNull()
     expect(document.querySelectorAll('.inline-error')).toHaveLength(1)
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . boom/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: boom/)
   })
 
   it('C8A-15 the daily authoring quota keeps its gate', async () => {
@@ -758,7 +758,7 @@ describe('author start failures: the panel', () => {
     // An unclassified failure retires it as well.
     mounted.rerender(view(fail('boom'), {}))
     expect(screen.queryByTestId('author-secret-notice')).toBeNull()
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . boomRetry R/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: boomRetry R/)
   })
 
   it('C8A-22 a run under way retires the credential notice on the mounted panel', () => {
@@ -777,7 +777,7 @@ describe('author start failures: the panel', () => {
     const refusal = refusalOf()
     const onAuthor = vi.fn(async () => { throw fail('refused', { secretRefused: true, refusal }) })
     const mounted = panel(older, {}, { onAuthor })
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . boom/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: boom/)
     fireEvent.change(screen.getByLabelText('What should the tool do?'), { target: { value: description } })
     await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Generate tool' })) })
     await waitFor(() => expect(screen.getByTestId('author-secret-notice-reason').textContent).toBe(refusal.reason))
@@ -785,7 +785,7 @@ describe('author start failures: the panel', () => {
     // The older failure is read again only because the activity became resumable.
     mounted.rerender(view(older, { resumable: true }, { onAuthor }))
     expect(screen.getByTestId('author-secret-notice')).toBeTruthy()
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . boomResume authoring/)
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: boomResume authoring/)
   })
 
   it('C8A-24 a property set on an error by anyone else is never rendered', async () => {
@@ -801,7 +801,7 @@ describe('author start failures: the panel', () => {
         panel(fail('boom', { authorStartFailure }), activity)
         expect(box().getAttribute('role')).toBeNull()
         expect(screen.queryByTestId('author-start-failure')).toBeNull()
-        expect(box().textContent).toMatch(/^Couldn.t author the tool . boom(Retry R|Resume authoring)Your description is preserved\.$/)
+        expect(box().textContent).toMatch(/^Couldn.t author the tool: boom(Retry R|Resume authoring)Your description is preserved\.$/)
         expect(screen.queryByText(LINK_GATE)).toBeNull()
         cleanup()
       }
@@ -824,9 +824,9 @@ describe('author start failures: the panel', () => {
     panel(refused.error, { resumable: true })
     expect(box().getAttribute('role')).toBeNull()
     expect(screen.queryByTestId('author-start-failure')).toBeNull()
-    // 27 characters of the generic lead-in, then exactly what the server said.
-    expect(box().textContent).toMatch(/^Couldn.t author the tool . Tool authoring requires a verified workspace identity/)
-    expect(box().textContent.slice(27)).toBe(`${IDENTITY} BAD_PARAMSResume authoring${NOTE}`)
+    // 26 characters of the generic lead-in, then exactly what the server said.
+    expect(box().textContent).toMatch(/^Couldn.t author the tool: Tool authoring requires a verified workspace identity/)
+    expect(box().textContent.slice(26)).toBe(`${IDENTITY} BAD_PARAMSResume authoring${NOTE}`)
     expect(document.body.textContent).not.toContain(SENTENCES.transport)
     cleanup()
 
