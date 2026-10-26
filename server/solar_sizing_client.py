@@ -191,6 +191,8 @@ def post_string_length(request, grant, *, preserve_uncertainty=False):
                 raise CloudError("cloud_auth_missing", 401)
             if response.status_code == 403:
                 raise CloudError("cloud_tenant_unauthorized", 403)
+            if response.status_code in (400, 422):
+                raise CloudError("cloud_request_invalid", 400)
             if response.status_code != 200:
                 raise CloudError("cloud_upstream_failure", 502)
             raw = bytearray()
