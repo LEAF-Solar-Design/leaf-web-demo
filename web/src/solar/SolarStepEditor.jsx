@@ -9,7 +9,8 @@ import { solarFlowPrefill, solarFlowStepId, projectSolarRailReason } from './sol
 import { ProjectSolarEquipmentForm } from './SolarToolForm.jsx'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { humanizeError } from '../errorHumanize.js'
-import { projectSolarRunFailure } from './solarProjectCompletion.js'
+import { SOLAR_REFUSAL_REASONS } from '../lib/ribbonClusters.js'
+import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 
 function ownsKey(record, key) {
   return record !== null && typeof record === 'object' && Object.prototype.hasOwnProperty.call(record, key)
@@ -44,9 +45,20 @@ export default function SolarStepEditor(props) {
 
 function solarStepFailureSentence(code) {
   if (typeof code !== 'string' || !code) return humanizeError('This run failed. Your inputs are kept.')
-  const message = code.toLowerCase() === 'stale_rev'
+  const key = code.toLowerCase()
+  const cloudReason = {
+    cloud_auth_missing: 'grant_missing', cloud_tenant_unauthorized: 'grant_scope',
+    cloud_upstream_failure: 'cloud_unavailable', cloud_response_invalid: 'cloud_response_invalid',
+    cloud_request_invalid: 'request_invalid',
+  }[key]
+  const proposalRefused = ['solve_proposal_stale', 'solve_proposal_not_succeeded', 'solve_proposal_not_found',
+    'solve_proposal_manifest_mismatch', 'solve_proposal_evidence_invalid', 'solve_proposal_required',
+    'solve_proposal_invalid', 'invalid_solve_candidate', 'stale_solve_result'].includes(key)
+  const message = key === 'stale_rev'
     ? 'The drawing changed. Review it before trying again.'
-    : humanizeError(projectSolarRunFailure(code).message)
+    : humanizeError((proposalRefused && 'The server refused this proposal. Run the solve again.')
+      || (Object.hasOwn(SOLAR_SIZING_RUN_REASONS, cloudReason) && SOLAR_SIZING_RUN_REASONS[cloudReason])
+      || (Object.hasOwn(SOLAR_REFUSAL_REASONS, key) && SOLAR_REFUSAL_REASONS[key]) || SOLAR_REFUSAL_REASONS.unlisted)
   return `${message.replace(/[.!?]+$/, '')}. Your inputs are kept.`
 }
 

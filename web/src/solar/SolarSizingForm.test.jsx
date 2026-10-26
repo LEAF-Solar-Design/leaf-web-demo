@@ -318,6 +318,37 @@ describe('SolarSizingForm', () => {
     }
   })
 
+  it('a catalog preview timeout offers a working preview retry without implying submission', async () => {
+    const h = r14Harness()
+    render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    h.client.catalog.mockResolvedValue({ ok: false, status: null, reason: 'SIP_R7_TIMEOUT', envelope: null })
+    r14Fill()
+    const message = 'The catalog preview did not finish in time. Select Refresh preview to try again.'
+    await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback').textContent).toBe(message))
+    expect(run().disabled).toBe(true)
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+    expect(screen.getByTestId('project-solar-sizing-form').textContent).not.toMatch(/submission|Retry the same request/i)
+    h.client.catalog.mockResolvedValue(r9Preview(r9Tool))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }))
+    await r9Ready()
+    expect(screen.queryByTestId('project-solar-sizing-feedback')).toBeNull()
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+  })
+
+  it('a drawing check timeout does not claim that submission occurred', async () => {
+    const h = r14Harness()
+    render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    h.client.readContext.mockResolvedValueOnce({ ok: false, status: null, reason: 'SIP_R7_TIMEOUT', envelope: null })
+    fireEvent.click(run())
+    await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
+      .toBe('The drawing check did not finish in time.'))
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(screen.getByTestId('project-solar-sizing-form').textContent).not.toMatch(/submission|Retry the same request/i)
+  })
+
   it('R14D-05 test_unknown_submission_reuses_intent', async () => {
     for (const stale of [false, true]) {
       const h = r14Harness()
@@ -336,7 +367,8 @@ describe('SolarSizingForm', () => {
       expect(screen.getByLabelText('Scope').value).toBe('global')
       for (const [label, value] of Object.entries(fields)) expect(screen.getByLabelText(label).value).toBe(value)
       expect(screen.getByTestId('project-solar-sizing-feedback').textContent)
-        .toContain('The submission was not confirmed. Retry the same request to check its status.')
+        .toBe('The submission was not confirmed. Retry the same request to check its status.')
+      expect(screen.queryByText('The catalog preview did not finish in time. Select Refresh preview to try again.')).toBeNull()
       if (stale) {
         h.context.context.head_version_id = r9Next.input_version_id
         h.context.context.is_head = false

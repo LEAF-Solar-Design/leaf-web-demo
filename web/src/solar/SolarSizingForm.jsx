@@ -8,6 +8,7 @@ import { sameSolarDrawingBinding, solarDrawingBindingKey } from './solarDrawingB
 
 const projectReasonCode = new RegExp('^[A-Za-z][A-Za-z0-9_]{0,127}(?![\\s\\S])')
 const projectJobId = new RegExp('^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])')
+const previewTimeoutSentence = 'The catalog preview did not finish in time. Select Refresh preview to try again.'
 
 export const MODULE_PARAMETER_LABELS = Object.freeze({
   V_oc_ref: 'Open circuit voltage at reference conditions (V)',
@@ -58,7 +59,10 @@ export function projectSizingConductorFeedback(outcome, admission = null, phase 
     || typeof outcome !== 'object' || outcome === null || Array.isArray(outcome) || typeof outcome.ok !== 'boolean'
     || (phase === 'submission' && outcome.ok && (outcome.status !== 202 || outcome.data?.status !== 'submitted'
       || typeof outcome.data.job_id !== 'string' || !projectJobId.test(outcome.data.job_id))) ) reason = 'request_invalid'
-  return { outcome, admission, reason, text: projectSizingConductorReason(reason), code }
+  return { outcome, admission, reason, phase,
+    text: reason === 'request_timeout' && phase === 'preview' ? previewTimeoutSentence
+      : reason === 'request_timeout' && phase === 'context' ? 'The drawing check did not finish in time.'
+        : projectSizingConductorReason(reason), code }
 }
 
 // The two project forms share the exact-intent lifecycle; standalone components never enter it.
@@ -162,7 +166,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           contextSettled = true
           setLoaded({ scope, state: outcome.ok ? deriveState({ binding, contextView: outcome.data })
             : { mode: 'refused', reason: 'context_unreadable' } })
-          if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome) })
+          if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome, null, 'context') })
         } catch {
           if (current.isCurrent()) {
             contextSettled = true
@@ -291,7 +295,7 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
           || checked.graphSha256 !== state.graphSha256 || checked.rev !== state.rev
           || !sameSolarDrawingBinding(checked.binding, state.binding)) {
         scope.armed = null
-        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome) })
+        if (!outcome.ok) setFeedback({ scope, generation: scope.generation, ...projectSizingConductorFeedback(outcome, null, 'context') })
         setPublication({ scope, generation: scope.generation,
           reason: checked.reason === 'not_current_head' ? 'not_current_head' : 'scope_stale' })
         return
@@ -355,7 +359,7 @@ function ProjectSolarSizingForm(props) {
   const built = editable ? buildSizingParams({ graph: state.graph, mode, draft }) : null
   const invalid = new Set(built?.invalid || [])
   const change = (key, value) => setDraft((previous) => ({ ...previous, [key]: value }))
-  const sentence = projectSizingConductorReason(reason)
+  const sentence = (reason === 'request_timeout' && runMessage?.phase === 'preview' ? previewTimeoutSentence : projectSizingConductorReason(reason))
     || projectSizingCloudReason(reason)
     || (reason === 'sizing_zip_required' ? SOLAR_SIZING_REASONS.sizing_zip_required
       : reason === 'sizing_fields_invalid' ? SOLAR_SIZING_REASONS.sizing_fields_invalid : null)
@@ -378,7 +382,7 @@ function ProjectSolarSizingForm(props) {
     </>}
     {sentence && <p role="status">{sentence}</p>}
     {runMessage && <p role="status" data-testid="project-solar-sizing-feedback">
-      {humanizeError(runMessage.reason === 'request_timeout'
+      {humanizeError(runMessage.reason === 'request_timeout' && runMessage.phase === 'submission'
         ? 'The submission was not confirmed. Retry the same request to check its status.' : runMessage.text)}
     </p>}
     <button type="button" disabled={Boolean(reason) || submitting || !editable} onClick={submit}>Review &amp; run</button>
