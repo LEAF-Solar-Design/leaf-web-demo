@@ -147,7 +147,101 @@ function r14Harness() {
   return h
 }
 
+function sizingAvailabilityHarness() {
+  const client = {
+    readContext: vi.fn(async () => ({ ok: true, status: 200,
+      data: r9Context({ ...r9Graph(), project: { zip_code: '44224-1234' } }) })),
+    prepareRun: vi.fn((request) => request),
+    catalog: vi.fn(async () => r9Preview(r9Tool)),
+    captureCatalogScope: () => () => true,
+    subscribe: () => () => {},
+    getSnapshot: () => ({ binding: r9Binding, authorityKey: 'epoch-1' }),
+  }
+  const props = { row: r9Row(), solarBinding: r9Binding, authorityKey: 'epoch-1', projectClient: client,
+    catalogDigest: r9Digest, newProjectIntentKey: vi.fn(() => 'sizing-availability-key'),
+    onProjectSubmit: vi.fn(async () => r9Submitted()), busy: false }
+  return { client, props }
+}
+
 describe('SolarSizingForm', () => {
+
+  it.each([true, false])('keeps sizing loaded while busy and re-arms without reading (callback withheld: %s)', async (withheld) => {
+    const h = sizingAvailabilityHarness()
+    const view = render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    r14Fill()
+    await r9Ready()
+    const scopeInput = screen.getByLabelText('Scope')
+    const moduleInput = screen.getByLabelText('Module')
+    const previews = h.client.catalog.mock.calls.length
+    view.rerender(<SolarSizingForm {...h.props} busy
+      onProjectSubmit={withheld ? undefined : h.props.onProjectSubmit} />)
+    await r9Settle()
+    expect(screen.getByLabelText('Scope')).toBe(scopeInput)
+    expect(screen.getByLabelText('Module')).toBe(moduleInput)
+    for (const [label, value] of Object.entries(fields)) expect(screen.getByLabelText(label).value).toBe(value)
+    expect(screen.getByTestId('project-solar-sizing-form').getAttribute('data-mode')).toBe('edit')
+    expect(screen.getByText('A Solar run is in progress. Wait for it to finish.')).toBeTruthy()
+    expect(screen.queryByText('Project Solar submission is not available in this view.')).toBeNull()
+    expect(run().disabled).toBe(true)
+    fireEvent.click(run())
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).toHaveBeenCalledTimes(previews)
+
+    const preview = r9Deferred()
+    h.client.catalog.mockReturnValueOnce(preview.promise)
+    view.rerender(<SolarSizingForm {...h.props} />)
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(previews + 1))
+    expect(run().disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    await act(async () => preview.resolve(r9Preview(r9Tool)))
+    await r9Ready()
+    expect(screen.getByLabelText('Module')).toBe(moduleInput)
+    expect(screen.queryByText('A Solar run is in progress. Wait for it to finish.')).toBeNull()
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['onProjectSubmit', 'newProjectIntentKey'])('loads sizing without %s and keeps it loaded when the callback changes', async (callback) => {
+    const h = sizingAvailabilityHarness()
+    const view = render(<SolarSizingForm {...h.props} {...{ [callback]: undefined }} />)
+    await waitFor(() => expect(screen.getByLabelText('Scope')).toBeTruthy())
+    const scopeInput = screen.getByLabelText('Scope')
+    expect(screen.getByText('Project Solar submission is not available in this view.')).toBeTruthy()
+    expect(run().disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).not.toHaveBeenCalled()
+
+    view.rerender(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).toHaveBeenCalledTimes(1)
+    view.rerender(<SolarSizingForm {...h.props} {...{ [callback]: undefined }} />)
+    await r9Settle()
+    expect(screen.getByLabelText('Scope')).toBe(scopeInput)
+    expect(screen.getByText('Project Solar submission is not available in this view.')).toBeTruthy()
+    expect(screen.getByTestId('project-solar-sizing-form').getAttribute('data-mode')).toBe('edit')
+    expect(run().disabled).toBe(true)
+    expect(h.client.readContext).toHaveBeenCalledTimes(1)
+    expect(h.client.catalog).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows run in progress while sizing is submitting before the workspace becomes busy', async () => {
+    const h = sizingAvailabilityHarness(), pending = r9Deferred()
+    const context = { ok: true, status: 200, data: r9Context() }
+    h.client.readContext.mockResolvedValue(context)
+    render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    h.client.readContext.mockReturnValueOnce(pending.promise)
+    fireEvent.click(run())
+    expect(screen.getByText('A Solar run is in progress. Wait for it to finish.')).toBeTruthy()
+    expect(screen.getByLabelText('Scope')).toBeTruthy()
+    expect(run().disabled).toBe(true)
+    expect(h.props.onProjectSubmit).not.toHaveBeenCalled()
+    await act(async () => pending.resolve(context))
+    await waitFor(() => expect(screen.getByText('Request submitted.')).toBeTruthy())
+    expect(screen.queryByText('A Solar run is in progress. Wait for it to finish.')).toBeNull()
+  })
 
   it('R14D-01 test_project_global_cloud_intent', async () => {
     for (const variant of [{}, { tracker: true }, { parameters: true }]) {
@@ -516,7 +610,10 @@ describe('SolarSizingForm', () => {
       render(<SolarSizingForm {...missing.props} />)
       await r9Settle()
       expect(screen.getByText(PROJECT_SIZING_CONDUCTOR_REASONS.submit_unavailable)).toBeTruthy()
-      expect(missing.client.readContext).not.toHaveBeenCalled()
+      if (['newProjectIntentKey', 'onProjectSubmit'].includes(dependency)) {
+        expect(missing.client.readContext).toHaveBeenCalledTimes(1)
+        expect(screen.getByLabelText('Scope')).toBeTruthy()
+      } else expect(missing.client.readContext).not.toHaveBeenCalled()
       expect(missing.props.readIntake).not.toHaveBeenCalled()
       expect(missing.props.onSubmit).not.toHaveBeenCalled()
       expect(run().disabled).toBe(true)
