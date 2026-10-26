@@ -1144,10 +1144,10 @@ export default function ConversePanel({
       )}
       {showQuota && (
         <div className="banner"><span><b>AI paused</b>. Your built tools keep working.
-          {model.quotaRetry && <>{' '}The affected provider reported a retry interval of {model.quotaRetry.seconds} seconds.
+          {model.quotaRetry && <>{' '}The service asked you to wait {Math.ceil(model.quotaRetry.seconds)} seconds before trying again.
             {model.quotaRetry.at
-              ? <> Retry time: <time dateTime={model.quotaRetry.at}>{model.quotaRetry.at}</time>.</>
-              : <> The event timestamp is unavailable.</>}
+              ? <> You can retry at <time dateTime={model.quotaRetry.at}>{new Date(model.quotaRetry.at).toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short' })}</time>.</>
+              : null}
           </>}
         </span></div>
       )}

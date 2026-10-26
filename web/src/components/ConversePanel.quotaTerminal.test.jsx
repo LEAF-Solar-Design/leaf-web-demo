@@ -55,9 +55,10 @@ describe('terminal quota transcript recovery', () => {
     expect(screen.queryByRole('button', { name: /^Stop$/ })).toBeNull()
     expect(screen.getByText('Approved')).toBeTruthy()
     expect(screen.queryByRole('button', { name: 'Approve' })).toBeNull()
-    expect(screen.getByText(/retry interval of 90.25 seconds/)).toBeTruthy()
-    expect(screen.getByText('2026-09-12T12:01:30.250Z').getAttribute('datetime'))
+    expect(screen.getByText(/wait 91 seconds before trying again/)).toBeTruthy()
+    expect(document.querySelector('time').getAttribute('datetime'))
       .toBe('2026-09-12T12:01:30.250Z')
+    expect(document.querySelector('time').textContent).not.toContain('2026-09-12T')
     assertNoMutations()
   })
 
@@ -68,7 +69,10 @@ describe('terminal quota transcript recovery', () => {
     view.unmount()
     vi.setSystemTime(new Date('2026-09-13T18:00:00Z'))
     await setup([...prior, quota()])
-    expect(screen.getByText('2026-09-12T12:01:30.250Z')).toBeTruthy()
+    expect(document.querySelector('time').getAttribute('datetime')).toBe('2026-09-12T12:01:30.250Z')
+    expect(document.querySelector('time').textContent).toBe(new Date('2026-09-12T12:01:30.250Z').toLocaleString(undefined, {
+      month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit', timeZoneName: 'short',
+    }))
     expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).disabled).toBe(false)
     assertNoMutations()
   })
@@ -82,7 +86,8 @@ describe('terminal quota transcript recovery', () => {
 
   it('does not invent an event timestamp when only the interval is present', async () => {
     await setup([...prior, quota({ ts: undefined })])
-    expect(screen.getByText(/event timestamp is unavailable/)).toBeTruthy()
+    expect(screen.getByText(/wait 91 seconds before trying again/)).toBeTruthy()
+    expect(screen.queryByText(/event timestamp is unavailable/)).toBeNull()
     expect(document.querySelector('time')).toBeNull()
     expect(screen.getByRole('textbox', { name: 'Reply to the assistant' }).disabled).toBe(false)
     assertNoMutations()
