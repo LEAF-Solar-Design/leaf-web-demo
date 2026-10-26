@@ -298,13 +298,27 @@ def _monitor_iso(value):
 
 @pytest.fixture
 def monitor_store(monkeypatch):
-    """Execute the production SELECT, adapting only named parameter placeholders.
+    """Execute the production SELECT, adapting named parameter placeholders and
+    its one JSON accessor.
 
-    Transaction controls and the driver clock are recorded separately. SQLite's
-    result timestamps are decoded to the aware datetimes psycopg returns.
+    CI's SQLite predates the ->> operator (3.38), so the single production
+    accessor j.execution_context->>'schema' runs as json_extract; every other
+    predicate, operator and structure is executed as written. Transaction
+    controls and the driver clock are recorded separately. SQLite's result
+    timestamps are decoded to the aware datetimes psycopg returns.
     """
     db = sqlite3.connect(":memory:")
-    assert db.execute("SELECT '{\"schema\":\"ok\"}'->>'schema'").fetchone() == ("ok",)
+    try:
+        db.execute("SELECT json_extract('{}', '$.schema')").fetchone()
+    except sqlite3.OperationalError:
+        # SQLite built without JSON1: same text extraction for a '$.<key>' path.
+        def _json_extract(document, path):
+            try:
+                value = json.loads(document) if document is not None else None
+            except ValueError:
+                return None
+            return value.get(path[2:]) if isinstance(value, dict) and path.startswith("$.") else None
+        db.create_function("json_extract", 2, _json_extract, deterministic=True)
     db.executescript("""
         CREATE TABLE jobs (
             job_id TEXT PRIMARY KEY, tool_name TEXT, created_at TEXT, updated_at TEXT,
@@ -376,8 +390,12 @@ def monitor_store(monkeypatch):
             assert position == 4 and sql == submitted_monitor.SELECTION_SQL
             if state.failure in {"select", "timeout"}:
                 raise TimeoutError(_MONITOR_PRIVATE)
-            # No replacement of predicates, arithmetic, operators, or SQL structure.
-            adapted = re.sub(r"%\((\w+)\)s", r":\1", sql)
+            # Only placeholders and the one JSON accessor are adapted; no other
+            # predicate, arithmetic, operator, or SQL structure changes.
+            accessor = "j.execution_context->>'schema'"
+            assert sql.count(accessor) == 1 and sql.count("->") == 1
+            adapted = re.sub(r"%\((\w+)\)s", r":\1", sql).replace(
+                accessor, "json_extract(j.execution_context, '$.schema')")
             bound = {key: _monitor_iso(value) if isinstance(value, datetime) else value
                      for key, value in args.items()}
             selected = db.execute(adapted, bound).fetchall()
