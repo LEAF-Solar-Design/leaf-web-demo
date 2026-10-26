@@ -49,6 +49,11 @@ afterEach(cleanup)
 const PROJECT_ID = '11111111-2222-4333-8444-555555555555'
 const VIEWER_BINDING = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
 
+// Unnamed members share a label; use their visible join date to select the row.
+function unnamedMemberRow(joined) {
+  return within(screen.getByText(`Unnamed member · joined ${joined}`).closest('li'))
+}
+
 const SNAPSHOT = {
   project: { project_id: PROJECT_ID, name: 'Rooftop Array', status: 'active', profile: 'blank_browser' },
   // Server-supplied viewer identity. The browser has no other way to know which
@@ -88,9 +93,10 @@ it('B5 an org owner names a member from the lifecycle panel', async () => {
     return { identity: { binding_id: memberBindingId, label: 'Ada Lovelace' } }
   })
   render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
-  const input = await screen.findByLabelText('Display name for Member bbbbbbbb')
+  await screen.findByText('Unnamed member · joined 2026-08-02')
+  const input = unnamedMemberRow('2026-08-02').getByLabelText('Display name for Unnamed member')
   fireEvent.change(input, { target: { value: '  Ada Lovelace  ' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Member bbbbbbbb' }))
+  fireEvent.click(unnamedMemberRow('2026-08-02').getByRole('button', { name: 'Save display name for Unnamed member' }))
   await waitFor(() => expect(setIdentityDisplayName).toHaveBeenCalledWith(orgId, memberBindingId, 'Ada Lovelace'))
   await waitFor(() => expect(screen.getByText('Ada Lovelace · joined 2026-08-02')).toBeTruthy())
 })
@@ -116,8 +122,8 @@ it('B5 a rename updates the loaded picker without another request', async () => 
   fireEvent.click(await screen.findByRole('button', { name: 'Load organization members' }))
   await screen.findByRole('option', { name: /^Member aaaaaaaa/ })
   expect(getOrgIdentities).toHaveBeenCalledTimes(1)
-  fireEvent.change(screen.getByLabelText('Display name for Member aaaaaaaa'), { target: { value: 'Ada Lovelace' } })
-  fireEvent.click(screen.getByRole('button', { name: 'Save display name for Member aaaaaaaa' }))
+  fireEvent.change(unnamedMemberRow('2026-08-01').getByLabelText('Display name for Unnamed member'), { target: { value: 'Ada Lovelace' } })
+  fireEvent.click(unnamedMemberRow('2026-08-01').getByRole('button', { name: 'Save display name for Unnamed member' }))
 
   // Both views use the PUT row while the lifecycle read is still pending.
   await screen.findByRole('option', { name: /^Ada Lovelace/ })
@@ -204,11 +210,11 @@ describe('lifecycle block renders for an open project with the flag on', () => {
     // Roster comes from the snapshot verbatim, with the wire's `read_only`
     // rendered in the component's own `read-only` vocabulary.
     // w4h-b4 replaces raw identity mechanics with labels and scoped choices.
-    expect(screen.getByLabelText('Role for Member aaaaaaaa').value).toBe('owner')
-    expect(screen.getByLabelText('Role for Member bbbbbbbb').value).toBe('read-only')
-    expect(screen.getByText('Member aaaaaaaa · joined 2026-08-01')).toBeTruthy()
-    expect(screen.getByText('Member bbbbbbbb · joined 2026-08-02')).toBeTruthy()
-    expect(screen.getByText('Organization members are unavailable. No one can be invited yet.')).toBeTruthy()
+    expect(unnamedMemberRow('2026-08-01').getByLabelText('Role for Unnamed member').value).toBe('owner')
+    expect(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member').value).toBe('read-only')
+    expect(screen.getByText('Unnamed member · joined 2026-08-01')).toBeTruthy()
+    expect(screen.getByText('Unnamed member · joined 2026-08-02')).toBeTruthy()
+    expect(screen.getByText('Load organization members to choose someone to invite.')).toBeTruthy()
 
     expect(screen.getByRole('region', { name: 'Project timeline' })).toBeTruthy()
     expect(screen.getByText('project_created')).toBeTruthy()
@@ -231,7 +237,7 @@ describe('lifecycle block renders for an open project with the flag on', () => {
     render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} projectName="Rooftop Array" />)
 
     await waitFor(() => expect(screen.getByText(/your role: owner/i)).toBeTruthy())
-    expect(screen.getByText('Organization members are unavailable. No one can be invited yet.')).toBeTruthy()
+    expect(screen.getByText('Load organization members to choose someone to invite.')).toBeTruthy()
   })
 
   it('renders no role matrix when the server sends no viewer', async () => {
@@ -308,14 +314,14 @@ describe('w4h-b4 lifecycle results and scoped identities', () => {
     expect(screen.getAllByText('Receipt: clone-remembered')).toHaveLength(1)
 
     getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, receipts: [...SNAPSHOT.receipts, receipt] })
-    fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'editor' } })
+    fireEvent.change(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member'), { target: { value: 'editor' } })
     await waitFor(() => expect(getProjectLifecycle).toHaveBeenCalledTimes(3))
-    await waitFor(() => expect(screen.getByLabelText('Role for Member bbbbbbbb')).not.toBeDisabled())
+    await waitFor(() => expect(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member')).not.toBeDisabled())
     expect(screen.getAllByText('Receipt: clone-remembered')).toHaveLength(1)
 
     // A later server window omits it. A retained local copy would resurrect it.
     getProjectLifecycle.mockResolvedValue(SNAPSHOT)
-    fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'reviewer' } })
+    fireEvent.change(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member'), { target: { value: 'reviewer' } })
     await waitFor(() => expect(getProjectLifecycle).toHaveBeenCalledTimes(4))
     await waitFor(() => expect(screen.queryByText('Receipt: clone-remembered')).toBeNull())
   })
@@ -525,8 +531,8 @@ describe('board Settings lifecycle seating', () => {
     expect(getProjectLifecycle).toHaveBeenCalledWith(PROJECT_ID)
     expect(getProjectLifecycle).toHaveBeenCalledTimes(1)
     expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
-    expect(screen.getByLabelText('Role for Member bbbbbbbb')).not.toBeDisabled()
-    expect(screen.getByRole('button', { name: 'Revoke Member bbbbbbbb' })).not.toBeDisabled()
+    expect(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member')).not.toBeDisabled()
+    expect(unnamedMemberRow('2026-08-02').getByRole('button', { name: 'Revoke Unnamed member' })).not.toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Load organization members' }))
     await screen.findByRole('option', { name: 'New member' })
     expect(screen.getByRole('button', { name: 'Clone project' })).not.toBeDisabled()
@@ -617,7 +623,7 @@ describe('board Settings lifecycle seating', () => {
       ? new Promise((resolve) => { resolveA = resolve })
       : Promise.resolve({ ...SNAPSHOT, project: { project_id: 'B', name: 'Project B', org_id: 'org-b' }, receipts: [] }))
     inviteMember.mockResolvedValue({})
-    fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'editor' } })
+    fireEvent.change(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member'), { target: { value: 'editor' } })
     await waitFor(() => expect(resolveA).toBeTypeOf('function'))
     view.update({ projectId: 'B' })
     await screen.findByTestId('membership-panel')
@@ -652,6 +658,7 @@ describe('board Settings lifecycle seating', () => {
   })
 
   it('BI03-11 Membership mutation refetches the existing owner once', async () => {
+    vi.stubGlobal('confirm', vi.fn(() => true))
     for (const kind of ['invite', 'role', 'revoke']) {
       getProjectLifecycle.mockReset().mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, org_id: 'org-a' } })
       inviteMember.mockReset().mockResolvedValue({})
@@ -671,21 +678,22 @@ describe('board Settings lifecycle seating', () => {
         fireEvent.change(screen.getByLabelText('Invite role'), { target: { value: 'editor' } })
         fireEvent.click(screen.getByRole('button', { name: 'Invite' }))
       } else if (kind === 'role') {
-        fireEvent.change(screen.getByLabelText('Role for Member bbbbbbbb'), { target: { value: 'editor' } })
-      } else fireEvent.click(screen.getByRole('button', { name: 'Revoke Member bbbbbbbb' }))
+        fireEvent.change(unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member'), { target: { value: 'editor' } })
+      } else fireEvent.click(unnamedMemberRow('2026-08-02').getByRole('button', { name: 'Revoke Unnamed member' }))
       await waitFor(() => expect(getProjectLifecycle).toHaveBeenCalledTimes(2))
       if (kind === 'revoke') {
         expect(revokeMember).toHaveBeenCalledTimes(1)
         expect(revokeMember).toHaveBeenCalledWith(PROJECT_ID, 'm-2')
         expect(inviteMember).not.toHaveBeenCalled()
-        await waitFor(() => expect(screen.queryByLabelText('Role for Member bbbbbbbb')).toBeNull())
+        await waitFor(() => expect(screen.queryByText('Unnamed member · joined 2026-08-02')).toBeNull())
       } else {
         expect(inviteMember).toHaveBeenCalledTimes(1)
         expect(inviteMember).toHaveBeenCalledWith(PROJECT_ID,
           kind === 'invite' ? 'binding-new' : SNAPSHOT.members[1].binding_id, 'editor')
         expect(revokeMember).not.toHaveBeenCalled()
-        await waitFor(() => expect(screen.getByLabelText(kind === 'invite'
-          ? 'Role for Invited server member' : 'Role for Member bbbbbbbb').value).toBe('editor'))
+        await waitFor(() => expect((kind === 'invite'
+          ? screen.getByLabelText('Role for Invited server member')
+          : unnamedMemberRow('2026-08-02').getByLabelText('Role for Unnamed member')).value).toBe('editor'))
       }
       expect(screen.getByTestId('projects-surface')).toBe(panel)
       expect(view.counts).toEqual({ mounts: 1, unmounts: 0 })
