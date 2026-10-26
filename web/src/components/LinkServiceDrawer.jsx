@@ -135,6 +135,7 @@ export default function LinkServiceDrawer({
     }
     const refreshAfterAuthorization = async () => {
       if (!authorizationTabOpened.current || authorizationRefreshInFlight.current) return
+      authorizationTabOpened.current = false
       authorizationRefreshInFlight.current = true
       refreshHealth()
       try {

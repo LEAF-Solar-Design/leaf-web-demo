@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
-import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import ClaudeAccountPanel from './ClaudeAccountPanel.jsx'
 import JobRail from './JobRail.jsx'
 import LinkServiceDrawer from './LinkServiceDrawer.jsx'
@@ -54,6 +54,26 @@ describe('w3 monitor and account popovers', () => {
     fireEvent.focus(window)
     expect(await screen.findByText('Connected', { selector: '.state' })).toBeInTheDocument()
     expect(onRefresh).toHaveBeenCalledTimes(1)
+  })
+
+  it('refreshes once per authorization return and allows a new Connect to refresh again', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
+    vi.spyOn(window, 'open').mockReturnValue(popup)
+    const onRefresh = vi.fn().mockResolvedValue([service])
+    render(<LinkServiceDrawer {...drawerProps} servers={[service]}
+      onConnect={async () => ({ authorize_url: 'https://signin.test' })} onRefresh={onRefresh} />)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    await waitFor(() => expect(popup.location.replace).toHaveBeenCalledTimes(1))
+    await act(async () => { fireEvent.focus(window) })
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+    await act(async () => { fireEvent.focus(window) })
+    expect(onRefresh).toHaveBeenCalledTimes(1)
+
+    fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
+    await waitFor(() => expect(popup.location.replace).toHaveBeenCalledTimes(2))
+    await act(async () => { fireEvent.focus(window) })
+    expect(onRefresh).toHaveBeenCalledTimes(2)
   })
 
   it('keeps keyboard focus when expanding the job monitor', () => {
