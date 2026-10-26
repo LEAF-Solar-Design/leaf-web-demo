@@ -149,6 +149,9 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
   const targets = sizingTargets(graph, mode)
   if (!targets.ok) return targets
   const invalid = []
+  const acceptedLength = mode === 'global' && Object.hasOwn(draft, 'accepted_string_length')
+  if (acceptedLength && (!Number.isInteger(draft.accepted_string_length)
+      || draft.accepted_string_length < 1 || draft.accepted_string_length > 4096)) invalid.push('accepted_string_length')
   const requireText = (key) => { if (!text(draft[key])) invalid.push(key) }
   const requireBoolean = (key) => { if (typeof draft[key] !== 'boolean') invalid.push(key) }
   if (mode === 'global') ['module_name', 'full_inverter_name'].forEach(requireText)
@@ -186,7 +189,8 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
     open_circuit_rise: draft.open_circuit_rise, zip_code: graph.zip,
     ...(draft.use_module_parameters ? { module_parameters: { ...moduleParameters } } : {}),
   }]))
-  return { ok: true, params: { expected_rev: graph.rev, mode, requests, grant_ref: draft.grant_ref, confirm: true } }
+  return { ok: true, params: { expected_rev: graph.rev, mode, requests, grant_ref: draft.grant_ref, confirm: true,
+    ...(acceptedLength ? { accepted_string_length: draft.accepted_string_length } : {}) } }
 }
 
 export const PROJECT_SIZING_CONDUCTOR_REASONS = Object.freeze({
