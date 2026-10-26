@@ -21,9 +21,10 @@ import { humanizeError, MSG_GENERIC } from '../errorHumanize.js'
 it('SSD1-B row3: panelErrorText never returns a non-string', () => {
   expect(panelErrorText('A plain message.')).toBe('A plain message.')
   expect(panelErrorText(new Error('x'))).toBe(humanizeError(new Error('x')))
-  for (const value of [{}, null, 42]) {
+  for (const value of [{}, null, 42, { message: 'A plain message.' }, new Error(''), new Error('   ')]) {
     expect(panelErrorText(value)).toBe(MSG_GENERIC)
   }
+  expect(panelErrorText('GET /api/drawings/private/versions -> 500')).toBe(humanizeError('GET /api/drawings/private/versions -> 500'))
   const capped = panelErrorText('x'.repeat(1000))
   expect(typeof capped).toBe('string')
   expect(capped.length).toBeLessThanOrEqual(300)
@@ -145,7 +146,7 @@ describe('ToolCast Versions tab gate', () => {
   it('opens the Versions tab on the drawing-only gate, same as the View tab', () => {
     const startIndex = toolCastSource.indexOf('id="operations-tab-versions"')
     const versionsButton = toolCastSource.slice(startIndex, toolCastSource.indexOf('</button>', startIndex))
-    expect(versionsButton).toMatch(/disabled=\{!hasDrawing\}/)
+    expect(versionsButton).toMatch(/aria-disabled=\{!hasDrawing\}/)
     expect(versionsButton).not.toMatch(/disabled=\{!(canOperate|sessionReady)\}/)
   })
 

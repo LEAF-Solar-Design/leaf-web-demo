@@ -26,7 +26,7 @@
 
 .tour-spot {
   position: fixed;
-  border-radius: 12px;
+  border-radius: var(--leaf-radius-card);
   border: 1px solid var(--primary);
   box-shadow: 0 0 0 9999px rgba(4, 8, 6, 0.62), 0 0 0 4px var(--accent-tint);
   pointer-events: none;
@@ -71,7 +71,7 @@
   width: min(380px, calc(100vw - 32px));
   background: var(--card-grad, var(--card));
   border: 1px solid var(--border);
-  border-radius: 14px;
+  border-radius: var(--leaf-radius-sheet);
   padding: 16px;
   /* Backstop: a long body can never clip its own Back/Skip/Next row. */
   max-height: calc(100dvh - 80px);
@@ -84,20 +84,20 @@
 
 .tour-card-step {
   font-family: var(--font-sans);
-  font-size: 11px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted-2);
 }
 
 .tour-card-title {
   margin: 6px 0 8px;
-  font-size: 16px;
+  font-size: var(--leaf-size-body);
   font-weight: 600;
   color: var(--foreground);
 }
 
 .tour-card-body {
   margin: 0;
-  font-size: 13.5px;
+  font-size: var(--leaf-size-dense);
   line-height: 1.55;
   color: var(--muted);
 }
@@ -105,7 +105,7 @@
 .tour-card-prompt {
   margin-top: 12px;
   padding: 8px 10px;
-  border-radius: 8px;
+  border-radius: var(--leaf-radius-card);
   background: var(--bar-well);
   border: 1px solid var(--border);
   font-family: var(--font-sans);
@@ -215,7 +215,7 @@
   padding: 0 10px;
   font-size: var(--leaf-size-caption);
 }
-.tour-card.is-coach .tour-card-title { margin: 4px 0 4px; font-size: 14px; }
+.tour-card.is-coach .tour-card-title { margin: 4px 0 4px; font-size: var(--leaf-size-body); }
 .tour-card.is-coach .tour-card-body { font-size: var(--leaf-size-dense); line-height: 1.45; }
 .tour-card.is-coach .tour-dots { margin-top: 8px; }
 .tour-card.is-coach .tour-card-actions { margin-top: 10px; flex-wrap: wrap; }
