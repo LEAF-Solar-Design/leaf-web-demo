@@ -9,6 +9,7 @@ const time = value => value === null ? 'Time not supplied' : typeof value === 'n
 function Summary({ receipt }) {
   return <div>
     <p>Status {receipt.status} · Mode {receipt.mode ?? 'not supplied'}</p>
+    <p>Fill count {receipt.fill?.fill_count ?? 'not supplied'}</p>
     <p>Fill price {money(receipt.fill?.price_cents)} · Fee {money(receipt.fill?.fee_cents)} · Cost {money(receipt.fill?.cost_cents)}</p>
     {receipt.unreadable && <p>Receipt unreadable</p>}
   </div>
@@ -50,17 +51,17 @@ export default function TestTradePanel({ hidden = false, provider, revision, req
         <div style={{ display: 'flex', gap: 24 }}>{['live', 'candidate'].map(mode => {
           const receipt = receipts.find(item => item.mode === mode)
           const label = mode === 'live' ? 'Live' : 'Candidate'
-          return <section key={mode} aria-label={label}><h3>{label}</h3>{receipt ? <><p>Source {receipt.source_sha?.slice(0, 8) ?? 'not supplied'}</p><LatencyWaterfall receipt={receipt} /></> : <p>No {label} run</p>}</section>
+          return <section key={mode} aria-label={label}><h3>{label}</h3>{receipt ? <><p>Source {receipt.source_sha?.slice(0, 8) ?? 'not supplied'}</p><Summary receipt={receipt} /><LatencyWaterfall receipt={receipt} /></> : <p>No {label} run</p>}</section>
         })}</div>
       </>}
       {tab === 'Budgets' && <>
         {!histograms.length && <p>No budgets measured yet</p>}
         {histograms.map((histogram, index) => {
           const micros = value => value === null ? null : typeof value === 'number' ? value / 1000 : nsToMs(value) * 1000
-          const budget = micros(histogram.budget_ns)
+          const budget = { p50: micros(histogram.budget_ns.p50), p99: micros(histogram.budget_ns.p99) }
           return <section key={index} aria-label={histogram.metric}><h3>{histogram.metric}</h3>
-            <Measurement measurement={{ p50_us: micros(histogram.p50_ns), p99_us: micros(histogram.p99_ns), count: histogram.count }} budget={budget === null ? null : { p50: budget, p99: budget }} />
-            <p>Observed {histogram.observed_count} · Receipt {histogram.receipt_id} · {histogram.over_budget ? 'over budget' : 'within budget'}</p>
+            <Measurement measurement={{ p50_us: micros(histogram.p50_ns), p99_us: micros(histogram.p99_ns), count: histogram.count }} budget={budget} />
+            <p>Observed {histogram.observed_count} · Receipt {histogram.receipt_id} · p50 {histogram.over_budget.p50 ? 'over budget' : 'within budget'} · p99 {histogram.over_budget.p99 ? 'over budget' : 'within budget'}</p>
           </section>
         })}
       </>}

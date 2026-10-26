@@ -15,6 +15,8 @@ import { canonicalJSON } from '../contract.js'
 import { labValueStore, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
 import { openRunStream, submitRun } from '../runs/runStream.js'
 import { formatLabRoute } from '../labRoute.js'
+import { readController } from '../changes/controller.js'
+import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
 
 // Both mounts pass the values returned by useLiveGraph to LiveValues. Keep
 // their display context out of the values and the proposal document itself.
@@ -114,6 +116,7 @@ export function useLiveGraph({ provider, registry: base = registry, now = wallTi
 export function LiveValues({ values, provider, saveBar = true, runId = 'local', store = labValueStore, renderProbe }) {
   const state = provider.state
   const context = displayContexts.get(values)
+  const controller = readController(provider)
   return <>
     {context && <AfterSaveDisplay provider={provider} context={context} saveBar={saveBar} />}
     <p data-sources-state>{!state.framed ? 'Studio sources: jobs, capabilities'
@@ -123,6 +126,7 @@ export function LiveValues({ values, provider, saveBar = true, runId = 'local', 
       {[...new Set(values.map(value => value.id))].map(id => <StoredBlockValues key={id} id={id} runId={runId}
         store={store} templates={values.filter(value => value.id === id)} renderProbe={renderProbe} />)}
     </section>
+    {controller && <TestsKeepersRail controller={controller} collapsed />}
   </>
 }
 
