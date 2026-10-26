@@ -1,4 +1,4 @@
-@import './contract/sources/leaf-tokens.css';
+@import './contract/sources/leaf-tokens.css' layer(leaf-lab-tokens);
 
 .lab-workbench {
   min-width: 0;
