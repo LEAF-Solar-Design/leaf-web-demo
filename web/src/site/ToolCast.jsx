@@ -100,7 +100,6 @@ import {
 } from './iosShipReadiness.js'
 import { authConfigured, isAuthRedirectCallback, isSignedIn, login } from '../auth.js'
 import { agentBannerFor as agentBannerForKind, OPERATOR_AGENT_BANNER_COPY } from '../lib/agentBanner.js'
-import { moveRovingTab } from '../lib/roving.js'
 import { selectEntity } from '../lib/selectEntity.js'
 import { countEntitiesByLayer } from '../lib/layerCounts.js'
 import { describeLockHolder, getSessionHolderId } from '../checkoutIdentity.js'
@@ -112,12 +111,24 @@ import * as mockVersions from '../mock/mockVersions.js'
 import { humanizeError, MSG_GENERIC } from '../errorHumanize.js'
 
 export function panelErrorText(value) {
-  const text = typeof value === 'string'
-    ? value
-    : value && typeof value === 'object' && typeof value.message === 'string' && value.message.length > 0
-      ? humanizeError(value)
-      : MSG_GENERIC
+  if (typeof value !== 'string' && !(value instanceof Error && typeof value.message === 'string' && value.message.trim())) {
+    return MSG_GENERIC
+  }
+  const text = humanizeError(value)
   return text.slice(0, 300)
+}
+
+// Unavailable tabs stay in the arrow-key order so their reason is discoverable.
+export function moveStageTab(event) {
+  if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return
+  const tabs = [...event.currentTarget.querySelectorAll('[role="tab"]')]
+  if (!tabs.length) return
+  const current = Math.max(0, tabs.indexOf(document.activeElement))
+  const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabs.length - 1
+    : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabs.length) % tabs.length
+  event.preventDefault()
+  tabs[next].focus()
+  tabs[next].click()
 }
 
 // The drawing state a session load seats. Pure, never throws: a versions
@@ -230,16 +241,16 @@ const UNIFIED_TOUR_STEPS = [
   },
 ]
 
-function phaseLabel(phase) {
+export function phaseLabel(phase) {
   if (phase === 'empty') return 'No drawing yet'
-  if (phase === 'loading') return PROOF_MODE ? 'Loading drawing' : 'Connecting backend'
-  if (phase === 'ready') return PROOF_MODE ? 'Drawing ready' : 'Backend ready'
+  if (phase === 'loading') return 'Loading drawing'
+  if (phase === 'ready') return 'Drawing ready'
   if (phase === 'starting') return 'Starting request'
   if (phase === 'proposal') return PROOF_MODE ? 'Waiting for approval' : 'Assistant response'
-  if (phase === 'running') return 'Rearranging panels'
-  if (phase === 'complete') return PROOF_MODE ? 'Cat version ready' : '3D cat ready'
+  if (phase === 'running') return 'Running request'
+  if (phase === 'complete') return 'Drawing updated'
   if (phase === 'tool-complete') return 'Tool run complete'
-  if (phase === 'undone') return 'Original restored'
+  if (phase === 'undone') return 'Previous version restored'
   // Pilot round 2 (try-signed-out-reads-as-request-failed): an anonymous
   // visitor made no request, so the 401 is a state, not a failure. 'failed'
   // stays for real failures that carry an error sentence.
@@ -379,10 +390,17 @@ export default function ToolCast({
   )
   const [workspaceBootstrapRequired, setWorkspaceBootstrapRequired] = useState(false)
   const [sessionRetry, setSessionRetry] = useState(0)
+  const [sessionError, setSessionError] = useState(null)
   // Slice 13a: the toast is now ONE bus (lib/notifications.js) shared with
   // App.jsx, read through useToastBus.
   const { toast, showToast, onToastDone } = useToastBus()
   const [drawer, setDrawer] = useState(null)
+  const jobDetailsRequestRef = useRef(0)
+  const closeDetails = useCallback(() => {
+    jobDetailsRequestRef.current += 1
+    setDrawer(null)
+  }, [])
+  useEffect(() => () => { jobDetailsRequestRef.current += 1 }, [])
   const [uploadDragActive, setUploadDragActive] = useState(false)
   const [opsOpen, setOpsOpen] = useState(() => !PUBLIC_DEMO && new URLSearchParams(window.location.search).get('ops') === '1')
   const [quotaAt, setQuotaAt] = useState(0)
@@ -441,7 +459,7 @@ export default function ToolCast({
 
   useEffect(() => {
     if (!drawingEvent) return
-    setPhase(drawingEvent.event === 'undo' ? 'undone' : 'complete')
+    setPhase(drawingEvent.event === 'undo' ? 'undone' : drawingEvent.event === 'upload' ? 'ready' : 'complete')
   }, [drawingEvent])
 
   // P2 wave C-2: the /try?demo=tour walkthrough is its OWN tour surface
@@ -466,7 +484,8 @@ export default function ToolCast({
     const { error: cause, context } = drawingError
     if (context?.operation === 'undo') setError('Undo failed. The current drawing version is unchanged.')
     else if (context?.operation === 'redo') setError('Redo failed. The current drawing version is unchanged.')
-    else setError(String(cause?.message || cause))
+    // History already owns a visible error and Refresh action in its panel.
+    else if (context?.operation !== 'history') setError(humanizeError(cause))
   }, [drawingError])
   const {
     seatIntake,
@@ -477,6 +496,12 @@ export default function ToolCast({
   const version = drawing.head
   const hasDrawing = Boolean(drawing.shown && drawing.drawingState?.drawing_id)
   const canOperate = sessionReady && hasDrawing
+  useEffect(() => {
+    closeDetails()
+  }, [closeDetails, sessionReady, drawing.drawingState?.drawing_id])
+  const sessionTabReason = sessionError ? 'Connection unavailable. Retry the connection below.'
+    : sessionAuthRequired ? 'Sign in to open this panel.' : 'Checking your connection. Please wait.'
+  const drawingTabReason = !sessionReady ? sessionTabReason : 'Upload a DWG or DXF to open this panel.'
   const { canUndo, canRedo } = drawing
   const panelCount = drawing.shown?.polylines?.length || null
   const selection = useMemo(() => selectEntity(drawing.shown, selectedHandle), [drawing.shown, selectedHandle])
@@ -500,6 +525,7 @@ export default function ToolCast({
 
   useEffect(() => {
     if (!active) return undefined
+    setSessionError(null)
     const requestedDrawingId = MODE_DRAWING_ID || drawingId
     const drawingSource = PROOF_MODE ? 'cat' : PUBLIC_DEMO ? 'rooftop_demo' : requestedDrawingId
     if (drawing.shown && drawing.drawingState?.drawing_id === requestedDrawingId) {
@@ -540,13 +566,16 @@ export default function ToolCast({
         .catch((cause) => {
           if (!probeLive) return
           if (cause?.status === 401) { requireAuth('/api/session'); return }
-          if (isWorkspaceBootstrapRequired(cause)) setWorkspaceBootstrapRequired(true)
+          if (isWorkspaceBootstrapRequired(cause)) { setWorkspaceBootstrapRequired(true); return }
+          setSessionError(humanizeError(cause))
+          setPhase('failed')
         })
       return () => { probeLive = false }
     }
     let live = true
     platformSession.actions.checking()
     setWorkspaceBootstrapRequired(false)
+    setError(null)
     setPhase('loading')
     getSession(PUBLIC_DEMO, drawingSource)
       .then(async (data) => {
@@ -589,7 +618,7 @@ export default function ToolCast({
           setPhase('failed')
           return
         }
-        setError('The drawing backend is unavailable. Start the proof API and reload this surface.')
+        setSessionError(humanizeError(cause))
         setPhase('failed')
       })
     return () => { live = false }
@@ -698,7 +727,7 @@ export default function ToolCast({
     onCompleteVersion,
     onNotice: onJobNotice,
     onAuthRequired: (required) => { if (required) requireAuth('jobs') },
-    formatError: () => 'The panel run did not produce a readable result.',
+    formatError: (cause) => humanizeError(cause),
   })
   resetJobRef.current = resetJob
 
@@ -831,6 +860,7 @@ export default function ToolCast({
     await login()
   }, [checkout.actions])
   const workspace = useWorkspaceController({ mock: transportMock, services: workspaceServices })
+  useEffect(() => { closeDetails() }, [closeDetails, workspace.openProjectId])
   // Scope-reset contract (docs/convergence/ACCEPTANCE.md, binding): document
   // identity persists across interactions, so it must NOT survive a project
   // switch or close — no drawing from the previous project's scope may still
@@ -1106,11 +1136,7 @@ export default function ToolCast({
         await drawing.actions.recordRestore(result)
         await drawing.actions.loadHistory()
       } catch (cause) {
-        const message = cause?.message || (drawing.unreadableHead
-          ? `Could not recover from v${target}.`
-          : `Could not restore v${target}.`)
-        const detail = cause?.body?.detail
-        throw new Error(typeof detail === 'string' && detail ? `${message}: ${detail}` : message)
+        throw new Error(humanizeError(cause))
       } finally {
         restorePendingRef.current = null
       }
@@ -1232,7 +1258,7 @@ export default function ToolCast({
     if (!sessionReady || !nextJobId) return
     onJobLinked(nextJobId)
     const envelope = await attachTrackedJob(nextJobId, {
-      toolName: toolName || 'arrange-panels-as-cat',
+      toolName: toolName || 'Tool',
       persist: true,
     })
     // S23 agent checkpoints, the same keyed notice /app raises: an agent
@@ -1249,43 +1275,44 @@ export default function ToolCast({
       setError(null)
     } else if (!envelope) {
       setPhase('failed')
-      setError('The panel run did not produce a readable drawing version.')
+      setError('The request did not produce a readable drawing version. Try again.')
     }
     await workspace.rehydrate()
     checkout.actions.refresh()
   }, [attachTrackedJob, checkout.actions, onJobLinked, onUndo, sessionReady, showToast, workspace])
 
-  const openResultDetails = useCallback((envelope = jobResult, jobId = currentJobId) => {
+  const openResultDetails = useCallback((envelope = jobResult) => {
     if (!envelope) return
+    jobDetailsRequestRef.current += 1
     const cost = envelope.cost?.usd_est
     setDrawer({
       title: 'Run details',
       rows: [
-        `job ${jobId || 'not recorded'}`,
         `tool ${envelope.tool || 'unknown'}`,
         `version ${envelope.version || 'unknown'}`,
         `timing ${envelope.timing_ms ?? 'unknown'} ms`,
         `cost ${Number(cost) > 0 ? `$${Number(cost).toFixed(4)}` : 'no cloud cost'}`,
         `degraded ${envelope.degraded_mode ? 'yes, local fallback' : 'no'}`,
         ...(envelope.error ? [
-          `error code ${envelope.error.error_code || 'unknown'}`,
-          `error message ${envelope.error.message || 'failed'}`,
+          humanizeError(envelope.error),
           `retryable ${envelope.error.retryable ? 'yes' : 'no'}`,
         ] : []),
       ],
       foot: 'This receipt belongs to one immutable tool run.',
     })
-  }, [currentJobId, jobResult])
+  }, [jobResult])
 
   const inspectHistoricalJob = useCallback(async (job) => {
     if (!sessionReady || !job?.job_id) return
+    const request = ++jobDetailsRequestRef.current
+    setDrawer({ title: 'Job details', rows: ['Loading job details.'] })
     try {
       const record = await getJob(job.job_id)
+      if (request !== jobDetailsRequestRef.current) return
       const envelope = recordToEnvelope(record)
       setDrawer({
         title: 'Job details',
         rows: [
-          `job ${job.job_id}`,
           `tool ${envelope.tool || job.tool || 'unknown'}`,
           `status ${record.status || 'unknown'}`,
           `timing ${envelope.timing_ms ?? 'unknown'} ms`,
@@ -1295,15 +1322,20 @@ export default function ToolCast({
           onClick: () => {
             adoptEnvelope(envelope, { jobId: job.job_id, toolName: envelope.tool || job.tool })
             setRightView('execution')
-            setDrawer(null)
+            closeDetails()
           },
         },
         foot: 'Selecting details does not rerun the tool.',
       })
-    } catch {
-      setError('The stored job details could not be loaded.')
+    } catch (cause) {
+      if (request !== jobDetailsRequestRef.current) return
+      setDrawer({
+        title: 'Job details',
+        rows: [humanizeError(cause)],
+        action: { label: 'Retry', onClick: () => inspectHistoricalJob(job) },
+      })
     }
-  }, [adoptEnvelope, sessionReady])
+  }, [adoptEnvelope, closeDetails, sessionReady])
 
   // S27: Escape on /try goes through the one owner stack. The details drawer
   // and the ops drawer own their own Escape (DetailsDrawer, OpsDrawer); this
@@ -1340,7 +1372,9 @@ export default function ToolCast({
   // — now simply drops the authorisation with the call.
   const dispatchRequest = useCallback(async (override, { allowSecretOnce = false } = {}) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
-    if (!text || platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing) return
+    const reason = stageRunDisabledReason({ sessionActive: platformSession.status === 'active', hasDrawing, busy, jobRunning, routing, loading: phase === 'loading' })
+    if (reason) { setError(reason); return }
+    if (!text) return
     setError(null)
     setPhase('starting')
     if (text.startsWith('/')) setLeftView('catalog')
@@ -1369,7 +1403,7 @@ export default function ToolCast({
     if (decision) setPhase('proposal')
     else setPhase('failed')
     return decision
-  }, [busy, catalog.actions, catalog.controller, hasDrawing, jobRunning, platformSession.status, prompt, routing])
+  }, [busy, catalog.actions, catalog.controller, hasDrawing, jobRunning, phase, platformSession.status, prompt, routing])
 
   const runRequest = useCallback(() => dispatchRequest(), [dispatchRequest])
 
@@ -1501,11 +1535,14 @@ export default function ToolCast({
     iosReady: iosShip.launchable === true,
   })
   const selectProductSurface = useCallback((surfaceId) => {
+    if (surfaceId === productSurfaceFromSearch(window.location.search)) return
     const search = searchForProductSurface(window.location.search, surfaceId)
     window.history.pushState({}, '', `${window.location.pathname}${search}${window.location.hash}`)
     setActiveSurface(surfaceId)
   }, [])
-  const openAccountDetails = useCallback(() => setDrawer({
+  const openAccountDetails = useCallback(() => {
+    jobDetailsRequestRef.current += 1
+    setDrawer({
     title: 'Account details',
     // S24: the one drawer here the URL may name (`drawer=details`).
     urlKey: 'details',
@@ -1517,7 +1554,8 @@ export default function ToolCast({
     ],
     action: isSignedIn() ? { label: 'Sign out', onClick: platformSession.actions.signOut } : null,
     foot: 'Platform identity and Claude account credit are separate.',
-  }), [platform.entitlements?.tier, platformSession.actions.signOut, sessionAuthRequired, sessionOrg, sessionTier, tenantId, workspace.orgId])
+    })
+  }, [platform.entitlements?.tier, platformSession.actions.signOut, sessionAuthRequired, sessionOrg, sessionTier, tenantId, workspace.orgId])
   // S24 (A14): the URL keeps the open Details drawer, the opened catalog
   // tool, the operator's own selection and the Focus 3D camera preset
   // (lib/urlState.js owns the four keys and preserves every boot flag, Auth0
@@ -1622,6 +1660,7 @@ export default function ToolCast({
           className="tc-run"
           data-testid="ios-ship-launch"
           disabled={iosShipBusy}
+          title={iosShipBusy ? 'The build is launching. Please wait.' : undefined}
           onClick={launchIosShip}
         >
           {iosShipBusy ? 'Launching' : 'Launch TestFlight build'}
@@ -1640,16 +1679,41 @@ export default function ToolCast({
           <div>{iosShipReceipt.app_store_connect_result?.status} · {iosShipReceipt.app_store_connect_result?.build_id}</div>
         </div>
       )}
-      {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{iosShipError}</p>}
+      {iosShipError && <p className="tc-rail-note" data-testid="ios-ship-error">{humanizeError(iosShipError)}</p>}
     </div>
   )
 
-  // Slice 13d: the stage's own act-scope palette row for the console's
-  // shortcut sheet (stageRunReasons.js's stageHelpPaletteRow, built off the
-  // SAME byId('bar:shortcuts') registry record the console's row reads).
-  // Declared and disabled: the stage mounts no ShortcutSheet and no Shift+?
-  // rung, so a live row here would run nothing on click.
-  const stagePaletteActions = [stageHelpPaletteRow()]
+  const stagePaletteActions = [{
+    ...stageHelpPaletteRow(),
+    disabled: false,
+    reason: null,
+    kbd: null,
+    onSelect: () => {
+      jobDetailsRequestRef.current += 1
+      setDrawer({
+        title: 'Keyboard shortcuts',
+        rows: [
+          'Ctrl+K or Command+K: focus the command bar.',
+          'Shift+Enter: add a new line to your request.',
+          'Arrow keys: move between workspace tabs.',
+          'Escape: close the current details or proposal.',
+        ],
+      })
+    },
+  }]
+
+  // PromptBox has no input-description prop. Associate the stage's explanation
+  // with its actual input here, without changing the shared command bar.
+  useLayoutEffect(() => {
+    const input = document.querySelector('.tc-bar-input')
+    if (!input) return undefined
+    const previous = input.getAttribute('aria-describedby')
+    input.setAttribute('aria-describedby', [previous, 'tc-run-reason'].filter(Boolean).join(' '))
+    return () => {
+      if (previous) input.setAttribute('aria-describedby', previous)
+      else input.removeAttribute('aria-describedby')
+    }
+  }, [active, stageBranch])
 
   // Slice 4a: the stage's command well, handed to the frame as its
   // `commandBar` render prop. Slice 5a replaced the hand-rolled rows inside
@@ -1688,9 +1752,8 @@ export default function ToolCast({
           {routeError && (
             <div className="strip-decision enter error" role="alert">
               <span className="dot red" aria-hidden="true" />
-              <span className="strip-sentence">Could not route the request. {routeError}<span className="dim"> The drawing is unchanged.</span></span>
-              <button type="button" className="chip-act" onClick={runRequest}>Retry</button>
-              <span className="key">R</span>
+              <span className="strip-sentence">{humanizeError(routeError)}<span className="dim"> The drawing is unchanged.</span></span>
+              <button type="button" className="chip-act" onClick={() => { document.querySelector('.tc-bar-input')?.focus(); runRequest() }}>Retry</button>
             </div>
           )}
           {agentBanner && (
@@ -1740,6 +1803,7 @@ export default function ToolCast({
                   // preconditions (below) can short-circuit the re-dispatch and
                   // the authorisation simply evaporates with it.
                   disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing}
+                  title={stageRunDisabledReason({ sessionActive: platformSession.status === 'active', hasDrawing, busy, jobRunning, routing }) || undefined}
                   onClick={() => dispatchRequest(undefined, { allowSecretOnce: true })}
                 >
                   Send anyway
@@ -1777,6 +1841,10 @@ export default function ToolCast({
                 - Retired: the static "Scope · this drawing" chip and the
                   .tc-bar-scopes lane string; PromptBox's live .bar-scope chip
                   replaces both. */}
+          <p id="tc-run-reason" className="tc-panel-note">{stageRunDisabledReason({
+            sessionActive: platformSession.status === 'active', hasDrawing, busy, jobRunning, routing,
+            loading: phase === 'loading',
+          }) || 'Press Enter to submit. Use Shift+Enter for a new line.'}</p>
           <PromptBox
             value={prompt}
             onChange={changePrompt}
@@ -1979,13 +2047,13 @@ export default function ToolCast({
       <aside className={`tc-rail tc-rail-l tc-operator-rail${focusView ? ' tc-focus-hidden' : ''}`} aria-label="Workspace controls" data-cast="tool" data-controller-instance={instanceId} data-checkout-instance={checkout.instanceId} style={{ '--rank': 0 }} data-testid="operator-surface">
         <div className="tc-rail-head">
           <span className="tc-rail-title">Workspace</span>
-          <span className="tc-rail-sub">request and tools</span>
+          <span className="tc-rail-sub">Requests and tools</span>
         </div>
-        <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveRovingTab}>
+        <div className="tc-rail-tabs" role="tablist" aria-label="Workspace panels" onKeyDown={moveStageTab}>
           <button id="workspace-tab-operator" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'operator' ? 0 : -1} aria-selected={leftView === 'operator'} onClick={() => setLeftView('operator')}>Operator</button>
-          <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} disabled={!sessionReady} onClick={() => setLeftView('catalog')}>Catalog <span>{tools.length}</span></button>
-          <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} disabled={!canOperate} onClick={() => setLeftView('author')}>Author</button>
-          <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} disabled={!canOperate} onClick={() => setLeftView('workspace')}>Project</button>
+          <button id="workspace-tab-catalog" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'catalog' ? 0 : -1} aria-selected={leftView === 'catalog'} aria-disabled={!sessionReady} title={!sessionReady ? sessionTabReason : undefined} onClick={() => { if (sessionReady) setLeftView('catalog'); else setError(sessionTabReason) }}>Catalog <span>{tools.length}</span></button>
+          <button id="workspace-tab-author" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'author' ? 0 : -1} aria-selected={leftView === 'author'} aria-disabled={!canOperate} title={!canOperate ? drawingTabReason : undefined} onClick={() => { if (canOperate) setLeftView('author'); else setError(drawingTabReason) }}>Author</button>
+          <button id="workspace-tab-workspace" aria-controls="workspace-tabpanel" type="button" role="tab" tabIndex={leftView === 'workspace' ? 0 : -1} aria-selected={leftView === 'workspace'} aria-disabled={!canOperate} title={!canOperate ? drawingTabReason : undefined} onClick={() => { if (canOperate) setLeftView('workspace'); else setError(drawingTabReason) }}>Project</button>
         </div>
         <div id="workspace-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`workspace-tab-${leftView}`} tabIndex={0}>
           {leftView === 'operator' && (PUBLIC_DEMO ? (
@@ -2092,6 +2160,7 @@ export default function ToolCast({
           {ENV_LIFECYCLE_UI && leftView === 'workspace'
             && !PUBLIC_DEMO && !transportMock && canOperate && workspace.openProjectId && (
             <ProjectLifecyclePanel
+              key={workspace.openProjectId}
               projectId={workspace.openProjectId}
               projectName={currentProjectName}
               onProjectDeleted={forgetDeletedProject}
@@ -2136,7 +2205,11 @@ export default function ToolCast({
               onResumeAuthor={authorStage.resume}
             />
           )}
-          {(error || jobError) && <div className="tc-operator-error" role="alert"><span className="dot red" />{error || jobError}</div>}
+          {sessionError && <div className="tc-operator-error" role="alert">
+            <span>{sessionError}</span>
+            <button type="button" onClick={() => { document.querySelector('.tc-bar-input')?.focus(); setSessionError(null); setError(null); setSessionRetry((current) => current + 1) }}>Retry connection</button>
+          </div>}
+          {(error || jobError) && <div className="tc-operator-error" role="alert"><span className="dot red" />{humanizeError(error || jobError)}</div>}
           {leftView === 'operator' && (
             <DrawingUploadControl
               policy={drawingUpload.policy}
@@ -2160,20 +2233,20 @@ export default function ToolCast({
       <aside className={`tc-rail tc-rail-r${focusView ? ' tc-focus-hidden' : ''}`} data-tour="right-rail" aria-label="Operations controls" data-cast="tool" style={{ '--rank': 1 }}>
         <div className="tc-rail-head">
           <span className="tc-rail-title">Operations</span>
-          <span className="tc-rail-sub">controller state</span>
+          <span className="tc-rail-sub">Results and history</span>
         </div>
-        <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveRovingTab}>
+        <div className="tc-rail-tabs" role="tablist" aria-label="Operation panels" onKeyDown={moveStageTab}>
           <button id="operations-tab-execution" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'execution' ? 0 : -1} aria-selected={rightView === 'execution'} onClick={() => setRightView('execution')}>Execution</button>
-          <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} disabled={!sessionReady} onClick={() => setRightView('jobs')}>Jobs <span>{visibleJobCount}</span></button>
+          <button id="operations-tab-jobs" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'jobs' ? 0 : -1} aria-selected={rightView === 'jobs'} aria-disabled={!sessionReady} title={!sessionReady ? sessionTabReason : undefined} onClick={() => { if (sessionReady) setRightView('jobs'); else setError(sessionTabReason) }}>Jobs <span>{visibleJobCount}</span></button>
           {/* Ruling 1 (guest-first sandbox): the Versions tab follows the View
               tab's drawing-only gate (`hasDrawing`), not `canOperate`, so a
               signed-out guest with an uploaded drawing can open version
               history under guest authority. Every write behind this tab
               (restore eligibility, checkout capability) stays gated on
               `sessionReady` separately, see `eligible` below. */}
-          {versionsMounted && <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} disabled={!hasDrawing} onClick={() => { setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>}
-          <button id="operations-tab-trust" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'trust' ? 0 : -1} aria-selected={rightView === 'trust'} disabled={!sessionReady} onClick={() => { setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
-          <button id="operations-tab-view" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} disabled={!hasDrawing} onClick={() => setRightView('view')}>View</button>
+          {versionsMounted && <button id="operations-tab-versions" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'versions' ? 0 : -1} aria-selected={rightView === 'versions'} aria-disabled={!hasDrawing} title={!hasDrawing ? 'Upload a DWG or DXF to view versions.' : undefined} onClick={() => { if (!hasDrawing) { setError('Upload a DWG or DXF to view versions.'); return }; setRightView('versions'); drawing.actions.loadHistory() }}>Versions <span>{drawing.latest ?? 0}</span></button>}
+          <button id="operations-tab-trust" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'trust' ? 0 : -1} aria-selected={rightView === 'trust'} aria-disabled={!sessionReady} title={!sessionReady ? sessionTabReason : undefined} onClick={() => { if (!sessionReady) { setError(sessionTabReason); return }; setRightView('trust'); platform.actions.refreshAll() }}>Trust</button>
+          <button id="operations-tab-view" aria-controls="operations-tabpanel" type="button" role="tab" tabIndex={rightView === 'view' ? 0 : -1} aria-selected={rightView === 'view'} aria-disabled={!hasDrawing} title={!hasDrawing ? 'Upload a DWG or DXF to view a drawing.' : undefined} onClick={() => { if (hasDrawing) setRightView('view'); else setError('Upload a DWG or DXF to view a drawing.') }}>View</button>
         </div>
         <div id="operations-tabpanel" className="tc-rail-body" role="tabpanel" aria-labelledby={`operations-tab-${rightView}`} tabIndex={0}>
         {rightView === 'execution' && <><div className="tc-events">
@@ -2188,13 +2261,13 @@ export default function ToolCast({
           {(hasDrawing || currentJobId || linkedJobId) ? (<>
           <div className="tc-event">
             <span className="dot" />
-            <span className="tc-event-text">Panels preserved</span>
+            <span className="tc-event-text">Drawing shapes</span>
             <span className="tc-event-time">{panelCount?.toLocaleString('en-US') || 'pending'}</span>
           </div>
           <div className="tc-event">
             <span className={(currentJobId || linkedJobId) ? 'dot' : 'dot hollow'} />
             <span className="tc-event-text">Tool job</span>
-            <span className="tc-event-time">{(currentJobId || linkedJobId) ? (currentJobId || linkedJobId).slice(0, 8) : 'pending'}</span>
+            <span className="tc-event-time">{(currentJobId || linkedJobId) ? 'Recorded' : 'No run yet'}</span>
           </div>
           <div className="tc-event">
             <span className={canUndo ? 'dot' : 'dot hollow'} />
@@ -2216,8 +2289,8 @@ export default function ToolCast({
             write after the click. e2e/local/version-restore.spec.mjs pins it
             on /app AND /try. */}
         <div className="tc-version-actions">
-          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || drawing.versionBusy || previewLocked || !canUndo}>Undo</button>
-          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || drawing.versionBusy || previewLocked || !canRedo}>Redo</button>
+          <button type="button" className="tc-bar-chip" onClick={undo} disabled={busy || jobRunning || drawing.versionBusy || previewLocked || !canUndo} title={previewLocked ? 'Return to the current version to undo.' : busy || jobRunning || drawing.versionBusy ? 'Wait for the current request to finish.' : !canUndo ? 'There is no earlier version to restore.' : undefined}>Undo</button>
+          <button type="button" className="tc-bar-chip" onClick={redo} disabled={busy || jobRunning || drawing.versionBusy || previewLocked || !canRedo} title={previewLocked ? 'Return to the current version to redo.' : busy || jobRunning || drawing.versionBusy ? 'Wait for the current request to finish.' : !canRedo ? 'There is no later version to restore.' : undefined}>Redo</button>
           <CheckoutControls
             lockedByOther={checkout.lockedByOther}
             staleByOther={checkout.staleByOther}
@@ -2241,9 +2314,9 @@ export default function ToolCast({
             data-head={drawing.unreadableHead.head}
             data-latest={drawing.unreadableHead.latest}
           >
-            {drawing.unreadableHead.message}
+            {humanizeError(drawing.unreadableHead.message)}
             {!drawing.unreadableHead.pending ? (
-              <button type="button" className="chip-act" onClick={drawing.actions.retryUnreadableHead} disabled={drawing.refreshing}>
+              <button type="button" className="chip-act" onClick={drawing.actions.retryUnreadableHead} disabled={drawing.refreshing} title={drawing.refreshing ? 'The drawing is loading. Please wait.' : undefined}>
                 {drawing.refreshing ? 'Reading the version chain…' : 'Retry loading'}
               </button>
             ) : null}
@@ -2252,7 +2325,7 @@ export default function ToolCast({
         {drawing.refreshFailure && (
           <div className="inline-error tc-refresh-failure" role="alert">
             Couldn’t refresh the viewer. The previous version is still shown.
-            <button type="button" className="chip-act" onClick={drawing.actions.retryRefresh} disabled={drawing.refreshing}>
+            <button type="button" className="chip-act" onClick={drawing.actions.retryRefresh} disabled={drawing.refreshing} title={drawing.refreshing ? 'The drawing is loading. Please wait.' : undefined}>
               {drawing.refreshing ? 'Refreshing…' : 'Retry'}
             </button>
           </div>
@@ -2354,7 +2427,7 @@ export default function ToolCast({
           <div className="tc-trust-panel">
             <div className="tc-panel-heading">
               <span>Service trust</span>
-              <button type="button" onClick={platform.actions.refreshAll} disabled={platform.healthLoading || platform.usageLoading || platform.entLoading || platform.grantLoading}>
+              <button type="button" onClick={platform.actions.refreshAll} disabled={platform.healthLoading || platform.usageLoading || platform.entLoading || platform.grantLoading} title={platform.healthLoading || platform.usageLoading || platform.entLoading || platform.grantLoading ? 'Account information is refreshing. Please wait.' : undefined}>
                 {platform.healthLoading ? 'Refreshing' : 'Refresh'}
               </button>
             </div>
@@ -2464,7 +2537,7 @@ export default function ToolCast({
           ? 'Interactive local demo: sample drawing and client-side tools. No cloud data changes.'
           : PROOF_MODE
             ? 'Deterministic browser proof. This surface does not claim a live Claude or APS run.'
-          : 'Live service chain: web → app → harness → broker. Requests are not preloaded or simulated.'}
+          : sessionReady ? 'Your drawing and tool results stay together in this workspace.' : 'Sign in to connect your workspace, or explore the sample drawing.'}
       </div>
 
       {/* The Result panel has its own object-navigation announcements. Keep
@@ -2480,11 +2553,11 @@ export default function ToolCast({
           ? `Running ${selectedCatalogTool?.name || currentJob?.tool || 'tool'}`
           : jobResult?.ok
             ? `${jobResult.tool || 'Tool'} complete`
-            : jobResult?.error?.message || ''}
+            : jobResult?.error ? humanizeError(jobResult.error) : ''}
       </LiveRegion>
       <SurfaceFrame.Toast />
       <SurfaceFrame.ContextMenu />
-      <DetailsDrawer data={drawer} onClose={() => setDrawer(null)} />
+      <DetailsDrawer data={drawer} onClose={closeDetails} />
       {opsOpen && (
         <div className="drawer-layer tc-ops-layer">
           <OpsDrawer onDismiss={() => setOpsOpen(false)} />

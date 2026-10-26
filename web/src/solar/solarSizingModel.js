@@ -149,6 +149,9 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
   const targets = sizingTargets(graph, mode)
   if (!targets.ok) return targets
   const invalid = []
+  const acceptedLength = mode === 'global' && Object.hasOwn(draft, 'accepted_string_length')
+  if (acceptedLength && (!Number.isInteger(draft.accepted_string_length)
+      || draft.accepted_string_length < 1 || draft.accepted_string_length > 4096)) invalid.push('accepted_string_length')
   const requireText = (key) => { if (!text(draft[key])) invalid.push(key) }
   const requireBoolean = (key) => { if (typeof draft[key] !== 'boolean') invalid.push(key) }
   if (mode === 'global') ['module_name', 'full_inverter_name'].forEach(requireText)
@@ -186,7 +189,8 @@ export function buildSizingParams({ graph, mode, draft = {} }) {
     open_circuit_rise: draft.open_circuit_rise, zip_code: graph.zip,
     ...(draft.use_module_parameters ? { module_parameters: { ...moduleParameters } } : {}),
   }]))
-  return { ok: true, params: { expected_rev: graph.rev, mode, requests, grant_ref: draft.grant_ref, confirm: true } }
+  return { ok: true, params: { expected_rev: graph.rev, mode, requests, grant_ref: draft.grant_ref, confirm: true,
+    ...(acceptedLength ? { accepted_string_length: draft.accepted_string_length } : {}) } }
 }
 
 export const PROJECT_SIZING_CONDUCTOR_REASONS = Object.freeze({
@@ -202,6 +206,7 @@ export const PROJECT_SIZING_CONDUCTOR_REASONS = Object.freeze({
   preview_required: 'Checking whether this change can be applied to this project drawing.',
   preview_refused: 'This change cannot be applied. Review the refusal and try again.',
   submit_unavailable: 'Project Solar submission is not available in this view.',
+  run_in_progress: 'A Solar run is in progress. Wait for it to finish.',
   request_invalid: 'This request could not be prepared. Review the inputs and try again.',
   manual_only: 'Project string sizing supports the saved global length only.',
   project_adapter_unavailable: 'Conductor changes are not available for project drawings on this server.',
@@ -226,6 +231,7 @@ export function projectSizingConductorReason(reason) {
     case 'preview_required': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_required
     case 'preview_refused': return PROJECT_SIZING_CONDUCTOR_REASONS.preview_refused
     case 'submit_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.submit_unavailable
+    case 'run_in_progress': return PROJECT_SIZING_CONDUCTOR_REASONS.run_in_progress
     case 'request_invalid': return PROJECT_SIZING_CONDUCTOR_REASONS.request_invalid
     case 'manual_only': return PROJECT_SIZING_CONDUCTOR_REASONS.manual_only
     case 'project_adapter_unavailable': return PROJECT_SIZING_CONDUCTOR_REASONS.project_adapter_unavailable

@@ -399,11 +399,12 @@ function handlerProbe(seen) {
  * App.jsx's global key ladder as it stood BEFORE slice 10a, copied here as
  * literals. It returns the same decision shape `ladderDecision` does, so the
  * two can be compared directly. Nothing imports it; it exists to be the
- * independent oracle a refactor of the real ladder has to keep agreeing with.
+ * independent oracle a refactor of the real ladder has to keep agreeing with,
+ * with the field protections added by the w3 keyboard fixes.
  */
 function OLD_LADDER(e, ctx) {
   const tag = ((e.target && e.target.tagName) || '').toLowerCase()
-  const typing = tag === 'input' || tag === 'textarea'
+  const typing = tag === 'input' || tag === 'textarea' || tag === 'select' || !!e.target?.isContentEditable
   if ((e.metaKey || e.ctrlKey) && (e.key === 'k' || e.key === 'K')) {
     return { id: 'bar:focus', rung: '', route: 'kbd', preventDefault: true, instant: true }
   }
@@ -412,6 +413,8 @@ function OLD_LADDER(e, ctx) {
     if (ctx.historyOpen) return { id: 'bar:escape', rung: 'history', route: 'kbd', preventDefault: false, instant: true }
     if (ctx.route) return { id: 'bar:escape', rung: 'route', route: 'kbd', preventDefault: false, instant: true }
     if (ctx.routeErr || ctx.runErr) return { id: 'bar:escape', rung: 'errors', route: 'kbd', preventDefault: false, instant: true }
+    if (typing && (ctx.running || (!ctx.selectedHandle && ctx.openProjectId)
+        || (ctx.selectedHandle && tag !== 'select'))) return null
     if (ctx.running) return { id: 'bar:escape', rung: 'running', route: 'kbd', preventDefault: false, instant: true }
     if (ctx.selectedHandle) return { id: 'bar:escape', rung: 'selection', route: 'kbd', preventDefault: false, instant: true }
     if (ctx.openProjectId) return { id: 'bar:escape', rung: 'project', route: 'kbd', preventDefault: false, instant: true }
@@ -748,7 +751,7 @@ describe('KEYS-C: a key pressed during a text composition is never the ladder\'s
       expect(ladderDecision({ key: 'Escape', ...mark, target: plainTarget() }, shell)).toBeNull()
     }
     // The control: the same key outside a composition is the ladder's.
-    const plain = ladderDecision({ key: 'Escape', keyCode: 27, isComposing: false, target: field() }, shell)
+    const plain = ladderDecision({ key: 'Escape', keyCode: 27, isComposing: false, target: plainTarget() }, shell)
     expect(plain).toMatchObject({ id: 'bar:escape', rung, route: 'kbd' })
   })
 
@@ -1142,6 +1145,7 @@ describe('engine shortcut records', () => {
   }
   const bindings = [
     [{ key: 'Delete' }, 'modify:delete'],
+    [{ key: 'Backspace' }, 'modify:delete'],
     [{ key: 'z', ctrlKey: true }, 'engine:undo'],
     [{ key: 'y', ctrlKey: true }, 'engine:redo'],
     [{ key: 'z', ctrlKey: true, shiftKey: true }, 'engine:redo'],
@@ -1160,7 +1164,7 @@ describe('engine shortcut records', () => {
       reached.add(id)
     }
     expect([...reached].sort()).toEqual(Object.keys(ENGINE_SHORTCUTS).sort())
-    for (const event of [{ key: 'Backspace' }, { key: 'Delete', shiftKey: true }, { key: 'c' }, { key: 'F8' }]) {
+    for (const event of [{ key: 'Backspace', ctrlKey: true }, { key: 'Delete', shiftKey: true }, { key: 'c' }, { key: 'F8' }]) {
       expect(engineShortcutDecision(event, eligible)).toBeNull()
     }
   })

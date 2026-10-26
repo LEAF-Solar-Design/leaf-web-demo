@@ -95,6 +95,18 @@ const retired = (patch = {}) => ({ ...summary, state: 'revoked', revision: 2,
 const deletes = (fetchImpl) => fetchImpl.mock.calls.filter(([, request]) => request.method === 'DELETE')
 const retireButton = () => screen.getByRole('button', { name: 'Revoke connection and erase stored credential' })
 
+it('starts another connection after verified retirement and retains the published connector', async () => {
+  const { props } = setup()
+  render(<IntegrationSetupPanel {...props} />)
+  await createConnection()
+  fireEvent.click(retireButton())
+  fireEvent.click(await screen.findByRole('button', { name: 'Create another connection' }))
+  expect(screen.getByRole('form', { name: 'Create connection' })).toBeInTheDocument()
+  expect(screen.getByLabelText('Connection stable ID')).toHaveValue('')
+  expect(screen.getByText(/Published connector:/)).toBeInTheDocument()
+  expect(screen.queryByLabelText('Bearer token')).toBeNull()
+})
+
 it('clears local private input and deduplicates retirement while obtaining the fresh revision', async () => {
   const { props, fetchImpl } = setup()
   render(<IntegrationSetupPanel {...props} />)
