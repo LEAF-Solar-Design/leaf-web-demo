@@ -36,24 +36,28 @@ export async function secureTakenCheckoutAuthority({
   // forever (panel W2c, lock-safety BLOCKER - reproduced).
   let refused = false
   let authority = null
-  authority = holdAuthority({
-    handoff: { capability, holder, drawingId, createdAtMs: Date.now() },
-    onAcquired: (owned) => {
-      if (!controller.restoreCapability(owned.capability)) {
-        refused = true
-        authority?.stop()
-        Promise.resolve(services.release(drawingId, owned.capability)).catch(() => { /* fail closed */ })
-      }
-    },
-    onError: () => controller.clearCapability(),
-  })
-  const acquired = authority.active && await authority.acquired
+  let acquired = false
+  try {
+    authority = holdAuthority({
+      handoff: { capability, holder, drawingId, createdAtMs: Date.now() },
+      onAcquired: (owned) => {
+        if (!controller.restoreCapability(owned.capability)) {
+          refused = true
+          authority?.stop()
+          Promise.resolve(services.release(drawingId, owned.capability)).catch(() => { /* fail closed */ })
+        }
+      },
+      onError: () => controller.clearCapability(),
+    })
+    acquired = authority.active && await authority.acquired
+  } catch { /* release the server lease if local locking fails */ }
   if (acquired && !refused) return authority
 
-  authority.stop()
+  authority?.stop()
   controller.clearCapability()
   try { await services.release(drawingId, capability) } catch { /* fail closed */ }
   await controller.refresh()
+  controller.reportAuthorityFailure?.()
   return null
 }
 

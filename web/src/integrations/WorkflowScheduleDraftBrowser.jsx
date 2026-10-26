@@ -175,8 +175,8 @@ function ScopedDraftBrowser({ client, projectId, signal, contextKey, availabilit
           <dt>Time</dt><dd>{String(draft.schedule.hour).padStart(2, '0')}:{String(draft.schedule.minute).padStart(2, '0')}</dd>
           <dt>Gap policy</dt><dd>{draft.schedule.gap_policy}</dd><dt>Fold policy</dt><dd>{draft.schedule.fold_policy}</dd>
         </dl>
-      </>}
       <p>This is a saved draft. Nothing is scheduled or authorized to run.</p>
+      </>}
     </div>
     {view.phase === 'pending' && <button type="button" style={secondaryButton} onClick={() => {
       cancelDetail(); setView({ phase: 'cancelled', draft: null })

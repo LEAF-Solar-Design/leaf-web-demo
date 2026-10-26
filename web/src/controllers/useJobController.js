@@ -8,6 +8,7 @@ import {
   recordToEnvelope as defaultRecordToEnvelope,
 } from '../api.js'
 import { track } from '../telemetry.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 
 export const INFLIGHT_JOB_KEY = 'leaf.inflightJob'
 
@@ -62,7 +63,16 @@ export function clearPendingRun(storage = browserStorage()) {
   try { storage?.removeItem(PENDING_RUN_KEY) } catch { /* storage is best effort */ }
 }
 
-export function readPendingRun(storage = browserStorage(), now = Date.now()) {
+export function pendingRunAccount(storage = browserStorage()) {
+  try {
+    const token = storage?.getItem('leaf.jwt')
+    if (!token) return null
+    const payload = JSON.parse(atob(token.split('.')[1].replace(/-/g, '+').replace(/_/g, '/')))
+    return typeof payload.sub === 'string' && payload.sub ? `${payload.iss || ''}:${payload.sub}` : null
+  } catch { return null }
+}
+
+export function readPendingRun(storage = browserStorage(), now = Date.now(), account = pendingRunAccount(storage)) {
   let raw
   try { raw = storage?.getItem(PENDING_RUN_KEY) } catch { return null }
   if (raw == null) return null
@@ -71,20 +81,28 @@ export function readPendingRun(storage = browserStorage(), now = Date.now()) {
     record = typeof raw === 'string' && raw.length <= MAX_PENDING_RUN_BYTES ? JSON.parse(raw) : null
   } catch { record = null }
   const age = record && Number.isFinite(record.ts) ? now - record.ts : NaN
-  const valid = isPlainParams(record) && record.v === 1 && isToolName(record.tool)
+  const valid = isPlainParams(record) && record.v === 2
+    && (record.account === null || typeof record.account === 'string') && isToolName(record.tool)
     && isPlainParams(record.params) && age >= 0 && age <= PENDING_RUN_TTL_MS
   if (!valid) {
+    clearPendingRun(storage)
+    return null
+  }
+  // An expired token cannot identify the returning account yet. Keep its
+  // bounded record private until sign-in establishes who is returning.
+  if (account === null && record.account !== null) return null
+  if (record.account !== account) {
     clearPendingRun(storage)
     return null
   }
   return { tool: record.tool, params: record.params, ts: record.ts }
 }
 
-export function savePendingRun(tool, params, storage = browserStorage(), now = Date.now()) {
+export function savePendingRun(tool, params, storage = browserStorage(), now = Date.now(), account = pendingRunAccount(storage)) {
   const body = params == null ? {} : params
   if (!isToolName(tool) || !isPlainParams(body)) return null
   let serialized
-  try { serialized = JSON.stringify({ v: 1, tool, params: body, ts: now }) } catch { return null }
+  try { serialized = JSON.stringify({ v: 2, account, tool, params: body, ts: now }) } catch { return null }
   if (typeof serialized !== 'string' || serialized.length > MAX_PENDING_RUN_BYTES) return null
   try { storage?.setItem(PENDING_RUN_KEY, serialized) } catch { return null }
   return { tool, params: body, ts: now }
@@ -148,6 +166,33 @@ export default function useJobController({
   const [pollGeneration, setPollGeneration] = useState(0)
   const [staleResults, setStaleResults] = useState([])
   const [pendingRun, setPendingRun] = useState(() => (mock ? null : readPendingRun(storage)))
+  const pendingAccountRef = useRef(pendingRunAccount(storage))
+  const currentAccount = pendingRunAccount(storage)
+  if (currentAccount) pendingAccountRef.current = currentAccount
+  useEffect(() => {
+    const clearSaved = () => {
+      pendingIntentRef.current += 1
+      pendingAccountRef.current = null
+      clearPendingRun(storageRef.current)
+      setPendingRun(null)
+    }
+    const refreshSaved = () => {
+      const nextAccount = pendingRunAccount(storageRef.current)
+      if (pendingAccountRef.current !== nextAccount) pendingIntentRef.current += 1
+      pendingAccountRef.current = nextAccount
+      setPendingRun(readPendingRun(storageRef.current))
+    }
+    const clear = subscribeBeforeLogout(clearSaved)
+    const refresh = subscribeTokenStored(refreshSaved)
+    const onStorage = event => {
+      if (event.key === 'leaf.jwt' || event.key === null) {
+        if (!event.newValue) clearSaved()
+        else refreshSaved()
+      }
+    }
+    window.addEventListener('storage', onStorage)
+    return () => { clear(); refresh(); window.removeEventListener('storage', onStorage) }
+  }, [])
 
   const sequenceRef = useRef(0)
   // Bumped by reset(): a result from before a reset belongs to a context this
@@ -398,9 +443,10 @@ export default function useJobController({
   const runJob = useCallback(async ({ toolName, execute, submission = null }) => {
     if (!execute) throw new TypeError('runJob requires an execute callback')
     const intent = ++pendingIntentRef.current
+    const runAccount = pendingAccountRef.current
     if (readsPausedRef.current) {
-      if (submission) {
-        const saved = savePendingRun(toolName, submission.params, storageRef.current)
+      if (submission && pendingIntentRef.current === intent) {
+        const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
         if (saved) setPendingRun(saved)
       }
       setAuth(true)
@@ -436,7 +482,7 @@ export default function useJobController({
         // pointer and let the job reattach after sign-in.
         keepPointer = true
       } else if ((sequenceRef.current === sequence || supersededByPause) && pendingIntentRef.current === intent && submission) {
-        const saved = savePendingRun(toolName, submission.params, storageRef.current)
+        const saved = savePendingRun(toolName, submission.params, storageRef.current, Date.now(), runAccount)
         if (saved) setPendingRun(saved)
       }
       setAuth(true)

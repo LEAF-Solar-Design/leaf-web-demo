@@ -230,12 +230,13 @@ describe('an expired sign-in keeps the run', () => {
     const after = Date.now()
 
     const stored = JSON.parse(hook.storage.getItem(PENDING_RUN_KEY))
-    expect(stored.v).toBe(1)
+    expect(stored.v).toBe(2)
+    expect(stored.account).toBeNull()
     expect(stored.tool).toBe(TOOL)
     expect(stored.params).toEqual({ zone: 'A' })
     expect(stored.ts).toBeGreaterThanOrEqual(before)
     expect(stored.ts).toBeLessThanOrEqual(after)
-    expect(Object.keys(stored).sort()).toEqual(['params', 'tool', 'ts', 'v'])
+    expect(Object.keys(stored).sort()).toEqual(['account', 'params', 'tool', 'ts', 'v'])
     expect(onAuthRequired.mock.calls.filter(([value]) => value === true)).toHaveLength(1)
     expect(hook.result.current.error).not.toBeNull()
     expect(hook.result.current.pendingRun).toEqual({ tool: TOOL, params: { zone: 'A' }, ts: stored.ts })
@@ -260,12 +261,12 @@ describe('an expired sign-in keeps the run', () => {
 
   it('reads a fresh pending run at mount and drops an expired or malformed one', () => {
     const fresh = memoryStorage({
-      [PENDING_RUN_KEY]: JSON.stringify({ v: 1, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 60000 }),
+      [PENDING_RUN_KEY]: JSON.stringify({ v: 2, account: null, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 60000 }),
     })
     expect(mountHook({ storage: fresh }).result.current.pendingRun.tool).toBe(TOOL)
 
     const expired = memoryStorage({
-      [PENDING_RUN_KEY]: JSON.stringify({ v: 1, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1800001 }),
+      [PENDING_RUN_KEY]: JSON.stringify({ v: 2, account: null, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1800001 }),
     })
     expect(mountHook({ storage: expired }).result.current.pendingRun).toBeNull()
     expect(expired.map.has(PENDING_RUN_KEY)).toBe(false)
@@ -276,7 +277,7 @@ describe('an expired sign-in keeps the run', () => {
   })
 
   it('takes the pending run once, and discards it', () => {
-    const record = () => JSON.stringify({ v: 1, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1000 })
+    const record = () => JSON.stringify({ v: 2, account: null, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1000 })
     const storage = memoryStorage({ [PENDING_RUN_KEY]: record() })
     const hook = mountHook({ storage })
     const stored = JSON.parse(storage.getItem(PENDING_RUN_KEY))
@@ -389,7 +390,7 @@ describe('CORR1 a real sign-in expiry keeps the run', () => {
   })
 
   it('CORR1 Review and run keeps the pending run when the catalog load fails', async () => {
-    const record = JSON.stringify({ v: 1, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1000 })
+    const record = JSON.stringify({ v: 2, account: null, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1000 })
     const storage = memoryStorage({ [PENDING_RUN_KEY]: record })
     const hook = mountHook({ storage })
     const loadTools = vi.fn(async () => { throw Object.assign(new Error('GET /api/tools -> 503'), { status: 503 }) })
@@ -407,7 +408,7 @@ describe('CORR1 a real sign-in expiry keeps the run', () => {
   })
 
   it('CORR1 Review and run takes the pending run only after arming succeeds', async () => {
-    const record = () => JSON.stringify({ v: 1, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1000 })
+    const record = () => JSON.stringify({ v: 2, account: null, tool: TOOL, params: { zone: 'A' }, ts: Date.now() - 1000 })
     const storage = memoryStorage({ [PENDING_RUN_KEY]: record() })
     const hook = mountHook({ storage })
     let prepared

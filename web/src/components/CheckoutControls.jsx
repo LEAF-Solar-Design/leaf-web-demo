@@ -1,4 +1,44 @@
 import CheckoutChip from './CheckoutChip.jsx'
+import { useLayoutEffect, useRef, useState } from 'react'
+import { humanizeError } from '../errorHumanize.js'
+
+export default function CheckoutControls(props) {
+  const [error, setError] = useState(null)
+  const [pending, setPending] = useState(false)
+  const root = useRef(null)
+  const restoreFocus = useRef(false)
+  useLayoutEffect(() => {
+    if (!pending && restoreFocus.current) {
+      restoreFocus.current = false
+      ;(root.current?.querySelector('button:not(:disabled)') || root.current)?.focus()
+    }
+  }, [pending])
+  const perform = (action, taking = false, reading = false) => async () => {
+    restoreFocus.current = root.current?.contains(document.activeElement)
+    setError(null)
+    setPending(true)
+    try {
+      const result = await action?.()
+      if ((!reading && result === null) || (taking && result?.acquired === false)) {
+        setError(humanizeError(taking
+          ? 'The edit lock could not be taken. Another tab or editor may be using it. Try again.'
+          : 'The edit lock could not be released. Try again.'))
+      }
+    } catch (cause) {
+      setError(humanizeError(cause))
+    } finally {
+      setPending(false)
+    }
+  }
+  return <span ref={root} tabIndex={-1} className="checkout-controls">
+    <CheckoutStateControls {...props} busy={props.busy || pending}
+      onTake={perform(props.onTake, true)} onRelease={perform(props.onRelease)}
+      onRetry={props.onRetry ? perform(props.onRetry, false, true) : undefined} />
+    {error && <span role="alert">{error}</span>}
+    {(pending || props.busy) && <span role="status">Updating the edit lock…</span>}
+    {props.disabled && <span>Open a drawing and sign in to change the edit lock.</span>}
+  </span>
+}
 
 // Take / Release affordances over the single-writer checkout (3B). Wave 2 landed
 // the lock as a DISPLAY-ONLY chip; this makes it mutable. States, in the order
@@ -19,8 +59,8 @@ import CheckoutChip from './CheckoutChip.jsx'
 //   - unlocked      — a quiet "Take edit lock" chip.
 // Calm posture throughout — a checkout is an expected coordination state, never
 // an error. Live only (the parent gates on !mock).
-export default function CheckoutControls({
-  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, readFailed, failure = null, busy, disabled = false, onTake, onRelease, onRetry,
+function CheckoutStateControls({
+  lockedByOther, legacyByOther, staleByOther, canTake, heldByUs, unknown, readFailed, busy, disabled = false, onTake, onRelease, onRetry,
 }) {
   if (unknown) {
     // Both states pause writes, and only the wording differs. Every read now
@@ -40,11 +80,6 @@ export default function CheckoutControls({
         <span className="checkout-unknown">
           Could not read the edit lock, so writes are paused
         </span>
-        {failure !== null && typeof failure === 'object' && (
-          <span className="checkout-code" data-testid="checkout-failure-code">
-            code {failure?.errorCode || (typeof failure?.status === 'number' ? `HTTP ${failure.status}` : 'local')}{failure?.errorId ? ` · error_id ${failure.errorId}` : ''}
-          </span>
-        )}
         {onRetry && (
           <button className="chip-act" onClick={onRetry} disabled={busy || disabled}>
             Retry

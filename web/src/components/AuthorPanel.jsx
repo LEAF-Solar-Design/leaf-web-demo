@@ -510,13 +510,14 @@ export default function AuthorPanel({ onAuthor, onPublish, onUseAuthored, onStag
             title={stageActivity?.pointer ? 'Finish or discard the current request before cancelling the revision.' : undefined}>Cancel revision</button>
         </div>
       )}
-      {(!buildEntitled || buildGate)
+      {!buildEntitled && !buildGate && <div className="author-gate" role="status">Tool authoring is unavailable for this account or site. Contact your administrator for access.</div>}
+      {buildGate
         ? <BuildGate />
         : quotaGate
           ? <QuotaGate limit={quotaGate.limit} used={quotaGate.used} />
           : svcGate
             ? <ServiceGate />
-            : (notLinked || grantGate)
+            : buildEntitled && (notLinked || grantGate)
               ? <AuthorGate onLinkClaude={onLinkClaude} />
               : null}
       {secretNotice && (

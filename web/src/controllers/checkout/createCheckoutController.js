@@ -1,4 +1,5 @@
 import { lockState, normalizeCheckout } from '../../checkoutIdentity.js'
+import { humanizeError } from '../../errorHumanize.js'
 
 export function storeDrawingIdForSource(drawingSource) {
   return drawingSource === 'rooftop_demo' ? 'demo' : drawingSource
@@ -178,6 +179,8 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
     mutationBusy = true
     const drawing = state.drawingId
     const holderAtStart = state.holder
+    const generation = scopeGeneration
+    let mutationError = null
     publish({ busy: true, error: null })
     try {
       const result = operation === 'take'
@@ -194,12 +197,12 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
       return result
     } catch (error) {
       if (error?.status === 403 || error?.status === 409) capability = null
-      if (!disposed && drawing === state.drawingId) publish({ error: String(error?.message || error) })
+      mutationError = humanizeError(error)
       return null
     } finally {
       if (!disposed && drawing === state.drawingId) await refresh()
       mutationBusy = false
-      if (!disposed && drawing === state.drawingId) publish({ busy: false })
+      if (!disposed && generation === scopeGeneration) publish({ busy: false, ...(mutationError ? { error: mutationError } : {}) })
     }
   }
 
@@ -232,6 +235,9 @@ export function createCheckoutController({ mock = false, drawingId = null, holde
       })
     },
     refresh,
+    reportAuthorityFailure() {
+      publish({ error: humanizeError('The edit lock could not be secured in this tab. Close other tabs using this drawing and try again.') })
+    },
     take: () => mutate('take'),
     takeDeferred: () => mutate('take', { installCapability: false }),
     release: () => mutate('release'),
