@@ -23,7 +23,7 @@
   margin-left: -360px;
   width: 720px;
   bottom: 188px;
-  z-index: 80;
+  z-index: calc(var(--leaf-layer-toast) + 10);
   /* !important: the scene rule `.stage-root[data-scene="tool"]
      [data-cast="tool"]` sets pointer-events: auto at higher specificity,
      which would make the EMPTY part of this 720px strip eat stage clicks
@@ -41,7 +41,7 @@
   max-width: calc(100vw - 32px);
   background: var(--card);
   border: 1px solid var(--border);
-  border-radius: 10px;
+  border-radius: var(--leaf-radius-card);
   padding: 14px 16px;
   box-shadow: 0 12px 32px rgba(0, 0, 0, 0.35);
   font-family: var(--font-sans);
@@ -50,13 +50,13 @@
 
 .coach-title {
   font-weight: 600;
-  font-size: 13px;
+  font-size: var(--leaf-size-dense);
   color: var(--foreground);
   margin-bottom: 4px;
 }
 
 .coach-body {
-  font-size: 12px;
+  font-size: var(--leaf-size-caption);
   color: var(--muted);
   margin: 0 0 10px;
   line-height: 1.4;
