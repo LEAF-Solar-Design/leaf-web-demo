@@ -29,8 +29,8 @@ describe('the console ConversationList sits in the rail column, not over the gro
   })
 
   it('mounts it inside the .rail-stack column beside the job monitor', () => {
-    const stackOpen = app.indexOf('<div className="rail-stack">')
-    assert.notEqual(stackOpen, -1, 'App.jsx must open a <div className="rail-stack"> column')
+    const stackOpen = app.search(/<div\s+className="rail-stack"[\s>]/)
+    assert.notEqual(stackOpen, -1, 'App.jsx must open the rail-stack column')
     const mount = app.indexOf(MOUNT)
     const jobRail = app.indexOf('<SurfaceFrame.JobRail />', stackOpen)
     const stackClose = app.indexOf('</div>', jobRail)

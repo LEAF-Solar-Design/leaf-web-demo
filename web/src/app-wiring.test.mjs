@@ -30,6 +30,37 @@ import { solarSettingsScope } from './solar/solarSettingsWire.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 
+it('Studio hides only the activity region and leaves command and header chrome outside it', () => {
+  const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
+  const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
+  const elements = []
+  function walk(node) {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'JSXElement') elements.push(node)
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(walk)
+      else if (value && typeof value.type === 'string') walk(value)
+    }
+  }
+  walk(tree)
+  const attribute = (node, name) => node.openingElement.attributes.find(item => item.name?.name === name)
+  const app = elements.find(node => attribute(node, 'className')?.value?.value === 'app')
+  const rail = elements.find(node => attribute(node, 'className')?.value?.value === 'rail-stack')
+  assert.ok(app && rail)
+  for (const name of ['inert', 'hidden', 'aria-hidden']) assert.equal(attribute(app, name), undefined)
+  for (const name of ['inert', 'hidden', 'aria-hidden', 'id']) assert.ok(attribute(rail, name), name)
+  const activity = source.slice(rail.start, rail.end)
+  assert.ok(activity.includes('project-workspace-activity'))
+  assert.ok(activity.includes('setStudioActivityHost'))
+  assert.ok(activity.includes('<SurfaceFrame.Conversations'))
+  assert.ok(activity.includes('<SurfaceFrame.JobRail'))
+  for (const landmark of ['header className="top"', 'className="bar-dock"', 'footer className="foot-bar"']) {
+    assert.ok(source.includes(landmark))
+    assert.ok(!activity.includes(landmark))
+  }
+  assert.ok(source.includes('destination={studioShell ? studioActivityHost : activityFallback}'))
+})
+
 it('main keeps telemetry first and installs the proof bridge once after render using the existing API clients', () => {
   const source = readFileSync(new URL('./main.jsx', import.meta.url), 'utf8')
   const body = parseJs(source, { sourceType: 'module', plugins: ['jsx'] }).program.body
@@ -2355,7 +2386,12 @@ describe('project board live pane wiring', () => {
     for (const name of ['ProjectWorkspacePanels', 'ConversePanel', 'AuthorPanel',
       'AnnotationDecisionCard', 'ProjectLifecyclePanel']) assert.equal(elements(name).length, 1, name)
     const seats = elements('PersistentSeat')
-    assert.equal(seats.length, 4)
+    assert.equal(seats.length, 6)
+    assert.equal(seats.filter(seat => {
+      const destination = expression(seat, 'destination')
+      return destination.type === 'ConditionalExpression' && destination.test.name === 'studioShell'
+        && destination.consequent.name === 'studioActivityHost' && destination.alternate.name === 'activityFallback'
+    }).length, 2)
     const labSeats = seats.filter((seat) => {
       const destination = expression(seat, 'destination')
       return destination.type === 'Identifier' && destination.name === 'labDestination'
@@ -5749,11 +5785,11 @@ it('R13G2A-12 drawing activation retains one Viewer and the existing owners', ()
     useCatalogController: 1, projectSolarDrawingView: 1, useEngineSession: 0,
     createProjectSolarRunController: 0, useProjectRunController: 0,
   })) assert.equal(r13Find(n => n.type === 'CallExpression' && n.callee.name === name).length, count, name)
-  for (const [name, count] of Object.entries({ readContext: 0, readJob: 0, subscribe: 1, observe: 2 }))
+  for (const [name, count] of Object.entries({ readContext: 0, readJob: 0, subscribe: 1, observe: 3 }))
     assert.equal(r13Find(n => n.type === 'CallExpression' && (n.callee.property?.name === name || n.callee.name === name)).length, count, name)
   const subscription = r13One(n => n.type === 'CallExpression' && n.callee.property?.name === 'subscribe')
   assert.equal(r13Text(subscription.callee), 'controller.subscribe')
-  assert.deepEqual(r13Find(n => n.type === 'CallExpression' && n.callee.property?.name === 'observe').map(r13Text), ['ro.observe(h)', 'ro.observe(f)'])
+  assert.deepEqual(r13Find(n => n.type === 'CallExpression' && n.callee.property?.name === 'observe').map(r13Text), ['ro.observe(h)', 'ro.observe(f)', 'ro.observe(commandDock)'])
   assert.equal(r13Find(n => n.type === 'NewExpression' && n.callee.name === 'ResizeObserver').length, 1)
   assert.equal(r13Find(n => n.type === 'NewExpression' && ['WebGLRenderer', 'Worker', 'MutationObserver'].includes(n.callee.name || n.callee.property?.name)).length, 0)
   const model = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'projectDrawing')

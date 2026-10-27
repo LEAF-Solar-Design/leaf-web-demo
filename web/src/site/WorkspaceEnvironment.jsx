@@ -1,12 +1,15 @@
 import { useLayoutEffect, useRef, useState, version } from 'react'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import { STUDIO_DRAWING_OCCLUDERS } from './drawingOccluders.js'
 import './workspaceEnvironment.css'
 
 // Next supplies React 19 while standalone consumers still use React 18.
 export const INERT_VALUE = Number(version.split('.')[0]) >= 19 ? true : ''
 
 export const ENVIRONMENT_OCCLUDERS = Object.freeze([
-  ['.browser-project-panel', 'left'], ['.app[data-environment-panel]', 'right'],
+  ...STUDIO_DRAWING_OCCLUDERS,
+  ['.browser-project-panel', 'left'], ['#project-workspace-activity', 'right'],
+  ['.environment-strip', 'top'],
 ])
 
 // Session memory belongs to this mounted authority scope, never to storage.
@@ -82,7 +85,7 @@ export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', pr
           onPanel('none')
           setFocusChooser(value => value + 1)
         }}>Choose</button>
-        <button ref={studioToggle} type="button" aria-expanded={panel === 'studio'} aria-controls="browser-studio-panel"
+        <button ref={studioToggle} type="button" aria-expanded={panel === 'studio'} aria-controls="project-workspace-activity"
           onClick={() => panel === 'studio' ? close() : enter('studio')}>Studio</button>
       </nav>
     </section>
