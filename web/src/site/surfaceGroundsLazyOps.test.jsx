@@ -1,6 +1,6 @@
 import * as React from 'react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { act, cleanup, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 let SurfaceGrounds
 let load
@@ -68,9 +68,14 @@ it('loads once, hides pending on switches, and retains the loaded node with curr
   expect(pending.querySelector('.ops-workspace')).toHaveAttribute('data-measured', 'true')
   rerender(<SurfaceGrounds {...first} surface="browser" studioShell />)
   expect(pending).toHaveAttribute('hidden')
-  expect(container.querySelector('[data-ground="browser"]')).not.toHaveAttribute('hidden')
+  expect(container.querySelector('[data-ground="browser-asset"]')).not.toHaveAttribute('hidden')
+  expect(screen.queryByRole('region', { name: 'Project workspace' })).toBeNull()
   rerender(<SurfaceGrounds {...first} boardVisible studioShell />)
-  expect(pending).toHaveAttribute('hidden')
+  // The shared shell overlays Project instead of replacing the Ops ground.
+  expect(pending).not.toHaveAttribute('hidden')
+  fireEvent.click(screen.getByRole('button', { name: 'Project', exact: true }))
+  expect(screen.getByRole('region', { name: 'Project sidebar' })).toBeVisible()
+  expect(pending).not.toHaveAttribute('hidden')
   rerender(<SurfaceGrounds {...first} surface="ios" leavingGround="integrations" studioShell />)
   expect(pending).not.toHaveAttribute('hidden')
   expect(pending).toHaveAttribute('inert')

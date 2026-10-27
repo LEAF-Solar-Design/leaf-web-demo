@@ -123,6 +123,11 @@ async function mountVersionSurface(page, {
 
   await page.goto('/app?drawing=cat-panels')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 15_000 })
+  // Each profile starts with its floating panels closed. Enter through the
+  // same Studio control a user opens before giving the drawing a command.
+  const studio = page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true })
+  await studio.click()
+  await expect(studio).toHaveAttribute('aria-expanded', 'true')
   // Seat a real versioned drawing through App's production controller path.
   // The initial session intake alone is intentionally unversioned.
   await page.getByLabel('Command bar', { exact: true }).fill(REQUEST)
