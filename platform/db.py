@@ -356,6 +356,11 @@ _REQUIRED_COLUMNS = {
     "project_web_page_revisions": {
         "org_id", "project_id", "revision", "document", "digest", "actor_binding_id", "created_at",
     },
+    "project_materials": {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "width", "height",
+        "preview_media_type", "preview_sha256", "created_at",
+    },
     "project_lifecycle_receipts": {
         "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
         "idempotency_key", "input_digest", "result_json", "created_at",
@@ -1099,6 +1104,30 @@ _REQUIRED_CONSTRAINTS = {
         "project_web_page_revisions", "CHECK", "jsonb_typeof(document) = 'object'"),
     "project_web_page_revisions_digest_check": _catalog_contract(
         "project_web_page_revisions", "CHECK", "digest ~ '^[0-9a-f]{64}$'"),
+    "project_materials_pkey": _catalog_contract(
+        "project_materials", "PRIMARY KEY (material_id)"),
+    "project_materials_org_id_project_id_sha256_key": _catalog_contract(
+        "project_materials", "UNIQUE (org_id, project_id, sha256)"),
+    "project_materials_org_id_project_id_fkey": _catalog_contract(
+        "project_materials", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_materials_org_id_actor_binding_id_fkey": _catalog_contract(
+        "project_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_materials_name_check": _catalog_contract(
+        "project_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+    "project_materials_media_type_check": _catalog_contract(
+        "project_materials", "CHECK", "media_type", "'image/jpeg'", "'image/png'", "'image/heif'"),
+    "project_materials_byte_size_check": _catalog_contract(
+        "project_materials", "CHECK", "byte_size >= 1", "byte_size <= 16777216"),
+    "project_materials_sha256_check": _catalog_contract(
+        "project_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
+    "project_materials_width_check": _catalog_contract(
+        "project_materials", "CHECK (width > 0)"),
+    "project_materials_preview_media_type_check": _catalog_contract(
+        "project_materials", "CHECK", "preview_media_type = 'image/jpeg'"),
+    "project_materials_preview_sha256_check": _catalog_contract(
+        "project_materials", "CHECK", "preview_sha256 ~ '^[0-9a-f]{64}$'"),
     "project_lifecycle_receipts_pkey": _catalog_contract(
         "project_lifecycle_receipts", "PRIMARY KEY (receipt_id)"),
     "project_lifecycle_receipts_project_fk": _catalog_contract(
@@ -1157,6 +1186,8 @@ _REQUIRED_INDEXES = {
         "project_member_bindings", "(org_id, project_id, created_at, membership_id)"),
     "idx_project_files_scope": _catalog_contract(
         "project_files", "(org_id, project_id, path)"),
+    "project_materials_scope_page": _catalog_contract(
+        "project_materials", "(org_id, project_id, material_id)"),
     "idx_project_lifecycle_receipts_scope": _catalog_contract(
         "project_lifecycle_receipts", "(org_id, project_id, created_at, receipt_id)"),
     "project_lifecycle_receipts_create_idempotency": _catalog_contract(
@@ -2164,7 +2195,7 @@ def _split_sql_statements(sql: str) -> List[str]:
     """Split migration DDL without breaking quoted or dollar-quoted bodies.
 
     Migrations are intentionally plain SQL, but immutable-ledger triggers use
-    PostgreSQL ``$$`` function bodies.  A naïve ``split(';')`` would execute a
+    PostgreSQL ``$$`` function bodies.  A naÃ¯ve ``split(';')`` would execute a
     function one fragment at a time.  This small lexer is sufficient for SQL
     migrations: it recognizes line comments, single-quoted strings, and tagged
     dollar quotes while preserving every byte sent to PostgreSQL.
@@ -2276,7 +2307,7 @@ MIGRATION_GLOB = "[0-9][0-9][0-9][0-9]_*.sql"
 
 def apply_migration(sql_path: Optional[Path] = None) -> None:
     """Apply migrations. With no arg, apply EVERY ``NNNN_*.sql`` in ``migrations/``
-    in sorted (numeric-prefix) order — so a fresh deploy gets 0001 (tables) AND
+    in sorted (numeric-prefix) order â€” so a fresh deploy gets 0001 (tables) AND
     0002 (deletion/purge columns) and any future migration, not just 0001. All
     migrations are idempotent (CREATE TABLE / ADD COLUMN IF NOT EXISTS). Shipped
     migrations are recorded with their source hash and skipped after a matching

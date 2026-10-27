@@ -3591,6 +3591,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_glug_routes.py"), 12),
         Suite("server-image-turns", "server tests/test_image_turns.py", "pytest", SERVER,
               _py_pytest("tests/test_image_turns.py"), 15),
+        Suite("server-project-material-images", "server tests/test_project_material_images.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_material_images.py"), 13),
         Suite("server-instant-artifact-registry", "server tests/test_instant_artifact_registry.py", "pytest", SERVER,
               _py_pytest("tests/test_instant_artifact_registry.py"), 5),
         Suite("server-instant-session-wiring", "server tests/test_instant_session_wiring.py", "pytest", SERVER,

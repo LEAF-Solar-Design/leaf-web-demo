@@ -6,7 +6,7 @@ export function materialError(error) {
   return humanizeError(/\bHTTP\s+\d{3}\b|\bat\s+\S+\s*\(/i.test(raw) ? null : raw)
 }
 
-export default function ProjectMaterialIntake({ project, upload = {}, intake = {}, artifacts, onStartUpload, onRetry, mock }) {
+export default function ProjectMaterialIntake({ project, upload = {}, intake = {}, artifacts, onStartUpload, onRetry, mock, photos }) {
   if (mock) return <section className="ground-pane" data-pane="material-intake">
     <DrawingUploadControl disabled={!project || mock === true} />
     <p>Uploads are unavailable in this demo.</p>
@@ -25,6 +25,8 @@ export default function ProjectMaterialIntake({ project, upload = {}, intake = {
   else if (upload.phase === 'extracting' || upload.phase === 'loading') sentence = `Extracting ${fileName}`
   return (
     <section className="ground-pane" data-pane="material-intake">
+      {photos}
+      {photos && <h3>Drawings</h3>}
       <DrawingUploadControl {...upload} error={null} phase={upload.phase === 'ready' ? 'idle' : upload.phase}
         disabled={!project} onUpload={onStartUpload} onCancel={upload.actions?.cancel} onEngineChange={upload.actions?.setEngine} />
       <p role="status">{sentence}</p>
@@ -36,7 +38,7 @@ export default function ProjectMaterialIntake({ project, upload = {}, intake = {
       {!project && sentence !== 'Open a project first.' && <p>Open a project first.</p>}
       {intake.phase === 'attach-failed' && <button type="button" onClick={onRetry}>Retry</button>}
       {artifacts !== undefined && (artifacts.length === 0
-        ? <p>No material yet. Upload a DWG or DXF.</p>
+        ? <p>{photos ? 'No drawings yet. Upload a DWG or DXF.' : 'No material yet. Upload a DWG or DXF.'}</p>
         : <ul aria-label="Project material">{artifacts.map((artifact) => (
           <li key={artifact.drawing_id}>
             <span>{artifact.name}</span>{' '}<span>{artifact.status}</span>{' '}
