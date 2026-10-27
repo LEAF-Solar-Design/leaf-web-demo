@@ -1520,6 +1520,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_agent_approvals.py"), 24),
         Suite("server-engine-changes", "server tests/test_engine_changes.py", "pytest",
               SERVER, _py_pytest("tests/test_engine_changes.py"), 23, db_gated=True),
+        Suite("server-lab-mirror-ops", "server tests/test_lab_mirror_ops.py", "pytest",
+              SERVER, _py_pytest("tests/test_lab_mirror_ops.py"), 20),
         Suite("server-approval-consume", "server tests/test_approval_consume.py", "pytest",
               SERVER, _py_pytest("tests/test_approval_consume.py"), 20),
         Suite("server-drawings-bootstrap", "server tests/test_drawings_bootstrap.py", "pytest",
