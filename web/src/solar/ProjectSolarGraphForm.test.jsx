@@ -3,6 +3,9 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 import { afterEach, expect, it, vi } from 'vitest'
 import ProjectSolarGraphForm from './ProjectSolarGraphForm.jsx'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
+import { createProjectSolarRunController } from './createProjectSolarRunController.js'
+import { createSolarProjectClient } from './solarProjectClient.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
 
 afterEach(() => {
   cleanup()
@@ -75,6 +78,168 @@ const refresh = () => screen.getByRole('button', { name: 'Refresh preview' })
 const location = () => screen.getByRole('textbox', { name: 'Insertion point (x, y, optional z)' })
 const feedback = () => screen.getByTestId('project-solar-graph-feedback').textContent
 const arm = async () => waitFor(() => expect(action().disabled).toBe(false))
+
+it('G17 panel import refusal permits explicit preview recovery', async () => {
+  const h = harness('solar-panels-from-drawing')
+  const fetchImpl = vi.fn(async () => ({ ok: false, status: 503, json: async () => workerUnavailable }))
+  const wire = createSolarProjectClient({ fetchImpl })
+  wire.setScope(binding, 'authority-a')
+  h.client.submitRun = vi.fn(wire.submitRun)
+  h.client.readJob = vi.fn()
+  const onOutcome = vi.fn()
+  const controller = createProjectSolarRunController({ projectClient: h.client, onOutcome })
+  h.submit.mockImplementation(controller.onProjectSubmit)
+  const message = 'No worker was available to start Import panels from drawing. Try again later: Refresh preview, then Review & run.'
+  try {
+    const mounted = render(<ProjectSolarGraphForm {...h.props} />)
+    await arm()
+    action().focus()
+    expect(document.activeElement).toBe(action())
+    // A native button's keyboard activation dispatches its click handler.
+    fireEvent.click(action(), { detail: 0 })
+    await waitFor(() => expect(feedback()).toContain(message))
+    expect(screen.getByTestId('project-solar-graph-feedback').getAttribute('role')).toBe('status')
+    expect(feedback()).toContain('(sip_r4_worker_unavailable)')
+    expect(refresh().disabled).toBe(false)
+    expect(action().disabled).toBe(true)
+    expect(h.submit).toHaveBeenCalledOnce()
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(h.client.readJob).not.toHaveBeenCalled()
+    expect(onOutcome).toHaveBeenCalledOnce()
+    expect(onOutcome.mock.calls[0][0]).toMatchObject({ state: 'refused', jobId: null, outputVersionId: null, message })
+    const intent = h.submit.mock.calls[0][0]
+    const previews = h.client.catalog.mock.calls.length
+    await act(async () => {})
+    expect(h.client.catalog).toHaveBeenCalledTimes(previews)
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(mounted.container.textContent).not.toContain(published)
+    // A refresh must finish successfully before Review & run can be armed again.
+    const previewGate = deferred()
+    h.previews.push(previewGate.promise)
+    refresh().focus()
+    fireEvent.click(refresh(), { detail: 0 })
+    await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(previews + 1))
+    expect(action().disabled).toBe(true)
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    await act(async () => { previewGate.resolve(catalog(h.name)); await previewGate.promise })
+    await arm()
+    fireEvent.click(action(), { detail: 0 })
+    await waitFor(() => expect(h.submit).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(feedback()).toContain(message))
+    expect(h.submit.mock.calls[1][0]).toBe(intent)
+    expect(h.key).toHaveBeenCalledOnce()
+    expect(h.client.readJob).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    mounted.unmount()
+  } finally { controller.dispose(); wire.dispose() }
+})
+
+it('G17 a denied worker preview does not submit', async () => {
+  const h = harness('solar-panels-from-drawing', 'SIP_R4_WORKER_UNAVAILABLE')
+  const mounted = render(<ProjectSolarGraphForm {...h.props} />)
+  await waitFor(() => expect(feedback()).toContain(
+    'No worker was available to start Import panels from drawing. Try again later: Refresh preview, then Review & run.'))
+  expect(feedback()).toContain('(sip_r4_worker_unavailable)')
+  expect(action().disabled).toBe(true)
+  expect(refresh().disabled).toBe(false)
+  expect(h.submit).not.toHaveBeenCalled()
+  expect(mounted.container.textContent).not.toContain('private path')
+})
+
+it('G17 busy-to-idle worker refusal requires an explicit Refresh preview', async () => {
+  const h = harness('solar-panels-from-drawing')
+  const pending = deferred()
+  h.submissions.push(pending.promise)
+  const mounted = render(<ProjectSolarGraphForm {...h.props} />)
+  await arm()
+  fireEvent.click(action())
+  await waitFor(() => expect(h.submit).toHaveBeenCalledOnce())
+  // The app runtime publishes busy while the HTTP request is pending, then
+  // clears it through the controller's synchronous refusal notification.
+  mounted.rerender(<ProjectSolarGraphForm {...h.props} busy />)
+  await act(async () => {
+    pending.resolve({ ok: false, status: 503, reason: 'SIP_R4_WORKER_UNAVAILABLE', envelope: workerUnavailable })
+    await pending.promise
+  })
+  await waitFor(() => expect(feedback()).toContain('No worker was available to start Import panels from drawing.'))
+  const previews = h.client.catalog.mock.calls.length
+  mounted.rerender(<ProjectSolarGraphForm {...h.props} busy={false} />)
+  await act(async () => { for (let index = 0; index < 40; index += 1) await Promise.resolve() })
+  expect(h.client.catalog).toHaveBeenCalledTimes(previews)
+  expect(feedback()).toContain('No worker was available to start Import panels from drawing.')
+  expect(action().disabled).toBe(true)
+  expect(refresh().disabled).toBe(false)
+  expect(h.submit).toHaveBeenCalledOnce()
+  fireEvent.click(refresh())
+  await arm()
+  expect(h.client.catalog).toHaveBeenCalledTimes(previews + 1)
+  expect(h.submit).toHaveBeenCalledOnce()
+})
+
+it('G17 a worker refusal preserves typed schedule coordinates and drawing binding', async () => {
+  const h = harness('solar-schedule')
+  h.submissions.push(Promise.resolve({ ok: false, status: 503,
+    reason: 'SIP_R4_WORKER_UNAVAILABLE', envelope: workerUnavailable }))
+  render(<ProjectSolarGraphForm {...h.props} />)
+  fireEvent.change(location(), { target: { value: ' +1.0, 2.0, -0 ' } })
+  await submitAndWait(h)
+  await waitFor(() => expect(feedback()).toContain('No worker was available to start Schedule.'))
+  expect(location().value).toBe(' +1.0, 2.0, -0 ')
+  expect(location().disabled).toBe(false)
+  expect(refresh().disabled).toBe(false)
+  expect(action().disabled).toBe(true)
+  const intent = h.submit.mock.calls[0][0]
+  expect(intent.binding).toEqual(binding)
+  expect(intent.params.insertion_point).toEqual([1, 2, 0])
+  fireEvent.click(refresh())
+  await arm()
+  expect(location().value).toBe(' +1.0, 2.0, -0 ')
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toBe(intent)
+  expect(h.submit).toHaveBeenCalledOnce()
+})
+
+it('G17 editing an input after worker refusal still previews', async () => {
+  const h = harness('solar-schedule')
+  h.submissions.push(Promise.resolve({ ok: false, status: 503,
+    reason: 'SIP_R4_WORKER_UNAVAILABLE', envelope: workerUnavailable }))
+  render(<ProjectSolarGraphForm {...h.props} />)
+  fireEvent.change(location(), { target: { value: '1,2' } })
+  await submitAndWait(h)
+  expect(feedback()).toContain('No worker was available to start Schedule.')
+  const previews = h.client.catalog.mock.calls.length
+  const previewGate = deferred()
+  h.previews.push(previewGate.promise)
+  fireEvent.change(location(), { target: { value: '3,4' } })
+  expect(action().disabled).toBe(true)
+  await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(previews + 1))
+  expect(action().disabled).toBe(true)
+  expect(h.submit).toHaveBeenCalledOnce()
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toMatchObject({ binding,
+    params: { insertion_point: [3, 4, 0] } })
+  await act(async () => { previewGate.resolve(catalog(h.name)); await previewGate.promise })
+  await arm()
+  expect(location().value).toBe('3,4')
+  expect(h.submit).toHaveBeenCalledOnce()
+})
+
+it('G17 a late worker refusal cannot update a changed graph scope', async () => {
+  const h = harness('solar-panels-from-drawing')
+  const late = deferred()
+  h.submissions.push(late.promise)
+  const mounted = render(<ProjectSolarGraphForm {...h.props} />)
+  await arm()
+  fireEvent.click(action())
+  await waitFor(() => expect(h.submit).toHaveBeenCalledOnce())
+  await act(async () => { h.move(nextBinding) })
+  mounted.rerender(<ProjectSolarGraphForm {...h.props} solarBinding={nextBinding} />)
+  await act(async () => {
+    late.resolve({ ok: false, status: 503, reason: 'SIP_R4_WORKER_UNAVAILABLE', envelope: workerUnavailable })
+    await late.promise
+  })
+  expect(mounted.container.textContent).not.toContain('No worker was available')
+  expect(h.submit).toHaveBeenCalledOnce()
+})
+
 async function submitAndWait(h) {
   await arm()
   fireEvent.click(action())
