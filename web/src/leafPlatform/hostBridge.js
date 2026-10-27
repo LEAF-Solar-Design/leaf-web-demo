@@ -104,7 +104,13 @@ function isBridgeEndpoint(value) {
 function isReady(value) {
   if (!isRecord(value)) return false
   const hasEndpoint = Object.hasOwn(value, 'bridgeEndpoint')
-  return isHandshake(value, 'host_bridge_ready', hasEndpoint ? [...IDENTITY_KEYS, 'bridgeEndpoint'] : IDENTITY_KEYS) &&
+  const extras = [...IDENTITY_KEYS, ...(hasEndpoint ? ['bridgeEndpoint'] : []),
+    ...(Object.hasOwn(value, 'syncCursor') ? ['syncCursor'] : [])]
+  return isHandshake(value, 'host_bridge_ready', extras) &&
+    (!Object.hasOwn(value, 'syncCursor') || (isRecord(value.syncCursor) &&
+      Object.keys(value.syncCursor).length === 2 &&
+      typeof value.syncCursor.drawingStoreId === 'string' && /^[a-z0-9][a-z0-9_-]{0,62}$/.test(value.syncCursor.drawingStoreId) &&
+      Number.isSafeInteger(value.syncCursor.version) && value.syncCursor.version > 0)) &&
     (!hasEndpoint || isBridgeEndpoint(value.bridgeEndpoint)) &&
     IDENTITY_KEYS.every((key) => typeof value[key] === 'string' && UUID.test(value[key]))
 }
@@ -195,9 +201,13 @@ export class LeafHostBridge {
     return () => this.listeners.delete(listener)
   }
 
-  finishCommand(status, reason, publish = true) {
+  finishCommand(status, reason, publish = true, callback = null) {
     const pending = this.pendingCommand
     if (!pending) return
+    if (pending.action === 'export_dxf' && status === 'applied') {
+      pending.callback = callback
+      if (!pending.export) return
+    }
     clearTimeout(pending.timer)
     this.pendingCommand = null
     const outcome = { action: pending.action, status, reason }
@@ -206,7 +216,9 @@ export class LeafHostBridge {
       this.state = { ...this.state, lastCommand: outcome }
       this.publish()
     }
-    pending.resolve(outcome)
+    if (pending.sync && (!callback || (pending.action === 'export_dxf' && status !== 'applied'))) pending.reject(new Error(reason || status))
+    else pending.resolve(pending.action === 'export_dxf' && status === 'applied'
+      ? pending.export : pending.sync ? callback : outcome)
   }
 
   async focusObject(target, action = 'focus') {
@@ -216,6 +228,28 @@ export class LeafHostBridge {
     const payload = isObjectId(target) ? { objectId: target } : objectHandles ? { objectHandles } : null
     if (!payload) throw new Error('Invalid drawing object identity')
     if (!['select', 'focus'].includes(action)) throw new Error('Invalid drawing action')
+    return this.sendCommand('drawing.focus_objects', action, payload)
+  }
+
+  applyPlan({ planText, planSha256, parentVersion, resultVersion, drawingStoreId }) {
+    if (!Number.isSafeInteger(parentVersion) || parentVersion < 1 || resultVersion !== parentVersion + 1) {
+      return Promise.reject(new Error('invalid_plan_version'))
+    }
+    return this.sendCommand('drawing.apply_plan', 'apply_plan', {
+      planText, planSha256, parentVersion, resultVersion,
+      resultDrawingVersionId: this.state.ready?.drawingVersionId, drawingStoreId,
+    }, 'leaf.mutation_plan.v1')
+  }
+
+  exportDxf() { return this.sendCommand('drawing.export_dxf', 'export_dxf', {}) }
+
+  syncCursor({ drawingStoreId, version, exportSha256 }) {
+    return this.sendCommand('drawing.sync_cursor', 'sync_cursor', { drawingStoreId, version, exportSha256 }, 'leaf.sync_cursor.v1')
+  }
+
+  async sendCommand(verb, action, payload, allowedMutation) {
+    if (this.state.status !== 'connected' || !this.channel) throw new Error('AutoCAD bridge unavailable')
+    const sync = verb !== 'drawing.focus_objects'
     const ready = this.state.ready
     const channel = this.channel
     const now = new Date()
@@ -227,25 +261,26 @@ export class LeafHostBridge {
       drawingVersionId: ready.drawingVersionId, nonce: crypto.randomUUID(),
       issuedAt: dotNetTimestamp(now), expiresAt: dotNetTimestamp(expires), action,
       dispatchMode: DISPATCH_MODE, payload,
+      ...(allowedMutation ? { allowedMutation } : {}),
     }
     const body = {
       protocolVersion: PROTOCOL_VERSION, sessionId: ready.sessionId,
       messageId: crypto.randomUUID(), issuedAt: dotNetTimestamp(now),
       expiresAt: dotNetTimestamp(expires), origin: ready.origin,
-      verb: 'drawing.focus_objects', drawingFingerprint: ready.documentFingerprint,
+      verb, drawingFingerprint: ready.documentFingerprint,
       drawingRevision: ready.drawingVersionId, payload: command,
     }
     this.finishCommand('superseded', null)
     let resolve, reject
     const result = new Promise((done, fail) => { resolve = done; reject = fail })
-    const pending = { commandId: command.commandId, action, resolve, timer: null }
+    const pending = { commandId: command.commandId, action, resolve, reject, sync, timer: null }
     this.pendingCommand = pending
     pending.timer = setTimeout(() => {
       if (this.pendingCommand === pending) {
         this.diagnose('timeout', { kind: 'command' })
         this.finishCommand('unknown', 'timeout')
       }
-    }, 15_000)
+    }, sync ? action === 'export_dxf' ? 60_000 : 30_000 : 15_000)
     void signature(body, ready.sessionKey).then((signed) => {
       if (this.pendingCommand !== pending) return
       if (this.channel !== channel || this.state.ready !== ready) throw new Error('AutoCAD connection changed')
@@ -353,7 +388,7 @@ export class LeafHostBridge {
     if (envelope.sessionId !== ready.sessionId || envelope.origin !== origin ||
         envelope.drawingRevision !== (unbound ? ready.drawingRevision : ready.drawingVersionId) ||
         envelope.drawingFingerprint !== ready.documentFingerprint) return rejectEnvelope('session')
-    if (!(unbound ? ['drawing.bind_result'] : ['drawing.selection_changed', 'host.callback']).includes(envelope.verb)) return rejectEnvelope('verb')
+    if (!(unbound ? ['drawing.bind_result'] : ['drawing.selection_changed', 'host.callback', 'drawing.dxf_export']).includes(envelope.verb)) return rejectEnvelope('verb')
     if (typeof envelope.messageId !== 'string') return rejectEnvelope('shape')
     if (this.seenHostMessages.get(envelope.messageId) > Date.now()) return rejectEnvelope('replay')
     if (typeof envelope.issuedAt !== 'string' || typeof envelope.expiresAt !== 'string' ||
@@ -401,7 +436,29 @@ export class LeafHostBridge {
           !(callback.reason === null || typeof callback.reason === 'string') ||
           !IDENTITY_KEYS.every((key) => typeof callback[key] === 'string' &&
             callback[key].toLowerCase() === ready[key].toLowerCase())) return rejectEnvelope('shape')
-      this.finishCommand(callback.status, callback.reason)
+      this.finishCommand(callback.status, callback.reason, true, callback)
+    } else if (envelope.verb === 'drawing.dxf_export') {
+      const data = envelope.payload
+      const pending = this.pendingCommand
+      if (!isRecord(data) || typeof data.commandId !== 'string' ||
+          pending?.action !== 'export_dxf' || data.commandId !== pending.commandId) return
+      try {
+        if (Object.keys(data).sort().join(',') !== 'byteLength,commandId,dxfBase64,exportSha256' ||
+            !Number.isSafeInteger(data.byteLength) || data.byteLength < 0 || data.byteLength > 16777216 ||
+            typeof data.dxfBase64 !== 'string' || data.dxfBase64.length > 22369624 ||
+            data.dxfBase64.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(data.dxfBase64) ||
+            typeof data.exportSha256 !== 'string' || !/^[a-f0-9]{64}$/.test(data.exportSha256)) throw new Error()
+        const bytes = base64Bytes(data.dxfBase64)
+        if (bytes.length !== data.byteLength) throw new Error()
+        const digest = await crypto.subtle.digest('SHA-256', bytes)
+        const sha256 = [...new Uint8Array(digest)].map((byte) => byte.toString(16).padStart(2, '0')).join('')
+        if (sha256 !== data.exportSha256) throw new Error()
+        if (this.pendingCommand !== pending || this.state.ready !== ready) return
+        pending.export = { bytes, sha256 }
+        if (pending.callback) this.finishCommand('applied', pending.callback.reason, true, pending.callback)
+      } catch {
+        if (this.pendingCommand === pending) this.finishCommand('rejected', 'export_digest_mismatch')
+      }
     } else if (envelope.verb === 'drawing.selection_changed' &&
         isRecord(envelope.payload) && envelope.payload.kind === 'selection_event') {
       const selectedObjectId = isObjectId(envelope.payload.payload?.objectId)
