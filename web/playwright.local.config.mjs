@@ -33,6 +33,8 @@ if (linkFlowBoot) {
   Object.assign(process.env, {
     TENANT_MCP_FAKE_OAUTH: '1', LEAF_ENTITLEMENTS_FILE: policyFile,
     LEAF_AUTH_LIVE: '0', LEAF_AGENT_MOCK: '1',
+    // This OAuth fixture uses PostgreSQL but never runs authored customer code.
+    LEAF_AUTHORED_EXECUTION: '0', LEAF_HARNESS_AUTHORING_MODE: 'disabled',
     LEAF_OPS_SECRET: randomUUID(), LEAF_GUEST_SECRET: randomUUID(),
     LEAF_E2E_MANAGED: '1', LEAF_CUSTOMIZATION_R5_MODE: 'off', LEAF_CUSTOMIZATION_R6_MODE: 'off',
     LEAF_E2E_BASE_URL: 'http://127.0.0.1:5275', LEAF_E2E_API_BASE: 'http://127.0.0.1:8230',
