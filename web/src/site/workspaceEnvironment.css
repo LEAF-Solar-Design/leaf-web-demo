@@ -39,16 +39,20 @@
 .studio-shell .app[data-environment-panel] :is(.drawing-navigation, .result-block, .cockpit-view, .drawing-objects-panel, .drawing-find-band, [data-cad-overview], .bar) { position: static !important; inset: auto !important; transform: none !important; width: 100% !important; max-width: 100% !important; height: auto !important; max-height: none !important; overflow: visible !important; box-sizing: border-box; }
 .studio-shell:has(.workspace-environment) :is(.studio-ground-device, .studio-ground-ops, .studio-ground-lab) { inset: 0 !important; }
 /* Keep glass pseudo-elements and command menus anchored to their own hosts. */
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] :is(header.top, .bar.bar-command-line, .result-block, .properties-dock, .cockpit-view, .drafting-ribbon) { position: relative !important; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] :is(header.top, .bar.bar-command-line, .result-block, .properties-dock, .cockpit-view, .drafting-ribbon, .viewer-toolbar) { position: relative !important; }
 /* The old canvas host has zero height because its instruments were fixed.
    In the overlay those instruments take space in the normal document flow. */
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .workspace-card > .viewer-wrap { position: relative; display: block; height: auto !important; min-height: 0; overflow: visible; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] :is(.cockpit-cube-wrap, .cockpit-cube-wcs, .viewer-wrap > .legend, .viewer-wrap > .selection-readout) { position: relative !important; inset: auto !important; margin: 8px 0; max-height: none; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .viewer-wrap > :is(.legend, .selection-readout) { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .drafting-ribbon[data-overflow-open="true"] .ribbon-panels { position: relative; inset: auto; max-height: none; width: 100%; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .converse-card { margin-right: 0; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar.bar-command-line { flex-direction: column; align-items: stretch; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line :is(.bar-input, .bar-controls) { width: 100%; min-width: 0; height: auto; box-sizing: border-box; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-controls { flex-wrap: wrap; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-field { min-width: 0; min-height: 64px; font-size: 16px; }
 /* Drawing controls remain available inside Studio, without a viewport footer. */
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] footer.foot-bar { position: static !important; inset: auto !important; display: flex !important; flex-wrap: wrap; width: 100%; max-width: 100%; height: auto !important; min-height: 0; padding: 8px 0; gap: 8px; overflow: visible !important; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] footer.foot-bar { position: relative !important; inset: auto !important; display: flex !important; flex-wrap: wrap; width: 100%; max-width: 100%; height: auto !important; min-height: 0; padding: 8px 0; gap: 8px; overflow: visible !important; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .foot-region { flex-wrap: wrap; height: auto !important; max-width: 100%; min-width: 0; gap: 6px; overflow: visible; padding: 4px 0; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .cockpit-status-toggles { flex-wrap: wrap; height: auto !important; max-width: 100%; }
 @media (max-width: 480px) {
