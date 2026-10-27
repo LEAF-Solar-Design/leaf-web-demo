@@ -6,7 +6,7 @@
 // and the marketing pages may never reach one at all.
 import './telemetry.js'
 import React from 'react'
-import ReactDOM from 'react-dom/client'
+import { useEffect } from 'react'
 import SiteRoot from './site/SiteRoot.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import './standard/leaf-standard.css'
@@ -14,16 +14,19 @@ import './styles.css'
 import { installSurfaceConfigProofBridge } from './proofBridge.js'
 import { getSession, getSurfaceConfig, submitSurfaceConfig } from './api.js'
 
-ReactDOM.createRoot(document.getElementById('root')).render(
-  <React.StrictMode>
+// Next owns the root and development StrictMode. This module is imported
+// exclusively by the ssr:false island, after telemetry has been installed.
+export default function StudioRoot() {
+  useEffect(() => {
+    installSurfaceConfigProofBridge(window, {
+      hostname: window.location.hostname,
+      env: import.meta.env,
+      clients: { getSession, getSurfaceConfig, submitSurfaceConfig },
+    })
+  }, [])
+  return (
     <ErrorBoundary>
       <SiteRoot />
     </ErrorBoundary>
-  </React.StrictMode>,
-)
-
-installSurfaceConfigProofBridge(window, {
-  hostname: window.location.hostname,
-  env: import.meta.env,
-  clients: { getSession, getSurfaceConfig, submitSurfaceConfig },
-})
+  )
+}

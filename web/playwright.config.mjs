@@ -23,7 +23,7 @@ export default defineConfig({
     viewport: { width: 1600, height: 1000 },
   },
   webServer: {
-    command: `npm run dev -- --host 127.0.0.1 --port ${port} --strictPort`,
+    command: `npm run dev -- --hostname 127.0.0.1 --port ${port}`,
     url: `${baseURL}/app`,
     reuseExistingServer: false,
     timeout: 120_000,

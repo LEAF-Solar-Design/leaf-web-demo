@@ -3,11 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
-  "description": "Leaf — build CAD tools with AI, run on Leaf. Web demo lane.",
+  "description": "Leaf \u2014 build CAD tools with AI, run on Leaf. Web demo lane.",
   "scripts": {
-    "dev": "vite",
-    "build": "vite build",
-    "preview": "vite preview --port 5175",
+    "check:next-contracts": "node scripts/check_web_container_config.mjs && node --test vite-plugins/engineVersion.test.mjs src/app-wiring.test.mjs",
+    "dev": "node scripts/next-dev.mjs",
+    "build": "node scripts/next-build.mjs",
+    "preview": "node scripts/next-runtime.mjs --preview --port 5175",
     "proof:cat": "playwright test e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs",
     "proof:unified:wave0": "playwright test --workers=1 e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs e2e/unified-walk.spec.mjs e2e/converse-session-controller.spec.mjs e2e/negative/denial-paths.spec.mjs e2e/negative/stage-signed-out.spec.mjs e2e/reduced-motion.spec.mjs e2e/session-gate.spec.mjs e2e/responsive-keyboard.spec.mjs e2e/accessibility-surface.spec.mjs e2e/keyboard-ladder.spec.mjs e2e/drawer-focus.spec.mjs e2e/viewer-controls.spec.mjs e2e/natural-language-routing.spec.mjs e2e/trust-notices.spec.mjs e2e/ops-surface.spec.mjs e2e/structured-failure-surface.spec.mjs e2e/provider-lifetime.spec.mjs e2e/post-write-refresh.spec.mjs e2e/controllers/session/session-controller.spec.mjs e2e/demand-capture.spec.mjs",
     "proof:fixture": "playwright test --workers=1 e2e/cat-operator-proof.spec.mjs e2e/cat-standards-surface.spec.mjs e2e/unified-walk.spec.mjs e2e/converse-session-controller.spec.mjs e2e/negative/denial-paths.spec.mjs e2e/negative/stage-signed-out.spec.mjs e2e/reduced-motion.spec.mjs e2e/session-gate.spec.mjs e2e/responsive-keyboard.spec.mjs e2e/accessibility-surface.spec.mjs e2e/keyboard-ladder.spec.mjs e2e/drawer-focus.spec.mjs e2e/viewer-controls.spec.mjs e2e/natural-language-routing.spec.mjs e2e/trust-notices.spec.mjs e2e/ops-surface.spec.mjs e2e/structured-failure-surface.spec.mjs e2e/provider-lifetime.spec.mjs e2e/post-write-refresh.spec.mjs e2e/controllers/session/session-controller.spec.mjs e2e/demand-capture.spec.mjs e2e/hp01-first-run-coach.spec.mjs",
@@ -64,8 +65,9 @@
     "@radix-ui/react-context-menu": "2.3.7",
     "@xyflow/react": "12.3.6",
     "elkjs": "0.9.3",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
+    "next": "16.4.3",
+    "react": "18.3.1",
+    "react-dom": "18.3.1",
     "recharts": "^3.10.1",
     "three": "^0.169.0",
     "zod": "^4.1.5"
@@ -81,6 +83,9 @@
     "pixelmatch": "^7.2.0",
     "pngjs": "^7.0.0",
     "vite": "^6.0.7",
-    "vitest": "^3.2.7"
+    "vitest": "^3.2.7",
+    "@babel/parser": "7.29.7",
+    "@babel/traverse": "7.29.7",
+    "@babel/generator": "7.29.7"
   }
 }
