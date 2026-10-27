@@ -1,5 +1,5 @@
-import { expect, test } from '@playwright/test'
-import { publishProjectSolar, switchProjectSolarForms } from '../walk/fixtures.mjs'
+import { expect, test, request } from '@playwright/test'
+import { publishProjectSolar, switchProjectSolarForms, releaseProjectSolarCheckout } from '../walk/fixtures.mjs'
 import { reviewStagingProposal, stagingAction, stagingRun, withStagingProject } from './projectSolarSteps.mjs'
 
 const token = process.env.LEAF_E2E_STAGING_JWT || ''
@@ -10,6 +10,12 @@ test.skip(!token, 'LEAF_E2E_STAGING_JWT is not set; signed-in staging walk requi
 test.beforeEach(({}, testInfo) => {
   test.skip(testInfo.config.metadata?.stagingWalk !== true,
     'Signed-in staging walks require playwright.walk-staging.config.mjs')
+})
+// Optional access also permits the declaration-only node:test harness.
+test.afterEach?.(async ({}, testInfo) => {
+  try {
+    if (testInfo.projectSolarRuntime) await releaseProjectSolarCheckout(testInfo.projectSolarRuntime, { request })
+  } catch { /* Teardown must never change the test's status. */ }
 })
 
 function requireProject(projectId, variable, writing = false) {

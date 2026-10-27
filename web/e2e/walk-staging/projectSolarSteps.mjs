@@ -356,9 +356,11 @@ export async function withStagingProject(page, baseURL, projectId, token, testIn
   assertStagingTokenIdentity(token, process.env)
   const runtime = { page, stack: { baseURL }, cleanup: [], evidence: { projectSolar: { steps: [] } },
     projectSolar: { apiBase: baseURL, traffic: { runCount: 0 }, catalog: [] } }
+  runtime.projectSolarToken = token
+  testInfo.projectSolarRuntime = runtime
   return stagingEvidenceStep(runtime, testInfo, async () => {
   const finish = monitorStagingSolar(page, runtime.projectSolar)
-  try {
+  return withProjectSolarCleanup(runtime, async () => {
     await page.addInitScript(({ token, allowedOrigins }) => {
       if (allowedOrigins.includes(location.origin.toLowerCase())) localStorage.setItem('leaf.jwt', token)
     }, { token, allowedOrigins: [...allowedStagingOrigins()] })
@@ -379,19 +381,31 @@ export async function withStagingProject(page, baseURL, projectId, token, testIn
     runtime.projectSolar.context = await stagingContext(page, baseURL, runtime.projectSolar.binding)
     testInfo.annotations.push({ type: 'project-solar-binding', description: JSON.stringify(runtime.projectSolar.binding) })
     await action(runtime)
+  }, finish)
+  }, options.persist, options.delivery)
+}
+
+export async function withProjectSolarCleanup(runtime, action, finish = async () => {}) {
+  let failed = false
+  try {
+    return await action()
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
-    try {
-      // Run all cleanups even when a release assertion fails.
-      const errors = []
-      for (const cleanup of runtime.cleanup.reverse()) {
-        try { await cleanup() } catch (error) { errors.push(error) }
-      }
-      if (errors.length) throw errors[0]
-    } finally {
-      await finish()
+    const errors = []
+    for (const cleanup of [...runtime.cleanup].reverse()) {
+      try { await cleanup() } catch (error) { errors.push(error) }
+    }
+    try { await finish() } catch (error) { errors.push(error) }
+    if (errors.length) {
+      // Cleanup diagnostics may contain secrets from transport errors.
+      const message = `Project Solar cleanup failed (${errors.length} error(s))`
+      runtime.evidence.projectSolar.cleanupError = message
+      console.error(message)
+      if (!failed) throw errors[0]
     }
   }
-  }, options.persist, options.delivery)
 }
 
 export async function reviewStagingProposal(runtime, {
