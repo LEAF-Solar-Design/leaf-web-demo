@@ -34,6 +34,9 @@ describe('JobInbox', () => {
     const retry = within(row).getByRole('button', { name: 'Retry' })
     expect(retry).toBeDisabled()
     expect(within(row).getByText(/recorded no follow-up action/)).toBeInTheDocument()
+    expect(() => fireEvent.click(retry)).not.toThrow()
+    expect(bus.getSnapshot().ring).toHaveLength(1)
+    expect(retry).toBeDisabled()
   })
 
   it('keeps EVERY pushed notice visible (not just the current toast) — the inbox reads the whole ring', () => {

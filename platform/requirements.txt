@@ -15,3 +15,5 @@ jsonschema
 # test-only
 pytest>=8.0
 httpx>=0.27          # required by fastapi/starlette TestClient
+Pillow==13.0.0
+pillow-heif==1.8.1

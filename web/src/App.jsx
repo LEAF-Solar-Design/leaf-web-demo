@@ -8,6 +8,7 @@ import { track, setTourStep } from './telemetry.js'
 import { useStudioGround } from './site/studioGround.js'
 import useDrawingViewport from './site/useDrawingViewport.js'
 import { STUDIO_DRAWING_OCCLUDERS } from './site/drawingOccluders.js'
+import { ENVIRONMENT_OCCLUDERS, INERT_VALUE } from './site/WorkspaceEnvironment.jsx'
 import { DrawingObjectsProvider, useDrawingObjects } from './site/DrawingObjectsContext.jsx'
 import DrawingNavigationTools from './site/DrawingNavigationTools.jsx'
 import DrawingOriginBridge from './site/DrawingOriginBridge.jsx'
@@ -132,11 +133,13 @@ import { countEntitiesByLayer } from './lib/layerCounts.js'
 import { ENV_CAD_EDIT } from './cadedit/flag.js'
 import {
   DEFAULT_PRODUCT_SURFACE,
+  PRODUCT_SURFACES,
   productSurfaceStates,
   productSurfaceFromSearch,
   searchForProductSurface,
   surfaceContract,
   surfaceGround,
+  surfaceRailState,
 } from './site/productSurfaces.js'
 import { useSurfaceContract } from './site/useSurfaceContract.js'
 import { fetchIosSurfaceStatus } from './ios/iosSurfaceStatus.js'
@@ -195,6 +198,7 @@ import LocalCadConnect from './localCad/LocalCadConnect.jsx'
 import { createLocalCadBridge } from './localCad/localCadBridge.js'
 import ProjectWorkspacePanels, { paneForCapability, deriveBoardPaneSeats, BoardPaneState, PersistentSeat, useBoardConversation, ConversationOpening, AnnotationPaneState } from './workspace/ProjectWorkspacePanels.jsx'
 import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
+import PhotoMaterialIntake from './workspace/PhotoMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
@@ -384,7 +388,8 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
   }
   return <ProjectMaterialIntake project={project} upload={projectUpload}
     intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
-    onRetry={materialIntake.retry} mock={false} />
+    onRetry={materialIntake.retry} mock={false}
+    photos={<PhotoMaterialIntake projectId={project?.project_id} />} />
 }
 
 function promoteStandaloneUpload({ receipt }, attempt, current, setFromUpload) {
@@ -3644,7 +3649,7 @@ export default function App() {
   // IosSurface, and EditSurface existed fully built and tested but were never
   // mounted (2026-08-30 finding); this is the mount, not new surface behavior.
   const projectLayout = useProjectWorkspaceLayout({ mock, projectId: openProjectId, surface: activeSurface })
-  const drawingViewport = useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, STUDIO_DRAWING_OCCLUDERS)
+  const drawingViewport = useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, surfaceSlots.chrome.shell === 'cockpit' ? ENVIRONMENT_OCCLUDERS : STUDIO_DRAWING_OCCLUDERS)
   drawingViewportRef.current = drawingViewport
   const onSelectSurface = useCallback((id) => {
     returnToDrawing()
@@ -3865,8 +3870,9 @@ export default function App() {
     setSolarFlowFamiliesDrawingId(scope.drawingId ?? null)
   }, [projectMode, mock, surfaceSlots.toolbar.profile, catalogRunContext?.drawingId, catalogRunContext?.drawingVersion, catalogRunContext?.projectId])
   const boardVisible = !!studioGround && (startOpen || surfaceSlots.ground === 'board')
-  // The Browser board's panel slot hosts the project panels; CAD and Solar Start keep them inline because they pass no panel.
-  const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'
+  const [browserPanel, setBrowserPanel] = useState('none')
+  // One persistent Project subtree owns campaigns and pane seats across all Studio profiles.
+  const boardHostsProject = (!!studioGround && surfaceSlots.chrome.shell === 'cockpit') || (boardVisible && surfaceSlots.ground === 'board')
   const paneSeats = deriveBoardPaneSeats({
     mock, signedIn, sessionStatus: session.status, projectId: openProjectId,
     drawingId: drawingState?.drawing_id, sessionId: agentSessionId,
@@ -3902,7 +3908,7 @@ export default function App() {
     if (boardAuthor && authorDestination) authorSectionRef.current = authorDestination
     else authorSectionRef.current = authorSource || authorFallback
   }, [boardAuthor, authorDestination, authorSource, authorFallback])
-  const effectiveGround = studioGround ? (boardVisible ? 'board' : surfaceGround(activeSurface)) : null
+  const effectiveGround = studioGround ? (surfaceSlots.chrome.shell === 'cockpit' ? surfaceGround(activeSurface) : boardVisible ? 'board' : surfaceGround(activeSurface)) : null
   const leavingGround = useLeavingGround(effectiveGround)
   // Keeps its name: ~20 sites read `studioGround && drafting`, and the App
   // wiring pin (src/app-wiring.test.mjs) guards that exact shape against the
@@ -4013,6 +4019,7 @@ export default function App() {
     }
   }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  const browserAssetActive = studioShell && surfaceSlots.ground === 'board'
   useDockRise(projectLayout.appRef, studioShell)
   // Build routing and "Open author flow" both use setAuthorOpen. The studio
   // must reveal the catalog too: its collapsed
@@ -4130,7 +4137,7 @@ export default function App() {
   // the three ENV_CAD_EDIT mounts on the SAME predicate as the cockpit gate
   // (W4f cockpit owner's request), so the armer and its surfaces cannot split.
   drawingCommandOnRef.current = ENV_CAD_EDIT && !!studioGround && !!drafting
-  const navSpine = !!studioGround && surfaceSlots.rails.left === 'spine' && !navExpanded && wideViewport
+  const navSpine = !studioShell && !!studioGround && surfaceSlots.rails.left === 'spine' && !navExpanded && wideViewport
   // The per-application fold (operator directive): under the studio each
   // tab's rail carries the families its application calls for; before the
   // ground attaches on the first render the whole catalog shows.
@@ -4742,10 +4749,10 @@ export default function App() {
       }}
       posture={{
         studio: !!studioGround,
-        navExpanded,
+        navExpanded: studioShell || navExpanded,
         onNavExpand: () => setNavExpanded(true),
         wideViewport,
-        jobRailExpanded,
+        jobRailExpanded: studioShell || jobRailExpanded,
         onJobRailExpand: () => setJobRailExpanded(true),
         onJobRailCollapse: () => setJobRailExpanded(false),
       }}
@@ -4856,7 +4863,13 @@ export default function App() {
         onUnlink: mcpRegistry.unlink,
       }}
     >
-    <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-drawer={studioShell ? studioDrawer : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
+    <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-drawer={studioShell && !browserAssetActive ? studioDrawer : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
+      id={studioShell ? 'browser-studio-panel' : undefined}
+      role={studioShell ? 'region' : undefined}
+      aria-label={studioShell ? 'Studio sidebar' : undefined}
+      data-environment-panel={studioShell ? browserPanel : undefined}
+      inert={studioShell && browserPanel !== 'studio' ? INERT_VALUE : undefined}
+      aria-hidden={studioShell && browserPanel !== 'studio' ? 'true' : undefined}
       onClickCapture={(event) => {
         if (event.target instanceof Element && event.target.closest('.ribbon-tool:not(:disabled), .cockpit-quick button:not(:disabled), .cp-run:not(:disabled)')) {
           if (exitPending()) { event.preventDefault(); event.stopPropagation(); return }
@@ -4869,6 +4882,10 @@ export default function App() {
         if (event.target instanceof Element && event.target.closest('.drafting-ribbon, .cockpit-quick, #cockpit-import-pane input[type="file"]')) returnToDrawing()
       }}
     >
+      {studioShell && <div className="browser-panel-heading"><strong>Studio</strong><button id="browser-studio-close" type="button" onClick={() => {
+        setBrowserPanel('none')
+        document.querySelector('.environment-strip button[aria-controls="browser-studio-panel"]')?.focus()
+      }}>Close Studio</button></div>}
       <header className="top">
         <div className="mark" role="img" aria-label="Leaf Automation"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="" aria-hidden="true" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
         {/* W4e: on the studio's drafting surfaces the header IS the
@@ -5119,6 +5136,12 @@ export default function App() {
             occluders={STUDIO_DRAWING_OCCLUDERS}
             studioPresentation={Boolean(studioGround)}
             studioShell={studioShell}
+            browserPanel={browserPanel}
+            onBrowserPanel={setBrowserPanel}
+            onSelectSurface={onSelectSurface}
+            environmentProfiles={PRODUCT_SURFACES.filter(item => item.contract.scene === 'app' && item.contract.chrome.shell === 'cockpit' && item.contract.chrome.tab && surfaceRailState(item.id, labStatus, 'app'))}
+            onDescribe={() => { setTimeout(() => barInputRef.current?.focus(), 0) }}
+            onEnterWorkspace={returnToDrawing}
             surface={activeSurface}
             boardVisible={boardVisible}
             leavingGround={leavingGround}
@@ -5127,7 +5150,7 @@ export default function App() {
             onCreateProject={onCreateProject}
             headingRef={boardHeadingRef}
             workspaceProject={workspaceProjectState}
-            actions={surfaceSlots.ground === 'board' ? {
+            actions={boardHostsProject ? {
               transferProjectId: openProjectId || '',
               transferStatus: boardTransferStatus,
               onTransferVersion: openProjectId && workspace && drawingState?.drawing_id ? async (raw) => {
@@ -5153,6 +5176,7 @@ export default function App() {
                 }
               } : undefined,
               onOpenDrawing: () => setProjectPane('material'),
+              onOpenPhotos: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null,
               onOpenVersion: () => setProjectPane('versions'),
               onOpenJob: (job) => { setBoardJob(job); setProjectPane('jobs') },
               onOpenTool: () => setProjectPane('tools'),
@@ -5162,7 +5186,7 @@ export default function App() {
                 ? () => setProjectPane('settings')
                 : undefined,
             } : undefined}
-            panel={surfaceSlots.ground === 'board' ? <>
+            panel={boardHostsProject ? <>
               {labEnabled && <div className="lab-preview-destination" ref={setLabDestination} />}
               {!mock && signedIn && !openProjectId && <ProjectStartPanel
                 bootstrapState={workspaceController.bootstrapState}

@@ -776,7 +776,7 @@ def test_async_migration_reapplication_preserves_custody(world):
     _begin_async(s)
     exchanges.record_grid(s.scope, s.attempt, uuid4())
     before = _read(s)
-    sql = (ROOT / "platform/migrations/0092_project_solve_async.sql").read_text(encoding="utf-8")
+    sql = (ROOT / "platform/migrations/0094_project_solve_async.sql").read_text(encoding="utf-8")
     for _ in range(2):
         with pg.db.transaction() as conn:
             for statement in pg.db._split_sql_statements(sql):

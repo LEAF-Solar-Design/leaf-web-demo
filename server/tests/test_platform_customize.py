@@ -459,6 +459,24 @@ def test_every_tracked_repo_path_passes_the_charset(lane_env):
     assert offenders == [], offenders
 
 
+@pytest.mark.parametrize('route', ['[slug]', '[[...slug]]'])
+def test_next_route_names_are_literal_and_preserve_neighbors(lane_env, route):
+    repo = lane_env['repo']
+    path = f'web/src/app/{route}/page.jsx'
+    neighbor = 'web/src/app/s/page.jsx'
+    for name in (path, neighbor):
+        target = repo / name
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text('original\n', encoding='utf-8')
+    _git(repo, 'add', '-A')
+    _git(repo, 'commit', '-m', 'route fixtures')
+    main_before = _git(repo, 'rev-parse', 'main')
+    view = _propose(edits=[{'path': path, 'content': 'edited route\n'}])
+    assert _git(repo, 'show', view['commit_sha'] + ':' + path) == 'edited route'
+    assert _git(repo, 'show', view['commit_sha'] + ':' + neighbor) == 'original'
+    assert _git(repo, 'rev-parse', 'main') == main_before
+
+
 def test_absent_manifest_makes_everything_fundamental(lane_env, monkeypatch):
     monkeypatch.setenv("LEAF_PLATFORM_FUNDAMENTAL_PATHS_FILE",
                        str(lane_env["tmp"] / "nope.json"))

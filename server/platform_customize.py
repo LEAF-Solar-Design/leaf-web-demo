@@ -60,7 +60,7 @@ _SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 
 # The complete character set an edit path may use. Verified against every one
 # of the repo's tracked files (984 at 2026-08-03): zero fall outside it.
-_PATH_ALLOWED_RE = re.compile(r"[A-Za-z0-9._/+@-]+")
+_PATH_ALLOWED_RE = re.compile(r"[A-Za-z0-9._/+@\[\]-]+")
 
 MAX_EDITS = 200
 MAX_EDIT_BYTES = 1_000_000  # per file
@@ -215,7 +215,8 @@ def _git_trust(*paths: Path) -> list[str]:
     # paths while the PUBLISHED commit differs from the real base — and git
     # excludes replacement refs from pack transfer, so the remote sees the
     # unapproved change. The oracle must read real objects (sol-critic #423 r6).
-    flags: list[str] = ["--no-replace-objects"]
+    # Next.js route brackets name literal files, never Git wildcard matches.
+    flags: list[str] = ["--no-replace-objects", "--literal-pathspecs"]
     for path in paths:
         try:
             resolved = str(path.resolve(strict=False))
@@ -306,8 +307,8 @@ def _validated_repo_path(raw: Any) -> str:
     # U+3164 Lo) are invisible, and homoglyphs read as the wrong file — and
     # they span half the Unicode category table, so each denied class leaves
     # the next (sol-critic PR #417 rounds 3-4). ALLOWLIST instead: every one
-    # of this repo's 984 tracked paths uses only these characters, so nothing
-    # legitimate is refused and every confusable spelling is.
+    # tracked paths use only these readable ASCII characters, including Next.js
+    # route brackets. Git receives literal pathspecs for these names.
     if _PATH_ALLOWED_RE.fullmatch(raw) is None:
         raise PlatformCustomizeError("edit_path_invalid", 422, "charset")
     return raw

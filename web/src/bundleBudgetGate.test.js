@@ -1,13 +1,14 @@
 // @vitest-environment node
 import { spawnSync } from 'node:child_process'
 import { copyFileSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs'
-import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { gzipSync } from 'node:zlib'
 import { expect, test } from 'vitest'
 
 function runBudgetGate(assets, baseline) {
-  const root = mkdtempSync(join(tmpdir(), 'bundle-gate-'))
+  // Keep the real gate's module layout and resolve its installed parser from
+  // web/node_modules, just as the production script does. Do not stub imports.
+  const root = mkdtempSync(resolve(process.cwd(), '.bundle-gate-'))
   try {
     const scripts = join(root, 'scripts')
     const assetDirectory = join(root, 'dist', 'assets')
@@ -15,6 +16,7 @@ function runBudgetGate(assets, baseline) {
     mkdirSync(assetDirectory, { recursive: true })
     const script = join(scripts, 'check_bundle_budget.mjs')
     copyFileSync(resolve(process.cwd(), 'scripts', 'check_bundle_budget.mjs'), script)
+    copyFileSync(resolve(process.cwd(), 'scripts', 'bundle-assets.mjs'), join(scripts, 'bundle-assets.mjs'))
     writeFileSync(join(scripts, 'bundle-baseline.json'), JSON.stringify(baseline))
     for (const [name, buffer] of Object.entries(assets)) {
       writeFileSync(join(assetDirectory, name), buffer)

@@ -145,16 +145,33 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
     _assert_lab_immutable_ledger_contract()
 
 
-def test_async_solve_migration_proof():
-    name = "0092_project_solve_async.sql"
+def test_runner_migration_proof():
+    name = "0093_project_web_pages.sql"
     manifest = db.migration_manifest()
-    assert manifest[-1] == {
+    proof = next(item for item in manifest if item['name'] == name)
+    assert proof == {
         "name": name,
         "sha256": sha256((db._PKG_DIR / "migrations" / name).read_bytes()).hexdigest(),
     }
     assert db._migration_proof(manifest)["missing_migrations"] == []
-    assert db._migration_proof(manifest[:-1])["missing_migrations"] == [name]
-    drifted = [*manifest[:-1], {"name": name, "sha256": "0" * 64}]
+    without_runner = [item for item in manifest if item['name'] != name]
+    assert db._migration_proof(without_runner)["missing_migrations"] == [name]
+    drifted = [*without_runner, {"name": name, "sha256": "0" * 64}]
+    assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
+
+
+def test_async_solve_migration_proof():
+    name = "0094_project_solve_async.sql"
+    manifest = db.migration_manifest()
+    proof = next(item for item in manifest if item['name'] == name)
+    assert proof == {
+        "name": name,
+        "sha256": sha256((db._PKG_DIR / "migrations" / name).read_bytes()).hexdigest(),
+    }
+    assert db._migration_proof(manifest)["missing_migrations"] == []
+    without_runner = [item for item in manifest if item['name'] != name]
+    assert db._migration_proof(without_runner)["missing_migrations"] == [name]
+    drifted = [*without_runner, {"name": name, "sha256": "0" * 64}]
     assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
 
 

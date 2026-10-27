@@ -4,7 +4,7 @@ import { writeProofReceipt } from '../proofReceipt.mjs'
 import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
-const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
+const TENANT_HEADERS = { 'X-Tenant-Id': process.env.LEAF_E2E_TENANT_ID || 'demo-tenant' }
 const DUMMY_TOKEN = 'sk-ant-oat01-local-e2e-nonsecret-placeholder'
 const PROOF_DIR = join(process.cwd(), '..', 'artifacts', 'unified-surface-proof', 'local')
 

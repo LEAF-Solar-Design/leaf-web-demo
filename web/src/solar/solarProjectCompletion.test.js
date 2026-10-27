@@ -4,7 +4,10 @@ import { resolve } from 'node:path'
 import { scanSource } from '../../scripts/check_user_facing_copy.mjs'
 import { SOLAR_REFUSAL_REASONS } from '../lib/ribbonClusters.js'
 import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
-import { PROJECT_SOLAR_RUN_REASONS, projectSolarRunFailure, readProjectSolarCompletion } from './solarProjectCompletion.js'
+import { PROJECT_SOLAR_RUN_REASONS, projectSolarRunFailure, readProjectSolarCompletion,
+  readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js'
+import { humanizeError } from '../errorHumanize.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
 
 const O = '11111111-1111-1111-1111-111111111111'
 const P = '22222222-2222-2222-2222-222222222222'
@@ -29,6 +32,70 @@ const fallback = { state: 'failed', jobId: J, outputVersionId: null, reasonCode:
   message: 'The server refused this solar tool' }
 
 describe('exact project Solar completion', () => {
+  it('G17 fixed copy names the submitted tool and survives humanization', () => {
+    const graphLabels = {
+      'solar-panels-from-drawing': 'Import panels from drawing', 'solar-panel-groups': 'Panel groups',
+      'solar-homeruns': 'Homeruns', 'solar-feeders': 'Feeders', 'solar-schedule': 'Schedule',
+    }
+    const otherLabels = {
+      'solar-settings': 'Solar settings', 'solar-size-strings': 'String sizing', 'solar-combiners': 'Combiners',
+      'solar-string-add': 'Add string', 'solar-assign-equipment': 'Assign equipment',
+      'solar-string-multi-add': 'Add multiple strings', 'solar-string-conductors': 'String conductors',
+      'solar-correct-string': 'Correct string', 'solar-solve-proposal': 'Solve proposal',
+      'solar-commit-solve': 'Apply solve proposal',
+    }
+    for (const [tool, label] of Object.entries({ ...graphLabels, ...otherLabels })) {
+      const message = `No worker was available to start ${label}. Try again later${Object.hasOwn(graphLabels, tool)
+        ? ': Refresh preview, then Review & run.' : '.'}`
+      expect(projectSolarWorkerRefusal(tool)).toEqual({ reasonCode: 'sip_r4_worker_unavailable', message })
+      expect(message.length).toBeLessThanOrEqual(160)
+      expect(humanizeError(message)).toBe(message)
+      expect(scanSource('const text = ' + JSON.stringify(message), 'copy.js', { strict: true })).toEqual([])
+    }
+    for (const tool of ['private-tool-sentinel', '__proto__', 'constructor', null, { toString() { throw new Error() } }]) {
+      expect(projectSolarWorkerRefusal(tool)).toEqual(projectSolarRunFailure(null))
+    }
+    const source = readFileSync(resolve(process.cwd(), 'src/solar/solarProjectCompletion.js'), 'utf8')
+    expect(scanSource(source, 'src/solar/solarProjectCompletion.js', { strict: true })).toEqual([])
+  })
+  it('G17 only an unambiguous initial worker 503 is definite', () => {
+    const reason = 'SIP_R4_WORKER_UNAVAILABLE'
+    const wire = () => ({ ok: false, status: 503, reason, envelope: workerUnavailable })
+    const local = () => ({ ok: false, status: 503, reason: reason.toLowerCase(), envelope: null })
+    expect(readProjectSolarWorkerRefusal(wire())).toBe(reason.toLowerCase())
+    expect(readProjectSolarWorkerRefusal(local())).toBe(reason.toLowerCase())
+    const invalid = [
+      ...[500, 502, 409, 202, '503', undefined, null, NaN, 503.1].map(status => ({ ...wire(), status })),
+      ...['SIP_R1_STORE_UNAVAILABLE', reason + '_EXTRA', '', null, 503].map(value => ({ ...wire(), reason: value })),
+      { ok: false, status: 503, envelope: null }, { ...wire(), ok: true },
+      { ...wire(), envelope: { ...workerUnavailable, ok: true } },
+      { ...wire(), envelope: { ...workerUnavailable, reason_code: 'SIP_R1_STORE_UNAVAILABLE' } },
+      { ...wire(), error: { reason_code: 'OTHER' } },
+      { ...wire(), envelope: { ...workerUnavailable, status: 'submitted' } },
+      { ...wire(), state: 'submitted' }, { ...wire(), status_code: 202 },
+      ...['job_id', 'jobId', 'output_version_id', 'outputVersionId', 'data', 'result', 'job'].flatMap(key => [
+        { ...wire(), [key]: key === 'data' ? { status: 'submitted', job_id: J } : {} },
+        { ...wire(), envelope: { ...workerUnavailable, [key]: J } },
+      ]),
+    ]
+    for (const value of invalid) expect(readProjectSolarWorkerRefusal(value)).toBeNull()
+    let reads = 0
+    const getter = () => { reads += 1; return reason }
+    for (const key of ['ok', 'status', 'status_code', 'state', 'reason', 'envelope', 'data', 'result', 'job_id', 'outputVersionId']) {
+      expect(readProjectSolarWorkerRefusal(Object.defineProperty(wire(), key, { get: getter }))).toBeNull()
+    }
+    expect(readProjectSolarWorkerRefusal({ ...wire(), envelope: { ...workerUnavailable,
+      error: Object.defineProperty({}, 'reason_code', { get: getter }) } })).toBeNull()
+    expect(readProjectSolarWorkerRefusal({ ...wire(), envelope: Object.defineProperty({ ...workerUnavailable },
+      'error', { get: getter }) })).toBeNull()
+    expect(reads).toBe(0)
+    // Unrelated free-text accessors are never read or used to format this refusal.
+    expect(readProjectSolarWorkerRefusal({ ...wire(), envelope: { ...workerUnavailable,
+      error: Object.defineProperty({ reason_code: reason }, 'message', { get: getter }) } })).toBe(reason.toLowerCase())
+    expect(reads).toBe(0)
+    expect(projectSolarRunFailure(reason)).toEqual(projectSolarRunFailure(null))
+    expect(read(failed({ error: { error_code: 'INTERNAL', reason_code: reason, retryable: true } }))).toEqual(fallback)
+  })
   it('W1C-34c maps cold voltage failures and tolerates their arithmetic detail', () => {
     expect(projectSolarRunFailure('COLD_VOLTAGE_FAILED')).toEqual({ reasonCode: 'cold_voltage_failed',
       message: SOLAR_SIZING_RUN_REASONS.cold_voltage })
