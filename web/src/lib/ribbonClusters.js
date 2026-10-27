@@ -40,9 +40,17 @@ export const ZOOM_OUT = 0.8
 // palette. Past this the cluster says how many more live in the pane.
 export const MAX_LAYER_TOOLS = 10
 
+const TOOL_NAME_ACRONYMS = Object.freeze({
+  nec: 'NEC', ac: 'AC', dc: 'DC', pv: 'PV', bom: 'BOM', dxf: 'DXF', dwg: 'DWG',
+  ocpd: 'OCPD', mppt: 'MPPT', pvcase: 'PVcase', gcr: 'GCR', kw: 'kW', kwh: 'kWh',
+})
+
 export function humanizeToolName(name) {
   if (typeof name !== 'string') return ''
+  // Acronyms read as acronyms; every other word keeps its case.
   const text = name.replace(/[-_]+/g, ' ').trim().replace(/\s+/g, ' ')
+    .split(' ').map((word) => Object.hasOwn(TOOL_NAME_ACRONYMS, word.toLowerCase())
+      ? TOOL_NAME_ACRONYMS[word.toLowerCase()] : word).join(' ')
   return text.charAt(0).toUpperCase() + text.slice(1)
 }
 
