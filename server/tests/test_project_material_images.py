@@ -46,6 +46,23 @@ def test_jpeg_orientation_is_applied_without_copying_exif():
     assert b'private camera description' not in preview
 
 
+def test_two_image_jpeg_previews_primary_and_rejects_larger_sequences():
+    def mpo(extra):
+        output = io.BytesIO()
+        Image.new('RGB', (30, 10), 'red').save(output, format='MPO', save_all=True,
+            append_images=[Image.new('RGB', (6, 4), 'blue') for _ in range(extra)])
+        return output.getvalue()
+    info, preview = images.decode_image(mpo(1))
+    assert info == {'media_type': 'image/jpeg', 'width': 30, 'height': 10}
+    with Image.open(io.BytesIO(preview)) as result:
+        assert result.size == (30, 10)
+        red, green, blue = result.getpixel((15, 5))
+        assert red > 200 and green < 30 and blue < 30
+        assert not result.getexif()
+    with pytest.raises(images.InvalidImage):
+        images.decode_image(mpo(2))
+
+
 @pytest.mark.parametrize('raw', [b'not a photo', b'<svg/>', b'', photo('JPEG')[:-20], photo('PNG')[:-20], photo('GIF')])
 def test_invalid_type_and_truncated_images_fail(raw):
     with pytest.raises(images.InvalidImage):

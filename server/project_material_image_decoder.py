@@ -24,15 +24,19 @@ def main():
     raw = Path('input').read_bytes()
     if not 0 < len(raw) <= 16 * 1024 * 1024:
         raise ValueError('size')
-    mime = {'JPEG': 'image/jpeg', 'PNG': 'image/png', 'HEIF': 'image/heif'}
+    mime = {'JPEG': 'image/jpeg', 'MPO': 'image/jpeg', 'PNG': 'image/png', 'HEIF': 'image/heif'}
     with Image.open(io.BytesIO(raw)) as check:
-        if check.format not in mime or getattr(check, 'n_frames', 1) != 1:
+        # Phone HDR JPEGs can contain a second auxiliary image. Preview the
+        # primary JPEG only; keep the entire original in immutable storage.
+        frames = getattr(check, 'n_frames', 1)
+        if check.format not in mime or frames not in ((1, 2) if check.format == 'MPO' else (1,)):
             raise ValueError('type or frames')
         if check.width * check.height > 40_000_000:
             raise ValueError('pixels')
         media_type = mime[check.format]
         check.verify()
     with Image.open(io.BytesIO(raw)) as source:
+        source.seek(0)
         source.load()
         oriented = ImageOps.exif_transpose(source)
         width, height = oriented.size
