@@ -123,7 +123,7 @@ describe('drawing sync commands', () => {
     return { sent: await sent, outcome }
   }
   const planArgs = { planText: '{"schema":"leaf.mutation_plan.v1"}', planSha256: 'a'.repeat(64),
-    parentVersion: 1, resultVersion: 2, drawingStoreId: 'roof-1' }
+    parentVersion: 1, resultVersion: 2, drawingStoreId: 'roof-1', resultContentSha256: 'c'.repeat(64) }
   const cursorArgs = { drawingStoreId: 'roof-1', version: 2, exportSha256: 'b'.repeat(64) }
   it.each([
     ['applyPlan', planArgs, 'drawing.apply_plan', 'apply_plan', 'leaf.mutation_plan.v1', { ...planArgs, resultDrawingVersionId: identity.drawingVersionId }],
@@ -147,6 +147,13 @@ describe('drawing sync commands', () => {
       expect(await outcome).toEqual(reply.payload)
     }
   })
+
+  it.each([undefined, null, '', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64), `${'a'.repeat(64)}\n`, 123])(
+    'rejects an invalid result digest without posting %#', async (resultContentSha256) => {
+      channel.postMessage.mockClear()
+      await expect(bridge.applyPlan({ ...planArgs, resultContentSha256 })).rejects.toThrow('invalid_result_digest')
+      expect(channel.postMessage).not.toHaveBeenCalled()
+    })
 
   async function exportMessage(commandId, overrides = {}) {
     const bytes = new Uint8Array([0, 1, 2, 255])
