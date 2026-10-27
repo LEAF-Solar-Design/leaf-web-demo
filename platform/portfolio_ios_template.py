@@ -142,7 +142,7 @@ def source_archive(document: dict, revision: int, assets: dict[str, bytes]) -> b
     payload = _canonical_json(page)
     files = {
         "Portfolio/PortfolioApp.swift": _SWIFT.encode("utf-8"),
-        "Portfolio/Resources/portfolio.json": payload + b"\n",
+        "Portfolio/PortfolioContent/portfolio.json": payload + b"\n",
         "Portfolio/Info.plist": _INFO_PLIST.encode("utf-8"),
         "Portfolio.xcodeproj/project.pbxproj": _PROJECT.encode("utf-8"),
         "Portfolio.xcodeproj/xcshareddata/xcschemes/Portfolio.xcscheme": _SCHEME.encode("utf-8"),
@@ -151,7 +151,7 @@ def source_archive(document: dict, revision: int, assets: dict[str, bytes]) -> b
     }
     asset_manifest = {}
     for material_id in sorted(refs):
-        path = "Portfolio/Resources/images/" + material_id + ".jpg"
+        path = "Portfolio/PortfolioContent/images/" + material_id + ".jpg"
         files[path] = assets[material_id]
         asset_manifest[material_id] = {"path": path, "sha256": refs[material_id]["sha256"],
                                        "preview_sha256": refs[material_id]["preview_sha256"]}
@@ -217,7 +217,7 @@ struct LoadedPortfolio {
 
     static func load() throws -> LoadedPortfolio {
         guard let url = Bundle.main.url(forResource: "portfolio", withExtension: "json",
-                                        subdirectory: "Resources") else {
+                                        subdirectory: "PortfolioContent") else {
             throw ContentError.missingDocument
         }
         let decoder = JSONDecoder()
@@ -235,7 +235,7 @@ struct LoadedPortfolio {
                 guard photo.id.range(of: #"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$"#,
                                      options: .regularExpression) != nil,
                       let imageURL = Bundle.main.url(forResource: photo.id, withExtension: "jpg",
-                                                      subdirectory: "Resources/images"),
+                                                      subdirectory: "PortfolioContent/images"),
                       let image = UIImage(contentsOfFile: imageURL.path) else {
                     throw ContentError.missingImage
                 }
@@ -497,7 +497,7 @@ _PROJECT = '''// !$*UTF8*$!
         A00000000000000000000001 = {isa = PBXBuildFile; fileRef = A00000000000000000000011; };
         A00000000000000000000002 = {isa = PBXBuildFile; fileRef = A00000000000000000000012; };
         A00000000000000000000011 = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = PortfolioApp.swift; sourceTree = "<group>"; };
-        A00000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = folder; path = Resources; sourceTree = "<group>"; };
+        A00000000000000000000012 = {isa = PBXFileReference; lastKnownFileType = folder; path = PortfolioContent; sourceTree = "<group>"; };
         A00000000000000000000013 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
         A00000000000000000000014 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = Portfolio.app; sourceTree = BUILT_PRODUCTS_DIR; };
         A00000000000000000000020 = {isa = PBXGroup; children = (A00000000000000000000021, A00000000000000000000022); sourceTree = "<group>"; };
@@ -597,11 +597,11 @@ own Apple signing assets and review distribution requirements separately.
 
 ## Content and photographs
 
-Portfolio/Resources/portfolio.json contains the shared leaf.portfolio.v1 data.
+Portfolio/PortfolioContent/portfolio.json contains the shared leaf.portfolio.v1 data.
 All prose is decoded as data and rendered as literal text. Only the validated
 contact email opens a native mailto link. The app does not download anything.
-Portfolio/Resources/images contains optimized JPEG previews, not the original
-photo files. Resources is a folder reference in the resource build phase, so
+Portfolio/PortfolioContent/images contains optimized JPEG previews, not the original
+photo files. PortfolioContent is a folder reference in the resource build phase, so
 its JSON and images retain their directory structure inside the app bundle.
 Keep that folder reference when editing the Xcode project.
 

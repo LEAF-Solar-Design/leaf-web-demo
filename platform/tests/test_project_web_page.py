@@ -167,7 +167,7 @@ def test_portfolio_historical_export_retains_conflict_and_checks_materials(clien
     assert response.status_code == 200, response.text
     assert reads == [(org, project, material['material_id'], 'preview')]
     with zipfile.ZipFile(io.BytesIO(response.content)) as archive:
-        prefix = 'Portfolio/Resources/' if target == 'ios' else ''
+        prefix = 'Portfolio/PortfolioContent/' if target == 'ios' else ''
         assert json.loads(archive.read(prefix + 'portfolio.json')) == document
         images_path = prefix + 'images/' if target == 'ios' else 'public/images/'
         assert archive.read(images_path + material['material_id'] + '.jpg') == b'preview photo'
