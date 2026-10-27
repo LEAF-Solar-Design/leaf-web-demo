@@ -145,8 +145,8 @@ def test_every_postgres_selector_adds_its_complete_authority_contract():
     _assert_lab_immutable_ledger_contract()
 
 
-def test_runner_migration_proof():
-    name = "0091_kashbot_runner.sql"
+def test_async_solve_migration_proof():
+    name = "0092_project_solve_async.sql"
     manifest = db.migration_manifest()
     assert manifest[-1] == {
         "name": name,
@@ -156,6 +156,26 @@ def test_runner_migration_proof():
     assert db._migration_proof(manifest[:-1])["missing_migrations"] == [name]
     drifted = [*manifest[:-1], {"name": name, "sha256": "0" * 64}]
     assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
+
+
+@pytest.mark.parametrize("kind,name", [
+    ("constraints", "project_solve_exchanges_async_shape_check"),
+    ("triggers", "project_solve_exchanges_async_guard"),
+])
+def test_async_solve_catalog_missing_or_disabled_fails_closed(kind, name):
+    required = db.required_catalog_for_selected_authorities({})
+    rows = _complete_catalog_rows({})
+    field = "conname" if kind == "constraints" else "tgname"
+    row = next(item for item in rows[kind] if item[field] == name)
+    if kind == "constraints":
+        row["validated"] = False
+        reason = "not-validated"
+    else:
+        row["enabled"] = "D"
+        reason = "disabled"
+    assert f"{name}:{reason}" in db._catalog_contract_errors(required, rows)[f"invalid_{kind}"]
+    rows[kind].remove(row)
+    assert f"{name}:missing-or-wrong-relation" in db._catalog_contract_errors(required, rows)[f"invalid_{kind}"]
 
 
 def _assert_lab_immutable_ledger_contract():

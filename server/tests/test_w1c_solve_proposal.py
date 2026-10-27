@@ -1,5 +1,7 @@
 """Canonical proposal admission, single-send recovery and offline proof seams."""
 from copy import deepcopy
+from datetime import datetime, timedelta, timezone
+import base64
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -25,6 +27,8 @@ import solar_project_graph as adapter
 import test_sip_r3b_tools as b3
 import test_sip_r5_policy as r5
 import test_sip_r5_routes as routes
+
+_blocking_transport = cloud.post_stringer
 
 
 def ready_graph(value):
@@ -76,22 +80,40 @@ class Store:
         self.events.append("prepare")
         self.exchange = {**values, "state": "prepared", "org_id": scope.org_id,
             "project_id": scope.project_id, "drawing_id": scope.drawing_id, "job_id": scope.job_id,
-            "response_bytes": None, "candidate_bytes": None, "proof_bytes": None}
+            "response_bytes": None, "candidate_bytes": None, "proof_bytes": None,
+            "grid_id": None, "send_protocol": None, "sent_at": None, "send_principal_sha256": None}
         return deepcopy(self.exchange)
 
-    def resume_exchange(self, scope, lease):
+    def resume_exchange(self, scope, lease, *, send_principal_sha256=None):
         state = self.exchange["state"]
         if state == "sending":
+            if self.exchange["send_protocol"] == "async-idempotent-v1":
+                if self.exchange["grid_id"] is not None:
+                    return SimpleNamespace(action="poll_result", exchange=deepcopy(self.exchange))
+                if datetime.now(timezone.utc) < self.exchange["sent_at"] + timedelta(hours=3):
+                    if send_principal_sha256 != self.exchange["send_principal_sha256"]:
+                        raise self.ExchangeConflict()
+                    return SimpleNamespace(action="resubmit_same_key", exchange=deepcopy(self.exchange))
             self.record_outcome_unknown(scope, lease)
             state = "outcome_unknown"
         return SimpleNamespace(action={"prepared": "send_ready", "responded": "use_response"}.get(state, state),
                                exchange=deepcopy(self.exchange))
 
-    def begin_send(self, scope, lease):
+    def begin_send(self, scope, lease, **options):
         self.events.append("begin_send")
         assert self.exchange["state"] == "prepared"
         self.exchange["state"] = "sending"
+        self.exchange.update(options, sender_worker=lease.worker_id, sender_attempt=lease.attempt)
+        if options:
+            self.exchange["sent_at"] = datetime.now(timezone.utc)
         return True
+
+    def record_grid(self, scope, lease, grid_id):
+        self.events.append("grid")
+        assert self.exchange["state"] == "sending"
+        assert self.exchange["send_protocol"] == "async-idempotent-v1"
+        assert self.exchange["grid_id"] in (None, grid_id)
+        self.exchange["grid_id"] = grid_id
 
     def capture_response(self, scope, lease, **values):
         self.events.append("capture")
@@ -129,6 +151,7 @@ def world(admitted, case, monkeypatch):
     a.store, a.guard, a.calls = Store(), SimpleNamespace(lost=False), []
     monkeypatch.setattr(solve, "_store", lambda: a.store)
     monkeypatch.setattr(solve, "SOLVE_CLASSIFICATION", "synthetic")
+    monkeypatch.setattr(solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", False)
     monkeypatch.setattr(service, "_job_context", lambda *args: a.context)
     monkeypatch.setattr(adapter, "_stored_job", lambda *args: deepcopy(a.row))
     def send(req, grant, *, preserve_uncertainty):
@@ -289,14 +312,16 @@ def test_lost_sender_never_resends(world, monkeypatch):
     assert a.calls == ["sent"] and a.store.exchange["state"] == "outcome_unknown"
 
 
-def test_known_prewrite_failure_refuses(world, monkeypatch):
+@pytest.mark.parametrize("code", ["cloud_upstream_failure", "cloud_auth_missing"])
+def test_known_prewrite_failure_refuses(world, monkeypatch, code):
     def failed(*args, **kwargs):
-        raise CloudError("cloud_upstream_failure", 502)
+        raise CloudError(code, 502)
     monkeypatch.setattr(cloud, "post_stringer", failed)
     with pytest.raises(CloudError):
         solve.prepare_job(world.row, world.guard)
     assert world.store.events == ["prepare", "begin_send", "refuse"]
     assert world.store.exchange["state"] == "refused"
+    assert world.store.exchange["refusal_code"] == code
 
 
 def test_grant_revoked_before_send(world, monkeypatch):
@@ -395,3 +420,294 @@ def test_execution_context_keys_are_tool_conditional(world):
             row["execution_context"][change] = {}
         with pytest.raises(adapter.project.ProjectContextError, match="SIP_R4_JOB_BINDING_MISMATCH"):
             jobs._graph_ids(row)
+
+
+@pytest.fixture
+def async_world(world, case, monkeypatch):
+    a = world
+    token = "e30." + base64.urlsafe_b64encode(b'{"iss":"issuer","sub":"solver"}').decode().rstrip("=") + ".sig"
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(str(a.s.org), token))
+    monkeypatch.setattr(solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", True)
+    monkeypatch.setattr(solve, "SOLVE_POLL_BUDGET_SECONDS", 600)
+    monkeypatch.setattr(solve, "SOLVE_POLL_INTERVAL_SECONDS", 5)
+    a.clock = SimpleNamespace(now=0.0)
+    def sleep(seconds):
+        a.clock.now += seconds
+    monkeypatch.setattr(solve, "time", SimpleNamespace(monotonic=lambda: a.clock.now, sleep=sleep))
+    a.raw = cloud.canonical_bytes(case[2])
+    a.grid_id = UUID(case[2]["job_id"])
+    a.submits, a.polls = [], []
+    a.submit_results = [("accepted", a.grid_id)]
+    a.poll_results = [("completed", a.raw)]
+    def submit(req, grant, key, *, remaining_seconds):
+        assert a.store.exchange["state"] == "sending"
+        assert a.store.exchange["send_protocol"] == "async-idempotent-v1"
+        assert 0 < remaining_seconds <= solve.SOLVE_POLL_BUDGET_SECONDS
+        a.submits.append(key)
+        return a.submit_results.pop(0)
+    def poll(grid_id, grant, *, remaining_seconds):
+        assert a.store.exchange["grid_id"] == grid_id == a.grid_id
+        a.polls.append(grid_id)
+        return a.poll_results.pop(0)
+    monkeypatch.setattr(cloud, "submit_stringer_async", submit)
+    monkeypatch.setattr(cloud, "get_stringer_result", poll)
+    monkeypatch.setattr(cloud, "post_stringer", lambda *args, **kwargs: pytest.fail("blocking async send"))
+    return a
+
+
+def test_async_accepted_grid_precedes_poll_and_proposal(async_world):
+    a = async_world
+    a.poll_results.insert(0, ("pending", None))
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert a.store.events == ["prepare", "begin_send", "grid", "capture", "complete"]
+    assert a.submits == [a.row["job_id"]] and a.polls == [a.grid_id, a.grid_id]
+    assert a.clock.now == 5
+
+
+def test_async_submit_accepts_blocking_manager_completed_body(async_world):
+    a = async_world
+    a.submit_results = [("completed", a.raw)]
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert not a.polls and a.store.exchange["grid_id"] is None
+
+
+def test_async_busy_retries_same_key(async_world):
+    a = async_world
+    a.submit_results.insert(0, ("busy", 12))
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert a.submits == [a.row["job_id"]] * 2 and a.clock.now == 12
+
+
+def test_async_postwrite_timeout_retries_exactly_one_key(async_world, monkeypatch):
+    a = async_world
+    # Exercise the real client mapping too: a write can precede the timeout.
+    keys = []
+    class Accepted:
+        status_code = 202
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            return False
+        def iter_content(self, size):
+            yield cloud.canonical_bytes({"status": "accepted", "grid_id": str(a.grid_id)})
+    def post(url, **kwargs):
+        keys.append(kwargs["headers"]["Idempotency-Key"])
+        if len(keys) == 1:
+            raise requests.ReadTimeout("write already sent")
+        return Accepted()
+    monkeypatch.setattr(cloud.requests, "post", post)
+    # The fixture installed a submit double. Bind the production transport seam.
+    monkeypatch.setattr(cloud, "submit_stringer_async", lambda req, grant, key, **kwargs:
+        cloud._async_stringer_call(cloud.requests.post, cloud.SOLVER_URL, grant,
+            request=req, idempotency_key=key, **kwargs))
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert keys == [a.row["job_id"]] * 2 and len(set(keys)) == 1
+
+
+@pytest.mark.parametrize("status", ["expired", "missing"])
+def test_async_unavailable_result_refused(async_world, status):
+    a = async_world
+    a.poll_results = [(status, None)]
+    with pytest.raises(CloudError, match="^cloud_upstream_failure$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.store.exchange["state"] == "refused"
+    assert a.store.exchange["refusal_code"] == "cloud_upstream_failure"
+
+
+def test_async_budget_then_resumed_attempt_polls_even_with_flag_off(async_world, monkeypatch):
+    a = async_world
+    monkeypatch.setattr(solve, "SOLVE_POLL_BUDGET_SECONDS", 5)
+    a.poll_results = [("pending", None)]
+    assert solve.prepare_job(a.row, a.guard) is None
+    before = deepcopy(a.store.exchange)
+    assert before["state"] == "sending" and before["grid_id"] == a.grid_id
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    monkeypatch.setattr(solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", False)
+    a.poll_results = [("completed", a.raw)]
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert a.submits == [a.row["job_id"]]
+    assert a.store.exchange["sender_worker"] == before["sender_worker"]
+    assert a.store.exchange["sender_attempt"] == 1
+
+
+@pytest.mark.parametrize("code", ["cloud_auth_missing", "cloud_upstream_failure"])
+def test_async_grant_failure_preserves_grid_for_next_attempt(async_world, monkeypatch, code):
+    a = async_world
+    monkeypatch.setattr(solve, "SOLVE_POLL_BUDGET_SECONDS", 5)
+    a.poll_results = [("pending", None)]
+    assert solve.prepare_job(a.row, a.guard) is None
+    before = deepcopy(a.store.exchange)
+    resolve = cloud.resolve_grant
+    def failed(*args):
+        raise CloudError(code, 502)
+    monkeypatch.setattr(cloud, "resolve_grant", failed)
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    with pytest.raises(CloudError, match="^" + code + "$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.store.exchange == before
+    assert before["state"] == "sending" and before["grid_id"] == a.grid_id
+    monkeypatch.setattr(cloud, "resolve_grant", resolve)
+    a.row.update(attempt=3, lease_owner="next-reclaimer")
+    a.poll_results = [("completed", a.raw)]
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert a.submits == [a.row["job_id"]]
+    assert a.polls == [a.grid_id, a.grid_id]
+
+
+def test_async_principal_read_failure_preserves_custody(async_world, monkeypatch):
+    a = async_world
+    submit = cloud.submit_stringer_async
+    monkeypatch.setattr(cloud, "submit_stringer_async", lambda *args, **kwargs:
+        (_ for _ in ()).throw(RuntimeError("lost handle")))
+    assert solve.prepare_job(a.row, a.guard) is None
+    before = deepcopy(a.store.exchange)
+    principal = cloud.grant_principal_sha256
+    def failed(*args):
+        raise CloudError("cloud_auth_missing", 401)
+    monkeypatch.setattr(cloud, "grant_principal_sha256", failed)
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    with pytest.raises(CloudError, match="^cloud_auth_missing$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.store.exchange == before
+    assert before["state"] == "sending" and before["grid_id"] is None
+    monkeypatch.setattr(cloud, "grant_principal_sha256", principal)
+    monkeypatch.setattr(cloud, "submit_stringer_async", submit)
+    a.row.update(attempt=3, lease_owner="next-reclaimer")
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert a.submits == [a.row["job_id"]]
+
+
+@pytest.mark.parametrize("code", ["cloud_auth_missing", "solve_outcome_unknown", "cloud_piece_failed"])
+def test_async_poll_error_preserves_grid_for_next_attempt(async_world, monkeypatch, code):
+    a = async_world
+    poll = cloud.get_stringer_result
+    def failed(grid_id, grant, **kwargs):
+        assert a.store.exchange["grid_id"] == grid_id == a.grid_id
+        raise CloudError(code, 502)
+    monkeypatch.setattr(cloud, "get_stringer_result", failed)
+    with pytest.raises(CloudError, match="^" + code + "$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.store.exchange["state"] == "sending"
+    assert a.store.exchange["grid_id"] == a.grid_id
+    assert a.store.events == ["prepare", "begin_send", "grid"]
+    monkeypatch.setattr(cloud, "get_stringer_result", poll)
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert a.submits == [a.row["job_id"]] and a.polls == [a.grid_id]
+
+
+@pytest.mark.parametrize("code", ["cloud_request_invalid", "cloud_response_invalid"])
+def test_async_definitive_poll_error_refuses(async_world, monkeypatch, code):
+    def failed(*args, **kwargs):
+        raise CloudError(code, 502)
+    monkeypatch.setattr(cloud, "get_stringer_result", failed)
+    with pytest.raises(CloudError, match="^" + code + "$"):
+        solve.prepare_job(async_world.row, async_world.guard)
+    assert async_world.store.exchange["state"] == "refused"
+    assert async_world.store.exchange["refusal_code"] == code
+
+
+def test_async_resubmit_same_key_after_no_handle_crash(async_world, monkeypatch):
+    a = async_world
+    submit = cloud.submit_stringer_async
+    monkeypatch.setattr(cloud, "submit_stringer_async", lambda *args, **kwargs:
+        (_ for _ in ()).throw(RuntimeError("crash after write before grid custody")))
+    assert solve.prepare_job(a.row, a.guard) is None
+    assert a.store.exchange["state"] == "sending" and a.store.exchange["grid_id"] is None
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    monkeypatch.setattr(cloud, "submit_stringer_async", submit)
+    assert solve.prepare_job(a.row, a.guard)["schema"] == solve.RESULT_SCHEMA
+    assert a.submits == [a.row["job_id"]]
+
+
+def test_flag_on_does_not_retry_legacy_sending(world, monkeypatch):
+    a = world
+    monkeypatch.setattr(cloud, "post_stringer", lambda *args, **kwargs:
+        (_ for _ in ()).throw(RuntimeError("legacy sender crashed")))
+    assert solve.prepare_job(a.row, a.guard) is None
+    monkeypatch.setattr(solve, "SOLVE_ASYNC_PROTOCOL_ENABLED", True)
+    monkeypatch.setattr(cloud, "submit_stringer_async", lambda *args, **kwargs:
+        pytest.fail("legacy custody must never resubmit"))
+    a.row.update(attempt=2, lease_owner="reclaimer")
+    with pytest.raises(CloudError, match="^solve_outcome_unknown$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.store.exchange["send_protocol"] is None
+
+
+def test_async_principal_change_prevents_resubmission(async_world, monkeypatch):
+    a = async_world
+    monkeypatch.setattr(cloud, "submit_stringer_async", lambda *args, **kwargs:
+        (_ for _ in ()).throw(RuntimeError("lost handle")))
+    assert solve.prepare_job(a.row, a.guard) is None
+    token = "e30." + base64.urlsafe_b64encode(b'{"iss":"issuer","sub":"different"}').decode().rstrip("=") + ".sig"
+    monkeypatch.setattr(cloud, "resolve_grant", lambda *args: CloudGrant(str(a.s.org), token))
+    with pytest.raises(CloudError, match="^cloud_tenant_unauthorized$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.store.exchange["state"] == "refused" and not a.submits
+
+
+def test_async_no_handle_after_retention_cutoff_is_unknown(async_world, monkeypatch):
+    a = async_world
+    monkeypatch.setattr(cloud, "submit_stringer_async", lambda *args, **kwargs:
+        (_ for _ in ()).throw(RuntimeError("lost handle")))
+    assert solve.prepare_job(a.row, a.guard) is None
+    a.store.exchange["sent_at"] -= timedelta(hours=3)
+    with pytest.raises(CloudError, match="^solve_outcome_unknown$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.store.exchange["state"] == "outcome_unknown" and not a.submits
+
+
+def test_async_lease_loss_stops_polling(async_world, monkeypatch):
+    a = async_world
+    def lost(grid_id, grant, **kwargs):
+        a.polls.append(grid_id)
+        a.guard.lost = True
+        return "pending", None
+    monkeypatch.setattr(cloud, "get_stringer_result", lost)
+    assert solve.prepare_job(a.row, a.guard) is None
+    assert a.polls == [a.grid_id] and a.store.exchange["state"] == "sending"
+
+
+def test_async_lease_loss_between_polls_leaves_grid_custody(async_world, monkeypatch):
+    a = async_world
+    a.poll_results = [("pending", None)]
+    def sleep(seconds):
+        a.clock.now += seconds
+        a.guard.lost = True
+    monkeypatch.setattr(solve.time, "sleep", sleep)
+    assert solve.prepare_job(a.row, a.guard) is None
+    assert a.polls == [a.grid_id]
+    assert a.store.exchange["state"] == "sending"
+    assert a.store.exchange["grid_id"] == a.grid_id
+    assert "capture" not in a.store.events and "refuse" not in a.store.events
+
+
+def test_async_retention_cutoff_is_rechecked_before_retry(async_world, monkeypatch):
+    a = async_world
+    a.submit_results = [("retryable", 5)]
+    def sleep(seconds):
+        a.clock.now += seconds
+        a.store.exchange["sent_at"] -= timedelta(hours=3)
+    monkeypatch.setattr(solve.time, "sleep", sleep)
+    with pytest.raises(CloudError, match="^solve_outcome_unknown$"):
+        solve.prepare_job(a.row, a.guard)
+    assert a.submits == [a.row["job_id"]]
+    assert a.store.exchange["state"] == "outcome_unknown"
+    assert a.store.exchange["grid_id"] is None and not a.polls
+
+
+def test_flag_off_read_timeout_keeps_single_blocking_post(world, monkeypatch):
+    a = world
+    calls = []
+    def post(*args, **kwargs):
+        calls.append(kwargs)
+        raise requests.ReadTimeout()
+    monkeypatch.setattr(cloud.requests, "post", post)
+    monkeypatch.setattr(cloud, "post_stringer", lambda request, grant, **kwargs:
+        _blocking_transport(request, grant, **kwargs))
+    with pytest.raises(CloudError, match="^solve_outcome_unknown$"):
+        solve.prepare_job(a.row, a.guard)
+    assert len(calls) == 1
+    assert "Idempotency-Key" not in calls[0]["headers"]
+    assert a.store.exchange["send_protocol"] is None
+    assert a.store.exchange["state"] == "outcome_unknown"

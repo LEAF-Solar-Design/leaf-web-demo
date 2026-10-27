@@ -607,3 +607,178 @@ def test_migration_is_idempotent(world):
             for statement in pg.db._split_sql_statements(sql):
                 conn.execute(statement)
     assert _read(s) == before
+
+
+PRINCIPAL = sha256(b"test-issuer|test-subject").hexdigest()
+
+
+def _begin_async(s, *, aged=False):
+    _prepare(s)
+    if aged:
+        # Construct historical custody at the legal send transition. Updating
+        # sent_at afterwards is deliberately forbidden by the new guard.
+        with pg.db.transaction() as conn:
+            conn.execute("UPDATE project_solve_exchanges SET state='sending',"
+                "sender_worker=%s,sender_attempt=%s,send_protocol='async-idempotent-v1',"
+                "sent_at=now()-interval '4 hours',send_principal_sha256=%s WHERE job_id=%s",
+                (s.attempt.worker_id, s.attempt.attempt, PRINCIPAL, s.job))
+    else:
+        assert exchanges.begin_send(s.scope, s.attempt, send_protocol="async-idempotent-v1",
+                                    send_principal_sha256=PRINCIPAL)
+    return _read(s)
+
+
+def test_async_send_custody_and_resume_without_handle(world):
+    s = world()
+    row = _begin_async(s)
+    assert row["send_protocol"] == "async-idempotent-v1"
+    assert row["sent_at"] is not None and row["send_principal_sha256"] == PRINCIPAL
+    assert row["grid_id"] is None
+    assert exchanges.resume_exchange(s.scope, s.attempt,
+        send_principal_sha256=PRINCIPAL).action == "resubmit_same_key"
+    with pytest.raises(exchanges.ExchangeConflict):
+        exchanges.resume_exchange(s.scope, s.attempt, send_principal_sha256="0" * 64)
+    assert _read(s) == row
+
+
+def test_async_record_grid_is_live_scoped_and_write_once(world):
+    s = world()
+    _begin_async(s)
+    grid_id = uuid4()
+    row = exchanges.record_grid(s.scope, s.attempt, grid_id)
+    assert row["grid_id"] == grid_id
+    assert exchanges.record_grid(s.scope, s.attempt, grid_id) == row
+    with pytest.raises(exchanges.ExchangeConflict):
+        exchanges.record_grid(s.scope, s.attempt, uuid4())
+    with pytest.raises(exchanges.ExchangeInputError):
+        exchanges.record_grid(s.scope, s.attempt, str(grid_id))
+    for field in ("org_id", "project_id", "drawing_id", "job_id"):
+        with pytest.raises(exchanges.ExchangeNotFound):
+            exchanges.record_grid(replace(s.scope, **{field: uuid4()}), s.attempt, grid_id)
+    old = s.attempt
+    _reclaim(s)
+    with pytest.raises(exchanges.ExchangeLeaseLost):
+        exchanges.record_grid(s.scope, old, grid_id)
+    assert exchanges.record_grid(s.scope, s.attempt, grid_id) == row
+    assert exchanges.resume_exchange(s.scope, s.attempt).action == "poll_result"
+    pg.expire_worker(s.job)
+    with pytest.raises(exchanges.ExchangeLeaseLost):
+        exchanges.record_grid(s.scope, s.attempt, grid_id)
+
+
+def test_record_grid_requires_async_sending(world):
+    s = world()
+    _prepare(s)
+    with pytest.raises(exchanges.ExchangeStateError):
+        exchanges.record_grid(s.scope, s.attempt, uuid4())
+    assert exchanges.begin_send(s.scope, s.attempt)
+    assert _read(s)["sent_at"] is None and _read(s)["send_principal_sha256"] is None
+    with pytest.raises(exchanges.ExchangeStateError):
+        exchanges.record_grid(s.scope, s.attempt, uuid4())
+
+
+def test_async_reclaimed_lease_captures_and_preserves_sender(world):
+    s = world()
+    before = _begin_async(s)
+    _reclaim(s)
+    grid_id = uuid4()
+    exchanges.record_grid(s.scope, s.attempt, grid_id)
+    assert _capture(s) == "stored"
+    row = _read(s)
+    assert row["sender_worker"] == before["sender_worker"]
+    assert row["sender_attempt"] == before["sender_attempt"]
+    assert row["grid_id"] == grid_id and row["sent_at"] == before["sent_at"]
+    assert _capture(s) == "duplicate"
+    with pytest.raises(exchanges.ExchangeStateError):
+        exchanges.record_grid(s.scope, s.attempt, grid_id)
+    assert _complete(s) == "completed"
+
+
+def test_async_reclaimed_lease_can_refuse(world):
+    s = world()
+    before = _begin_async(s)
+    _reclaim(s)
+    assert exchanges.refuse_exchange(s.scope, s.attempt,
+        reason_code="cloud_upstream_failure") == "refused"
+    assert _read(s)["sender_worker"] == before["sender_worker"]
+
+
+def test_async_no_handle_cutoff_resumes_unknown(world):
+    s = world()
+    _begin_async(s, aged=True)
+    assert exchanges.resume_exchange(s.scope, s.attempt,
+        send_principal_sha256="0" * 64).action == "outcome_unknown"
+    assert _read(s)["grid_id"] is None
+
+
+@pytest.mark.parametrize("aged,with_grid", [(False, False), (False, True), (True, True)])
+def test_async_unknown_guard_blocks_old_workers(world, aged, with_grid):
+    s = world()
+    _begin_async(s, aged=aged)
+    if with_grid:
+        exchanges.record_grid(s.scope, s.attempt, uuid4())
+    before = _read(s)
+    with pytest.raises(exchanges.ExchangeStateError):
+        exchanges.record_outcome_unknown(s.scope, s.attempt)
+    with pytest.raises(psycopg.errors.RaiseException, match="outcome remains recoverable"):
+        with pg.db.transaction() as conn:
+            conn.execute("UPDATE project_solve_exchanges SET state='outcome_unknown',"
+                "refusal_code='SOLVE_OUTCOME_UNKNOWN' WHERE job_id=%s", (s.job,))
+    assert _read(s) == before
+    if with_grid:
+        assert exchanges.resume_exchange(s.scope, s.attempt).action == "poll_result"
+
+
+def test_async_custody_columns_are_immutable(world):
+    s = world()
+    _begin_async(s)
+    exchanges.record_grid(s.scope, s.attempt, uuid4())
+    before = _read(s)
+    for assignments in ("grid_id=NULL", "grid_id='" + str(uuid4()) + "'::uuid",
+            "send_protocol=NULL", "sent_at=sent_at-interval '1 hour'",
+            "send_principal_sha256='" + "0" * 64 + "'"):
+        with pytest.raises(psycopg.errors.RaiseException):
+            with pg.db.transaction() as conn:
+                conn.execute("UPDATE project_solve_exchanges SET " + assignments + " WHERE job_id=%s", (s.job,))
+        assert _read(s) == before
+
+
+def test_async_shape_checks_independent_of_update_guard(world):
+    s = world()
+    before = _begin_async(s)
+    for changes in ({"send_protocol": "unsupported"}, {"sent_at": None},
+            {"send_principal_sha256": None}, {"send_principal_sha256": "bad"},
+            {"send_protocol": None}, {"send_protocol": None, "sent_at": None,
+                "send_principal_sha256": None, "grid_id": uuid4()},
+            {"state": "outcome_unknown", "refusal_code": "SOLVE_OUTCOME_UNKNOWN", "grid_id": uuid4()},
+            {"state": "prepared", "sender_worker": None, "sender_attempt": None, "grid_id": uuid4()}):
+        changed = {**before, **changes}
+        with pytest.raises(psycopg.errors.CheckViolation):
+            with pg.db.transaction() as conn:
+                conn.execute("DELETE FROM project_solve_exchanges WHERE job_id=%s", (s.job,))
+                names = tuple(changed)
+                conn.execute("INSERT INTO project_solve_exchanges (" + ",".join(names) +
+                    ") VALUES (" + ",".join("%(" + key + ")s" for key in names) + ")", changed)
+        assert _read(s) == before
+
+
+def test_async_custody_requires_prepared_send_transition(world):
+    s = world()
+    _prepare(s)
+    with pytest.raises(psycopg.errors.RaiseException, match="custody is immutable"):
+        with pg.db.transaction() as conn:
+            conn.execute("UPDATE project_solve_exchanges SET send_protocol='async-idempotent-v1',"
+                "sent_at=now(),send_principal_sha256=%s WHERE job_id=%s", (PRINCIPAL, s.job))
+
+
+def test_async_migration_reapplication_preserves_custody(world):
+    s = world()
+    _begin_async(s)
+    exchanges.record_grid(s.scope, s.attempt, uuid4())
+    before = _read(s)
+    sql = (ROOT / "platform/migrations/0092_project_solve_async.sql").read_text(encoding="utf-8")
+    for _ in range(2):
+        with pg.db.transaction() as conn:
+            for statement in pg.db._split_sql_statements(sql):
+                conn.execute(statement)
+    assert _read(s) == before

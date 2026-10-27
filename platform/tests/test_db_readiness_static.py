@@ -35,8 +35,8 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0091_kashbot_runner.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0091"
+    assert manifest[-1]["name"] == "0092_project_solve_async.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0092"
 
     class Schema:
         absent = None
@@ -80,12 +80,17 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     for table, column in (("orgs", "account_class"), ("unit_economics_observations", "org_id"),
                           ("unit_economics_observations", "org_account_class"),
                           ("demo_sessions", "revoked_at"),
+                          ("project_solve_exchanges", "grid_id"),
+                          ("project_solve_exchanges", "send_protocol"),
+                          ("project_solve_exchanges", "sent_at"),
+                          ("project_solve_exchanges", "send_principal_sha256"),
                           ("demo_mint_counters", "count")):
         schema.absent = (table, column)
         status = db.schema_status()
         assert not status["ok"]
         assert column in status["missing"][table]
     for constraint in ("orgs_account_class_check", "unit_economics_observations_org_class_check",
+                       "project_solve_exchanges_async_shape_check",
                        "demo_sessions_subject_key", "demo_sessions_tenant_id_key",
                        "demo_sessions_subject_check", "demo_sessions_tenant_id_check",
                        "demo_sessions_client_ip_hash_check", "demo_sessions_check",
@@ -95,6 +100,10 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         status = db.schema_status()
         assert not status["ok"]
         assert f"{constraint}:missing-or-wrong-relation" in status["invalid_constraints"]
+    schema.absent = "project_solve_exchanges_async_guard"
+    status = db.schema_status()
+    assert not status["ok"]
+    assert "project_solve_exchanges_async_guard:missing-or-wrong-relation" in status["invalid_triggers"]
     schema.absent = None
     schema.definitions["unit_economics_observations_org_class_check"] = (
         "CHECK (org_account_class = 'production_acceptance')")
@@ -112,7 +121,7 @@ def test_runner_registry(monkeypatch):
     columns = db.required_columns_for_selected_authorities({})
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 92)]
+    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 93)]
     assert [item["name"][:4] for item in manifest] == inventory["scope"]["migration_ids"]
     assert len(ADDONS) == 12
     assert "-- expand-contract: contract-of=0083" in sql
@@ -240,12 +249,13 @@ def test_sip_r1_schema_contract_complete():
         "response_bytes", "response_sha256", "solver_endpoint", "solver_version",
         "candidate_bytes", "candidate_sha256", "proof_bytes", "proof_sha256",
         "sender_worker", "sender_attempt", "refusal_code", "created_at", "updated_at",
+        "grid_id", "send_protocol", "sent_at", "send_principal_sha256",
     }
     solve_constraints = {"project_solve_exchanges_" + suffix for suffix in (
         "pkey", "job_fk", "artifact_fk", "input_fk", "grant_check", "graph_check",
         "phase_check", "worker_check", "solver_check", "classification_check",
         "state_check", "hash_check", "digest_check", "shape_check", "request_check",
-        "response_check", "candidate_check", "proof_check")}
+        "response_check", "candidate_check", "proof_check", "async_shape_check")}
     assert solve_constraints <= set(catalog["constraints"])
     assert all(catalog["constraints"][name]["relation"] == "project_solve_exchanges"
                for name in solve_constraints)
@@ -255,15 +265,16 @@ def test_sip_r1_schema_contract_complete():
         "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION guard_project_solve_exchange()")
     sql = (db._PKG_DIR / "migrations/0078_project_solve_exchanges.sql").read_text(encoding="utf-8")
+    sql += (db._PKG_DIR / "migrations/0092_project_solve_async.sql").read_text(encoding="utf-8")
     assert solve_constraints == set(re.findall(r"CONSTRAINT (project_solve_exchanges_\w+)", sql))
 
 
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 92)]
+    ids = [f"{n:04d}" for n in range(1, 93)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0091_kashbot_runner.sql"
+    assert db.migration_manifest()[-1]["name"] == "0092_project_solve_async.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
@@ -271,7 +282,7 @@ def test_sip_r1_migration_registration_complete():
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 92)" in source
+        assert "range(1, 93)" in source
         assert "range(1, 74)" not in source
 
 
@@ -456,12 +467,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0091_kashbot_runner.sql",
+        manifest_names[-1], "0092_project_solve_async.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0091",
+        inventory["scope"]["migration_ids"][-1], "0092",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
