@@ -14,6 +14,10 @@ afterEach(() => {
 const mount = (props = {}) => render(<ProjectBoardGround active worldSpace={false} {...props} />)
 const board = () => screen.getByRole('region', { name: 'Project workspace' })
 const toggle = () => screen.getByRole('button', { name: 'Light board' })
+function openProject() {
+  expect(screen.queryByRole('region', { name: 'Project workspace' })).toBeNull()
+  fireEvent.click(screen.getByRole('button', { name: 'Project', exact: true }))
+}
 function expectDark() {
   expect(board().hasAttribute('data-board-theme')).toBe(false)
   expect(board().hasAttribute('data-leaf-theme')).toBe(false)
@@ -93,9 +97,11 @@ it('SSD1-24E board row 10', () => {
 it('SSD1-24E board row 11', () => {
   localStorage.setItem(BOARD_THEME_KEY, 'light')
   const view = render(<SurfaceGrounds surface="cad" boardVisible studioShell studioPresentation />)
+  openProject()
   expectDark()
   expect(screen.queryByRole('button', { name: 'Light board' })).toBeNull()
   view.rerender(<SurfaceGrounds surface="browser" studioShell studioPresentation />)
+  openProject()
   expectLight()
 })
 
@@ -147,10 +153,12 @@ it('SSD1-24E board row 15', () => {
 it('SSD1-24E board row 9: SurfaceGrounds themes Browser but not Start over CAD', () => {
   localStorage.setItem(BOARD_THEME_KEY, 'light')
   const view = render(<SurfaceGrounds surface="browser" studioShell studioPresentation />)
+  openProject()
   expect(board().getAttribute('data-board-layout')).toBe('contained')
   expectLight()
   view.unmount()
   render(<SurfaceGrounds surface="cad" boardVisible studioShell studioPresentation />)
+  openProject()
   expect(board().getAttribute('data-board-layout')).toBe('contained')
   expectDark()
   expect(screen.queryByRole('button', { name: 'Light board' })).toBeNull()

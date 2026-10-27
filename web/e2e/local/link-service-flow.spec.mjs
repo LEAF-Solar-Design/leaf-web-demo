@@ -7,6 +7,13 @@ const REGISTRY = '/api/tenant/mcp-servers'
 const HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
 const local = (value) => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname)
 
+async function openLinkedServices(page) {
+  const studio = page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true })
+  await studio.click()
+  await expect(studio).toHaveAttribute('aria-expanded', 'true')
+  await page.locator('.link-svc-trigger').click()
+}
+
 test.use({ serviceWorkers: 'block' })
 
 test('link service through local OAuth, show connected, then unlink', async ({ page, context, request }) => {
@@ -32,6 +39,12 @@ test('link service through local OAuth, show connected, then unlink', async ({ p
   expect(metadata.status(), 'boot with TENANT_MCP_FAKE_OAUTH=1').toBe(200)
   const entitlement = await request.get(`${API_BASE}/api/entitlements`, { headers: HEADERS })
   expect((await entitlement.json()).entitlements.link_service, 'managed policy must grant link_service').toBe(true)
+  // The real Studio shell loads its tenant overlay even in fake OAuth mode.
+  // Require the managed stack's migrated database, rather than letting an
+  // unrelated overlay 500 hide behind a later drawer interaction timeout.
+  const overlay = await request.get(`${API_BASE}/api/overlay`, { headers: HEADERS })
+  expect(overlay.status(), 'managed link flow requires a migrated PostgreSQL fixture for the Studio overlay').toBe(200)
+  expect((await overlay.json()).error).toBeNull()
 
   // Isolate only this row's label when reusing the managed stack. Never
   // delete somebody else's services or call their revocation endpoints.
@@ -42,7 +55,7 @@ test('link service through local OAuth, show connected, then unlink', async ({ p
     expect((await request.delete(`${API_BASE}${REGISTRY}/${server.id}`, { headers: HEADERS })).status()).toBe(200)
   }
   await page.goto('/app')
-  await page.locator('.link-svc-trigger').click()
+  await openLinkedServices(page)
   const drawer = page.getByRole('dialog', { name: 'Linked services', exact: true })
   await drawer.getByLabel('Service label').fill(label)
   await drawer.getByLabel('Service URL').fill(`${API_BASE}${REGISTRY}/_fake-oauth`)
@@ -64,7 +77,7 @@ test('link service through local OAuth, show connected, then unlink', async ({ p
   // The drawer refreshes on mount, not via a fabricated callback message.
   // Reload follows the real list path after the server-side callback.
   await page.reload()
-  await page.locator('.link-svc-trigger').click()
+  await openLinkedServices(page)
   await expect(row.locator('.state')).toHaveText('Connected')
   await row.locator('.chip-danger').click()
   await row.locator('.chip-danger-confirm').click()
