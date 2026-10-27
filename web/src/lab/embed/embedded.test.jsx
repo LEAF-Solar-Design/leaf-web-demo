@@ -2,11 +2,11 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 const connections = vi.hoisted(() => [])
-const canvasControl = vi.hoisted(() => ({ report: true, onLayout: null }))
+const canvasControl = vi.hoisted(() => ({ report: true, onLayout: null, document: null, ready: true, admit: true }))
 vi.mock('./hostBridge.js', () => ({
   createLabHostBridge: vi.fn((callbacks) => {
     const connection = {
-      callbacks, start: vi.fn(() => { callbacks.onAdmitted(); return Promise.resolve(true) }),
+      callbacks, start: vi.fn(() => { if (canvasControl.admit) callbacks.onAdmitted(); return Promise.resolve(true) }),
       stop: vi.fn(), proposal: vi.fn().mockResolvedValue(true), run: vi.fn().mockResolvedValue(true),
       state: null,
     }
@@ -30,15 +30,15 @@ vi.mock('../views.js', () => ({
 vi.mock('../canvas/LabCanvas.jsx', async () => {
   const { useEffect, useLayoutEffect } = await import('react')
   const empty = { schema: 'leaf.lab-graph.v1', blocks: [], pipes: [], outputs: {} }
-  return { default: function Canvas({ initialDocument = empty, onChange, entries = {} }) {
+  return { default: function Canvas({ initialDocument = canvasControl.document || empty, onChange, entries = {} }) {
     useEffect(() => {
-      if (canvasControl.report) onChange({ document: initialDocument, ready: true, problems: [] })
+      if (canvasControl.report) onChange({ document: initialDocument, ready: canvasControl.ready, problems: [] })
     }, [initialDocument, onChange])
     useLayoutEffect(() => { canvasControl.onLayout?.(initialDocument) })
     return <div data-canvas-editor>
       <section aria-label="Block palette">{Object.values(entries).map(entry => <button key={entry.id}>{entry.title}</button>)}</section>
       <p aria-label="Canvas document">{JSON.stringify(initialDocument)}</p>
-      <button onClick={() => onChange({ document: initialDocument, ready: true, problems: [] })}>Commit ready draft</button>
+      <button onClick={() => onChange({ document: { ...initialDocument }, ready: true, problems: [] })}>Commit ready draft</button>
       <button onClick={() => onChange({ document: { ...initialDocument, blocks: [{ id: 'count-1',
         registry: { id: 'count', version: '1.0.0', code_sha256: entries['count@1.0.0'].version.code_sha256 }, settings: {},
       }] }, ready: false, problems: ['Input required'] })}>Commit incomplete draft</button>
@@ -69,6 +69,9 @@ beforeEach(() => {
   connections.length = 0
   canvasControl.report = true
   canvasControl.onLayout = null
+  canvasControl.document = null
+  canvasControl.ready = true
+  canvasControl.admit = true
   vi.clearAllMocks()
   setLabHostBridgeLoader(bridgeImport)
   useLabSurfaceStatus.mockReturnValue({ state: 'on', posture: 'local' })
@@ -87,6 +90,58 @@ const canvas = async () => {
 }
 
 describe('Lab embedded mode', () => {
+  it('proposes the latest ready document once when the host admits the frame', async () => {
+    framed()
+    canvasControl.admit = false
+    const document = emptyGraph()
+    canvasControl.document = document
+    render(<LabGround active />)
+    await canvas()
+    const connection = connections[0]
+    expect(screen.getByText('Ready', { exact: true })).toBeVisible()
+    expect(connection.proposal).not.toHaveBeenCalled()
+    act(() => connection.callbacks.onAdmitted())
+    await waitFor(() => expect(connection.proposal).toHaveBeenCalledOnce())
+    expect(connection.proposal).toHaveBeenLastCalledWith({ document, ready: true, problems: [] }, expect.any(Number))
+    fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
+    act(() => connection.callbacks.onAdmitted())
+    expect(connection.proposal).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Run graph' }))
+    await waitFor(() => expect(connection.run).toHaveBeenCalledOnce())
+    expect(connection.proposal).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Commit incomplete draft' }))
+    expect(connection.proposal).toHaveBeenCalledTimes(2)
+  })
+
+  it('proposes the first ready report when the frame is already admitted', async () => {
+    framed()
+    canvasControl.report = false
+    const document = emptyGraph()
+    canvasControl.document = document
+    render(<LabGround active />)
+    await canvas()
+    const connection = connections[0]
+    expect(connection.proposal).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
+    await waitFor(() => expect(connection.proposal).toHaveBeenCalledOnce())
+    expect(connection.proposal).toHaveBeenLastCalledWith({ document, ready: true, problems: [] }, expect.any(Number))
+    fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
+    expect(connection.proposal).toHaveBeenCalledOnce()
+  })
+
+  it.each([false, true])('does not propose an unready initial document with admission first=%s', async (admit) => {
+    framed()
+    canvasControl.admit = admit
+    canvasControl.ready = false
+    canvasControl.document = { ...emptyGraph(), outputs: { missing: { node: 'missing', port: 'result' } } }
+    render(<LabGround active />)
+    await canvas()
+    const connection = connections[0]
+    if (!admit) act(() => connection.callbacks.onAdmitted())
+    expect(screen.getByText('No valid graph')).toBeVisible()
+    expect(connection.proposal).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['blocked', 'The sign-in window was blocked or could not finish. Allow pop-ups for this site, then try again.'],
     ['cancelled', 'Sign-in was cancelled.'],
@@ -140,14 +195,16 @@ describe('Lab embedded mode', () => {
     await canvas()
     const connection = connections[0]
     const provider = createHostProvider({ framed: true })
+    connection.proposal.mockClear()
     const rows = [{ source: 'markets', as_of: Date.now(), data: { price: 42 } }]
     provider.announce(rows)
     act(() => connection.callbacks.onSource(rows))
     const first = addBlock(emptyGraph(), provider.entries()['host-source@1.0.0'])
     first.blocks[0].settings = { source: 'markets' }
     let restored
-    act(() => { restored = connection.callbacks.onRestore({ document: first }) })
+    act(() => { restored = connection.callbacks.onRestore({ document: first, restore: true }) })
     await act(async () => { await restored })
+    expect(connection.proposal).not.toHaveBeenCalled()
     const values = screen.getByRole('region', { name: 'Values' })
     await waitFor(() => expect(within(values).getByRole('heading', { name: 'Dashboard source' })).toBeVisible())
     canvasControl.report = false
@@ -170,6 +227,7 @@ describe('Lab embedded mode', () => {
     framed()
     render(<LabGround active />)
     await canvas()
+    connections[0].proposal.mockClear()
     fireEvent.click(screen.getByRole('button', { name: 'Commit tainted draft' }))
     expect(screen.getByRole('status', { name: 'Host proposal' }))
       .toHaveTextContent('Proposal refused: host data cannot leave the runtime')
@@ -253,6 +311,7 @@ describe('Lab embedded mode', () => {
     render(<LabGround active />)
     await canvas()
     const connection = connections[0]
+    connection.proposal.mockClear()
     expect(connection.proposal).not.toHaveBeenCalled()
     fireEvent.click(screen.getByRole('button', { name: 'Commit incomplete draft' }))
     expect(connection.proposal).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false, problems: ['Input required'] }), expect.any(Number))
@@ -308,6 +367,7 @@ describe('Lab embedded mode', () => {
     await canvas()
     const connection = connections[0]
     const document = { schema: 'leaf.lab-graph.v1', blocks: [], pipes: [], outputs: { restored: { node: 'strategy-1', port: 'result' } } }
+    connection.proposal.mockClear()
     let restored
     act(() => { restored = connection.callbacks.onRestore({ document, ready: true, problems: [], restore: true }) })
     await act(async () => { await restored })
