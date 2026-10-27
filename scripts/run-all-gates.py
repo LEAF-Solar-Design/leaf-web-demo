@@ -2538,8 +2538,9 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_binding_grant_static.py",
                  f"{repo_name}/platform/tests/test_binding_grant_issuance_static.py",
                  f"{repo_name}/platform/tests/test_org_self_provision_gate_static.py",  # SP2 invite-only org gate
-                 f"{repo_name}/platform/tests/test_org_export_scope_static.py"  # P-153 export ownership scope
-                 ], 239,  # +1 demo inventory/migration contract regression
+                 f"{repo_name}/platform/tests/test_org_export_scope_static.py",  # P-153 export ownership scope
+                 f"{repo_name}/platform/tests/test_campaign_plan_policy_static.py",
+                 ], 254,  # +15 versioned web/native planning policy cases
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
