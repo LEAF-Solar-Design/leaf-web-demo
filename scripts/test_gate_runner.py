@@ -3618,7 +3618,7 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
         "web-vitest-2": "npm/npx",
         "web-vitest-3": "npm/npx",
         "web-build": "npm/npx",
-        "web-link-service-flow": "npm/npx",
+        "web-link-service-flow": "PostgreSQL",
         "web-demo-gate": "nested runner",
         "studio-walk-regressions": "nested stack",
         "server-sessions-e2e": "harness/dist",
@@ -3755,6 +3755,8 @@ def test_conflict_resources_maps_each_rule_to_its_lock(monkeypatch):
     # The override table wins over the generic rules.
     assert g.conflict_resources(stub("web-link-service-flow", g.WEB, ["npx", "playwright"])) \
         == {"web-tree", "harness-tree", "link-flow-ports"}
+    assert g.conflict_resources(stub("web-link-service-flow", g.WEB, ["npx", "playwright"], uses_database=True)) \
+        == {"web-tree", "harness-tree", "link-flow-ports", "postgres"}
     assert g.conflict_resources(stub("server-sessions-e2e", g.SERVER)) == {"harness-tree"}
     assert g.conflict_resources(stub("web-demo-gate", g.REPO, ["bash"])) == {"web-tree"}
     assert g.conflict_resources(stub("harness-container-smoke", g.REPO)) \

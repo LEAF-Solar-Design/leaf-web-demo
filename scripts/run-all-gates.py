@@ -5213,7 +5213,8 @@ def conflict_resources(suite: Suite) -> frozenset[str]:
         return frozenset()
     override = _CONFLICT_RESOURCES_OVERRIDE.get(suite.id)
     if override is not None:
-        return override
+        # Explicit filesystem/port locks cannot drop a declared database lock.
+        return override | (frozenset({"postgres"}) if suite.db_gated or suite.uses_database else frozenset())
     table_reason = _SERIAL_SUITE_REASONS.get(suite.id, "")
     held = set()
     # server/authored_tools.json is reset in place before the suite runs.
