@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
+from datetime import timedelta
 import hashlib
 import re
 import unicodedata
@@ -42,7 +43,7 @@ class JobAttempt:
 @dataclass(frozen=True)
 class ResumeResult:
     action: Literal[
-        "send_ready", "use_response",
+        "send_ready", "use_response", "poll_result", "resubmit_same_key",
         "completed", "refused", "outcome_unknown"
     ]
     exchange: dict
@@ -128,7 +129,9 @@ PREPARE_SQL = (
 BEGIN_SEND_SQL = (
     "UPDATE project_solve_exchanges e "
     "SET state='sending',sender_worker=%(worker)s,"
-    "sender_attempt=%(attempt)s,updated_at=clock_timestamp() "
+    "sender_attempt=%(attempt)s,send_protocol=%(send_protocol)s,"
+    "sent_at=CASE WHEN %(send_protocol)s::text IS NOT NULL THEN clock_timestamp() END,"
+    "send_principal_sha256=%(send_principal_sha256)s,updated_at=clock_timestamp() "
     "WHERE " + SCOPE_SQL +
     " AND e.state='prepared' AND " + LIVE_EXISTS_SQL + " RETURNING e.*"
 )
@@ -139,7 +142,8 @@ CAPTURE_SQL = (
     "solver_version=%(solver_version)s,updated_at=clock_timestamp() "
     "WHERE " + SCOPE_SQL +
     " AND e.state='sending' AND e.response_bytes IS NULL "
-    "AND e.sender_worker=%(worker)s AND e.sender_attempt=%(attempt)s "
+    "AND (e.send_protocol='async-idempotent-v1' OR "
+    "(e.sender_worker=%(worker)s AND e.sender_attempt=%(attempt)s)) "
     "AND " + LIVE_EXISTS_SQL + " RETURNING e.*"
 )
 COMPLETE_SQL = (
@@ -154,7 +158,7 @@ REFUSE_SQL = (
     "SET state='refused',refusal_code=%(reason_code)s,"
     "updated_at=clock_timestamp() WHERE " + SCOPE_SQL +
     " AND e.state IN ('prepared','sending','responded') "
-    "AND (e.state<>'sending' OR "
+    "AND (e.state<>'sending' OR e.send_protocol='async-idempotent-v1' OR "
     "(e.sender_worker=%(worker)s AND e.sender_attempt=%(attempt)s)) "
     "AND " + LIVE_EXISTS_SQL + " RETURNING e.*"
 )
@@ -163,6 +167,8 @@ UNKNOWN_SQL = (
     "SET state='outcome_unknown',refusal_code='SOLVE_OUTCOME_UNKNOWN',"
     "updated_at=clock_timestamp() WHERE " + SCOPE_SQL +
     " AND e.state='sending' AND e.response_bytes IS NULL "
+    "AND (e.send_protocol IS NULL OR (e.grid_id IS NULL "
+    "AND now() >= e.sent_at + interval '3 hours')) "
     "AND " + LIVE_EXISTS_SQL + " RETURNING e.*"
 )
 
@@ -244,8 +250,9 @@ def _write(conn, sql, args):
 
 
 def _sender(exchange, args):
-    return (exchange["sender_worker"] == args["worker"]
-            and exchange["sender_attempt"] == args["attempt"])
+    return (exchange.get("send_protocol") == "async-idempotent-v1"
+            or (exchange["sender_worker"] == args["worker"]
+                and exchange["sender_attempt"] == args["attempt"]))
 
 
 def get_exchange(scope: ExchangeScope, lease: JobAttempt, *, conn=None) -> dict:
@@ -310,8 +317,15 @@ def prepare_exchange(
     return operation(conn) if conn is not None else db.run_transaction(operation)
 
 
-def begin_send(scope: ExchangeScope, lease: JobAttempt) -> bool:
+def begin_send(scope: ExchangeScope, lease: JobAttempt, *,
+               send_protocol=None, send_principal_sha256=None) -> bool:
     args = _parameters(scope, lease)
+    if (send_protocol not in (None, "async-idempotent-v1")
+            or (send_protocol is None and send_principal_sha256 is not None)
+            or (send_protocol is not None and (not isinstance(send_principal_sha256, str)
+                or _HASH_RE.fullmatch(send_principal_sha256) is None))):
+        raise ExchangeInputError()
+    args.update(send_protocol=send_protocol, send_principal_sha256=send_principal_sha256)
 
     def operation(conn):
         try:
@@ -325,6 +339,28 @@ def begin_send(scope: ExchangeScope, lease: JobAttempt) -> bool:
     # run_transaction returns only after its context managers commit. Callers
     # must dispatch only after True; this API deliberately accepts no conn.
     return db.run_transaction(operation)
+
+
+def record_grid(scope: ExchangeScope, lease: JobAttempt, grid_id: UUID, *, conn=None) -> dict:
+    args = _parameters(scope, lease)
+    if not isinstance(grid_id, UUID):
+        raise ExchangeInputError()
+    args["grid_id"] = grid_id
+
+    def operation(conn):
+        _, exchange = _lock(conn, args)
+        if exchange["state"] != "sending" or exchange.get("send_protocol") != "async-idempotent-v1":
+            raise ExchangeStateError()
+        if exchange["grid_id"] is not None:
+            if exchange["grid_id"] != grid_id:
+                raise ExchangeConflict()
+            return exchange
+        return _write(conn, "UPDATE project_solve_exchanges e SET grid_id=%(grid_id)s,"
+            "updated_at=clock_timestamp() WHERE " + SCOPE_SQL +
+            " AND e.state='sending' AND e.grid_id IS NULL "
+            "AND e.send_protocol='async-idempotent-v1' AND " + LIVE_EXISTS_SQL + " RETURNING e.*", args)
+
+    return operation(conn) if conn is not None else db.run_transaction(operation)
 
 
 def capture_response(
@@ -417,13 +453,18 @@ def record_outcome_unknown(
         _, exchange = _lock(conn, args)
         if exchange["state"] != "sending" or exchange["response_bytes"] is not None:
             raise ExchangeStateError()
+        if exchange.get("send_protocol") is not None:
+            with conn.cursor() as cur:
+                observed = project_graph_store._clock(cur)
+            if exchange["grid_id"] is not None or observed < exchange["sent_at"] + timedelta(hours=3):
+                raise ExchangeStateError()
         _write(conn, UNKNOWN_SQL, args)
         return "outcome_unknown"
 
     return db.run_transaction(operation)
 
 
-def resume_exchange(scope: ExchangeScope, lease: JobAttempt) -> ResumeResult:
+def resume_exchange(scope: ExchangeScope, lease: JobAttempt, *, send_principal_sha256=None) -> ResumeResult:
     args = _parameters(scope, lease)
 
     def operation(conn):
@@ -436,6 +477,17 @@ def resume_exchange(scope: ExchangeScope, lease: JobAttempt) -> ResumeResult:
         if state == "prepared":
             return ResumeResult("send_ready", exchange)
         if state == "sending":
+            if exchange.get("send_protocol") == "async-idempotent-v1":
+                if exchange["grid_id"] is not None:
+                    return ResumeResult("poll_result", exchange)
+                with conn.cursor() as cur:
+                    observed = project_graph_store._clock(cur)
+                if observed < exchange["sent_at"] + timedelta(hours=3):
+                    if send_principal_sha256 != exchange["send_principal_sha256"]:
+                        # No same-principal key exists for this grant. Keep custody;
+                        # the caller refuses resubmission, never sends another key.
+                        raise ExchangeConflict()
+                    return ResumeResult("resubmit_same_key", exchange)
             exchange = _write(conn, UNKNOWN_SQL, args)
             return ResumeResult("outcome_unknown", exchange)
         if state == "responded":

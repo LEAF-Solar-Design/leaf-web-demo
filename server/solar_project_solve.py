@@ -3,6 +3,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import time
 from uuid import UUID
 
 import deps
@@ -18,6 +20,10 @@ TOOL_NAME = cloud.TOOL_NAME
 COMMIT_TOOL = "solar-commit-solve"
 SOLVE_CLASSIFICATION = "live"
 RESULT_SCHEMA = "leaf.solar-solve-proposal.v1"
+# Enable only after the Manager honors the principal-scoped idempotency key.
+SOLVE_ASYNC_PROTOCOL_ENABLED = os.environ.get("SOLVE_ASYNC_PROTOCOL_ENABLED", "false").lower() in {"1", "true"}
+SOLVE_POLL_INTERVAL_SECONDS = float(os.environ.get("SOLVE_POLL_INTERVAL_SECONDS", "5"))
+SOLVE_POLL_BUDGET_SECONDS = float(os.environ.get("SOLVE_POLL_BUDGET_SECONDS", "600"))
 
 
 def _store():
@@ -142,7 +148,59 @@ def _result(exchange, summary, provenance):
         "candidate_summary": summary, "execution_provenance": provenance}
 
 
+def _async_response(store, scope, lease, request, grant, guard, deadline):
+    principal = None
+    while not guard.lost:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            # The lease lapses and the next attempt resumes custody. After the
+            # last attempt the job fails ATTEMPTS_EXHAUSTED; the exchange stays
+            # sending. A user's next solve creates a new job.
+            return None
+        exchange = store.get_exchange(scope, lease)
+        if exchange.get("grid_id") is None:
+            if principal is None:
+                principal = cloud.grant_principal_sha256(grant)
+            try:
+                resume = store.resume_exchange(scope, lease, send_principal_sha256=principal)
+            except store.ExchangeConflict:
+                raise cloud.CloudError("cloud_tenant_unauthorized", 403) from None
+            if resume.action == "outcome_unknown":
+                raise cloud.CloudError("solve_outcome_unknown", 502)
+        # Database custody checks may have consumed time or lost the lease.
+        remaining = deadline - time.monotonic()
+        if guard.lost:
+            return None
+        if remaining <= 0:
+            continue
+        if exchange.get("grid_id") is None:
+            status, value = cloud.submit_stringer_async(request, grant, str(scope.job_id),
+                remaining_seconds=remaining)
+        else:
+            status, value = cloud.get_stringer_result(exchange["grid_id"], grant,
+                remaining_seconds=remaining)
+        if guard.lost:
+            return None
+        if status == "completed":
+            return value
+        if status == "accepted":
+            store.record_grid(scope, lease, value)
+            continue
+        if status in {"expired", "missing"}:
+            raise cloud.CloudError("cloud_upstream_failure", 502)
+        if status not in {"pending", "busy", "retryable"}:
+            raise cloud.CloudError("cloud_response_invalid", 502)
+        delay = SOLVE_POLL_INTERVAL_SECONDS
+        if status in {"busy", "retryable"}:
+            delay = max(delay, value)
+        remaining = deadline - time.monotonic()
+        if remaining > 0:
+            time.sleep(min(delay, remaining))
+    return None
+
+
 def prepare_job(job, guard):
+    deadline = time.monotonic() + SOLVE_POLL_BUDGET_SECONDS
     from solar_project_jobs import _job_context
     store, db = _store(), platform_link.platform_db()
     context = db.run_transaction(lambda conn: _job_context(job, conn))
@@ -156,27 +214,56 @@ def prepare_job(job, guard):
         exchange = store.prepare_exchange(scope, lease, **reservation)
     if any(exchange[key] != value for key, value in reservation.items()):
         raise store.ExchangeConflict()
-    resume = store.resume_exchange(scope, lease)
+    grant = None
+    async_custody = exchange.get("send_protocol") == "async-idempotent-v1"
+    if async_custody and exchange["state"] == "sending":
+        # Grant errors leave async custody intact; the lease lapses and the next attempt resumes.
+        try:
+            grant = cloud.resolve_grant(reservation["grant_ref"], str(context.organization_id))
+            principal = (cloud.grant_principal_sha256(grant)
+                         if exchange.get("grid_id") is None else None)
+            resume = store.resume_exchange(scope, lease, send_principal_sha256=principal)
+        except store.ExchangeConflict:
+            store.refuse_exchange(scope, lease, reason_code="cloud_tenant_unauthorized")
+            raise cloud.CloudError("cloud_tenant_unauthorized", 403) from None
+    else:
+        resume = store.resume_exchange(scope, lease)
     if resume.action == "outcome_unknown":
         raise cloud.CloudError("solve_outcome_unknown", 502)
     if resume.action == "refused":
         raise cloud.CloudError(resume.exchange["refusal_code"], 502)
-    if resume.action == "send_ready":
+    if resume.action in {"send_ready", "poll_result", "resubmit_same_key"}:
         try:
-            grant = cloud.resolve_grant(reservation["grant_ref"], str(context.organization_id))
+            if grant is None:
+                grant = cloud.resolve_grant(reservation["grant_ref"], str(context.organization_id))
+            options = {}
+            if resume.action == "send_ready" and SOLVE_ASYNC_PROTOCOL_ENABLED:
+                options = {"send_protocol": "async-idempotent-v1",
+                           "send_principal_sha256": cloud.grant_principal_sha256(grant)}
+                async_custody = True
         except cloud.CloudError as exc:
             store.refuse_exchange(scope, lease, reason_code=exc.classification)
             raise
-        if guard.lost or not store.begin_send(scope, lease):
+        if guard.lost or (resume.action == "send_ready" and not store.begin_send(scope, lease, **options)):
             return None
         try:
-            raw = cloud.post_stringer(cloud.StringerRequest.model_validate(plan["binding"]["request"]),
-                                      grant, preserve_uncertainty=True)
+            request = cloud.StringerRequest.model_validate(plan["binding"]["request"])
+            if async_custody:
+                raw = _async_response(store, scope, lease, request, grant, guard, deadline)
+                if raw is None:
+                    return None
+            else:
+                raw = cloud.post_stringer(request, grant, preserve_uncertainty=True)
         except cloud.CloudError as exc:
             if guard.lost:
                 return None
+            if async_custody and exc.classification not in {
+                    "cloud_upstream_failure", "cloud_request_invalid",
+                    "cloud_response_invalid", "cloud_tenant_unauthorized"}:
+                raise
             if exc.classification == "solve_outcome_unknown":
-                store.record_outcome_unknown(scope, lease)
+                if not async_custody:
+                    store.record_outcome_unknown(scope, lease)
             else:
                 store.refuse_exchange(scope, lease, reason_code=exc.classification)
             raise
