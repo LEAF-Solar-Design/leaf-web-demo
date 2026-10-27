@@ -170,6 +170,17 @@ def test_success_exact_build_scan_publish_and_evidence(tmp_path):
     assert_success(output, request, completed, calls)
 
 
+@POSIX
+def test_long_relay_snapshot_key_succeeds(tmp_path):
+    source, output, request, env = case(tmp_path)
+    prefix = 'forge-ci-relay/LEAF-Solar-Design/leaf-web-demo/snapshots/' + 'a' * 40 + '/'
+    suffix = '/source.zip'
+    request['source_snapshot']['key'] = prefix + 'b' * (300 - len(prefix) - len(suffix)) + suffix
+    request['executor_package']['version_id'] = 'v' * 200
+    completed, calls = drive(request, env)
+    assert_success(output, request, completed, calls)
+
+
 def assert_success(output, request, completed, calls):
     assert completed.returncode == 0, completed.stderr
     uri = REGISTRY + '/leaf-platform-instant-execution:sha-' + request['source_revision']
@@ -241,7 +252,8 @@ def test_no_usable_python_has_no_provider_calls(tmp_path):
 @pytest.mark.parametrize('fault', ['schema', 'extra-key', 'duplicate-key', 'noncanonical', 'base64',
     'encoding-mismatch', 'sha', 'head', 'tree', 'repository', 'repository-id', 'snapshot-mismatch',
     'path', 'disabled', 'arguments', 'dirty', 'untracked', 'output-mode', 'output-entry', 'inside-source',
-    'request-symlink', 'output-symlink', 'source-symlink', 'nested-key', 'missing-tool'])
+    'request-symlink', 'output-symlink', 'source-symlink', 'nested-key', 'missing-tool',
+    'key-too-long', 'version-too-long'])
 def test_invalid_input_has_no_provider_calls(tmp_path, fault):
     source, output, request, env = case(tmp_path)
     raw, arguments = None, ()
@@ -262,6 +274,8 @@ def test_invalid_input_has_no_provider_calls(tmp_path, fault):
     if fault == 'repository-id': request['source_snapshot']['repository']['id'] = True
     if fault == 'snapshot-mismatch': request['source_snapshot']['commit'] = '0' * 40
     if fault == 'path': request['executor_package']['key'] = '../escape.zip'
+    if fault == 'key-too-long': request['source_snapshot']['key'] = 'k/' + 'x' * 1023
+    if fault == 'version-too-long': request['executor_package']['version_id'] = 'v' * 1025
     if fault == 'disabled': env['LEAF_INSTANT_EXECUTION_ENABLED'] = 'false'
     if fault == 'arguments': arguments = ('unexpected',)
     if fault == 'dirty': (source / 'deploy/Dockerfile.instant-execution').write_text('changed')

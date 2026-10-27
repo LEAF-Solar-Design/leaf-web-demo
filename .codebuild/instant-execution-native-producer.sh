@@ -95,8 +95,8 @@ def keys(value, expected):
 def hexval(value, length):
     require(type(value) is str and re.fullmatch('[0-9a-f]{%d}' % length, value))
 
-def text(value):
-    require(type(value) is str and 0 < len(value) <= 128 and not any(ord(c) < 32 for c in value))
+def text(value, limit=128):
+    require(type(value) is str and 0 < len(value) <= limit and not any(ord(c) < 32 for c in value))
 
 def bounded(path, limit):
     require(not path.is_symlink() and stat.S_ISREG(path.stat().st_mode))
@@ -151,9 +151,11 @@ try:
     package = request['executor_package']
     keys(package, 'bucket key version_id sha256')
     hexval(package['sha256'], 64)
+    # Keys and version ids take S3's 1024-character bound, matching instant_execution_start.py.
     for descriptor in (snapshot, package):
-        for field in ('bucket', 'key', 'version_id'):
-            text(descriptor[field])
+        text(descriptor['bucket'])
+        text(descriptor['key'], 1024)
+        text(descriptor['version_id'], 1024)
         require(re.fullmatch('[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]', descriptor['bucket']))
         require('\\' not in descriptor['key'] and ':' not in descriptor['key'])
         require(all(part not in ('', '.', '..') for part in descriptor['key'].split('/')))
