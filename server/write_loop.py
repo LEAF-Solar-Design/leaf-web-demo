@@ -487,6 +487,20 @@ def edited_source_proof_key(tenant_id: str, drawing_id: str, version: int) -> st
     return edited_source_key(tenant_id, drawing_id, version) + ".proof.json"
 
 
+def version_content_sha256(backend, tenant_id: str, drawing_id: str,
+                           version: int) -> Optional[str]:
+    """Digest the stored sidecar or DWG source, never synthesized DXF."""
+    import store
+    v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    skey = edited_source_key(tenant_id, drawing_id, v)
+    if backend.exists(skey):
+        return hashlib.sha256(backend.get(skey)).hexdigest()
+    source = backend.get(vkey)
+    if source.startswith(DWG_MAGIC):
+        return hashlib.sha256(source).hexdigest()
+    return None
+
+
 def publish_edited_source(backend, tenant_id: str, drawing_id: str, version: int,
                           raw: bytes, payload_bytes: bytes) -> None:
     """Publish the sidecar first; an unavailable proof only costs a re-parse."""

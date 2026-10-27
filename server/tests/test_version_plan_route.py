@@ -27,23 +27,28 @@ def _get(client, drawing=saves.DWG_DRAWING, version=2, tenant=saves.TENANT):
                       headers={"X-Tenant-Id": tenant})
 
 
+def _seed_unchanged_dwg(tmp_path):
+    import dxf_intake
+
+    return saves._seed_dwg_backed(
+        tmp_path, intake=dxf_intake.parse_dxf_bytes(saves.EDITED_DXF))
+
+
 def _expected(backend, drawing, mutations):
     import mutation_plan
-    import store
     import write_loop
 
-    _, key = store.resolve_version(backend, saves.TENANT, drawing, 1)
-    source = backend.get(key)
     _, base = write_loop.read_intake(backend, saves.TENANT, drawing, 1)
     canonical = mutation_plan.validate_mutations(
         base, mutations, allow_transforms=True, allow_xdata=False, reject_noop=False)
-    digest = hashlib.sha256(
-        source if source.startswith(write_loop.DWG_MAGIC) else saves.EDITED_DXF).hexdigest()
+    digest = write_loop.version_content_sha256(backend, saves.TENANT, drawing, 1)
+    assert digest is not None
     return mutation_plan.emit_plan(canonical, base_sha256=digest, base_intake=base)
 
 
 def _assert_plan(client, backend, drawing, expected):
     import store
+    import write_loop
 
     response = _get(client, drawing)
     assert response.status_code == 200, response.text
@@ -51,6 +56,9 @@ def _assert_plan(client, backend, drawing, expected):
         "drawing_id": drawing, "version": 2, "parent_version": 1,
         "plan_text": expected.decode("utf-8"),
         "plan_sha256": hashlib.sha256(expected).hexdigest(),
+        "result_sha256": (hashlib.sha256(saves.EDITED_DXF).hexdigest()
+                          if backend.exists(write_loop.edited_source_key(
+                              saves.TENANT, drawing, 2)) else None),
         "error": None, "degraded_mode": False,
     }
     assert expected.startswith(b"LEAF_MUTATION_PLAN|")
@@ -63,6 +71,56 @@ def _assert_plan(client, backend, drawing, expected):
     assert history["versions"][-1]["plan_sha256"] == entry["plan_sha256"]
 
 
+def test_plan_on_edited_version_uses_parent_content_digest(client, tmp_path):
+    saves._seed_dwg_backed(tmp_path)
+    parent_digest = hashlib.sha256(saves.EDITED_DXF).hexdigest()
+    response = client.post(
+        f"/api/drawings/{saves.DWG_DRAWING}/versions/edited",
+        headers={"X-Tenant-Id": saves.TENANT},
+        files={"file": ("edited.dxf", io.BytesIO(saves.EDITED_DXF), "application/dxf")},
+        data={"parent_version": "1", "source_digest": parent_digest},
+    )
+    assert response.status_code == 201, response.text
+    edited = saves.EDITED_DXF.replace(b"8\nRoof\n", b"8\nMoved\n")
+    result_digest = hashlib.sha256(edited).hexdigest()
+    assert parent_digest != result_digest
+    response = saves._post(
+        client, saves.DWG_DRAWING,
+        {"set_layer": [{"handle": "A", "layer": "Moved"}]},
+        parent=2, data=edited)
+    assert response.status_code == 201, response.text
+    assert response.json()["commit"] == "dxf-sidecar"
+    response = _get(client, version=3)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["plan_text"].splitlines()[1] == f"BASE_SHA256|{parent_digest}"
+    assert body["parent_version"] == 2
+    assert body["result_sha256"] == result_digest
+
+
+@pytest.mark.parametrize("live", [False, True])
+def test_dwg_parent_digest_and_result_content(client, tmp_path, monkeypatch, live):
+    import deps
+    import store
+
+    backend = saves._seed_dwg_backed(tmp_path, intake=saves._live_base_intake())
+    _, key = store.resolve_version(backend, saves.TENANT, saves.DWG_DRAWING, 1)
+    parent_digest = hashlib.sha256(backend.get(key)).hexdigest()
+    monkeypatch.setattr(deps, "APS_LIVE", live)
+    response = saves._post(
+        client, saves.DWG_DRAWING,
+        saves._live_mutations())
+    assert response.status_code == 201, response.text
+    assert response.json()["commit"] == ("dxf-sidecar" if live else "dwg-plan")
+    response = _get(client)
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["plan_text"].splitlines()[1] == f"BASE_SHA256|{parent_digest}"
+    assert body["parent_version"] == 1
+    assert body["result_sha256"] == (
+        hashlib.sha256(saves.EDITED_DXF).hexdigest() if live else None)
+
+
 def test_mock_plan_round_trips_exact_emitted_bytes(client, tmp_path):
     backend = saves._seed_dwg_backed(tmp_path)
     mutations = {"set_layer": [{"handle": "A", "layer": "Moved"}]}
@@ -73,37 +131,87 @@ def test_mock_plan_round_trips_exact_emitted_bytes(client, tmp_path):
     _assert_plan(client, backend, saves.DWG_DRAWING, expected)
 
 
-@pytest.mark.parametrize("dwg_backed,mutations", [
-    (False, {"added": [{"handle": "n1", "kind": "LINE", "layer": "New",
-                        "pts": [[1, 2], [4, 6]]}]}),
-    (False, {}),
-    (True, {}),
-])
-def test_sidecar_including_no_operations_stores_emitted_plan(
-        client, tmp_path, dwg_backed, mutations):
+def test_parent_without_content_digest_commits_without_plan(client, tmp_path):
     import store
+    import write_loop
 
-    if dwg_backed:
-        backend = saves._seed_dwg_backed(tmp_path)
-        drawing = saves.DWG_DRAWING
-    else:
-        drawing = saves.DEMO
-        assert saves._head(client, drawing) == 1
-        backend = store.FilesystemBackend(str(tmp_path / "drawings"))
-    expected = _expected(backend, drawing, mutations)
-    response = saves._post(client, drawing, mutations)
+    drawing = saves.DEMO
+    assert saves._head(client, drawing) == 1
+    backend = store.FilesystemBackend(str(tmp_path / "drawings"))
+    # Match the uploaded geometry exactly; only the missing digest disqualifies it.
+    _, data, _ = write_loop.read_dxf(backend, saves.TENANT, drawing, 1)
+    response = saves._post(client, drawing, {}, data=data)
     assert response.status_code == 201, response.text
     assert response.json()["commit"] == "dxf-sidecar"
-    assert response.json()["plan_sha256"] is None  # Existing save response stays unchanged.
-    _assert_plan(client, backend, drawing, expected)
+    response = _get(client, drawing=drawing)
+    assert response.status_code == 404
+    assert response.json()["error"]["error_code"] == "no_plan"
+
+
+@pytest.mark.parametrize("mutations", [{}, {"set_layer": [{"handle": "A", "layer": "Moved"}]}])
+def test_sidecar_changed_geometry_without_faithful_plan_commits(client, tmp_path, monkeypatch, mutations):
+    import deps
+    import write_loop
+
+    backend = _seed_unchanged_dwg(tmp_path)
+    edited = saves.EDITED_DXF.replace(b"10\n50\n", b"10\n60\n")
+    if mutations:
+        edited = edited.replace(b"8\nRoof\n", b"8\nMoved\n")
+    # A nonempty partial plan takes the gated sidecar leg too.
+    monkeypatch.setattr(deps, "APS_LIVE", True)
+    response = saves._post(client, saves.DWG_DRAWING, mutations, data=edited)
+    assert response.status_code == 201, response.text
+    assert response.json()["commit"] == "dxf-sidecar"
+    _, intake = write_loop.read_intake(backend, saves.TENANT, saves.DWG_DRAWING, 2)
+    assert intake["polylines"][0]["pts"][1][0] == 60
+    assert backend.get(write_loop.edited_source_key(saves.TENANT, saves.DWG_DRAWING, 2)) == edited
+    response = _get(client)
+    assert response.status_code == 404
+    assert response.json()["error"]["error_code"] == "no_plan"
+
+
+@pytest.mark.parametrize("failure", ["missing-cache", "cache-read", "proof-read", "digest-read", "comparison"])
+def test_sidecar_unavailable_replay_metadata_still_commits(client, tmp_path, monkeypatch, failure):
+    import store
+    import write_loop
+
+    backend = _seed_unchanged_dwg(tmp_path)
+    if failure == "missing-cache":
+        backend.delete(write_loop.intake_cache_key(saves.TENANT, saves.DWG_DRAWING, 1))
+    else:
+        def fail(*args, **kwargs):
+            if failure == "proof-read":
+                raise write_loop.ProofStateUnreadable("unavailable proof")
+            raise OSError("unavailable replay metadata")
+
+        target = ("version_content_sha256" if failure == "digest-read" else
+                  "verify_live_mutation_effects" if failure == "comparison" else "read_intake")
+        monkeypatch.setattr(write_loop, target, fail)
+    response = saves._post(client, saves.DWG_DRAWING, {})
+    assert response.status_code == 201, response.text
+    assert response.json()["commit"] == "dxf-sidecar"
+    assert store.load_manifest(backend, saves.TENANT, saves.DWG_DRAWING)["head"] == 2
+    response = _get(client)
+    assert response.status_code == 404
+    assert response.json()["error"]["error_code"] == "no_plan"
+
+
+def test_unchanged_sidecar_stores_empty_plan(client, tmp_path):
+    backend = _seed_unchanged_dwg(tmp_path)
+    expected = _expected(backend, saves.DWG_DRAWING, {})
+    response = saves._post(client, saves.DWG_DRAWING, {})
+    assert response.status_code == 201, response.text
+    assert response.json()["commit"] == "dxf-sidecar"
+    assert response.json()["plan_sha256"] is None
+    _assert_plan(client, backend, saves.DWG_DRAWING, expected)
 
 
 def test_gated_live_sidecar_still_stores_plan(client, tmp_path, monkeypatch):
     import deps
 
-    backend = saves._seed_dwg_backed(tmp_path)
+    backend = saves._seed_dwg_backed(tmp_path, intake=saves._live_base_intake())
     monkeypatch.setattr(deps, "APS_LIVE", True)
-    mutations = {"set_layer": [{"handle": "A", "layer": "Moved"}]}
+    mutations = saves._live_mutations()
     expected = _expected(backend, saves.DWG_DRAWING, mutations)
     response = saves._post(client, saves.DWG_DRAWING, mutations)
     assert response.status_code == 201, response.text
@@ -204,7 +312,7 @@ def test_unknown_drawing_is_404_without_writing(client, tmp_path):
 
 
 def test_another_tenant_cannot_read_plan(client, tmp_path):
-    saves._seed_dwg_backed(tmp_path)
+    _seed_unchanged_dwg(tmp_path)
     assert saves._post(client, saves.DWG_DRAWING, {}).status_code == 201
     assert _get(client, tenant="other-tenant").status_code == 404
     assert _get(client).status_code == 200
@@ -213,7 +321,7 @@ def test_another_tenant_cannot_read_plan(client, tmp_path):
 def test_tampered_plan_never_returns_text(client, tmp_path):
     import store
 
-    backend = saves._seed_dwg_backed(tmp_path)
+    backend = _seed_unchanged_dwg(tmp_path)
     assert saves._post(client, saves.DWG_DRAWING, {}).status_code == 201
     backend.put(store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2), b"tampered-secret")
     response = _get(client)
@@ -224,7 +332,7 @@ def test_tampered_plan_never_returns_text(client, tmp_path):
 
 
 def test_read_plan_works_with_mutations_disabled(client, tmp_path, monkeypatch):
-    saves._seed_dwg_backed(tmp_path)
+    _seed_unchanged_dwg(tmp_path)
     assert saves._post(client, saves.DWG_DRAWING, {}).status_code == 201
     monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
     assert _get(client).status_code == 200
@@ -235,7 +343,7 @@ def test_read_plan_works_with_mutations_disabled(client, tmp_path, monkeypatch):
 def test_failed_manifest_publication_leaves_no_plan(client, tmp_path, monkeypatch):
     import store
 
-    backend = saves._seed_dwg_backed(tmp_path)
+    backend = _seed_unchanged_dwg(tmp_path)
     real = store.FilesystemBackend.put
 
     def fail(self, key, data):
@@ -260,7 +368,7 @@ def test_plan_write_failure_commits_like_no_plan(
     error_type = OSError if error_kind == "oserror" else store.ImmutableConflict
     baseline_dir = tmp_path / "baseline"
     baseline_dir.mkdir()
-    saves._seed_dwg_backed(baseline_dir)
+    _seed_unchanged_dwg(baseline_dir)
     real_publish = write_loop._put_bytes_version
 
     def without_plan(*args, **kwargs):
@@ -273,7 +381,7 @@ def test_plan_write_failure_commits_like_no_plan(
         expected = saves._post(client, saves.DWG_DRAWING, {})
     assert expected.status_code == 201, expected.text
 
-    backend = saves._seed_dwg_backed(tmp_path)
+    backend = _seed_unchanged_dwg(tmp_path)
     real_put = store.FilesystemBackend.put
     real_delete = store.FilesystemBackend.delete
 

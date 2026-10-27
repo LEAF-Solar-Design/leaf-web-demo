@@ -296,6 +296,8 @@ def get_version_plan(drawing_id: str, version: str,
         "drawing_id": drawing_id, "version": v,
         "parent_version": entry["parent_version"],
         "plan_sha256": entry["plan_sha256"], "plan_text": plan_text,
+        "result_sha256": write_loop.version_content_sha256(
+            backend, str(tenant_id), drawing_id, v),
     })
 
 
@@ -1850,17 +1852,29 @@ def save_plan_version(drawing_id: str,
     plan_digest: Optional[str] = None
     plan_bytes: Optional[bytes] = None
     canonical = {}
-    if leg in ("dwg-plan", "dwg-plan-live", "dxf-sidecar"):
+    try:
+        base_digest = write_loop.version_content_sha256(
+            backend, str(tenant_id), drawing_id, head_v)
+    except Exception:  # Optional replay metadata cannot refuse a save.
+        base_digest = None
+    base_intake = None
+    if leg != "dxf-sidecar" or base_digest is not None:
         try:
             _base_v, base_intake = write_loop.read_intake(
                 backend, str(tenant_id), drawing_id, int(head_v))
         except write_loop.ProofStateUnreadable as exc:
-            return error_response(ErrorCode.INTERNAL, str(exc),
-                                  retryable=True, status_code=503)
+            if leg != "dxf-sidecar":
+                return error_response(ErrorCode.INTERNAL, str(exc),
+                                      retryable=True, status_code=503)
         except (KeyError, ValueError):
-            return error_response(ErrorCode.BAD_PARAMS,
-                                  "drawing unavailable or malformed request",
-                                  retryable=False, status_code=400)
+            if leg != "dxf-sidecar":
+                return error_response(ErrorCode.BAD_PARAMS,
+                                      "drawing unavailable or malformed request",
+                                      retryable=False, status_code=400)
+        except Exception:
+            if leg != "dxf-sidecar":
+                raise
+    if base_intake is not None:
         try:
             canonical = mutation_plan.validate_mutations(
                 base_intake, mutations, allow_transforms=True, allow_xdata=False,
@@ -1868,12 +1882,13 @@ def save_plan_version(drawing_id: str,
             # The lowering runs here too, so a plan the live WorkItem would
             # refuse (a non-planar polyline, a collinear closed one) is refused
             # on this leg as well, with the same sentence.
-            plan_bytes = mutation_plan.emit_plan(
-                canonical, base_sha256=(hashlib.sha256(head_source).hexdigest()
-                                        if dwg_backed else actual_digest),
-                base_intake=base_intake)
-        except ValueError as exc:
+            if base_digest is not None:
+                plan_bytes = mutation_plan.emit_plan(
+                    canonical, base_sha256=base_digest, base_intake=base_intake)
+        except Exception as exc:
             if leg != "dxf-sidecar":
+                if not isinstance(exc, ValueError):
+                    raise
                 return error_response(ErrorCode.BAD_PARAMS,
                                       f"the edit plan was refused: {exc}",
                                       retryable=False, status_code=422)
@@ -1885,7 +1900,7 @@ def save_plan_version(drawing_id: str,
             if leg in ("dwg-plan", "dwg-plan-live") or mutations.get("block_defs"):
                 plan_digest = stored_plan_digest
 
-        if plan_bytes is not None and (leg == "dwg-plan-live" or canonical.get("block_defs")
+        if plan_bytes is not None and (leg in ("dwg-plan-live", "dxf-sidecar") or canonical.get("block_defs")
                 or any(e.get("kind") == "MLEADER" for e in canonical.get("added", []))
                 or "MULTILEADER" in canonical.get("removed_kinds", {}).values()
                 or "mleaders_unsupported" in base_intake
@@ -1893,11 +1908,6 @@ def save_plan_version(drawing_id: str,
             # The client computes the plan from the same entity list it wrote the
             # DXF from, so a mismatch is a client defect. Never commit a plan the
             # bytes beside it contradict.
-            expected_base = copy.deepcopy(base_intake)
-            expected_base["dwg"] = drawing_id
-            uploaded = copy.deepcopy(intake)
-            uploaded["dwg"] = drawing_id
-
             def text_entities(entities):
                 entries = Counter()
                 for entity in entities:
@@ -1914,6 +1924,10 @@ def save_plan_version(drawing_id: str,
                 return entries
 
             try:
+                expected_base = copy.deepcopy(base_intake)
+                expected_base["dwg"] = drawing_id
+                uploaded = copy.deepcopy(intake)
+                uploaded["dwg"] = drawing_id
                 if "texts" in base_intake and (
                     text_entities(uploaded.get("texts") or [])
                     != text_entities(base_intake.get("texts") or [])
@@ -1985,10 +1999,16 @@ def save_plan_version(drawing_id: str,
                         field in entity for entity in canonical.get("added", [])
                         for field in mutation_plan.STYLE_FIELDS)):
                     raise ValueError(properties_note)
-            except ValueError as exc:
-                return error_response(ErrorCode.BAD_PARAMS,
-                                      f"the uploaded DXF does not carry the plan's result: {exc}",
-                                      retryable=False, status_code=422)
+            except Exception as exc:
+                if leg == "dxf-sidecar":
+                    plan_bytes = None
+                    plan_digest = None
+                else:
+                    if not isinstance(exc, ValueError):
+                        raise
+                    return error_response(ErrorCode.BAD_PARAMS,
+                                          f"the uploaded DXF does not carry the plan's result: {exc}",
+                                          retryable=False, status_code=422)
 
     if leg == "dwg-plan-live":
         co = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
