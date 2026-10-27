@@ -868,7 +868,7 @@ def test_browser_config_uses_private_worker_port(tmp_path, worker):
     port = 5185 + 100 * int(worker or "0")
     assert value["use"]["baseURL"] == f"http://127.0.0.1:{port}"
     assert value["webServer"]["url"] == f"http://127.0.0.1:{port}/app"
-    assert value["webServer"]["command"].endswith(f"--port {port} --strictPort")
+    assert value["webServer"]["command"] == f"npm run dev -- --hostname 127.0.0.1 --port {port}"
     assert value["webServer"]["reuseExistingServer"] is False
 
 

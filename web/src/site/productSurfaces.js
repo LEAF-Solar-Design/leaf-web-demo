@@ -178,7 +178,7 @@ export const PRODUCT_SURFACES = Object.freeze([
       toolbar: {
         profile: 'project',
         // The shared shell seats this profile's project, tools and activity tabs.
-        ribbon: true,
+        ribbon: false,
         // Invalid selections fall back to this profile's home on a switch.
         home: 'project',
         // quick: CockpitTopBand.jsx takes `before`/`after` as PROPS built in

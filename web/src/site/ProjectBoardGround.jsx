@@ -89,6 +89,9 @@ export function ProjectBoardGround({
         {typeof actions?.onOpenSettings === 'function' && (
           <button type="button" onClick={actions.onOpenSettings}>Project settings</button>
         )}
+        {typeof actions?.onOpenPhotos === 'function' && (
+          <button type="button" onClick={actions.onOpenPhotos}>Photos</button>
+        )}
         {panel}
         {worldSpace ? (
           <WorldSpaceBoard key={workspaceProject?.project_id || 'anonymous'} scopeId={workspaceProject?.project_id || 'anonymous'} viewport={win} store={store}>

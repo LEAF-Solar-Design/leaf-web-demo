@@ -8,11 +8,13 @@
 //   node scripts/check_bundle_budget.mjs                  # gate against baseline
 //   node scripts/check_bundle_budget.mjs --write-baseline # reseed after a deliberate change
 //   node scripts/check_bundle_budget.mjs --write-baseline --before <ref> # explicit before source
-import { existsSync, readdirSync, readFileSync, realpathSync, writeFileSync } from 'node:fs'
+import { existsSync, readdirSync, readFileSync, realpathSync } from 'node:fs'
 import { gzipSync } from 'node:zlib'
 import { join, dirname, isAbsolute, resolve } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { execFileSync } from 'node:child_process'
+
+import { bundleGraph } from './bundle-assets.mjs'
 
 const ROOT = join(dirname(fileURLToPath(import.meta.url)), '..')
 const DIST = join(ROOT, 'dist', 'assets')
@@ -132,50 +134,53 @@ export function stemFailures(chunks, baseline) {
 
 async function main() {
 if (process.argv.includes('--write-baseline')) {
-  // Isolate this slice from unrelated drift since the older total baseline.
-  // Both builds use identical dependencies/configuration; changed web/src
-  // files are overlaid in memory for the before build.
-  // No checkout edits, dist writes or temporary files are needed.
-  const { build } = await import('vite')
-  const previous = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'))
-  let mergeBase = null
-  if (!process.argv.includes('--before')) {
-    try { mergeBase = execFileSync('git', ['merge-base', 'HEAD', 'origin/main'], { cwd: ROOT, encoding: 'utf8' }).trim() }
-    catch { /* beforeReference reports the required explicit fallback. */ }
+  throw new Error('Automatic Vite reseeding is retired. Supply a reviewed before/after Next artifact measurement before changing the committed baseline.')
+}
+const distArg = process.argv.indexOf('--dist')
+const bundleRoot = distArg === -1 ? join(ROOT, 'dist') : resolve(process.argv[distArg + 1])
+const nextDist = join(bundleRoot, '_next', 'static')
+if (existsSync(nextDist)) {
+  const graph = bundleGraph(bundleRoot)
+  const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'))
+  const bytes = file => gzipSync(graph.assets.get(file), { level: 9 }).length
+  const files = [...graph.assets.keys()].filter(file => file.startsWith('_next/static/') && /\.(js|css)$/.test(file))
+  // Comparable to the old budget: sum gzip-9 of every emitted JS/CSS file,
+  // including lazy and worker chunks, once each. Engine glue/wasm was never
+  // part of dist/assets and is still outside this metric.
+  const total = files.reduce((sum, file) => sum + bytes(file), 0)
+  // Startup is a separate diagnostic, not a replacement for the total cap:
+  // HTML script/link roots plus their eager import closure; dynamic imports
+  // are excluded. Framework/runtime bytes count just like application bytes.
+  const startup = [...graph.startup].reduce((sum, file) => sum + bytes(file), 0)
+  const ceiling = (baseline.next?.total ?? baseline.total) + baseline.total_allowance_bytes
+  // React.lazy need not appear in Next's react-loadable manifest. Its
+  // unique emitted markup identifies the chunk, and emitted dependency
+  // edges bind the lazy closure without trusting a producer claim.
+  const canvasFiles = new Set([...graph.assets].filter(([file, code]) =>
+    file.endsWith('.js') && code.includes('lab-canvas-editor')).map(([file]) => file))
+  if (!canvasFiles.size) throw new Error('No emitted lazy LabCanvas dependency evidence')
+  for (const file of canvasFiles) if (!graph.reachable.has(file)) throw new Error(`Unreachable lazy canvas asset: ${file}`)
+  const closure = graph.closure([...canvasFiles])
+  const js = [...closure].filter(file => file.endsWith('.js') && !graph.startup.has(file))
+  const css = files.filter(file => file.endsWith('.css') && graph.assets.get(file).includes('.react-flow'))
+  // Webpack shares modules across chunk boundaries. The complete-export cap
+  // bounds all of them; Rollup-specific stem caps cannot measure this graph.
+  const jsBytes = js.reduce((sum, file) => sum + bytes(file), 0)
+  const cssBytes = css.reduce((sum, file) => sum + bytes(file), 0)
+  const measurement = { framework: 'next', method: 'gzip-9 complete emitted JS/CSS', total,
+    startup, lazy_canvas_js: jsBytes, lazy_canvas_css: cssBytes, files: files.length,
+    prior_total: baseline.total, prior_ceiling: ceiling }
+  if (process.argv.includes('--measure-next')) {
+    console.log(JSON.stringify(measurement))
+    return
   }
-  const beforeRef = beforeReference(process.argv, mergeBase)
-  const sourceRef = execFileSync('git', ['rev-parse', '--verify', beforeRef], { cwd: ROOT, encoding: 'utf8' }).trim()
-  const overlay = beforeOverlay(sourceRef)
-  const measure = async before => {
-    const result = await build({ root: ROOT, logLevel: 'warn',
-      build: { write: false, emptyOutDir: false },
-      plugins: before ? [overlay.plugin] : [],
-    })
-    const chunks = {}
-    for (const bundle of Array.isArray(result) ? result : [result]) for (const asset of bundle.output) {
-      if (!/\.(js|css)$/.test(asset.fileName)) continue
-      const name = stem(asset.fileName.split('/').at(-1))
-      const content = asset.type === 'chunk' ? asset.code : asset.source
-      chunks[name] = (chunks[name] || 0) + gzipSync(content, { level: 9 }).length
-    }
-    return { chunks, total: Object.values(chunks).reduce((sum, bytes) => sum + bytes, 0) }
-  }
-  const before = await measure(true)
-  const after = await measure(false)
-  const { chunks, deltas, required_stems } = isolatedChunks(previous, before, after)
-  const canvas = Object.entries(after.chunks).filter(([name]) => isCanvasStem(name))
-  if (!['LabCanvas.js', 'LabCanvas.css'].every(name => Object.hasOwn(after.chunks, name))) {
-    throw new Error(`Lazy LabCanvas.js or LabCanvas.css chunk missing; wire LabWorkbench into the production app before reseeding. Observed before ${before.total}, after ${after.total} gzip bytes.`)
-  }
-  const ref = execFileSync('git', ['rev-parse', '--short', 'HEAD'], { cwd: ROOT, encoding: 'utf8' }).trim()
-  const total = Object.values(chunks).reduce((sum, bytes) => sum + bytes, 0)
-  writeFileSync(BASELINE_PATH, JSON.stringify({ ...previous, _ref: ref, chunks, total, required_stems,
-    stem_caps: { ...previous.stem_caps, ...Object.fromEntries(canvas.map(([name, bytes]) => [name, bytes + 4096])) },
-    ...measurementReceipt({ sourceRef, before, after, previous, canvas, deltas, paths: overlay.paths }),
-  }, null, 2) + '\n')
-  console.log(`Slice isolated: before ${before.total}, after ${after.total}, delta ${after.total - before.total} gzip bytes`)
-  console.log(`bundle baseline ${previous.total} -> ${total}; unrelated drift ${before.total - previous.total} bytes was not reseeded`)
-  console.log(`canvas hard caps: ${JSON.stringify(Object.fromEntries(canvas.map(([name, bytes]) => [name, bytes + 4096])))}`)
+  if (!baseline.next) throw new Error('Next requires a measured export baseline for this framework migration')
+  if (total > ceiling) throw new Error(`bundle budget EXCEEDED: all Next JS/CSS gzip-9 ${total} > ${ceiling}`)
+  if (!css.length) throw new Error('Missing lazy canvas CSS')
+  if ([...canvasFiles].some(file => graph.startup.has(file))) throw new Error('Lazy canvas has entered the startup script closure')
+  const initial = [...graph.startup].map(file => graph.assets.get(file)).join('\n')
+  if (/__THREE__|three\.(?:module|core)|node_modules[/\\\\]three[/\\\\]/.test(initial)) throw new Error('Viewer dependency in startup scripts')
+  console.log(`bundle budget ok: complete Next JS/CSS ${total} gzip-9 bytes (ceiling ${ceiling}); startup ${startup}; lazy canvas/ELK ${jsBytes} JS + ${cssBytes} CSS`)
   return
 }
 

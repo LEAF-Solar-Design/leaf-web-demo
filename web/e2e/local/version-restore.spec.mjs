@@ -123,6 +123,11 @@ async function mountVersionSurface(page, {
 
   await page.goto('/app?drawing=cat-panels')
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg', { timeout: 15_000 })
+  // Each profile starts with its floating panels closed. Enter through the
+  // same Studio control a user opens before giving the drawing a command.
+  const studio = page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true })
+  await studio.click()
+  await expect(studio).toHaveAttribute('aria-expanded', 'true')
   // Seat a real versioned drawing through App's production controller path.
   // The initial session intake alone is intentionally unversioned.
   await page.getByLabel('Command bar', { exact: true }).fill(REQUEST)
@@ -208,8 +213,7 @@ test('an unreadable restored head keeps its warning through history refresh and 
   await expect(persistentLock).toHaveAttribute('data-latest', '4')
   await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   await expect(page.locator('[data-quick="quick-redo"]')).toBeDisabled()
-  // The studio shell collapses the tool rail to a spine; its band's Tool rail button expands it.
-  await page.getByRole('button', { name: 'Tool rail', exact: true }).click()
+  // Studio's open overlay already exposes the tool catalog.
   await page.getByRole('button', { name: /Drawing tools/ }).click()
   const writeTool = page.locator('.tool-card').filter({ hasText: 'arrange-panels-as-cat' })
   await writeTool.getByRole('button').first().click()

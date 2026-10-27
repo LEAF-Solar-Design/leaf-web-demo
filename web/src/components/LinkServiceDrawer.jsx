@@ -33,9 +33,11 @@ import { humanizeError } from '../errorHumanize.js'
 const authorizationState = (server) => (
   server.state === 'connected' ? 'connected'
     : server.state === 'error' ? 'sign-in-failed'
+      : server.state === 'connecting' ? 'sign-in-pending'
       : 'sign-in-needed'
 )
 const reachabilityState = (result) => (result?.state === 'error' ? 'unreachable' : 'reachable')
+const VERCEL_HOST = 'mcp.vercel.com'
 const isAllowedAuthorizationUrl = (url) => (
   url.protocol === 'https:'
   || (url.protocol === 'http:' && ['localhost', '127.0.0.1', '::1', '[::1]'].includes(url.hostname))
@@ -62,6 +64,11 @@ export default function LinkServiceDrawer({
   const [healthResults, setHealthResults] = useState({})
   const [registerError, setRegisterError] = useState(null)
   const [refreshedServers, setRefreshedServers] = useState(null)
+  const [connecting, setConnecting] = useState(null)
+  const connectLock = useRef(false)
+  const activeAuthorizations = useRef(new Map())
+  // Retain a successful registration for retry even if the hook's list refresh fails.
+  const registeredVercel = useRef(null)
   const rootRef = useRef(null)
   const triggerRef = useRef(null)
   const dialogRef = useRef(null)
@@ -78,6 +85,8 @@ export default function LinkServiceDrawer({
   const serverIdsKey = JSON.stringify([...new Set(list.map((server) => server.id))].sort())
   const listFailed = error?.kind === 'list'
   const mutationError = listFailed ? error.mutationError : error
+  const vercelServer = list.find((server) => server.host === VERCEL_HOST)
+  const serviceBusy = busy || connecting !== null
   const shownState = (server) => {
     if (server.state === 'error') return authorizationState(server)
     const result = healthResults[server.id]
@@ -89,7 +98,21 @@ export default function LinkServiceDrawer({
   drawerOpenRef.current = open
   registryRefreshRef.current = onRefresh
 
+  const reconcileRegistry = (records) => {
+    if (!Array.isArray(records)) return // A failed refresh is not an empty registry.
+    if (!records.some((record) => record.id === registeredVercel.current && record.host === VERCEL_HOST)) {
+      registeredVercel.current = null
+    }
+    for (const [id, authorization] of activeAuthorizations.current) {
+      const record = records.find((row) => row.id === id)
+      if (!record || record.state === 'connected' || record.state === 'error' || authorization.popup.closed) {
+        activeAuthorizations.current.delete(id)
+      }
+    }
+  }
+
   useEffect(() => {
+    reconcileRegistry(servers)
     setRefreshedServers(null)
   }, [servers])
 
@@ -140,7 +163,10 @@ export default function LinkServiceDrawer({
       refreshHealth()
       try {
         const nextServers = await registryRefreshRef.current?.()
-        if (drawerOpenRef.current && Array.isArray(nextServers)) setRefreshedServers(nextServers)
+        if (drawerOpenRef.current && Array.isArray(nextServers)) {
+          reconcileRegistry(nextServers)
+          setRefreshedServers(nextServers)
+        }
       } catch (e) {
         if (drawerOpenRef.current) setRegisterError(humanizeError(e))
       } finally {
@@ -184,7 +210,7 @@ export default function LinkServiceDrawer({
   const submit = async () => {
     const u = url.trim()
     const l = label.trim()
-    if (!u || !l || busy) return
+    if (!u || !l || serviceBusy || connectLock.current) return
     setRegisterError(null)
     try {
       const result = await onRegister(u, l)
@@ -202,23 +228,45 @@ export default function LinkServiceDrawer({
     }
   }
 
-  const runConnect = async (id) => {
-    setConnectErrors((current) => ({ ...current, [id]: null }))
-    // Reserve the tab during the click, before the asynchronous authorization request.
+  const runConnect = async (id, vercel = false) => {
+    if (busy || connectLock.current) return
+    if (vercel && !id) id = registeredVercel.current
+    const pendingAuthorization = id && activeAuthorizations.current.get(id)
+    if (pendingAuthorization && !pendingAuthorization.popup.closed) {
+      pendingAuthorization.popup.focus?.()
+      authorizationTabOpened.current = true
+      return
+    }
+    if (id) activeAuthorizations.current.delete(id)
+    connectLock.current = true
+    setConnecting(vercel && !id ? 'Registering Vercel…' : 'Opening sign-in…')
+    setRegisterError(null)
+    if (id) setConnectErrors((current) => ({ ...current, [id]: null }))
+    // Reserve during the click, before either registration or authorization awaits.
     let popup
-    let result
     try {
       popup = window.open('about:blank', '_blank')
       if (popup) popup.opener = null
-      result = await onConnect(id)
-    } catch (e) {
-      popup?.close()
-      const reason = e?.body?.error?.message || humanizeError(e)
-      setConnectErrors((current) => ({ ...current, [id]: reason }))
-      return
-    }
-    const startUrl = result?.authorize_url
-    try {
+      if (vercel && (!popup || popup.closed)) {
+        throw new Error('The sign-in tab was blocked or closed. Allow pop-ups and try Connect again.')
+      }
+      if (vercel && !id) {
+        id = registeredVercel.current
+        if (!id) {
+          const record = await onRegister(`https://${VERCEL_HOST}`, 'Vercel')
+          if (!record?.id || record.host !== VERCEL_HOST) {
+            throw new Error('Vercel was not linked. Refresh linked services and try again.')
+          }
+          id = record.id
+          registeredVercel.current = id
+          const projected = { id, label: record.label, host: record.host, state: record.state, linked_at: record.linked_at }
+          setRefreshedServers((current) => [...(current || list).filter((row) => row.id !== id), projected])
+        }
+      }
+      setConnectErrors((current) => ({ ...current, [id]: null }))
+      setConnecting('Opening sign-in…')
+      const result = await onConnect(id)
+      const startUrl = result?.authorize_url
       if (typeof startUrl === 'string' && startUrl.trim()) {
         if (!popup || popup.closed) {
           setConnectErrors((current) => ({ ...current, [id]: 'The sign-in tab was blocked or closed. Allow pop-ups and try Connect again.' }))
@@ -230,6 +278,7 @@ export default function LinkServiceDrawer({
             return
           }
           popup.location.replace(authorizationUrl.toString())
+          activeAuthorizations.current.set(id, { popup })
           authorizationTabOpened.current = true
         }
       } else {
@@ -239,7 +288,11 @@ export default function LinkServiceDrawer({
     } catch (e) {
       popup?.close()
       const reason = e?.body?.error?.message || humanizeError(e)
-      setConnectErrors((current) => ({ ...current, [id]: reason }))
+      if (id) setConnectErrors((current) => ({ ...current, [id]: reason }))
+      else setRegisterError(reason)
+    } finally {
+      connectLock.current = false
+      setConnecting(null)
     }
   }
 
@@ -272,6 +325,8 @@ export default function LinkServiceDrawer({
   const runUnlink = async (id) => {
     try {
       await onUnlink(id)
+      activeAuthorizations.current.delete(id)
+      if (registeredVercel.current === id) registeredVercel.current = null
       healthGeneration.current[id] = (healthGeneration.current[id] || 0) + 1
       automaticallyCheckedIds.current.delete(id)
       setConnectErrors((current) => { const next = { ...current }; delete next[id]; return next })
@@ -293,6 +348,7 @@ export default function LinkServiceDrawer({
     state === 'connected' ? 'Connected'
       : state === 'unreachable' ? 'Unreachable'
         : state === 'sign-in-failed' ? 'Sign-in failed, try again'
+        : state === 'sign-in-pending' ? 'Sign-in pending'
         : 'Sign in needed'
   )
 
@@ -324,6 +380,17 @@ export default function LinkServiceDrawer({
             <EscCap ref={closeRef} onClick={() => onToggle(false)} label="Close linked services panel" />
           </div>
 
+          <div className="ca-setup" role="group" aria-label="Vercel setup">
+            <b>Vercel</b>
+            <p className="ca-copy">Host your app in your own Vercel account. Connecting does not publish your site.</p>
+            <p className="ca-copy"><a href="https://vercel.com/signup" target="_blank" rel="noopener noreferrer">Create Vercel account</a></p>
+            <button className="btn primary ca-act" onClick={() => runConnect(vercelServer?.id, true)}
+              disabled={serviceBusy || loading || listFailed || vercelServer?.state === 'connected'}>
+              {vercelServer?.state === 'connected' ? 'Vercel connected' : 'Connect Vercel'}
+            </button>
+            {connecting && <p className="ca-copy" role="status">{connecting}</p>}
+          </div>
+
           <div className="ca-linked">
             {listFailed && (
               <div className="field-err" role="alert">
@@ -349,20 +416,21 @@ export default function LinkServiceDrawer({
                       {server.host && <span>{server.host}</span>}
                       {health && <span>Connection checked: {health === 'unreachable' ? 'Unreachable' : 'Reachable'}</span>}
                     </div>
+                    {server.state === 'connecting' && <p className="ca-copy">Finish sign-in in the service tab. Connect resumes the current attempt.</p>}
                     {connectErr && (
                       <div className="field-err" role="alert"><span className="dot red" />{connectErr}</div>
                     )}
                     <div className="ca-account-actions">
-                      <button className="chip-act" onClick={() => runConnect(server.id)} disabled={busy}>Connect</button>
-                      <button className="chip-neutral" onClick={() => runHealth(server.id)} disabled={busy}>Health</button>
+                      <button className="chip-act" onClick={() => runConnect(server.id)} disabled={serviceBusy}>Connect</button>
+                      <button className="chip-neutral" onClick={() => runHealth(server.id)} disabled={serviceBusy}>Health</button>
                       {confirmUnlink !== server.id ? (
-                        <button className="chip-danger" onClick={() => setConfirmUnlink(server.id)} disabled={busy}>Unlink</button>
+                        <button className="chip-danger" onClick={() => setConfirmUnlink(server.id)} disabled={serviceBusy}>Unlink</button>
                       ) : (
                         <>
-                          <button className="chip-danger-confirm" onClick={() => runUnlink(server.id)} disabled={busy}>
+                          <button className="chip-danger-confirm" onClick={() => runUnlink(server.id)} disabled={serviceBusy}>
                             {busy ? 'Unlinking…' : 'Unlink'}
                           </button>
-                          <button className="chip-neutral" onClick={() => setConfirmUnlink(null)} disabled={busy}>Keep</button>
+                          <button className="chip-neutral" onClick={() => setConfirmUnlink(null)} disabled={serviceBusy}>Keep</button>
                         </>
                       )}
                     </div>
@@ -382,7 +450,7 @@ export default function LinkServiceDrawer({
                 onChange={(event) => setLabel(event.target.value)}
                 placeholder="Billing tool"
                 maxLength={80}
-                disabled={busy}
+                disabled={serviceBusy}
               />
             </label>
             <label className="ca-field">
@@ -398,10 +466,10 @@ export default function LinkServiceDrawer({
                 placeholder="https://mcp.example.com/sse"
                 autoComplete="off"
                 spellCheck={false}
-                disabled={busy}
+                disabled={serviceBusy}
               />
             </label>
-            <button className="btn primary ca-act" onClick={submit} disabled={busy || !url.trim() || !label.trim()} title={busy ? 'Please wait for the service update.' : !url.trim() || !label.trim() ? 'Enter a service label and address.' : undefined}>
+            <button className="btn primary ca-act" onClick={submit} disabled={serviceBusy || !url.trim() || !label.trim()} title={serviceBusy ? 'Please wait for the service update.' : !url.trim() || !label.trim() ? 'Enter a service label and address.' : undefined}>
               {busy ? 'Linking…' : 'Link service'}
             </button>
             <p className="ca-note">Your sign-in details are stored securely and are hidden in this panel.</p>
