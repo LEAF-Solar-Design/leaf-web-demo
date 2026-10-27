@@ -2,12 +2,14 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
+import { getStoredOrgId, listProjects, openProject, requestBindingGrant, getDrawingVersions } from '../api.js'
+import { pull, publish } from './drawingSync.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import LeafPlatformScene from './LeafPlatformScene.jsx'
 
-vi.mock('../api.js', () => ({ getStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn() }))
+vi.mock('../api.js', () => ({ getStoredOrgId: vi.fn(), listProjects: vi.fn(), openProject: vi.fn(), requestBindingGrant: vi.fn(), getDrawingVersions: vi.fn() }))
+vi.mock('./drawingSync.js', async (importOriginal) => ({ ...await importOriginal(), pull: vi.fn(), publish: vi.fn() }))
 vi.mock('../auth.js', () => ({ isSignedIn: vi.fn(), login: vi.fn() }))
 vi.mock('./hostBridge.js', () => ({ getLeafHostBridge: vi.fn() }))
 
@@ -60,6 +62,49 @@ function expectStudioRecovery() {
 }
 
 describe('AutoCAD palette scene in Studio', () => {
+  it('shows the drawing sync row and publishes the first version', async () => {
+    state = { status: 'connected', ready, selectedObjectId: null }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    getDrawingVersions.mockResolvedValue({ head: 3 })
+    let finish
+    publish.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+    render(<LeafPlatformScene />)
+    const button = await screen.findByRole('button', { name: 'Publish drawing' })
+    expect(screen.getByText(/Drawing store: roof-1/).textContent).toContain('not synced')
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(true)
+    fireEvent.click(button)
+    fireEvent.click(button)
+    expect(publish).toHaveBeenCalledTimes(1)
+    expect(publish).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: null })
+    expect(button.disabled).toBe(true)
+    await act(async () => { finish({ cursor: 4 }) })
+    expect(screen.getByRole('button', { name: 'Publish' }).disabled).toBe(false)
+    expect(screen.getByRole('button', { name: 'Pull' }).disabled).toBe(false)
+    expect(screen.getByText('Drawing published.')).toBeTruthy()
+  })
+
+  it('starts from the matching native cursor and pulls', async () => {
+    state = { status: 'connected', ready: { ...ready, syncCursor: { drawingStoreId: 'roof-1', version: 2 } } }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    getDrawingVersions.mockResolvedValue({ head: 3 })
+    pull.mockResolvedValue({ cursor: 3, applied: [3], reason: null })
+    render(<LeafPlatformScene />)
+    const button = await screen.findByRole('button', { name: 'Pull' })
+    expect(button.disabled).toBe(false)
+    fireEvent.click(button)
+    await screen.findByText('Pulled 1 versions.')
+    expect(pull).toHaveBeenCalledWith({ api: expect.any(Object), bridge: expect.any(Object), drawingStoreId: 'roof-1', cursor: 2 })
+  })
+
+  it('ignores a cursor for a different drawing store', async () => {
+    state = { status: 'connected', ready: { ...ready, syncCursor: { drawingStoreId: 'other', version: 2 } } }
+    openProject.mockResolvedValue({ drawing_versions: [{ ...version, provenance: { source: { drawing_id: 'roof-1', version: 3 } } }] })
+    getDrawingVersions.mockResolvedValue({ head: 3 })
+    render(<LeafPlatformScene />)
+    expect((await screen.findByRole('button', { name: 'Pull' })).disabled).toBe(true)
+    expect(screen.getByRole('button', { name: 'Publish drawing' })).toBeTruthy()
+  })
+
   async function chooseGrantVersion() {
     state = { status: 'unbound', bindingGrantVersion: 1,
       ready: { sessionKey, sessionId: 'native-session', documentFingerprint: `sha256:${'a'.repeat(64)}` }, bindingResult: null }

@@ -100,6 +100,122 @@ const invalidHandles = [
   ['too many', Array.from({ length: 1001 }, (_, index) => index.toString(16))],
 ]
 
+describe('drawing sync commands', () => {
+  let bridge, channel
+  beforeEach(async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    vi.stubGlobal('TextEncoder', TextEncoder)
+    channel = fakeChannel()
+    bridge = createLeafHostBridge({ channel, location })
+    bridge.start()
+    await bridge.receive(ready())
+  })
+  afterEach(() => {
+    bridge.stop()
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
+  })
+  async function send(method, args) {
+    let posted
+    const sent = new Promise((resolve) => { posted = resolve })
+    channel.postMessage.mockImplementationOnce(posted)
+    const outcome = bridge[method](args)
+    return { sent: await sent, outcome }
+  }
+  const planArgs = { planText: '{"schema":"leaf.mutation_plan.v1"}', planSha256: 'a'.repeat(64),
+    parentVersion: 1, resultVersion: 2, drawingStoreId: 'roof-1' }
+  const cursorArgs = { drawingStoreId: 'roof-1', version: 2, exportSha256: 'b'.repeat(64) }
+  it.each([
+    ['applyPlan', planArgs, 'drawing.apply_plan', 'apply_plan', 'leaf.mutation_plan.v1', { ...planArgs, resultDrawingVersionId: identity.drawingVersionId }],
+    ['exportDxf', undefined, 'drawing.export_dxf', 'export_dxf', undefined, {}],
+    ['syncCursor', cursorArgs, 'drawing.sync_cursor', 'sync_cursor', 'leaf.sync_cursor.v1', cursorArgs],
+  ])('signs the %s envelope and exact payload', async (method, args, verb, action, mutation, payload) => {
+    const { sent, outcome } = await send(method, args)
+    expect(sent.verb).toBe(verb)
+    expect(sent.payload).toMatchObject({ ...identity, action, dispatchMode: DISPATCH_MODE, payload })
+    expect(sent.payload.payload).toEqual(payload)
+    expect(sent.payload.allowedMutation).toBe(mutation)
+    const { signature, ...body } = sent
+    expect(signature).toBe(sign(body).signature)
+    const reply = callback(sent.payload.commandId, 'rejected', 'test_complete')
+    if (method === 'exportDxf') {
+      const rejected = expect(outcome).rejects.toThrow('test_complete')
+      await bridge.receive(reply)
+      await rejected
+    } else {
+      await bridge.receive(reply)
+      expect(await outcome).toEqual(reply.payload)
+    }
+  })
+
+  async function exportMessage(commandId, overrides = {}) {
+    const bytes = new Uint8Array([0, 1, 2, 255])
+    const digest = await webcrypto.subtle.digest('SHA-256', bytes)
+    const sha256 = Buffer.from(digest).toString('hex')
+    return { bytes, sha256, message: envelope(ready(), { verb: 'drawing.dxf_export',
+      payload: { commandId, byteLength: bytes.length, exportSha256: sha256,
+        dxfBase64: Buffer.from(bytes).toString('base64'), ...overrides } }) }
+  }
+  it.each(['callback', 'data'])('waits for both replies when %s arrives first', async (first) => {
+    const { sent, outcome } = await send('exportDxf')
+    const data = await exportMessage(sent.payload.commandId)
+    const reply = callback(sent.payload.commandId)
+    const settled = vi.fn()
+    void outcome.then(settled)
+    await bridge.receive(first === 'callback' ? reply : data.message)
+    expect(settled).not.toHaveBeenCalled()
+    await bridge.receive(first === 'callback' ? data.message : reply)
+    expect(await outcome).toEqual({ bytes: data.bytes, sha256: data.sha256 })
+  })
+  it.each([
+    { exportSha256: '0'.repeat(64) }, { byteLength: 3 }, { byteLength: 16777217 },
+    { dxfBase64: 'invalid?' }, { extra: true }, { exportSha256: 'A'.repeat(64) },
+  ])('rejects malformed or mismatched export data %#', async (overrides) => {
+    const { sent, outcome } = await send('exportDxf')
+    const rejected = expect(outcome).rejects.toThrow('export_digest_mismatch')
+    const { message } = await exportMessage(sent.payload.commandId, overrides)
+    await bridge.receive(callback(sent.payload.commandId))
+    await bridge.receive(message)
+    await rejected
+  })
+  it('ignores an export for an unknown command', async () => {
+    const { sent, outcome } = await send('exportDxf')
+    const settled = vi.fn()
+    void outcome.then(settled)
+    await bridge.receive((await exportMessage(webcrypto.randomUUID())).message)
+    await bridge.receive(callback(sent.payload.commandId))
+    expect(settled).not.toHaveBeenCalled()
+    const data = await exportMessage(sent.payload.commandId)
+    await bridge.receive(data.message)
+    expect(await outcome).toEqual({ bytes: data.bytes, sha256: data.sha256 })
+  })
+  it.each([['applyPlan', planArgs, 30000], ['syncCursor', cursorArgs, 30000], ['exportDxf', undefined, 60000]])(
+    'rejects %s at its deadline', async (method, args, deadline) => {
+      vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+      const { outcome } = await send(method, args)
+      const rejected = expect(outcome).rejects.toThrow('timeout')
+      vi.advanceTimersByTime(deadline)
+      await rejected
+    })
+  it('parses an optional ready sync cursor', async () => {
+    await bridge.receive({ ...ready(), syncCursor: { drawingStoreId: 'roof-1', version: 7 } })
+    expect(bridge.state.ready.syncCursor).toEqual({ drawingStoreId: 'roof-1', version: 7 })
+  })
+  it('still times out an applied export when its data never arrives', async () => {
+    vi.useFakeTimers({ toFake: ['setTimeout', 'clearTimeout', 'Date'] })
+    const { sent, outcome } = await send('exportDxf')
+    const rejected = expect(outcome).rejects.toThrow('timeout')
+    await bridge.receive(callback(sent.payload.commandId))
+    vi.advanceTimersByTime(60000)
+    await rejected
+  })
+  it('ignores a malformed ready sync cursor', async () => {
+    const previous = bridge.state.ready
+    await bridge.receive({ ...ready(), syncCursor: { drawingStoreId: '../bad', version: 0 } })
+    expect(bridge.state.ready).toBe(previous)
+  })
+})
+
 describe('Studio bridge diagnostics and telemetry', () => {
   let bridge, channel, diagnostics, clock
   beforeEach(() => {

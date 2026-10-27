@@ -1466,6 +1466,12 @@ export async function getDrawingVersions(mock, drawingId, { includeDeltas = fals
   })
 }
 
+export async function getDrawingVersionPlan(drawingId, version) {
+  return http(`/api/drawings/${encodeURIComponent(drawingId)}/versions/${encodeURIComponent(version)}/plan`, {
+    headers: { 'X-Tenant-Id': TENANT, ...guestDrawingHeaders(drawingId) },
+  })
+}
+
 // GET /api/operator/sessions -> {sessions:[...]}. Slice 10b's act-scope
 // palette artifact index. Operator-gated at the server (contract/OPERATOR.md
 // §1-2): a caller with no granted operator principal gets 404. That is not a
