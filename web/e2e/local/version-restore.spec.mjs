@@ -213,8 +213,7 @@ test('an unreadable restored head keeps its warning through history refresh and 
   await expect(persistentLock).toHaveAttribute('data-latest', '4')
   await expect(page.locator('[data-quick="quick-undo"]')).toBeDisabled()
   await expect(page.locator('[data-quick="quick-redo"]')).toBeDisabled()
-  // The studio shell collapses the tool rail to a spine; its band's Tool rail button expands it.
-  await page.getByRole('button', { name: 'Tool rail', exact: true }).click()
+  // Studio's open overlay already exposes the tool catalog.
   await page.getByRole('button', { name: /Drawing tools/ }).click()
   const writeTool = page.locator('.tool-card').filter({ hasText: 'arrange-panels-as-cat' })
   await writeTool.getByRole('button').first().click()
