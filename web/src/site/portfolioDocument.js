@@ -14,11 +14,11 @@ function text(value, low, high, label) {
   if (typeof value !== 'string' || Array.from(value).length < low || Array.from(value).length > high || (low && !value.trim())
     || /[<>]/.test(value) || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.replaceAll('\n', ''))
     || /(?:[a-z][a-z0-9+.-]*:\/\/|\b(?:https?|ftp|file|data|javascript):|\bwww\.)/i.test(value)) {
-    throw new Error(`Check ${label}: use plain text, ${low}–${high} characters.`)
+    throw new Error(`Check ${label}: use plain text, ${low} to ${high} characters.`)
   }
 }
 function items(value, low, high) {
-  if (!Array.isArray(value) || value.length < low || value.length > high) throw new Error(`Use ${low}–${high} items.`)
+  if (!Array.isArray(value) || value.length < low || value.length > high) throw new Error(`Use ${low} to ${high} items.`)
 }
 
 export function validatePortfolioDocument(document, importing = false) {
