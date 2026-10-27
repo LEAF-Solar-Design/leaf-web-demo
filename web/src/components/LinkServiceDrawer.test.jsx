@@ -76,7 +76,8 @@ describe('LinkServiceDrawer', () => {
     })} />)
 
     expect(screen.getByText('Billing tool')).toBeInTheDocument()
-    expect(screen.getAllByText('Sign in needed')).toHaveLength(2)
+    expect(screen.getAllByText('Sign in needed')).toHaveLength(1)
+    expect(screen.getByText('Sign-in pending')).toBeInTheDocument()
     expect(screen.getByText('Roof scanner')).toBeInTheDocument()
     expect(screen.getByText('Connected')).toBeInTheDocument()
     expect(screen.getByText('Flaky server')).toBeInTheDocument()

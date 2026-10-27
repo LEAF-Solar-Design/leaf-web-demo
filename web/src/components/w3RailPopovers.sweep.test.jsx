@@ -170,7 +170,7 @@ describe('w3 monitor and account popovers', () => {
     onHealth.mockResolvedValue({ state: 'connected' })
     fireEvent.focus(window)
     await waitFor(() => expect(onHealth).toHaveBeenCalledTimes(2))
-    expect(screen.getByText('Sign in needed', { selector: '.state' })).toBeInTheDocument()
+    expect(screen.getByText('Sign-in pending', { selector: '.state' })).toBeInTheDocument()
     expect(screen.queryByText('Connected', { selector: '.state' })).not.toBeInTheDocument()
   })
 
@@ -183,6 +183,6 @@ describe('w3 monitor and account popovers', () => {
     onHealth.mockResolvedValue({ state: 'connected' })
     view.rerender(<LinkServiceDrawer {...props} />)
     await waitFor(() => expect(onHealth).toHaveBeenCalledTimes(2))
-    expect(screen.getByText('Sign in needed', { selector: '.state' })).toBeInTheDocument()
+    expect(screen.getByText('Sign-in pending', { selector: '.state' })).toBeInTheDocument()
   })
 })

@@ -85,6 +85,7 @@ class _FakeAsConfig:
         self.token_status = 200
         self.token_body = {"access_token": FAKE_TOKEN, "token_type": "bearer", "expires_in": 3600}
         self.revoked = False
+        self.requests = []
 
 
 class _Handler(BaseHTTPRequestHandler):
@@ -101,6 +102,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_GET(self):  # noqa: N802 - BaseHTTPRequestHandler API
         cfg: _FakeAsConfig = self.server.config  # type: ignore[attr-defined]
+        cfg.requests.append(("GET", self.path))
         if self.path == "/.well-known/oauth-protected-resource":
             if cfg.pr_oversized:
                 body = b"x" * (tenant_mcp._MAX_RESPONSE_BYTES + 4096)
@@ -118,6 +120,7 @@ class _Handler(BaseHTTPRequestHandler):
 
     def do_POST(self):  # noqa: N802
         cfg: _FakeAsConfig = self.server.config  # type: ignore[attr-defined]
+        cfg.requests.append(("POST", self.path))
         length = int(self.headers.get("Content-Length", 0) or 0)
         self.rfile.read(length)
         if self.path == "/register":
@@ -268,6 +271,87 @@ def test_connect_then_callback_links_and_leaks_nothing(fake_as):
     assert stored["oauth"]["access_token"] == FAKE_TOKEN  # persisted, never echoed
 
 
+def test_connect_after_reload_resumes_pending_without_discovery(fake_as):
+    base, cfg = fake_as
+    record = _seed_record(_TENANT, base + "/mcp")
+    route = f"/api/tenant/mcp-servers/{record['id']}/connect"
+    first = client().post(route)
+    assert first.status_code == 200
+    url = first.json()["authorize_url"]
+    requests_before = list(cfg.requests)
+    pending_path = tenant_mcp_store._pending_file()
+    pending_before = pending_path.read_bytes()
+
+    # A fresh client represents a reload; the authorization state is on disk.
+    repeated = client().post(route)
+    assert repeated.status_code == 200
+    assert repeated.json()["authorize_url"] == url
+    assert cfg.requests == requests_before
+    assert pending_path.read_bytes() == pending_before
+    assert len(json.loads(pending_before)) == 1
+    listing = client().get("/api/tenant/mcp-servers")
+    health = client().get(f"/api/tenant/mcp-servers/{record['id']}/health")
+    for response in (listing, health):
+        assert response.status_code == 200
+        assert "authorize_url" not in response.text
+        assert url not in response.text
+        _assert_no_leak(response.text)
+
+
+@pytest.mark.parametrize("binding", ["tenant_id", "server_id", "redirect_uri"])
+def test_pending_resume_requires_exact_binding(fake_as, binding):
+    base, cfg = fake_as
+    record = _seed_record(_TENANT, base + "/mcp")
+    first = client().post(f"/api/tenant/mcp-servers/{record['id']}/connect")
+    assert first.status_code == 200
+    url = first.json()["authorize_url"]
+    values = {
+        "tenant_id": _TENANT,
+        "server_id": record["id"],
+        "redirect_uri": parse_qs(urlsplit(url).query)["redirect_uri"][0],
+    }
+    assert tenant_mcp_store.pending_authorize_url(**values) == url
+    values[binding] += "-different"
+    assert tenant_mcp_store.pending_authorize_url(**values) is None
+
+
+def test_expired_pending_connect_starts_new_flow(fake_as, monkeypatch):
+    base, cfg = fake_as
+    record = _seed_record(_TENANT, base + "/mcp")
+    route = f"/api/tenant/mcp-servers/{record['id']}/connect"
+    first = client().post(route)
+    assert first.status_code == 200
+    url = first.json()["authorize_url"]
+    now = tenant_mcp_store.time.time()
+    monkeypatch.setattr(tenant_mcp_store.time, "time", lambda: now + tenant_mcp_store.PENDING_TTL_S + 1)
+    second = client().post(route)
+    assert second.status_code == 200
+    assert second.json()["authorize_url"] != url
+    assert cfg.requests.count(("POST", "/register")) == 2
+    pending = json.loads(tenant_mcp_store._pending_file().read_bytes())
+    assert len(pending) == 1
+    assert pending[0]["authorize_url"] == second.json()["authorize_url"]
+
+
+def test_connect_flows_are_isolated_between_tenants_and_servers(fake_as):
+    base, cfg = fake_as
+    urls = []
+    for tenant_id, path in ((_TENANT, "/mcp"), (_TENANT, "/other"), ("other-tenant", "/mcp")):
+        record = _seed_record(tenant_id, base + path)
+        app = _app_with_capability_override()
+        app.dependency_overrides[tenant_mcp._require_link_service] = lambda tid=tenant_id: tid
+        scoped_client = TestClient(app, raise_server_exceptions=False)
+        route = f"/api/tenant/mcp-servers/{record['id']}/connect"
+        response = scoped_client.post(route)
+        assert response.status_code == 200
+        url = response.json()["authorize_url"]
+        assert url not in urls
+        assert scoped_client.post(route).json()["authorize_url"] == url
+        urls.append(url)
+    assert cfg.requests.count(("POST", "/register")) == 3
+    assert len(json.loads(tenant_mcp_store._pending_file().read_bytes())) == 3
+
+
 def test_connect_unknown_server_404():
     resp = client().post("/api/tenant/mcp-servers/does-not-exist/connect")
     assert resp.status_code == 404
@@ -343,6 +427,10 @@ def test_callback_replay_of_consumed_state_fails_closed(fake_as):
         "/api/tenant/mcp-servers/callback", params={"state": state, "code": "fixture-auth-code"},
     )
     assert replay.status_code == 400  # single-use: the state was already popped
+    reconnect = client().post(f"/api/tenant/mcp-servers/{record['id']}/connect")
+    assert reconnect.status_code == 200
+    assert reconnect.json()["authorize_url"] != authorize_url
+    assert cfg.requests.count(("POST", "/register")) == 2
 
 
 def test_audience_mismatch_fails_closed(fake_as):
