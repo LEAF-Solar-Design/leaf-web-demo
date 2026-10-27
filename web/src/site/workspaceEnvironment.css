@@ -13,69 +13,89 @@
 .environment-strip > button:last-child { margin-left: auto; }
 .workspace-environment[data-entered="true"] .environment-backdrop { opacity: 0; pointer-events: none; }
 .workspace-environment[data-entered="true"] .environment-chooser { opacity: 0; transform: translate(-50%, -54%) scale(.96); pointer-events: none; }
-.studio-shell:has(.workspace-environment) .studio-ground { inset: 0 !important; }
+.studio-shell:has(.workspace-environment) .studio-ground { position: absolute; inset: 0 !important; z-index: auto; }
+.studio-shell:has(.workspace-environment) > .app { z-index: auto; }
 .studio-shell:has(.workspace-environment) :is(.studio-ground-viewer, .studio-ground-device, .studio-ground-ops, [data-ground="lab"], .browser-asset-viewport) { transition: opacity 210ms ease; }
 .studio-shell:has(.workspace-environment[data-entered="false"]) :is(.studio-ground-viewer, .studio-ground-device, .studio-ground-ops, [data-ground="lab"], .browser-asset-viewport) { opacity: 0; visibility: hidden; }
-/* In this hosting mode all shared chrome lives inside the right overlay. */
-.studio-shell .app[data-environment-panel] { position: fixed; inset: 68px 12px 12px auto; width: min(520px, calc(100vw - 24px)); height: auto; min-height: 0; display: block; overflow: auto; overscroll-behavior: contain; padding: 0 12px 12px; box-sizing: border-box; background: var(--leaf-surface); border: 1px solid var(--leaf-line); border-radius: 12px; pointer-events: auto; z-index: 14; }
-.studio-shell .app[data-environment-panel]:not([data-environment-panel="studio"]) { display: none !important; }
-.studio-shell .app[data-environment-panel] :is(.studio-drawer-tabs, .start-board-gloss, .tc-product-tabs) { display: none !important; }
-.studio-shell .app[data-environment-panel] :is(header.top, aside.nav, .rail-stack, aside.rail, .center-col, main.center-scroll, .bar-dock, .tc-product-frame, .tc-product-morph, .tc-product-nav, .studio-profile-info, .drafting-ribbon, .studio-ribbon-host, .studio-profile-host) { position: static !important; inset: auto !important; transform: none !important; width: 100% !important; max-width: 100%; height: auto !important; max-height: none !important; min-height: 0; overflow: visible !important; margin: 0; box-sizing: border-box; visibility: visible !important; opacity: 1; pointer-events: auto; }
-.studio-shell .app[data-environment-panel] :is(header.top, header.top .proj, header.top .who) { display: flex !important; flex-wrap: wrap !important; }
-.studio-shell .app[data-environment-panel] :is(aside.nav, .rail-stack, aside.rail) { display: block !important; }
-.studio-shell .app[data-environment-panel] .rail-stack > * { height: auto !important; max-height: none !important; overflow: visible !important; }
-.studio-shell .app[data-environment-panel] .browser-panel-heading { margin: 0 -12px; z-index: 20; }
-.studio-shell:has(.workspace-environment) .browser-project-panel { z-index: 14; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] { position: fixed !important; inset: 68px 12px 12px auto !important; width: min(520px, calc(100vw - 24px)) !important; height: auto !important; min-height: 0 !important; display: block; overflow: auto !important; padding: 0 12px 12px !important; grid-template-columns: none; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel]:not([data-environment-panel="studio"]) { display: none !important; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .studio-chrome-host { display: block !important; position: static !important; inset: auto !important; height: auto !important; overflow: visible !important; pointer-events: auto; }
-.studio-shell .app[data-environment-panel] :is(.drafting-ribbon, .ribbon-body, .ribbon-groups, .cockpit-top-band, .cockpit-quick, .cockpit-tabs, .cockpit-doctabs, .viewer-toolbar, .properties-dock, .cockpit-prompt-slot) { position: static !important; inset: auto !important; height: auto !important; max-height: none !important; width: 100% !important; overflow: visible !important; flex-wrap: wrap; }
-.studio-shell .app[data-environment-panel] .ribbon-body { overflow-x: auto !important; }
-.studio-shell .app[data-environment-panel] :is(.cockpit-band, .cockpit-ribbon-tabs) { position: static !important; inset: auto !important; width: 100% !important; height: auto !important; flex-wrap: wrap !important; overflow: visible !important; }
-.studio-shell .app[data-environment-panel] header.top :is(.proj, .who) { display: flex !important; flex-wrap: wrap !important; }
-.studio-shell .app[data-environment-panel] .tc-account-signout { display: inline-flex !important; }
-.studio-shell .app[data-environment-panel] header.top :is(button, input, select) { min-height: 44px; }
-.studio-shell .app[data-environment-panel] .workspace-card { position: static !important; inset: auto !important; height: auto !important; min-height: 0 !important; overflow: visible !important; }
-.studio-shell .app[data-environment-panel] :is(.drawing-navigation, .result-block, .cockpit-view, .drawing-objects-panel, .drawing-find-band, [data-cad-overview], .bar) { position: static !important; inset: auto !important; transform: none !important; width: 100% !important; max-width: 100% !important; height: auto !important; max-height: none !important; overflow: visible !important; box-sizing: border-box; }
-.studio-shell:has(.workspace-environment) :is(.studio-ground-device, .studio-ground-ops, .studio-ground-lab) { inset: 0 !important; }
-/* Keep glass pseudo-elements and command menus anchored to their own hosts. */
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] :is(header.top, .bar.bar-command-line, .result-block, .properties-dock, .cockpit-view, .drafting-ribbon, .viewer-toolbar) { position: relative !important; }
-/* The old canvas host has zero height because its instruments were fixed.
-   In the overlay those instruments take space in the normal document flow. */
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .workspace-card > .viewer-wrap { position: relative; display: block; height: auto !important; min-height: 0; overflow: visible; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] :is(.cockpit-cube-wrap, .cockpit-cube-wcs, .viewer-wrap > .legend, .viewer-wrap > .selection-readout) { position: relative !important; inset: auto !important; margin: 8px 0; max-height: none; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .viewer-wrap > :is(.legend, .selection-readout) { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .drafting-ribbon[data-overflow-open="true"] .ribbon-panels { position: relative; inset: auto; max-height: none; width: 100%; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .converse-card { margin-right: 0; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar.bar-command-line { flex-direction: column; align-items: stretch; }
-/* The full-viewport cockpit centers this dock with margin-left: -360px.
-   Once it joins the sidebar flow, that margin puts Run outside the scroll
-   origin and clips its hit region, letting the drawing receive the click. */
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-dock { margin: 0 !important; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line :is(.bar-input, .bar-controls) { width: 100%; min-width: 0; height: auto; box-sizing: border-box; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-controls { flex-wrap: wrap; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-field { min-width: 0; min-height: 64px; font-size: 16px; }
-/* Drawing controls remain available inside Studio, without a viewport footer. */
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] footer.foot-bar { position: relative !important; inset: auto !important; display: flex !important; flex-wrap: wrap; width: 100%; max-width: 100%; height: auto !important; min-height: 0; padding: 8px 0; gap: 8px; overflow: visible !important; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .foot-region { flex-wrap: wrap; height: auto !important; max-width: 100%; min-width: 0; gap: 6px; overflow: visible; padding: 4px 0; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .cockpit-status-toggles { flex-wrap: wrap; height: auto !important; max-width: 100%; }
-@media (max-width: 480px) {
-  .environment-strip { left: 6px; right: 6px; gap: 4px; }
-  .environment-strip label { font-size: 0; gap: 0; min-width: 0; }
-  .environment-strip select { width: 100%; max-width: 112px; font-size: 12px; }
-  .environment-strip button { padding-inline: 8px; font-size: 12px; }
+/* Preserve the cockpit's viewport, ribbon, command and status seats. */
+.environment-activity-fallback, .environment-activity-fallback > div { display: contents; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] {
+  width: 100%; max-width: 100vw; min-width: 0; font-size: 13px;
+}
+/* Only activity is an edge panel. Hidden preserves mounted conversation drafts. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity {
+  position: fixed; inset: var(--ck-canvas-top-live) 0 calc(80px + env(safe-area-inset-bottom, 0px)) auto;
+  display: flex; flex-direction: column; width: 300px; max-width: calc(100vw - 24px); height: auto; min-height: 0; max-height: none;
+  box-sizing: border-box; overflow: auto; overscroll-behavior: contain;
+  background: var(--ck-chrome); color: var(--ck-ink); border-left: 1px solid var(--ck-edge); z-index: 14; pointer-events: auto;
+}
+.studio-shell .app[data-environment-panel] > .rail-stack[hidden] { display: none !important; }
+.studio-shell .app[data-environment-panel] > #project-workspace-activity:not([hidden]) { display: flex !important; }
+.studio-shell .app[data-environment-panel] #project-workspace-activity :is(aside.rail, .result-block) { display: block !important; }
+.studio-shell .app[data-environment-panel] #project-workspace-activity .result-block:has(.result-panel > p.panel-sub) { display: none !important; }
+.studio-shell .app[data-environment-panel] .studio-drawer-tabs { display: none !important; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > .rail-stack > * { flex: 0 0 auto; height: auto; min-height: 0; max-height: none; overflow: visible; }
+.studio-shell .app[data-environment-panel] > .rail-stack .browser-panel-heading { position: sticky; top: 0; z-index: 2; background: var(--ck-chrome); }
+.studio-shell .app[data-environment-panel] #browser-studio-close { min-height: 44px; }
+/* Target activity cards only: drawing instruments keep their positioning. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity :is(aside.nav, aside.rail, .result-block, .converse-card, .studio-profile-info) {
+  position: relative; inset: auto; transform: none; width: 100%; max-width: 100%; height: auto; max-height: none; margin: 0; box-sizing: border-box;
+}
+.studio-shell .app[data-environment-panel] .environment-activity-host { min-width: 0; overflow-wrap: anywhere; }
+.studio-shell .app[data-environment-panel] > .rail-stack .link-svc .claude-pop { position: relative; inset: auto; width: 100%; max-width: 100%; box-sizing: border-box; transform: none; }
+.studio-shell:has(.workspace-environment) .browser-project-panel { inset: max(68px, var(--cockpit-band-bottom, 68px)) auto calc(80px + env(safe-area-inset-bottom, 0px)) 0; width: min(300px, calc(100vw - 24px)); border-radius: 0; z-index: 14; }
+/* Workspace navigation has its own dock, separate from the top ribbon. */
+.environment-strip { top: auto; left: 0; right: auto; bottom: 31px; width: 300px; max-width: 100vw; box-sizing: border-box; gap: 4px; padding: 2px 4px; background: var(--leaf-surface); border: 1px solid var(--leaf-line); color: var(--leaf-ink); opacity: 1; font: 13px var(--leaf-font-text); }
+.environment-strip label { min-width: 0; font-size: 0; gap: 0; }
+.environment-strip select { min-width: 0; width: 100%; max-width: 100px; font-size: 13px; }
+.environment-strip button, .environment-strip select { padding-inline: 6px; border-radius: var(--leaf-radius-control); background: var(--leaf-surface); color: var(--leaf-ink); border-color: var(--leaf-line); }
+.environment-strip button[aria-expanded="true"] { border-color: var(--leaf-accent); }
+/* Header controls wrap within the viewport; each band retains its own seat. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top { max-width: 100%; min-width: 0; height: auto; min-height: var(--ck-top); flex-wrap: wrap; overflow: visible; }
+.studio-shell .app[data-environment-panel] header.top .who { min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.studio-shell .app[data-environment-panel] header.top .who > * { max-width: 100%; overflow-wrap: anywhere; }
+.studio-shell .app[data-environment-panel] header.top .cockpit-band { min-width: 0; max-width: 100%; overflow-x: auto; }
+@media (min-width: 1024px) and (max-width: 1279px) {
+  .environment-strip { bottom: 80px; }
+}
+@media (max-width: 1023px) {
+  .environment-strip { bottom: calc(100px + env(safe-area-inset-bottom, 0px)); width: 100%; }
+  .environment-strip label { flex: 1; }
+  .environment-strip select { max-width: none; }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top { min-height: 88px; }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity { bottom: calc(148px + env(safe-area-inset-bottom, 0px)); }
+  .studio-shell .app[data-environment-panel] > .studio-profile-info { display: block !important; position: fixed; top: var(--ck-canvas-top-live); left: 0; right: auto; bottom: auto; width: min(250px, calc(100vw - 24px)); max-height: calc(100dvh - var(--ck-canvas-top-live) - 148px); overflow: auto; }
+  .studio-shell:has(.workspace-environment) .browser-project-panel { bottom: calc(148px + env(safe-area-inset-bottom, 0px)); }
+  .studio-shell .app[data-environment-panel] .bar-command-line .bar-controls { flex-shrink: 1; min-width: 0; overflow-x: auto; }
+  .studio-shell .app[data-environment-panel] .bar-command-line .bar-controls > * { flex-shrink: 0; }
 }
 @media (prefers-reduced-motion: reduce) {
   .workspace-environment *, .studio-shell:has(.workspace-environment) :is(.studio-ground-viewer, .studio-ground-device, .studio-ground-ops, [data-ground="lab"], .browser-asset-viewport) { transition: none !important; }
 }
-
-.studio-shell .app[data-environment-panel] header.top .who { min-width: 0; width: 100%; }
-.studio-shell .app[data-environment-panel] header.top .who > * { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
-/* Service setup expands inside the scrollable Studio panel. An anchored
-   popover below its bottom trigger would be clipped by the overlay. */
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .link-svc { display: block; width: 100%; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .link-svc .claude-pop {
-  position: relative; inset: auto; width: 100%; max-width: 100%; max-height: none;
-  box-sizing: border-box; margin-top: 8px; background: var(--leaf-surface);
-  transform: none; z-index: 1;
+/* Share the measured command edge across profiles, including the taller phone prompt. */
+.workspace-environment { z-index: var(--leaf-layer-overlay); }
+.environment-strip { top: var(--drawer-top, 44px); bottom: auto; left: 0; right: 0; width: 100%; border-inline: 0; }
+.environment-strip label { font-size: 12px; gap: 6px; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top { min-height: 44px; padding: 6px 12px; gap: 8px; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top .mark .mark-lockup { height: 26px; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top .proj { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.studio-shell:has(.workspace-environment) .browser-asset-viewport { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); height: auto; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .tc-product-nav { display: none; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity aside.nav { display: block; padding: 12px; overflow: visible; min-height: 0; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity,
+.studio-shell:has(.workspace-environment) .browser-project-panel { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); }
+@media (max-width: 1023px) {
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-dock { height: auto; }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar.bar-command-line {
+    flex: 0 0 auto; height: auto; min-height: 116px; flex-direction: column; align-items: stretch;
+  }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-input {
+    flex: 0 0 auto; height: auto; width: 100%; box-sizing: border-box; padding: 4px 8px;
+  }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-field {
+    height: auto; min-height: 64px; max-height: 128px; font-size: 16px; overflow-y: auto;
+  }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-controls {
+    flex: 0 0 44px; height: 44px; width: 100%; box-sizing: border-box; padding: 0 8px;
+  }
 }
