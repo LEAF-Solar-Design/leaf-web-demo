@@ -84,10 +84,14 @@
   min-height: 40px;
   padding: 8px;
   font: inherit;
-  color: inherit;
-  background: var(--bg, #fff);
-  border: 1px solid var(--border, #bdb9b2);
+  color: var(--leaf-ink, #202020);
+  background: var(--leaf-surface, #fff);
+  border: 1px solid var(--leaf-line, #bdb9b2);
   border-radius: 6px;
 }
 .project-page-editor textarea { resize: vertical; }
 .project-page-editor__error { color: var(--danger, #a52828); font-size: 13px; line-height: 1.5; }
+
+.project-page-editor button { color: var(--leaf-ink, #202020); background: var(--leaf-surface, #fff); border: 1px solid var(--leaf-line, #bdb9b2); border-radius: 6px; padding: 8px 12px; }
+.project-page-editor :is(input, textarea, select, button):focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.project-page-editor button:disabled { opacity: .55; }
