@@ -4,11 +4,11 @@
  "sources": [
   {
    "repo": "mushy-code",
-   "head": "fe795a268626e828ee1e4509285825a385fa5ca7",
+   "head": "0affc814ecfd576dcefe6675f1913187550ad6c0",
    "upstream_path": "contract/generated/leaf-tokens.css",
    "frozen_path": "web/src/lab/contract/sources/leaf-tokens.css",
-   "sha256": "9eaf6c04927cefb5e021261f83fef0a01bc9525be2363687f8b3cda999ef72f5",
-   "bytes": 42432
+   "sha256": "c9613218d57b9a1c1c851bd142db5c39af03026d59e80e22b9ff56cf9538e643",
+   "bytes": 42418
   },
   {
    "repo": "mushy-code",
