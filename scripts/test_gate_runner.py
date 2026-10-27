@@ -1391,6 +1391,10 @@ def test_lab_run_store_gate_registration():
 def test_database_suites_take_the_gate_dsn_and_no_longer_allowlist_its_absence():
     g = _load_runner()
     suites = {suite.id: suite for suite in g.build_suites()}
+    # The managed browser stack reads PostgreSQL overlays in every case.
+    # DB-less release producers must report that prerequisite as a suite skip.
+    assert suites["web-link-service-flow"].db_gated
+    assert suites["web-link-service-flow"].uses_database
     for sid in _DATABASE_SUITE_IDS:
         suite = suites[sid]
         assert suite.uses_database, sid

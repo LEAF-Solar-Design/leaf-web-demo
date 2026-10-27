@@ -3743,7 +3743,7 @@ def build_suites() -> List[Suite]:
         Suite("web-link-service-flow", "web managed link service OAuth flow", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.local.config.mjs",
                "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None,
-              uses_database=True),
+              uses_database=True, db_gated=True),
         # Browser proofs from studio-lanes-20260930 (lanes C, stu2-d, stu2-h, the
         # lifecycle panel, the iOS ship surface, the viewer grid toggle). One row
         # per Playwright config; every config derives its dev server port from
