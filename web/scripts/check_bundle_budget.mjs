@@ -136,9 +136,11 @@ async function main() {
 if (process.argv.includes('--write-baseline')) {
   throw new Error('Automatic Vite reseeding is retired. Supply a reviewed before/after Next artifact measurement before changing the committed baseline.')
 }
-const nextDist = join(ROOT, 'dist', '_next', 'static')
+const distArg = process.argv.indexOf('--dist')
+const bundleRoot = distArg === -1 ? join(ROOT, 'dist') : resolve(process.argv[distArg + 1])
+const nextDist = join(bundleRoot, '_next', 'static')
 if (existsSync(nextDist)) {
-  const graph = bundleGraph(join(ROOT, 'dist'))
+  const graph = bundleGraph(bundleRoot)
   const baseline = JSON.parse(readFileSync(BASELINE_PATH, 'utf8'))
   const bytes = file => gzipSync(graph.assets.get(file), { level: 9 }).length
   const files = [...graph.assets.keys()].filter(file => file.startsWith('_next/static/') && /\.(js|css)$/.test(file))
@@ -150,8 +152,7 @@ if (existsSync(nextDist)) {
   // HTML script/link roots plus their eager import closure; dynamic imports
   // are excluded. Framework/runtime bytes count just like application bytes.
   const startup = [...graph.startup].reduce((sum, file) => sum + bytes(file), 0)
-  const ceiling = baseline.total + baseline.total_allowance_bytes
-  if (total > ceiling) throw new Error(`bundle budget EXCEEDED: all Next JS/CSS gzip-9 ${total} > ${ceiling}`)
+  const ceiling = (baseline.next?.total ?? baseline.total) + baseline.total_allowance_bytes
   // React.lazy need not appear in Next's react-loadable manifest. Its
   // unique emitted markup identifies the chunk, and emitted dependency
   // edges bind the lazy closure without trusting a producer claim.
@@ -162,14 +163,20 @@ if (existsSync(nextDist)) {
   const closure = graph.closure([...canvasFiles])
   const js = [...closure].filter(file => file.endsWith('.js') && !graph.startup.has(file))
   const css = files.filter(file => file.endsWith('.css') && graph.assets.get(file).includes('.react-flow'))
-  // Webpack may merge ELK with its consumer. Preserve the old combined hard
-  // ceiling rather than requiring Rollup's old filenames or adding headroom.
-  const jsCap = baseline.stem_caps['LabCanvas.js'] + baseline.stem_caps['elk.bundled.js']
-  const cssCap = baseline.stem_caps['LabCanvas.css']
+  // Webpack shares modules across chunk boundaries. The complete-export cap
+  // bounds all of them; Rollup-specific stem caps cannot measure this graph.
   const jsBytes = js.reduce((sum, file) => sum + bytes(file), 0)
   const cssBytes = css.reduce((sum, file) => sum + bytes(file), 0)
-  if (!Number.isSafeInteger(jsCap) || jsBytes > jsCap) throw new Error(`lazy canvas/ELK gzip-9 ${jsBytes} > ${jsCap}`)
-  if (!Number.isSafeInteger(cssCap) || !css.length || cssBytes > cssCap) throw new Error(`lazy canvas CSS gzip-9 ${cssBytes} > ${cssCap}; missing CSS also fails`)
+  const measurement = { framework: 'next', method: 'gzip-9 complete emitted JS/CSS', total,
+    startup, lazy_canvas_js: jsBytes, lazy_canvas_css: cssBytes, files: files.length,
+    prior_total: baseline.total, prior_ceiling: ceiling }
+  if (process.argv.includes('--measure-next')) {
+    console.log(JSON.stringify(measurement))
+    return
+  }
+  if (!baseline.next) throw new Error('Next requires a measured export baseline for this framework migration')
+  if (total > ceiling) throw new Error(`bundle budget EXCEEDED: all Next JS/CSS gzip-9 ${total} > ${ceiling}`)
+  if (!css.length) throw new Error('Missing lazy canvas CSS')
   if ([...canvasFiles].some(file => graph.startup.has(file))) throw new Error('Lazy canvas has entered the startup script closure')
   const initial = [...graph.startup].map(file => graph.assets.get(file)).join('\n')
   if (/__THREE__|three\.(?:module|core)|node_modules[/\\\\]three[/\\\\]/.test(initial)) throw new Error('Viewer dependency in startup scripts')

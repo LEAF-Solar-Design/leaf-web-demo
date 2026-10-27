@@ -2,7 +2,9 @@ import { beforeAll, describe, expect, it } from 'vitest'
 import { emittedJavaScript } from '../../scripts/bundle-assets.mjs'
 import { nextFenceDirectory, NEXT_FENCE_TIMEOUT } from '../../scripts/next-fence-fixtures.mjs'
 
-const MARKERS = ['solar-settings-form', 'Choose the drawing units before starting a Solar design.', 'solar-flow-rail', 'solar-flow-select']
+// Unit help also belongs to shared project settings, so it is not evidence
+// that the gated Solar form or flow rail ships. These markers are surface-only.
+const MARKERS = ['solar-settings-form', 'solar-flow-rail', 'solar-flow-select']
 describe('Solar settings build fence', () => {
   let onText
   let offText

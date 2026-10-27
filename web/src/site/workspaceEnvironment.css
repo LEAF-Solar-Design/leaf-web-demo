@@ -53,3 +53,6 @@
 @media (prefers-reduced-motion: reduce) {
   .workspace-environment *, .studio-shell:has(.workspace-environment) :is(.studio-ground-viewer, .studio-ground-device, .studio-ground-ops, [data-ground="lab"], .browser-asset-viewport) { transition: none !important; }
 }
+
+.studio-shell .app[data-environment-panel] header.top .who { min-width: 0; width: 100%; }
+.studio-shell .app[data-environment-panel] header.top .who > * { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }

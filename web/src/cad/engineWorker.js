@@ -153,7 +153,7 @@ export class EngineBoundary {
 // worker scope. No WASM engine is loaded yet — the echo loop only proves the
 // boundary's validate-or-drop contract holds from the worker side too.
 if (
-  typeof window === 'undefined' &&
+  typeof globalThis.window === 'undefined' &&
   typeof self !== 'undefined' &&
   typeof self.postMessage === 'function' &&
   typeof importScripts === 'function'

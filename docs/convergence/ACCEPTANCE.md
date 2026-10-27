@@ -221,6 +221,20 @@ Paid by W4c-0 (receipts named so the ledger stays auditable):
   colour under `.studio-ground` (landing.css); the old shell keeps `#0f0f11`
   via the inline fallback.
 
+### Next.js web runtime
+
+The operator confirmed Next.js for all web surfaces and generated web apps on
+2026-10-26. Studio's browser routes use the Next App Router with a static export
+served by the existing web deployment. One persistent client root retains the
+shared project across profile changes. Native iOS and CAD execution keep their
+existing boundaries. Vite remains only in test tooling and the historical
+rollback verifier; the deployed application builds with Next.js.
+
+Production builds preserve public environment whitelisting, opaque source
+references, disabled-feature exclusion and runtime worker listeners. Deployment
+readers inspect actual Next script elements, including encoded catchall paths,
+and refuse missing static assets instead of returning the HTML shell.
+
 ### Shared artifact environment (F04, current Studio-hosted standard)
 
 Browser, CAD, Solar CAD, iOS, Ops and a mounted Studio Lab share one small

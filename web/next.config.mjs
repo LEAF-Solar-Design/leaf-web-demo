@@ -23,9 +23,12 @@ export default function nextConfig(phase) {
         __LEAF_ENGINE_VERSION__: JSON.stringify(engineVersion(findEnginePkgDir(webRoot))),
       }))
       config.module.rules.unshift({
-        test: /\.jsx$/, include: path.join(webRoot, 'src'), enforce: 'pre',
+        test: /\.jsx?$/, include: path.join(webRoot, 'src'), enforce: 'pre',
         use: [{ loader: path.join(webRoot, 'webpack/elementSourceLoader.cjs'), options: {
           root: webRoot, source: dev, ref: elementRefEnabled(),
+          ...(!dev ? { featureFlags: Object.fromEntries([
+            'VITE_CAD_EDIT', 'VITE_LIFECYCLE_UI', 'VITE_SOLAR_SETTINGS_FORM', 'VITE_SOLAR_FLOW_RAIL',
+          ].map(key => [key, process.env[key] === '1'])) } : {}),
         } }],
       }, {
         test: /worker-browser\.mjs$/, include: path.resolve(webRoot, '../vendor'), enforce: 'pre',

@@ -4,7 +4,7 @@ import { bundleGraph } from './bundle-assets.mjs'
 
 const graph = bundleGraph(resolve(process.argv[2] || 'dist'))
 const workers = [...graph.assets].filter(([file, code]) => file.endsWith('.js') &&
-  code.includes('engine_unavailable') && code.includes('bad_document_bytes'))
+  code.includes('engine_unavailable: the compiled CAD engine') && code.includes('documentLoaded'))
 assert.ok(workers.length, 'the emitted CAD engine worker is missing')
 for (const [file] of workers) {
   assert.ok(graph.reachable.has(file), `CAD worker is unreachable from HTML: ${file}`)

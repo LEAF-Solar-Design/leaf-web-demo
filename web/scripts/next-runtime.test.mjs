@@ -3,6 +3,9 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import os from 'node:os'
 import path from 'node:path'
 import test from 'node:test'
+import inlineFeatureFlags from '../webpack/inlineFeatureFlags.cjs'
+import elementSourceLoader from '../webpack/elementSourceLoader.cjs'
+import { elementRef } from '../vite-plugins/elementSourceStamp.js'
 import { bundleGraph, scriptPaths } from './bundle-assets.mjs'
 import { bundleManifest, elementRefEnabled, environmentDefinitions, publicEnvironment, sourceIdentity, STUDIO_PATHS } from './next-runtime.mjs'
 
@@ -48,6 +51,57 @@ test('source override, route exports and stamp switch are explicit', () => {
   assert.throws(() => elementRefEnabled({ LEAF_ELEMENT_REF_STAMP: 'bad' }))
 })
 
+test('production flag folding follows imported aliases without changing shadowed locals or other modules', () => {
+  const root = path.resolve('/fixture/web')
+  const filename = path.join(root, 'src/App.jsx')
+  const source = `import { ENV_CAD_EDIT as enabled, otherFlag } from './cadedit/flag.js';
+    import { ENV_CAD_EDIT } from './unrelated/flag.js';
+    export const disabled = enabled && <div />;
+    export const object = { enabled };
+    export function nested(enabled) { return enabled && <div />; }
+    export const unrelated = ENV_CAD_EDIT;`
+  const result = inlineFeatureFlags(source, filename, { root, flags: { VITE_CAD_EDIT: false } })
+  assert.match(result.code, /disabled = false &&/)
+  assert.match(result.code, /enabled: false/)
+  assert.match(result.code, /nested\(enabled\)\s*\{\s*return enabled &&/)
+  assert.match(result.code, /import \{ otherFlag \} from ['"]\.\/cadedit\/flag\.js['"]/)
+  assert.match(result.code, /unrelated = ENV_CAD_EDIT/)
+  assert.match(result.code, /from ['"]\.\/unrelated\/flag\.js['"]/)
+  assert.throws(() => inlineFeatureFlags(source, filename, { root, flags: {} }), /Missing compile-time boolean/)
+})
+
+test('production flag folding handles lifecycle and both Solar bindings and ignores lookalike module paths', () => {
+  const root = path.resolve('/fixture/web')
+  const filename = path.join(root, 'src/site/ToolCast.jsx')
+  const source = `import { ENV_LIFECYCLE_UI as lifecycle } from '../projects/flag.js';
+    import { ENV_SOLAR_SETTINGS_FORM as settings, ENV_SOLAR_FLOW_RAIL as rail } from '../solar/flag.js';
+    export const values = [lifecycle, settings, rail];`
+  const result = inlineFeatureFlags(source, filename, { root, flags: {
+    VITE_LIFECYCLE_UI: true, VITE_SOLAR_SETTINGS_FORM: false, VITE_SOLAR_FLOW_RAIL: true,
+  } })
+  assert.match(result.code, /values = \[true, false, true\]/)
+  assert.doesNotMatch(result.code, /import /)
+  assert.equal(inlineFeatureFlags("import { ENV_CAD_EDIT } from '../other/cadedit/flag.js'; export const value = ENV_CAD_EDIT", filename, { root, flags: { VITE_CAD_EDIT: false } }), null)
+})
+
+test('production loader stamps original JSX before folding and leaves development imports intact', async () => {
+  const root = path.resolve('/fixture/web')
+  const resourcePath = path.join(root, 'src/App.jsx')
+  const source = `import { ENV_CAD_EDIT } from './cadedit/flag.js';
+    export function Panel() { return ENV_CAD_EDIT && <div data-element-id="panel" />; }`
+  const run = options => new Promise((resolve, reject) => elementSourceLoader.call({
+    resourcePath, getOptions: () => ({ root, ...options }),
+    async: () => (error, code) => error ? reject(error) : resolve(code),
+  }, source))
+  const production = await run({ source: false, ref: true, featureFlags: { VITE_CAD_EDIT: false } })
+  assert.match(production, /return false &&/)
+  assert.ok(production.includes(`data-element-ref="${elementRef('src/App.jsx:Panel')}"`))
+  assert.doesNotMatch(production, /data-element-source|import /)
+  const development = await run({ source: true, ref: true })
+  assert.match(development, /import \{ ENV_CAD_EDIT \}/)
+  assert.match(development, /data-element-source="src\/App.jsx:Panel"/)
+})
+
 
 test('Next graph decodes catchall entries and follows CSS-only lazy chunks', (t) => {
   const dist = mkdtempSync(path.join(os.tmpdir(), 'leaf-next-graph-'))
@@ -67,4 +121,18 @@ test('Next graph decodes catchall entries and follows CSS-only lazy chunks', (t)
   assert.ok(bundleGraph(dist).reachable.has('_next/static/css/abcdef.css'))
   rmSync(css)
   assert.throws(() => bundleGraph(dist), /Missing CSS chunk/)
+})
+
+
+test('vendor worker loader preserves runtime scope and dynamic engine import', async () => {
+  const output = await new Promise((resolve, reject) => {
+    elementSourceLoader.call({
+      getOptions: () => ({ runtimeImportsOnly: true }),
+      async: () => (error, code) => error ? reject(error) : resolve(code),
+    }, "if (typeof window === 'undefined') self.addEventListener('message', handler); import(/* @vite-ignore */ url)")
+  })
+  assert.ok(output.includes("typeof globalThis.window === 'undefined'"))
+  assert.ok(output.includes('self.addEventListener'))
+  assert.ok(output.includes('webpackIgnore: true'))
+  assert.ok(!output.includes('typeof window'))
 })
