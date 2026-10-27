@@ -78,7 +78,24 @@
 .environment-strip label { font-size: 12px; gap: 6px; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top { min-height: 44px; padding: 6px 12px; gap: 8px; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top .mark .mark-lockup { height: 26px; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top .proj { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; }
+.studio-shell:has(.workspace-environment) .browser-asset-viewport { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); height: auto; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .tc-product-nav { display: none; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity aside.nav { display: block; padding: 12px; overflow: visible; min-height: 0; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity,
 .studio-shell:has(.workspace-environment) .browser-project-panel { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); }
+@media (max-width: 1023px) {
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-dock { height: auto; }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar.bar-command-line {
+    flex: 0 0 auto; height: auto; min-height: 116px; flex-direction: column; align-items: stretch;
+  }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-input {
+    flex: 0 0 auto; height: auto; width: 100%; box-sizing: border-box; padding: 4px 8px;
+  }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-field {
+    height: auto; min-height: 64px; max-height: 128px; font-size: 16px; overflow-y: auto;
+  }
+  .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-controls {
+    flex: 0 0 44px; height: 44px; width: 100%; box-sizing: border-box; padding: 0 8px;
+  }
+}

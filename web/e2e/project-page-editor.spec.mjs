@@ -171,6 +171,15 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await preview.getByRole('button', { name: 'Cakes', exact: true }).click()
     await expect(page.locator('.environment-backdrop')).toHaveCSS('opacity', '0')
     await expect(page.locator('.environment-chooser')).toHaveCSS('opacity', '0')
+    // The docked preview scrolls within the workspace; load each lazy photo
+    // through its visible viewport before asserting the completed gallery.
+    const photos = preview.locator('.portfolio-photo')
+    await expect(photos).toHaveCount(2)
+    for (const photo of await photos.all()) {
+      await photo.scrollIntoViewIfNeeded()
+      await expect.poll(() => photo.locator('img').evaluateAll(images => images.length === 1 && images[0].complete && images[0].naturalWidth > 0)).toBe(true)
+    }
+    await preview.getByRole('navigation').scrollIntoViewIfNeeded()
     await expect.poll(() => preview.locator('img').evaluateAll(images => images.length === 2 && images.every(image => image.complete && image.naturalWidth > 0))).toBe(true)
     await page.screenshot({ path: testInfo.outputPath(`portfolio-gallery-${size}.png`) })
     expect(await preview.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true)
