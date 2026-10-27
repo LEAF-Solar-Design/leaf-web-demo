@@ -73,4 +73,5 @@ harness/sessions-data/
 
 # Vercel CLI project link and Cygwin/MSYS crash dumps
 web/.vercel/
+web/.next-dev-*/
 *.stackdump
