@@ -391,6 +391,15 @@ export function createProjectSolarClient(options = {}) {
 }
 
 export async function getCapabilities(mock, context, options = {}) {
+  if (context?.catalogDiscovery) {
+    const { projectId, orgId } = context.catalogDiscovery
+    if (mock || typeof projectId !== 'string' || !projectId.trim() ||
+        typeof orgId !== 'string' || !orgId.trim()) throw new Error('Project tools are unavailable.')
+    const data = await http(`/api/capabilities?project_id=${encodeURIComponent(projectId)}`, {
+      headers: { 'X-Org-Id': orgId, 'X-Project-Id': projectId }, signal: options.signal,
+    }, STARTUP_FETCH_TIMEOUT_MS)
+    return { families: normalizeFamilies(data.families || []), source: 'endpoint' }
+  }
   if (context && Object.hasOwn(context, 'solarBinding') && context.solarBinding !== undefined) {
     const client = options.projectClient
     const snapshot = client?.getSnapshot?.()

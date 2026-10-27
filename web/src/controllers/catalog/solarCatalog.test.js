@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createHash } from 'node:crypto'
 
-vi.mock('../../telemetry.js', () => ({ track: vi.fn() }))
+vi.mock('../../telemetry.js', () => ({ track: vi.fn(), trackErrorShown: vi.fn() }))
 
 import { createCatalogController } from './createCatalogController.js'
 import { createSolarProjectClient } from '../../solar/solarProjectClient.js'
@@ -19,6 +19,39 @@ const projectDigest = 'sha256:' + 'a'.repeat(64)
 const SCHEME = 'Bear' + 'er'
 const AUTH = 'author' + 'ization'
 const AUTH_CAP = 'Author' + 'ization'
+
+describe('drawing-free project catalog discovery transport', () => {
+  it('uses authenticated project query and headers without drawing or execution admission', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: true, status: 200,
+      json: async () => ({ families: [] }) }))
+    vi.stubGlobal('fetch', fetchImpl)
+    try {
+      const catalogDiscovery = { projectId: projectBinding.project_id, orgId: projectBinding.organization_id }
+      expect(await getCapabilities(false, { catalogDiscovery, drawing_id: 'retained' })).toEqual({ families: [], source: 'endpoint' })
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      const [url, options] = fetchImpl.mock.calls[0]
+      const request = new URL(String(url), 'http://localhost')
+      expect(request.pathname).toBe('/api/capabilities')
+      expect([...request.searchParams]).toEqual([['project_id', projectBinding.project_id]])
+      expect(options.headers).toMatchObject({ 'X-Org-Id': projectBinding.organization_id,
+        'X-Project-Id': projectBinding.project_id })
+      expect(options.body).toBeUndefined()
+      expect(JSON.stringify(options)).not.toContain('checkout')
+    } finally { vi.unstubAllGlobals() }
+  })
+
+  it('never falls back to tools on discovery failure', async () => {
+    const fetchImpl = vi.fn(async () => ({ ok: false, status: 404 }))
+    vi.stubGlobal('fetch', fetchImpl)
+    try {
+      await expect(getCapabilities(false, { catalogDiscovery: {
+        projectId: projectBinding.project_id, orgId: projectBinding.organization_id,
+      } })).rejects.toMatchObject({ status: 404 })
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+      expect(String(fetchImpl.mock.calls[0][0])).toContain('/api/capabilities?project_id=')
+    } finally { vi.unstubAllGlobals() }
+  })
+})
 
 function projectSetup(availability = {}) {
   const rows = fixture.map((row) => ({ ...row, availability: { entitled: true, implemented: true,

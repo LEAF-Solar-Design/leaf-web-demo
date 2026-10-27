@@ -1241,13 +1241,15 @@ describe('R13F project Solar catalog attachment', () => {
           const writes = []
           const families = []
           const inputs = { projectMode: true, projectSolar: { ready, scope: { binding, authorityKey: 'authority' } },
+            catalogDiscovery: null,
             PROJECT_SOLAR_INTENTS: intents, ENV_SOLAR_SETTINGS_FORM: enabled, ENV_SOLAR_FLOW_RAIL: enabled,
             mock: false, surfaceSlots: { toolbar: { profile } }, catalogRunContext: null, solarSettingsScope,
             catalogController: { setContext: (context) => writes.push(context) },
             setSolarFlowFamiliesDrawingId: (id) => families.push(id) }
           invoke(contextEffect, inputs)
           invoke(familiesEffect, inputs)
-          assert.deepEqual(writes, [{ solarBinding: ready ? binding : null, authorityKey: ready ? 'authority' : null, projectIntents: intents }])
+          assert.deepEqual(writes, [{ solarBinding: ready ? binding : null, authorityKey: ready ? 'authority' : null, projectIntents: intents,
+            catalogDiscovery: null, drawingId: null, drawing_id: null, drawingVersion: null, drawing_version: null }])
           assert.deepEqual(families, [null])
         }
         for (const mock of [true, false]) {
@@ -1262,7 +1264,7 @@ describe('R13F project Solar catalog attachment', () => {
           invoke(familiesEffect, inputs)
           assert.equal(writes.length, 1)
           const expected = solarSettingsScope({ enabled, mock, profile, context })
-          assert.deepEqual(writes[0], { solarBinding: undefined, authorityKey: undefined, projectIntents: undefined, ...(enabled ? expected : {}) })
+          assert.deepEqual(writes[0], { solarBinding: undefined, authorityKey: undefined, catalogDiscovery: null, projectIntents: undefined, ...(enabled ? expected : {}) })
           assert.ok(Object.hasOwn(writes[0], 'solarBinding'))
           assert.deepEqual(families, [expected.drawingId ?? null])
         }
@@ -3001,7 +3003,7 @@ describe('Solar settings form wiring', () => {
   })
 
   it('SF2 wiring the catalog controller context follows solarSettingsScope', () => {
-    assert.match(appSource, new RegExp('catalogController\\.setContext\\(\\{\\s*solarBinding: undefined,\\s*authorityKey: undefined,\\s*projectIntents: undefined,\\s*\\.\\.\\.\\(ENV_SOLAR_SETTINGS_FORM \\? solarSettingsScope\\(\\{\\s*enabled: ENV_SOLAR_SETTINGS_FORM,\\s*mock,\\s*profile: surfaceSlots\\.toolbar\\.profile,\\s*context: catalogRunContext\\s*\\}\\) : \\{\\}\\),\\s*\\}\\)'))
+    assert.match(appSource, new RegExp('catalogController\\.setContext\\(\\{\\s*solarBinding: undefined,\\s*authorityKey: undefined,\\s*catalogDiscovery: null,\\s*projectIntents: undefined,\\s*\\.\\.\\.\\(ENV_SOLAR_SETTINGS_FORM \\? solarSettingsScope\\(\\{\\s*enabled: ENV_SOLAR_SETTINGS_FORM,\\s*mock,\\s*profile: surfaceSlots\\.toolbar\\.profile,\\s*context: catalogRunContext\\s*\\}\\) : \\{\\}\\),\\s*\\}\\)'))
     assert.match(appSource, new RegExp('if \\(projectMode\\) \\{\\s+catalogController\\.setContext\\(\\{\\s+solarBinding: projectSolar\\.ready \\? projectSolar\\.scope\\.binding : null,\\s+authorityKey: projectSolar\\.ready \\? projectSolar\\.scope\\.authorityKey : null,\\s+projectIntents: PROJECT_SOLAR_INTENTS,'))
     assert.ok(!appSource.includes('catalogController.setContext(solarSettingsScope('))
     assert.equal(appSource.split('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({').length - 1, 1)

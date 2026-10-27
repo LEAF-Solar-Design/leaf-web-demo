@@ -99,7 +99,7 @@ const useAppScope = Function('React', 'createCatalogRunContext', 'composerDraftA
   return function useAppScope(input, services) {
     const { useRef, useMemo, useCallback, useEffect } = React
     const { mock, tenant, orgId, openProjectId, workspace, canonicalVersionId, drawingState,
-      surfaceSlots, ENV_SOLAR_SETTINGS_FORM } = input
+      surfaceSlots, ENV_SOLAR_SETTINGS_FORM, signedIn = true, wsLoading = false, wsError = null } = input
     const session = { ...React.useSyncExternalStore(input.controller.subscribe,
       input.controller.getSnapshot, input.controller.getSnapshot), controller: input.controller }
     const { getTools, getCapabilities, routePrompt: nlPrompt, createClient: createProjectSolarClient } = services
@@ -191,6 +191,75 @@ async function receipt(hook) {
 }
 
 describe('App project Solar scope ownership', () => {
+  const emptyProject = { project: { project_id: P }, drawing_versions: [] }
+  it.each(['project', 'ship'])('drawing-free %s discovers only the current project without run authority', async (profile) => {
+    const run = setup({ workspace: emptyProject, canonicalVersionId: null,
+      drawingState: { drawing_id: 'retained-standalone', version: 7 },
+      surfaceSlots: { toolbar: { profile } } })
+    run.legacyFetch.mockResolvedValue(response({ families: [{ family_id: 'discovery', capabilities: [
+      { name: 'count-by-layer', availability: { entitled: true, implemented: true, engine_ready: true, input_ready: true } },
+    ] }] }))
+    const hook = mount(run)
+    await waitFor(() => expect(hook.result.current.catalogState.catalog.source).toBe('endpoint'))
+    expect(hook.result.current.catalogState.catalogError).toBeNull()
+    expect(hook.result.current.catalogState.projectCatalog).toBeNull()
+    expect(hook.result.current.projectSolar.ready).toBe(false)
+    expect(hook.result.current.catalogState.runnableCapabilityCount).toBe(0)
+    expect(hook.result.current.catalogState.capabilityCount).toBe(1)
+    act(() => { hook.result.current.catalogActions.commitDecision({ lane: 'run', tool: 'count-by-layer', params: {} }) })
+    expect(hook.result.current.catalogState.routeError).toBe('project_request_required')
+    expect(run.fetchImpl).not.toHaveBeenCalled()
+    expect(run.services.getCapabilities).toHaveBeenCalledWith(false, {
+      catalogDiscovery: { projectId: P, orgId: O, actorId: composerDraftAccountScope(),
+        generation: run.controller.getSnapshot().generation, profile },
+    }, { signal: expect.any(AbortSignal) })
+    for (const [url, options] of run.legacyFetch.mock.calls) {
+      const request = new URL(String(url), 'http://localhost')
+      expect(request.search).toBe(`?project_id=${P}`)
+      expect(options.headers).toMatchObject({ 'X-Org-Id': O, 'X-Project-Id': P })
+      expect(JSON.stringify([url, options])).not.toContain('retained-standalone')
+    }
+  })
+
+  it.each([
+    { surfaceSlots: { toolbar: { profile: 'drafting' } } },
+    { surfaceSlots: { toolbar: { profile: 'solar' } } },
+    { workspace: null }, { wsLoading: true }, { wsError: 'failed' },
+    { workspace: { project: { project_id: D }, drawing_versions: [] } },
+    { workspace: { project: { project_id: P, org_id: D }, drawing_versions: [] } },
+    { workspace: { org_id: D, project: { project_id: P }, drawing_versions: [] } },
+    { workspace: { project: { project_id: P } } },
+    { workspace: { project: { project_id: P }, drawing_versions: [{ version_id: V }] } },
+    { canonicalVersionId: V }, { signedIn: false }, { orgId: null },
+  ])('refuses invalid discovery scope %#', async (overrides) => {
+    const run = setup({ workspace: emptyProject, canonicalVersionId: null,
+      surfaceSlots: { toolbar: { profile: 'project' } }, ...overrides })
+    const hook = mount(run)
+    await act(async () => {})
+    expect(hook.result.current.catalogState.projectCatalog).toBeNull()
+    expect(run.services.getCapabilities).not.toHaveBeenCalled()
+    expect(run.legacyFetch).not.toHaveBeenCalled()
+  })
+
+  it.each(['project', 'org', 'profile', 'session', 'generation', 'actor', 'logout'])('drops pending discovery on %s changes', async (change) => {
+    const run = setup({ workspace: emptyProject, canonicalVersionId: null,
+      surfaceSlots: { toolbar: { profile: 'project' } } })
+    const pending = deferred()
+    run.services.getCapabilities.mockImplementationOnce(() => pending.promise)
+    const hook = mount(run)
+    await waitFor(() => expect(run.services.getCapabilities).toHaveBeenCalled())
+    if (change === 'generation') act(() => { run.controller.actions.activate({ tenant: 'tenant', org: O }) })
+    if (change === 'actor') account('bob')
+    if (change === 'logout') await act(async () => { await run.controller.actions.signOut() })
+    const next = change === 'project' ? { openProjectId: D } : change === 'org' ? { orgId: D }
+      : change === 'profile' ? { surfaceSlots: { toolbar: { profile: 'solar' } } }
+        : change === 'session' ? { signedIn: false } : {}
+    hook.rerender({ ...run.input, ...next })
+    await act(async () => { pending.resolve(catalogData('obsolete')); await pending.promise })
+    expect(hook.result.current.catalogState.catalog.families.some((row) => row.family_id === 'obsolete')).toBe(false)
+    expect(hook.result.current.catalogState.projectCatalog).toBeNull()
+  })
+
   it('R13F-15b project mode admits the workspace under the complete Solar fence', () => {
     const seats = nodes((node) => node.type === 'JSXElement' && node.openingElement.name.name === 'SolarFlowSeat')
     expect(seats).toHaveLength(1)
