@@ -220,11 +220,15 @@ export function proposalFormValues(graph) {
   } } }
 }
 
-export function canonicalProjectVersion(workspace, projectId) {
+export function canonicalProjectVersion(workspace, projectId, { pinnedVersionId } = {}) {
   expect(workspace.project?.project_id).toBe(projectId)
-  // Fixtures contain one drawing. Prefer its newest sequence, including a
-  // published scratch head from an earlier invocation of this suite.
-  const versions = workspace.drawing_versions ?? []
+  // Fixtures normally contain one drawing; staging projects can gain others.
+  // A pinned version identifies the drawing whose newest sequence to prefer,
+  // including a published scratch head from an earlier invocation of this suite.
+  let versions = workspace.drawing_versions ?? []
+  const pinnedVersion = typeof pinnedVersionId === 'string' && pinnedVersionId.length > 0
+    ? versions.find(row => row.version_id === pinnedVersionId) : undefined
+  if (pinnedVersion) versions = versions.filter(row => row.drawing_id === pinnedVersion.drawing_id)
   expect(versions.length).toBeGreaterThan(0)
   expect(new Set(versions.map(row => row.drawing_id)).size).toBe(1)
   const version = [...versions].sort((a, b) => b.seq - a.seq)[0]
@@ -351,6 +355,18 @@ export function monitorStagingSolar(page, solar) {
   }
 }
 
+async function ensureProjectPanel(page, region, label) {
+  if (await region.isVisible()) return
+  const projectToggle = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('button', { name: 'Project', exact: true })
+  if (await projectToggle.count()) {
+    if (await projectToggle.getAttribute('aria-expanded') !== 'true') await walkClick(projectToggle, label)
+  } else {
+    await walkClick(page.getByRole('button', { name: 'Open project or material', exact: true }), 'Enter workspace')
+  }
+  await expect(region).toBeVisible({ timeout: 15_000 })
+}
+
 export async function withStagingProject(page, baseURL, projectId, token, testInfo, action, options = {}) {
   assertAllowedStagingHost(baseURL)
   assertStagingTokenIdentity(token, process.env)
@@ -372,11 +388,21 @@ export async function withStagingProject(page, baseURL, projectId, token, testIn
     const project = projects.find(row => row.project_id === projectId)
     expect(Boolean(project)).toBe(true)
     expect(projects.filter(row => row.name === project.name)).toHaveLength(1)
+    const workspaceProjects = page.getByRole('region', { name: 'Workspace projects', exact: true })
+    await ensureProjectPanel(page, workspaceProjects, 'Open Project panel')
+    const projectSidebar = page.getByRole('region', { name: 'Project sidebar', exact: true, includeHidden: true })
+    const projectScope = await projectSidebar.count() ? projectSidebar : page
     const response = await stagingAction(page, baseURL, 'GET', `/api/projects/${projectId}`,
-      () => walkClick(page.getByRole('region', { name: 'Workspace projects', exact: true })
+      () => walkClick(projectScope.getByRole('region', { name: 'Workspace projects', exact: true })
         .getByRole('button', { name: project.name, exact: true }), 'Open Workspace project'))
     expect(response.status()).toBe(200)
-    runtime.projectSolar.binding = canonicalProjectVersion(await response.json(), projectId)
+    const pinnedVersionId = projectId === process.env.LEAF_WALK_STAGING_SCRATCH_PROJECT_ID
+      ? process.env.LEAF_WALK_STAGING_SCRATCH_VERSION_ID
+      : projectId === process.env.LEAF_WALK_STAGING_OWNER_PROJECT_ID
+        ? process.env.LEAF_WALK_STAGING_OWNER_VERSION_ID : undefined
+    runtime.projectSolar.binding = canonicalProjectVersion(await response.json(), projectId, { pinnedVersionId })
+    // Opening a project changes scope and closes the panel that holds the Versions tile.
+    await ensureProjectPanel(page, page.getByRole('region', { name: 'Project workspace', exact: true }), 'Reopen Project panel')
     await selectProjectSolarVersion(runtime)
     runtime.projectSolar.context = await stagingContext(page, baseURL, runtime.projectSolar.binding)
     testInfo.annotations.push({ type: 'project-solar-binding', description: JSON.stringify(runtime.projectSolar.binding) })

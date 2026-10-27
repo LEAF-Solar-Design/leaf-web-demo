@@ -1412,6 +1412,46 @@ export async function openProjectSolar(runtime, assertions = expect) {
   })
 }
 
+const readLocatorAttribute = async (locator, name) => await locator.getAttribute?.(name) ?? null
+
+export async function closeProjectPanelIfOpen(page) {
+  const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  if (!await controls.count?.()) return
+  const project = controls.getByRole('button', { name: 'Project', exact: true })
+  if (!await project.count() || await readLocatorAttribute(project, 'aria-expanded') !== 'true') return
+  await walkClick(project, 'Close Project panel')
+  await expect(project).toHaveAttribute('aria-expanded', 'false', { timeout: 15_000 })
+}
+
+export async function openSolarCadProfile(page) {
+  const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  if (await controls.count?.()) {
+    const profile = controls.getByRole('combobox', { name: 'Workspace profile', exact: true })
+    if (await profile.count()) {
+      await profile.selectOption({ label: 'Solar CAD' })
+      await expect(page.getByRole('tablist', { name: 'Workspace profile', exact: true })
+        .getByRole('tab', { name: 'Solar CAD', exact: true }))
+        .toHaveAttribute('aria-selected', 'true', { timeout: 15_000 })
+      const environment = page.locator('section.workspace-environment')
+      const entered = await environment.count() ? await readLocatorAttribute(environment, 'data-entered') : null
+      if (entered !== null && entered !== 'true') {
+        const resume = environment.getByRole('button', { name: 'Continue workspace', exact: true })
+        const openProject = !await resume.isVisible()
+        if (openProject) {
+          await walkClick(environment.getByRole('button', { name: 'Open project or material', exact: true }),
+            'Enter Solar workspace')
+        } else {
+          await walkClick(resume, 'Continue Solar workspace')
+        }
+        await expect(environment).toHaveAttribute('data-entered', 'true', { timeout: 15_000 })
+        if (openProject) await closeProjectPanelIfOpen(page)
+      }
+      return
+    }
+  }
+  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
+}
+
 export async function selectProjectSolarVersion(runtime, assertions = expect) {
   const { page, projectSolar: solar } = runtime
   // web/src/site/BoardTiles.jsx:41,59-61 renders this count only from workspace versions;
@@ -1429,7 +1469,8 @@ export async function selectProjectSolarVersion(runtime, assertions = expect) {
   await assertions(version, `version ${solar.binding.input_version_id} is not listed in the Versions pane within 30 s`)
     .toBeVisible({ timeout: 30_000 })
   await version.click({ timeout: 30_000 })
-  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
+  await closeProjectPanelIfOpen(page)
+  await openSolarCadProfile(page)
   await assertProjectSolarDrawing(runtime, assertions)
 }
 
@@ -1440,6 +1481,7 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
     await walkClick(editor.getByRole('button', { name: /^(Close|Cancel)$/ }), 'Close Solar editor')
     await assertions(editor).toHaveCount(0)
   }
+  await closeProjectPanelIfOpen(page)
   await walkClick(page.getByRole('tab', { name: 'Solar', exact: true }), 'Open Solar tab')
   const ribbon = page.getByTestId('drafting-ribbon').locator(`button[data-tool="${tool}"]`)
   const rail = page.locator(`#solar-step-${tool}`)
