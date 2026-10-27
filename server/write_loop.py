@@ -41,7 +41,7 @@ import time
 from contextlib import contextmanager
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, ok_envelope
 import entity_scope_containment as containment
@@ -485,6 +485,20 @@ def edited_source_key(tenant_id: str, drawing_id: str, version: int) -> str:
 def edited_source_proof_key(tenant_id: str, drawing_id: str, version: int) -> str:
     """Binding proof for an edited DXF and its version payload."""
     return edited_source_key(tenant_id, drawing_id, version) + ".proof.json"
+
+
+def version_content_sha256(backend, tenant_id: str, drawing_id: str,
+                           version: int) -> Optional[str]:
+    """Digest the stored sidecar or DWG source, never synthesized DXF."""
+    import store
+    v, vkey = store.resolve_version(backend, tenant_id, drawing_id, version)
+    skey = edited_source_key(tenant_id, drawing_id, v)
+    if backend.exists(skey):
+        return hashlib.sha256(backend.get(skey)).hexdigest()
+    source = backend.get(vkey)
+    if source.startswith(DWG_MAGIC):
+        return hashlib.sha256(source).hexdigest()
+    return None
 
 
 def publish_edited_source(backend, tenant_id: str, drawing_id: str, version: int,
@@ -1378,7 +1392,9 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                        holder: Optional[str] = None,
                        fence: Optional[int] = None,
                        require_parent_is_head: bool = False,
-                       graph_bundle: Optional[Dict[str, Any]] = None) -> int:
+                       graph_bundle: Optional[Dict[str, Any]] = None,
+                       mutation_plan_bytes: Optional[bytes] = None,
+                       prepare_mutation_plan: Optional[Callable[[int], bool]] = None) -> int:
     """put_drawing takes a local path (immutability + sha are computed there), so
     stage `data` to a temp file and append the new version.
 
@@ -1395,7 +1411,9 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                                  parent_version=parent_version, meta=meta,
                                  holder=holder, fence=fence,
                                  require_parent_is_head=require_parent_is_head,
-                                 graph_bundle=graph_bundle)
+                                 graph_bundle=graph_bundle,
+                                 mutation_plan_bytes=mutation_plan_bytes,
+                                 prepare_mutation_plan=prepare_mutation_plan)
     finally:
         try:
             os.remove(tmp)
@@ -3315,6 +3333,7 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
                   "source_ref": source_ref,
                   "note": meta_note},
             holder=holder, fence=fence, require_parent_is_head=True,
+            mutation_plan_bytes=plan_bytes,
         )
         version_write_ms = int(
             (time.perf_counter() - version_write_started) * 1000)

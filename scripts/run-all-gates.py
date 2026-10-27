@@ -3683,6 +3683,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_cost_vendors.py"), 15),
         Suite("server-save-plan-version", "server tests/test_save_plan_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_plan_version.py"), 39),
+        Suite("server-version-plan-route", "server tests/test_version_plan_route.py", "pytest", SERVER,
+              _py_pytest("tests/test_version_plan_route.py"), 26),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
               _py_pytest("tests/test_search.py"), 9),
         Suite("server-session-fanout", "server tests/test_session_fanout.py", "pytest", SERVER,
