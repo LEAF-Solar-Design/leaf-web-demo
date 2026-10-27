@@ -122,7 +122,9 @@ describe('App portal wiring', () => {
     // surface attribute's gate is what this pin guards.)
     expect(src).toContain("const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'")
     expect(src).toMatch(/data-studio-shell=\{studioShell \? 'cockpit' : undefined\} data-surface=/)
-    expect(src).toMatch(/<div className="app"[^>]*\bdata-surface=\{studioGround \? activeSurface : undefined\} data-start-open=\{studioGround && startOpen \? 'true' : undefined\} data-tour="shell"\s+onClickCapture=/)
+    expect(src).toMatch(/<div className="app"[^>]*\bdata-surface=\{studioGround \? activeSurface : undefined\} data-start-open=\{studioGround && startOpen \? 'true' : undefined\} data-tour="shell"/)
+    expect(src).toContain("data-environment-panel={studioShell ? browserPanel : undefined}")
+    expect(src).toContain("inert={studioShell && browserPanel !== 'studio' ? INERT_VALUE : undefined}")
   })
 
   it('never seeds intake synchronously — the single-mount invariant of the portal', () => {
@@ -141,7 +143,7 @@ describe('App portal wiring', () => {
     expect(Object.isFrozen(STUDIO_DRAWERS)).toBe(true)
     expect(src).toContain("const [studioDrawer, setStudioDrawer] = useState('none')")
     expect(src).toContain("STUDIO_DRAWERS.includes(name) ? name : 'none'")
-    expect(src).toContain('data-drawer={studioShell ? studioDrawer : undefined}')
+    expect(src).toContain('data-drawer={studioShell && !browserAssetActive ? studioDrawer : undefined}')
     expect(src).toMatch(/\{studioShell && \(\s*<div className="studio-drawer-tabs"/)
   })
 })
