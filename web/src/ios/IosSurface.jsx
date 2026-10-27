@@ -28,7 +28,7 @@ import { iosSourceApprovalState } from '../site/iosShipReadiness.js'
 
 const SHIP_APPROVE_REASONS = Object.freeze({
   owner: 'Only the project owner can approve a source revision',
-  noRevision: 'Select a drawing version before approving',
+  noRevision: 'Select an imported native source before approving',
   busy: 'The approval is being recorded.',
 })
 
@@ -46,7 +46,7 @@ const SHIP_PHASE_REASONS = Object.freeze({
 
 function setupSentence(readiness) {
   const state = readiness?.setupState
-  if (state === 'no-approved-revision') return 'Select a drawing version and ask the project owner to approve it.'
+  if (state === 'no-approved-revision') return 'Select an imported native source and ask the project owner to approve it.'
   if (state === 'grant-not-ready') return 'Ask the project owner to connect the Apple account before starting a build.'
   if (state === 'executor-busy') return 'Another build is using the build computer. Check again when it finishes.'
   if (state === 'executor-unavailable') return 'The build computer is unavailable. Ask support to reconnect it, then check again.'
@@ -85,27 +85,35 @@ export function ShipStage({ ship, onLaunch }) {
       {setupSentence(readiness) && <p>{setupSentence(readiness)}</p>}
       {Array.isArray(ship.sources) && (
         <section className="ios-ship-sources" data-testid="ios-ship-sources" aria-label="Imported source revisions">
+          {ship.selectedSourceRevision && <p data-testid="ios-selected-source">Selected native source: {ship.selectedSourceRevision}
+            {ship.selectedSourceAvailable === false && '. No longer available. Select an imported source again.'}</p>}
           {ship.sync && ship.sync.status !== 'ok' && <p data-testid="ios-ship-sync">Source updates are unavailable. Showing saved versions. Check again shortly.</p>}
           {ship.sources.length === 0 ? <p>No imported source revision yet.</p> : (
             <ul>
               {ship.sources.map((source) => {
                 const state = iosSourceApprovalState(source, ship.approvals || [], ship.revision)
+                const selected = ship.selectedSourceRevision === source.source_revision && ship.selectedSourceAvailable !== false
+                const canApproveSource = !ship.selectedSourceRevision || selected
                 return (
-                  <li key={source.source_revision} data-testid="ios-ship-source" data-revision={source.source_revision} data-state={state}>
+                  <li key={source.source_revision} data-testid="ios-ship-source" data-revision={source.source_revision} data-state={state} data-selected={selected}>
                     {source.bundle_identifier} · {source.marketing_version} ({source.build_number}) · {source.source_revision.slice(0, 12)}
+                    {typeof ship.selectSource === 'function' && <button type="button" aria-pressed={selected}
+                      disabled={ship.selectionLocked === true || ship.approving === true || ship.busy === true}
+                      onClick={() => ship.selectSource(source.source_revision)}>{selected ? 'Native source selected' : 'Select native source'}</button>}
                     {state === 'approved' ? <span>approved for the selected version</span>
                       : state === 'consumed' ? <span>approval consumed</span>
-                        : ship.canApprove === true && typeof ship.approve === 'function' && ship.revision ? (
-                          <button type="button" data-testid="ios-ship-approve" disabled={ship.approving === true}
+                        : ship.canApprove === true && typeof ship.approve === 'function' && ship.revision && canApproveSource ? (
+                          <button type="button" data-testid="ios-ship-approve" disabled={ship.approving === true || ship.selectionLocked === true}
                             title={ship.approving ? SHIP_APPROVE_REASONS.busy : 'Approve for the selected version'}
                             onClick={() => ship.approve(source.source_revision)}>Approve for the selected version</button>
-                        ) : <p>{!ship.revision ? SHIP_APPROVE_REASONS.noRevision : SHIP_APPROVE_REASONS.owner}</p>}
+                        ) : <p>{!ship.revision || !canApproveSource ? SHIP_APPROVE_REASONS.noRevision : SHIP_APPROVE_REASONS.owner}</p>}
                   </li>
                 )
               })}
             </ul>
           )}
           {ship.sourcesError && <p role="alert" data-testid="ios-ship-sources-error">{humanizeError(ship.sourcesError)}</p>}
+          {ship.refreshSources && <button type="button" disabled={ship.approving === true} onClick={ship.refreshSources}>Refresh imported sources</button>}
         </section>
       )}
       {execution && (

@@ -1173,7 +1173,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mcp_staging_probe.py"), 24),
         Suite("server-probe-staging-async-job",
               "server tests/test_probe_staging_async_job.py", "pytest", SERVER,
-              _py_pytest("tests/test_probe_staging_async_job.py"), 16),
+              _py_pytest("tests/test_probe_staging_async_job.py"), 20),
         Suite("server-probe-conv-durable-restart",
               "server tests/test_probe_conv_durable_restart.py", "pytest", SERVER,
               _py_pytest("tests/test_probe_conv_durable_restart.py"), 16),

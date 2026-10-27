@@ -1,10 +1,12 @@
 import { authHeaders, config, getStoredOrgId, noteUnauthorized } from '../api.js'
 import { getStoredActorBindingId } from '../projects/api.js'
+import { validatePortfolioDocument } from './portfolioDocument.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
 
 export function validatePageDocument(document) {
+  if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
   if (!document || typeof document !== 'object' || Array.isArray(document)
     || Object.keys(document).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
   for (const [field, limit] of Object.entries(LIMITS)) {
@@ -55,9 +57,18 @@ async function request(path, { signal, ...options } = {}, consume = response => 
         403: 'You do not have permission to access or change this page.',
         404: 'This project is no longer available to you.',
         409: 'The saved page changed elsewhere. Your draft is still here. Reload the saved page to continue.',
+        413: 'The page document is too large. Reduce its content and try again.',
         422: 'Some page fields were not accepted. Check your draft and try again.',
       }
-      const error = new Error(messages[response.status] || 'The page action failed. Your draft is still here. Try again.')
+      let message = messages[response.status]
+      if (response.status === 422) {
+        try {
+          const { detail } = await response.json()
+          if (typeof detail === 'string' && /^Portfolio (?:previews exceed 64 MiB|(?:source|archive) exceeds 80 MiB)/.test(detail)) message = 'This portfolio is too large to export. Reduce the selected photos, save, and try again.'
+          if (typeof detail === 'string' && detail.startsWith('A portfolio photo is missing from this project')) message = 'A selected photo is missing or changed. Re-select it from this project, save, and try again.'
+        } catch { /* retain the bounded default message */ }
+      }
+      const error = new Error(message || 'The page action failed. Your draft is still here. Try again.')
       error.status = response.status
       throw error
     }
@@ -95,14 +106,16 @@ export async function saveProjectPage(projectId, document, expectedRevision, { s
   }, response => readPage(response, false))
 }
 
-export async function downloadProjectPageSource(projectId, revision, { signal } = {}) {
+export async function downloadProjectPageSource(projectId, revision, { signal, target = 'web' } = {}) {
   if (!Number.isSafeInteger(revision) || revision < 1) throw new Error('Save your page before downloading its source.')
-  return request(`${pagePath(projectId)}/source?revision=${revision}`, { signal }, async response => {
+  if (!['web', 'ios'].includes(target)) throw new Error('Choose a supported source format.')
+  const suffix = target === 'ios' ? '&target=ios' : ''
+  return request(`${pagePath(projectId)}/source?revision=${revision}${suffix}`, { signal }, async response => {
     if (!(response.headers.get('content-type') || '').toLowerCase().startsWith('application/zip')) {
       throw new Error('The page service did not return a source archive. Try again.')
     }
     const blob = await response.blob()
-    if (!blob.size || blob.size > 8 * 1024 * 1024) throw new Error('The source archive could not be downloaded. Try again.')
+    if (!blob.size || blob.size > 80 * 1024 * 1024) throw new Error('The source archive could not be downloaded. Try again.')
     return blob
   })
 }

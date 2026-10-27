@@ -31,6 +31,7 @@ RESTART_TIMEOUT_S = 900
 HEALTH_TIMEOUT_S = 300
 POLL_S = 10
 HTTP_TIMEOUT_S = 15
+USER_AGENT = "leaf-p058-probe/1"
 CHECKS = ("preflight", "written", "tail_before", "restarted", "healthy",
           "tail_after", "replay_same")
 EXITS = {"PASS": 0, "FAIL": 1, "REFUSED": 2, "UNKNOWN": 3}
@@ -343,7 +344,8 @@ class LiveAdapters:
             def redirect_request(self, *args, **kwargs):
                 return None
 
-        headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json"}
+        headers = {"Authorization": "Bearer " + token, "Content-Type": "application/json",
+                   "User-Agent": USER_AGENT}
         if key is not None:
             headers["Idempotency-Key"] = key
         request = urllib.request.Request(self.environment["origin"] + path,

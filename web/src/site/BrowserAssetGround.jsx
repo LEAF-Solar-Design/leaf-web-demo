@@ -4,6 +4,7 @@ import WorkspaceEnvironment from './WorkspaceEnvironment.jsx'
 import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
+import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import './browserAssetGround.css'
 
 // Only ReleaseOutputs supplies decoded HTML after the trusted artifact retrieval.
@@ -36,9 +37,14 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
       if (composerDraftAccountScope() !== accountRef.current) invalidate()
     }
     const token = subscribeTokenStored(checkAccount)
+    let photoScope = readActiveScope()
+    const activeScope = subscribeActiveScope(() => {
+      const nextScope = readActiveScope()
+      if (nextScope !== photoScope) { photoScope = nextScope; invalidate() }
+    })
     const storage = event => { if (event.key === 'leaf.jwt' || event.key === null) checkAccount() }
     window.addEventListener('storage', storage)
-    return () => { logout(); token(); window.removeEventListener('storage', storage); live.current = false }
+    return () => { logout(); token(); activeScope(); window.removeEventListener('storage', storage); live.current = false }
   }, [])
   const acceptArtifact = ({ html, name }) => {
     if (!live.current || scope.current !== currentScope || !signedIn || !accountScope || accountScope === 'guest' || !projectId
@@ -65,7 +71,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
       <div className="browser-asset-viewport">
         {shown?.kind === 'page' ? <>
           <span className="browser-preview-label">Page draft · {shown.name}</span>
-          <PagePreview document={shown.document} onSelectField={field => {
+          <PagePreview document={shown.document} projectId={projectId} onSelectField={field => {
             setSelectedField({ field, request: Date.now() })
             onBrowserPanel('project')
           }} />

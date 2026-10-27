@@ -374,7 +374,7 @@ def _lifecycle_response(operation):
 class SaveProjectPageBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
     expected_revision: int = Field(strict=True, ge=0, lt=2147483647)
-    document: Dict[str, Any] = Field(max_length=6)
+    document: Dict[str, Any] = Field(max_length=9)
 
 
 @router.get('/projects/{project_id}/page')
@@ -388,11 +388,10 @@ def get_project_page(project_id: uuid.UUID, actor: _LifecycleActor = Depends(_ge
 async def save_project_page(project_id: uuid.UUID, request: Request,
                            actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
     from . import project_web_page
-    # Bound input before JSON parsing. Escaped Unicode can use six bytes per
-    # character, so 16 KiB admits every valid document and its envelope.
+    # Bound the raw envelope before parsing, allowing escaped Unicode.
     raw = bytearray()
     async for chunk in request.stream():
-        if len(raw) + len(chunk) > 16384:
+        if len(raw) + len(chunk) > 2 * 1024 * 1024:
             raise HTTPException(status_code=413, detail='The page document is too large.')
         raw.extend(chunk)
     try:
@@ -406,14 +405,14 @@ async def save_project_page(project_id: uuid.UUID, request: Request,
 
 @router.get('/projects/{project_id}/page/source')
 def export_project_page(project_id: uuid.UUID, revision: int = Query(ge=1, le=2147483647),
+                        target: Literal['web', 'ios'] = Query(default='web'),
                         actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
-    from . import project_web_page, web_page_template
-    page = _lifecycle_response(lambda: project_web_page.read(
-        actor.org_id, project_id, actor.binding_id, revision=revision))
-    archive = web_page_template.source_archive(page['document'], page['revision'])
+    from . import project_web_page
+    page, archive = _material_response(lambda: project_web_page.export_source(
+        actor.org_id, project_id, actor.binding_id, revision=revision, target=target))
     return Response(archive, media_type='application/zip', headers={
         'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
-        'Content-Disposition': f'attachment; filename="page-revision-{revision}.zip"',
+        'Content-Disposition': f'attachment; filename="{target}-page-revision-{revision}.zip"',
         'X-Page-Revision': str(revision), 'X-Page-Digest': page['digest'],
     })
 

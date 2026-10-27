@@ -460,6 +460,9 @@ def test_preflight_requires_exact_staging_origin_and_ack(monkeypatch):
         "Authorization": "Bearer " + JWT, "Content-Type": "application/json",
         "Idempotency-Key": "p080-r3:offline-1"}
     assert "params" not in calls[-1][2] and calls[-1][1] == p.ORIGIN + "/api/run"
+    LIVE_HTTP(f, "GET", "/api/health", None)
+    assert calls[-1][1] == p.ORIGIN + "/api/health"
+    assert calls[-1][2]["headers"] == {}
 
 
 def test_identity_requires_protected_acceptance_b_binding(monkeypatch):
@@ -502,6 +505,141 @@ def test_runtime_requires_verified_source_and_postgres_authorities(monkeypatch):
             f.env["LEAF_STORE_DIR"] = "/foreign"
         assert run(f) == "failed"
         assert not f.secret_reads and not f.saved and not f.ingests and not f.posts
+
+
+@pytest.fixture
+def ecs_component():
+    def build(component):
+        task_arn = f"arn:aws:ecs:{p.REGION}:{p.ACCOUNT}:task/staging/0123456789abcdef"
+        definition_arn = f"arn:aws:ecs:{p.REGION}:{p.ACCOUNT}:task-definition/leaf-platform-{component}:1"
+        entry = {"task": task_arn, "container": component,
+                 "image_digest": "sha256:" + "1" * 64}
+        receipt = {"database_secret_arn": f"arn:aws:secretsmanager:{p.REGION}:{p.ACCOUNT}:secret:stg/database-abcdef",
+                   "efs_id": "fs-0123456789abcdef0"}
+        environment = {key: ENV[key] for key in p.COMPONENT_KEYS[component]}
+        if component == "broker":
+            environment["LEAF_RUNTIME_ENV"] = "production"
+        task = {"taskArn": task_arn, "taskDefinitionArn": definition_arn,
+                "lastStatus": "RUNNING",
+                "containers": [{"name": component, "imageDigest": entry["image_digest"]}]}
+        definition = {
+            "taskDefinitionArn": definition_arn,
+            "containerDefinitions": [{
+                "name": component,
+                "environment": [{"name": key, "value": value}
+                                for key, value in environment.items()],
+                "secrets": [{"name": "DATABASE_URL", "valueFrom": receipt["database_secret_arn"]}],
+                "mountPoints": [{"containerPath": "/data/drawings", "sourceVolume": "drawings",
+                                 "readOnly": False}],
+            }],
+            "volumes": [{"name": "drawings", "efsVolumeConfiguration": {
+                "fileSystemId": receipt["efs_id"]}}],
+        }
+        return task, definition, entry, receipt
+    return build
+
+
+@pytest.mark.parametrize("component", ["app", "broker"])
+@pytest.mark.parametrize("labels", [None, {}, {p.REVISION_LABEL: SOURCE}])
+def test_check_component_accepts_staging_components(ecs_component, component, labels):
+    task, definition, entry, receipt = ecs_component(component)
+    if labels is not None:
+        definition["containerDefinitions"][0]["dockerLabels"] = labels
+    if component == "broker":
+        environment = {v["name"]: v["value"]
+                       for v in definition["containerDefinitions"][0]["environment"]}
+        assert environment["LEAF_RUNTIME_ENV"] == "production"
+        assert "LEAF_JOBS_STORE" not in environment
+    assert p.check_component(component, task, definition, entry, SOURCE, ENV, receipt) is None
+
+
+@pytest.mark.parametrize("component,defect,reason", [
+    ("app", "revision", "source_refused"),
+    ("app", "digest", "source_refused"),
+    ("broker", "drawing", "authority_refused"),
+    ("app", "environment", "authority_refused"),
+    ("app", "override", "authority_refused"),
+    ("broker", "override", "authority_refused"),
+    ("app", "database", "database_refused"),
+    ("app", "efs", "mount_refused"),
+    ("app", "readonly", "mount_refused"),
+    ("app", "duplicate-mount", "mount_refused"),
+    ("app", "stopped", "runtime_refused"),
+    ("app", "account", "runtime_refused"),
+    ("app", "region", "runtime_refused"),
+    ("app", "missing-definition-container", "runtime_refused"),
+    ("app", "duplicate-definition-container", "runtime_refused"),
+    ("app", "missing-task-container", "source_refused"),
+    ("app", "duplicate-task-container", "source_refused"),
+])
+def test_check_component_refusals(ecs_component, component, defect, reason):
+    task, definition, entry, receipt = ecs_component(component)
+    container = definition["containerDefinitions"][0]
+    if defect == "revision":
+        container["dockerLabels"] = {p.REVISION_LABEL: "b" * 40}
+    elif defect == "digest":
+        task["containers"][0]["imageDigest"] = "sha256:" + "2" * 64
+    elif defect in {"drawing", "environment"}:
+        key, value = (("LEAF_DRAWING_STORE", "memory") if defect == "drawing"
+                      else ("LEAF_RUNTIME_ENV", "production"))
+        for variable in container["environment"]:
+            if variable["name"] == key:
+                variable["value"] = value
+    elif defect == "override":
+        task["overrides"] = {"containerOverrides": [{"name": component, "environment": [
+            {"name": "LEAF_DRAWING_STORE", "value": "memory"}]}]}
+    elif defect == "database":
+        container["secrets"][0]["valueFrom"] += "-other"
+    elif defect == "efs":
+        definition["volumes"][0]["efsVolumeConfiguration"]["fileSystemId"] = "fs-other"
+    elif defect == "readonly":
+        container["mountPoints"][0]["readOnly"] = True
+    elif defect == "duplicate-mount":
+        container["mountPoints"].append(deepcopy(container["mountPoints"][0]))
+    elif defect == "stopped":
+        task["lastStatus"] = "STOPPED"
+    elif defect == "account":
+        task["taskArn"] = task["taskArn"].replace(p.ACCOUNT, "000000000000")
+    elif defect == "region":
+        task["taskArn"] = task["taskArn"].replace(p.REGION, "us-west-2")
+    elif defect == "missing-definition-container":
+        definition["containerDefinitions"] = []
+    elif defect == "duplicate-definition-container":
+        definition["containerDefinitions"].append(deepcopy(container))
+    elif defect == "missing-task-container":
+        task["containers"] = []
+    elif defect == "duplicate-task-container":
+        task["containers"].append(deepcopy(task["containers"][0]))
+    else:
+        raise AssertionError(defect)
+    with pytest.raises(p.Refusal, match="^" + reason + "$"):
+        p.check_component(component, task, definition, entry, SOURCE, ENV, receipt)
+
+
+def test_check_component_merges_overrides_for_matching_container(ecs_component):
+    task, definition, entry, receipt = ecs_component("app")
+    for variable in definition["containerDefinitions"][0]["environment"]:
+        if variable["name"] == "LEAF_DRAWING_STORE":
+            variable["value"] = "memory"
+    task["overrides"] = {"containerOverrides": [
+        {"name": "app", "environment": [{"name": "LEAF_DRAWING_STORE", "value": "postgres"}]},
+        {"name": "sidecar", "environment": [{"name": "LEAF_DRAWING_STORE", "value": "memory"}]},
+    ]}
+    assert p.check_component("app", task, definition, entry, SOURCE, ENV, receipt) is None
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (200, {"source_sha": SOURCE}, True),
+    (503, {"source_sha": SOURCE}, False),
+    (201, {"source_sha": SOURCE}, False),
+    (200, {"source_sha": "b" * 40}, False),
+    (200, {}, False),
+    (200, None, False),
+    (200, [{"source_sha": SOURCE}], False),
+    (200, SOURCE, False),
+])
+def test_served_source_ok(status, body, expected):
+    assert p.served_source_ok(status, body, SOURCE) is expected
 
 
 def test_entitlement_and_catalog_refusals_precede_submission(monkeypatch):
@@ -707,13 +845,13 @@ def test_evidence_is_sanitized_offline_and_gate_registered(monkeypatch, capsys):
         p.validate_receipt(tainted)
     registration = (ROOT / "scripts/run-all-gates.py").read_text()
     assert 'Suite("server-probe-staging-async-job"' in registration
-    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 16)' in registration
+    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 20)' in registration
     selection = json.loads((ROOT / "scripts/ci/test-selection-map.json").read_text())
     assert "server-probe-staging-async-job" in selection["mandatory_suite_ids"]
     floors = (ROOT / "scripts/test_gate_runner.py").read_text()
-    assert '"server-probe-staging-async-job": 16' in floors
+    assert '"server-probe-staging-async-job": 20' in floors
     no_skip = floors.split("_OPERATOR_NO_SKIP_FILES = frozenset({", 1)[1].split("})", 1)[0]
     assert '"server-probe-staging-async-job"' in no_skip
     source = Path(__file__).read_text()
-    assert source.count("\ndef test_") == 16
+    assert source.count("\ndef test_") == 20
     assert not any(name in sys.modules for name in ("probe_staging_async_job_live",))
