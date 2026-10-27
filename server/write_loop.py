@@ -1378,7 +1378,8 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                        holder: Optional[str] = None,
                        fence: Optional[int] = None,
                        require_parent_is_head: bool = False,
-                       graph_bundle: Optional[Dict[str, Any]] = None) -> int:
+                       graph_bundle: Optional[Dict[str, Any]] = None,
+                       mutation_plan_bytes: Optional[bytes] = None) -> int:
     """put_drawing takes a local path (immutability + sha are computed there), so
     stage `data` to a temp file and append the new version.
 
@@ -1395,7 +1396,8 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                                  parent_version=parent_version, meta=meta,
                                  holder=holder, fence=fence,
                                  require_parent_is_head=require_parent_is_head,
-                                 graph_bundle=graph_bundle)
+                                 graph_bundle=graph_bundle,
+                                 mutation_plan_bytes=mutation_plan_bytes)
     finally:
         try:
             os.remove(tmp)
@@ -3315,6 +3317,7 @@ def _apply_plan_live(*, tenant_id: str, drawing_id: str, head_v: int,
                   "source_ref": source_ref,
                   "note": meta_note},
             holder=holder, fence=fence, require_parent_is_head=True,
+            mutation_plan_bytes=plan_bytes,
         )
         version_write_ms = int(
             (time.perf_counter() - version_write_started) * 1000)

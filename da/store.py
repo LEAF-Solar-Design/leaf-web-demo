@@ -235,6 +235,31 @@ def drawing_prefix(tenant_id: str, drawing_id: str) -> str:
     return f"tenants/{sanitize_id(tenant_id)}/drawings/{sanitize_id(drawing_id)}"
 
 
+def version_plan_key(tenant_id: str, drawing_id: str, version: int) -> str:
+    """The immutable mutation plan beside one version's payload."""
+    return drawing_version_key(tenant_id, drawing_id, version)[:-4] + ".plan.txt"
+
+
+# The PostgreSQL schema has no extensible version metadata column. Keep the
+# additive plan fields in its existing note slot, decoding back to the original
+# public note in _pg_manifest. Legacy manifests store the fields directly.
+_PLAN_NOTE_PREFIX = "leaf-version-plan-v1:"
+
+
+def _version_plan_fields(meta: dict, parent_version: int) -> dict:
+    return {"plan_sha256": meta["plan_sha256"],
+            "parent_version": int(parent_version)}
+
+
+def _decode_plan_note(entry: dict) -> dict:
+    note = entry.get("note")
+    if isinstance(note, str) and note.startswith(_PLAN_NOTE_PREFIX):
+        metadata = json.loads(note[len(_PLAN_NOTE_PREFIX):])
+        entry.update(note=metadata["note"], plan_sha256=metadata["plan_sha256"],
+                     parent_version=metadata["parent_version"])
+    return entry
+
+
 def manifest_key(tenant_id: str, drawing_id: str) -> str:
     """Deterministic object key for the drawing's version index + checkout lock."""
     return f"{drawing_prefix(tenant_id, drawing_id)}/manifest.json"
@@ -564,6 +589,10 @@ class StorageBackend:
     def exists(self, key: str) -> bool:
         raise NotImplementedError
 
+    def delete(self, key: str) -> None:
+        """Roll back an unpublished plan while the drawing commit is held."""
+        raise NotImplementedError
+
     def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
         """Every object key currently under ONE drawing, or None if this backend
         cannot enumerate them.
@@ -622,6 +651,9 @@ class InMemoryBackend(StorageBackend):
     def exists(self, key: str) -> bool:
         return key in self._blobs
 
+    def delete(self, key: str) -> None:
+        self._blobs.pop(key, None)
+
     def put_if_absent_or_verify(self, key: str, data: bytes) -> None:
         payload = bytes(data)
         winner = self._blobs.setdefault(key, payload)
@@ -648,6 +680,9 @@ class OSSBackend(StorageBackend):
 
     def get(self, key: str) -> bytes:
         return client.download_object(key)
+
+    def delete(self, key: str) -> None:
+        client.delete_object(key)
 
     def put(self, key: str, data: bytes) -> None:
         # client.upload_object takes a local path (signed-S3 3-step), so stage bytes.
@@ -833,6 +868,12 @@ class FilesystemBackend(StorageBackend):
     def exists(self, key: str) -> bool:
         return os.path.exists(self._path(key))
 
+    def delete(self, key: str) -> None:
+        try:
+            os.remove(self._path(key))
+        except FileNotFoundError:
+            pass
+
     def drawing_object_keys(self, tenant_id: str, drawing_id: str) -> set | None:
         """Walk the drawing's prefix, separating ABSENCE from a FAILED SCAN.
 
@@ -930,7 +971,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
         "drawing_id": drawing_id,
         "head": int(manifest_row["head"]),
         "latest": ready_latest,
-        "versions": [{
+        "versions": [_decode_plan_note({
             "v": int(row["version"]),
             "parent": (int(row["parent_version"])
                        if row["parent_version"] is not None else None),
@@ -941,7 +982,7 @@ def _pg_manifest(tenant_id: str, drawing_id: str) -> dict:
             "tool": row["tool"],
             "note": row["note"],
             "source_ref": row["source_ref"],
-        } for row in rows],
+        }) for row in rows],
         "checkout": checkout,
     }
 
@@ -1293,9 +1334,15 @@ def _pg_put(
     parent_version: Optional[int], meta: dict, *,
     holder: Optional[str] = None, fence: Optional[int] = None,
     bundle: dict | None = None,
+    mutation_plan_bytes: bytes | None = None,
 ) -> int:
     db = _db()
     digest = _sha256(data)
+    if mutation_plan_bytes is not None:
+        meta = dict(meta, note=_PLAN_NOTE_PREFIX + json.dumps({
+            "note": meta.get("note"),
+            **_version_plan_fields(meta, parent_version),
+        }, separators=(",", ":")))
 
     def reserve(conn):
         row = conn.execute(
@@ -1439,9 +1486,20 @@ def _pg_put(
                 "version": version,
             },
         )
+        if mutation_plan_bytes is not None:
+            backend.put_if_absent_or_verify(
+                version_plan_key(tenant_id, drawing_id, version), mutation_plan_bytes)
         return True
 
-    if not db.run_transaction(finalize, isolation="serializable"):
+    try:
+        finalized = db.run_transaction(finalize, isolation="serializable")
+    except Exception:
+        if mutation_plan_bytes is not None:
+            backend.delete(version_plan_key(tenant_id, drawing_id, version))
+        raise
+    if not finalized:
+        if mutation_plan_bytes is not None:
+            backend.delete(version_plan_key(tenant_id, drawing_id, version))
         if bundle is not None:
             # A concurrent retry may have finalized the same apply while this
             # reservation was uploading. It is a success only for exact bytes.
@@ -1852,7 +1910,8 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
                 parent_version, meta: dict | None = None, *,
                 holder: str | None = None, fence: int | None = None,
                 require_parent_is_head: bool = False,
-                graph_bundle: dict | None = None) -> int:
+                graph_bundle: dict | None = None,
+                mutation_plan_bytes: bytes | None = None) -> int:
     """Append a NEW immutable version (v = latest+1, parent = parent_version) and
     advance head + latest. This is the primitive the DWG write path calls.
 
@@ -1902,6 +1961,18 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
     did = sanitize_id(drawing_id)
     bundle = None
     data = _read(local_path)
+    if mutation_plan_bytes is not None:
+        if (not isinstance(mutation_plan_bytes, bytes)
+                or not mutation_plan_bytes.startswith(b"LEAF_MUTATION_PLAN|")
+                or len(mutation_plan_bytes) > 1_048_576):
+            raise ValueError("invalid mutation plan bytes")
+        if type(parent_version) is not int or parent_version < 1:
+            raise ValueError("mutation plan requires a positive parent version")
+        plan_digest = _sha256(mutation_plan_bytes)
+        if (meta or {}).get("plan_sha256", plan_digest) != plan_digest:
+            raise ValueError("mutation plan digest mismatch")
+        meta = dict(meta or {}, plan_sha256=plan_digest)
+        require_parent_is_head = True
     if graph_bundle is not None:
         if holder is None or type(fence) is not int or fence < 1:
             raise CheckoutDenied("graph commits require a holder and checkout fence")
@@ -1917,6 +1988,7 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             backend, tid, did, data,
             int(parent_version) if parent_version is not None else None,
             meta or {}, holder=holder, fence=fence, bundle=bundle,
+            mutation_plan_bytes=mutation_plan_bytes,
         )
     # Under the SAME guard as acquire/release, because this is a load, edit,
     # save of the same one manifest document and `save_manifest` writes the
@@ -2014,7 +2086,19 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         })
         m["head"] = new_v
         m["latest"] = new_v
-        save_manifest(backend, tid, did, m)
+        if mutation_plan_bytes is None:
+            save_manifest(backend, tid, did, m)
+        else:
+            m["versions"][-1].update(_version_plan_fields(meta, parent_version))
+            plan_key = version_plan_key(tid, did, new_v)
+            plan_existed = backend.exists(plan_key)
+            try:
+                backend.put_if_absent_or_verify(plan_key, mutation_plan_bytes)
+                save_manifest(backend, tid, did, m)
+            except Exception:
+                if not plan_existed:
+                    backend.delete(plan_key)
+                raise
         return new_v
 
 

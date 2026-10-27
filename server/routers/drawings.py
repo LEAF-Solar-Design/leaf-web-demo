@@ -250,6 +250,55 @@ def get_dxf(drawing_id: str, request: Request, version: str = "head",
     return Response(content=data, media_type="application/dxf", headers=headers)
 
 
+@router.get("/api/drawings/{drawing_id}/versions/{version}/plan")
+def get_version_plan(drawing_id: str, version: str,
+                     tenant_id: str = Depends(deps.require_active_tenant)) -> Any:
+    """Read the exact mutation plan bound to a committed browser-edit version."""
+    import store
+
+    if not re.fullmatch(r"[a-z0-9][a-z0-9_-]{0,62}", drawing_id or ""):
+        return error_response(ErrorCode.BAD_PARAMS, "malformed drawing id",
+                              retryable=False, status_code=400)
+    if (len(version) > 8 or not re.fullmatch(r"[0-9]+", version)
+            or not 1 <= int(version) <= 99999999):
+        return error_response(ErrorCode.BAD_PARAMS, "version must be a positive integer",
+                              retryable=False, status_code=400)
+    backend = _backend(str(tenant_id))
+    try:
+        v, _, entry = store.resolve_version_entry(
+            backend, str(tenant_id), drawing_id, int(version))
+    except (KeyError, ValueError) as exc:
+        return error_response(ErrorCode.BAD_PARAMS, f"drawing/version unavailable: {exc}",
+                              retryable=False, status_code=404)
+
+    def plan_error(code: str, message: str, status: int) -> JSONResponse:
+        error = error_obj(ErrorCode.INTERNAL if status == 500 else ErrorCode.BAD_PARAMS,
+                          message, False)
+        error["error_code"] = code
+        return JSONResponse(status_code=status,
+                            content=with_envelope_fields({"error": error}))
+
+    if "plan_sha256" not in entry:
+        return plan_error("no_plan", "this version has no stored mutation plan", 404)
+    try:
+        data = backend.get(store.version_plan_key(str(tenant_id), drawing_id, v))
+    except KeyError:
+        return plan_error("no_plan", "this version has no stored mutation plan", 404)
+    import mutation_plan
+    if (len(data) > mutation_plan.MAX_PLAN_BYTES
+            or hashlib.sha256(data).hexdigest() != entry["plan_sha256"]):
+        return plan_error("plan_integrity", "stored mutation plan failed integrity validation", 500)
+    try:
+        plan_text = data.decode("utf-8")
+    except UnicodeError:
+        return plan_error("plan_integrity", "stored mutation plan failed integrity validation", 500)
+    return with_envelope_fields({
+        "drawing_id": drawing_id, "version": v,
+        "parent_version": entry["parent_version"],
+        "plan_sha256": entry["plan_sha256"], "plan_text": plan_text,
+    })
+
+
 # sf-w2-combiners-intake-producer: the combiner intake import. Every reason the route can answer, as
 # (HTTP status, envelope code, retryable). The keys are closed: the 18 codes of
 # solar_combiner_intake_import.CODES, its 8 passthrough binding codes, the two route codes (drawing id and
@@ -1071,6 +1120,8 @@ def _version_row(e: Dict[str, Any]) -> Dict[str, Any]:
         "workitem_id": e.get("workitem_id"),
         "note": e.get("note"),
         "source_ref": _source_ref(e.get("source_ref")),
+        **({"plan_sha256": e["plan_sha256"], "parent_version": e["parent_version"]}
+           if "plan_sha256" in e else {}),
     }
 
 
@@ -1786,9 +1837,20 @@ def save_plan_version(drawing_id: str,
     else:
         leg, note = "dwg-plan", "mock writer: the plan applied to the head's intake"
 
+    solar_carried = leg == "dxf-sidecar"
+    if solar_carried:
+        # Keep the sidecar leg's existing solar-state refusal precedence before
+        # reading the parent's intake for plan validation.
+        intake, refused = _carry_solar_state(
+            backend, str(tenant_id), drawing_id, int(head_v), intake,
+            parent_bytes=head_source)
+        if refused is not None:
+            return refused
+
     plan_digest: Optional[str] = None
+    plan_bytes: Optional[bytes] = None
     canonical = {}
-    if leg in ("dwg-plan", "dwg-plan-live") or mutations.get("block_defs"):
+    if leg in ("dwg-plan", "dwg-plan-live", "dxf-sidecar"):
         try:
             _base_v, base_intake = write_loop.read_intake(
                 backend, str(tenant_id), drawing_id, int(head_v))
@@ -1801,20 +1863,29 @@ def save_plan_version(drawing_id: str,
                                   retryable=False, status_code=400)
         try:
             canonical = mutation_plan.validate_mutations(
-                base_intake, mutations, allow_transforms=True, allow_xdata=False)
+                base_intake, mutations, allow_transforms=True, allow_xdata=False,
+                reject_noop=False)
             # The lowering runs here too, so a plan the live WorkItem would
             # refuse (a non-planar polyline, a collinear closed one) is refused
             # on this leg as well, with the same sentence.
             plan_bytes = mutation_plan.emit_plan(
-                canonical, base_sha256=hashlib.sha256(head_source).hexdigest(),
+                canonical, base_sha256=(hashlib.sha256(head_source).hexdigest()
+                                        if dwg_backed else actual_digest),
                 base_intake=base_intake)
         except ValueError as exc:
-            return error_response(ErrorCode.BAD_PARAMS,
-                                  f"the edit plan was refused: {exc}",
-                                  retryable=False, status_code=422)
-        plan_digest = mutation_plan.plan_sha256(plan_bytes)
+            if leg != "dxf-sidecar":
+                return error_response(ErrorCode.BAD_PARAMS,
+                                      f"the edit plan was refused: {exc}",
+                                      retryable=False, status_code=422)
+            # The sidecar already carries the save. Optional replay metadata
+            # must not turn a previously valid DXF save into a refusal.
+            canonical = {}
+        if plan_bytes is not None:
+            stored_plan_digest = mutation_plan.plan_sha256(plan_bytes)
+            if leg in ("dwg-plan", "dwg-plan-live") or mutations.get("block_defs"):
+                plan_digest = stored_plan_digest
 
-        if (leg == "dwg-plan-live" or canonical.get("block_defs")
+        if plan_bytes is not None and (leg == "dwg-plan-live" or canonical.get("block_defs")
                 or any(e.get("kind") == "MLEADER" for e in canonical.get("added", []))
                 or "MULTILEADER" in canonical.get("removed_kinds", {}).values()
                 or "mleaders_unsupported" in base_intake
@@ -1985,10 +2056,11 @@ def save_plan_version(drawing_id: str,
                 "note": "browser edit plan, mock writer (intake payload)"}
         cost = {"engine_usd": 0.0, "engine": "mock-writer"}
     else:
-        intake, refused = _carry_solar_state(backend, str(tenant_id), drawing_id, int(head_v), intake,
-                                             parent_bytes=head_source)
-        if refused is not None:
-            return refused
+        if not solar_carried:
+            intake, refused = _carry_solar_state(backend, str(tenant_id), drawing_id, int(head_v), intake,
+                                                 parent_bytes=head_source)
+            if refused is not None:
+                return refused
         payload = json.dumps(intake, separators=(",", ":")).encode("utf-8")
         intake_digest = hashlib.sha256(payload).hexdigest()
         meta = {"tool": "cad-edit-surface", "source": "cad_edit",
@@ -2006,7 +2078,8 @@ def save_plan_version(drawing_id: str,
                 backend, str(tenant_id), drawing_id, payload,
                 parent_version=int(parent_version),
                 meta=meta, holder=holder, fence=fence,
-                require_parent_is_head=True)
+                require_parent_is_head=True,
+                mutation_plan_bytes=plan_bytes)
     except store.CheckoutDenied as exc:
         return _denied(checkout_capability.CapabilityRejected(str(exc)))
     except ValueError as exc:
