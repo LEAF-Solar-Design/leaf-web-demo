@@ -39,6 +39,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
   const root = useRef(null)
   const restoration = useRef(null)
   const initialReport = useRef(true)
+  const initialProposalPending = useRef(true)
   const latestDraft = useRef(null)
   const lastProposalDocument = useRef(null)
   const admittedRef = useRef(false)
@@ -57,6 +58,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
       onRestore: (draft) => new Promise((resolve) => {
         restoration.current = resolve
         initialReport.current = true
+        initialProposalPending.current = false
         latestDraft.current = null
         setOpened(true)
         live.onChange(null)
@@ -97,13 +99,10 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
   }, [source, revision, onHostSource])
 
   const propose = useCallback((draft, triggeredAt = actionAt.current ?? performance.now()) => {
-    if (!admittedRef.current || !bridge.current) return Promise.resolve(false)
     try {
       return guardSink('proposal', next => {
-        const document = canonicalJSON(next.document)
-        if (lastProposalDocument.current === document) return Promise.resolve(true)
-        const pending = bridge.current.proposal(next, triggeredAt)
-        lastProposalDocument.current = document
+        const pending = bridge.current?.proposal(next, triggeredAt)
+        if (admittedRef.current) lastProposalDocument.current = canonicalJSON(next.document)
         return pending
       })(draft)
     } catch {
@@ -127,8 +126,12 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
   }, [live.onChange, propose])
 
   useEffect(() => {
-    if (admitted && live.ready && graph && latestDraft.current === graph) {
-      void propose(latestDraft.current)?.catch(() => {})
+    // Only the automatic initial proposal waits for readiness and admission.
+    if (initialProposalPending.current && admitted && live.ready && graph && latestDraft.current === graph) {
+      initialProposalPending.current = false
+      if (lastProposalDocument.current !== canonicalJSON(graph.document)) {
+        void propose(latestDraft.current)?.catch(() => {})
+      }
     }
   }, [admitted, live.ready, graph, propose])
 

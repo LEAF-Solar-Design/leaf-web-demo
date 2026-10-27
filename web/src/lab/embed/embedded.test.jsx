@@ -105,12 +105,12 @@ describe('Lab embedded mode', () => {
     expect(connection.proposal).toHaveBeenLastCalledWith({ document, ready: true, problems: [] }, expect.any(Number))
     fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
     act(() => connection.callbacks.onAdmitted())
-    expect(connection.proposal).toHaveBeenCalledOnce()
+    expect(connection.proposal).toHaveBeenCalledTimes(2)
     fireEvent.click(screen.getByRole('button', { name: 'Run graph' }))
     await waitFor(() => expect(connection.run).toHaveBeenCalledOnce())
-    expect(connection.proposal).toHaveBeenCalledOnce()
+    expect(connection.proposal).toHaveBeenCalledTimes(3)
     fireEvent.click(screen.getByRole('button', { name: 'Commit incomplete draft' }))
-    expect(connection.proposal).toHaveBeenCalledTimes(2)
+    expect(connection.proposal).toHaveBeenCalledTimes(4)
   })
 
   it('proposes the first ready report when the frame is already admitted', async () => {
@@ -126,7 +126,27 @@ describe('Lab embedded mode', () => {
     await waitFor(() => expect(connection.proposal).toHaveBeenCalledOnce())
     expect(connection.proposal).toHaveBeenLastCalledWith({ document, ready: true, problems: [] }, expect.any(Number))
     fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
-    expect(connection.proposal).toHaveBeenCalledOnce()
+    expect(connection.proposal).toHaveBeenCalledTimes(2)
+  })
+
+  it('passes every edit to the guarded bridge before admission and then proposes the latest ready draft once', async () => {
+    framed()
+    canvasControl.admit = false
+    canvasControl.document = emptyGraph()
+    render(<LabGround active />)
+    await canvas()
+    const connection = connections[0]
+    expect(connection.proposal).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Commit incomplete draft' }))
+    expect(connection.proposal).toHaveBeenCalledTimes(1)
+    expect(connection.proposal).toHaveBeenLastCalledWith(expect.objectContaining({ ready: false, problems: ['Input required'] }), expect.any(Number))
+    fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
+    expect(connection.proposal).toHaveBeenCalledTimes(2)
+    act(() => connection.callbacks.onAdmitted())
+    await waitFor(() => expect(connection.proposal).toHaveBeenCalledTimes(3))
+    expect(connection.proposal).toHaveBeenLastCalledWith({ document: canvasControl.document, ready: true, problems: [] }, expect.any(Number))
+    act(() => connection.callbacks.onAdmitted())
+    expect(connection.proposal).toHaveBeenCalledTimes(3)
   })
 
   it.each([false, true])('does not propose an unready initial document with admission first=%s', async (admit) => {
@@ -140,6 +160,10 @@ describe('Lab embedded mode', () => {
     if (!admit) act(() => connection.callbacks.onAdmitted())
     expect(screen.getByText('No valid graph')).toBeVisible()
     expect(connection.proposal).not.toHaveBeenCalled()
+    fireEvent.click(screen.getByRole('button', { name: 'Commit ready draft' }))
+    await waitFor(() => expect(connection.proposal).toHaveBeenCalledOnce())
+    act(() => connection.callbacks.onAdmitted())
+    expect(connection.proposal).toHaveBeenCalledOnce()
   })
 
   it.each([
