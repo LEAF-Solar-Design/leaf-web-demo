@@ -28,6 +28,7 @@ def task(key='build', path='src/app.py', depends_on=None):
 
 def document():
     return dict(contract=plan.PLAN_CONTRACT, campaign_id=CAMPAIGN, prompt_digest=DIGEST,
+                implementation_policy=dict(plan.IMPLEMENTATION_POLICY),
                 source_sha=SOURCE, summary='Organize recipes', tasks=[task()], open_questions=[])
 
 
