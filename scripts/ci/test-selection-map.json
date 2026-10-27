@@ -397,6 +397,7 @@
     "server-mcp-gateway-telemetry",
     "server-mcp-staging-probe",
     "server-probe-staging-async-job",
+    "server-probe-conv-durable-restart",
     "server-mcp-status",
     "server-mcp-tenant-registry",
     "server-mcp-tool-projection",
