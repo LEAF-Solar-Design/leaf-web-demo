@@ -24,6 +24,32 @@ const importedSources = ['a', 'b'].map((letter) => ({ source_revision: letter.re
 const importedShip = (overrides = {}) => ({ phase: 'setup-required', readiness: { setupState: 'no-approved-revision' },
   revision: 'r1', sources: importedSources, approvals: [], canApprove: false, ...overrides })
 
+it('F15 visibly selects a native source before offering approval without a drawing', () => {
+  const selectSource = vi.fn()
+  const approve = vi.fn()
+  const ship = importedShip({ revision: null, selectSource, approve, canApprove: true })
+  const view = render(<IosSurface enabled ship={ship} />)
+  expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
+  expect(screen.getAllByRole('button', { name: 'Select native source' })).toHaveLength(2)
+  fireEvent.click(screen.getAllByRole('button', { name: 'Select native source' })[1])
+  expect(selectSource).toHaveBeenCalledWith(importedSources[1].source_revision)
+  expect(approve).not.toHaveBeenCalled()
+  const selected = { ...ship, revision: importedSources[1].source_revision,
+    selectedSourceRevision: importedSources[1].source_revision, selectedSourceAvailable: true }
+  view.rerender(<IosSurface enabled ship={selected} />)
+  expect(screen.getByTestId('ios-selected-source')).toHaveTextContent(importedSources[1].source_revision)
+  expect(screen.getByRole('button', { name: 'Native source selected' })).toHaveAttribute('aria-pressed', 'true')
+  expect(screen.getAllByTestId('ios-ship-approve')).toHaveLength(1)
+  fireEvent.click(screen.getByTestId('ios-ship-approve'))
+  expect(approve).toHaveBeenCalledWith(importedSources[1].source_revision)
+  view.rerender(<IosSurface enabled ship={{ ...selected, selectionLocked: true }} />)
+  expect(screen.getByRole('button', { name: 'Select native source' })).toBeDisabled()
+  expect(screen.getByTestId('ios-ship-approve')).toBeDisabled()
+  view.rerender(<IosSurface enabled ship={{ ...selected, sources: [], selectedSourceAvailable: false }} />)
+  expect(screen.getByTestId('ios-selected-source')).toHaveTextContent(/no longer available/i)
+  expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
+})
+
 it('B4D row16 catalog metadata without sources leaves both legacy renders byte identical', () => {
   const ship = { phase: 'setup-required', readiness: { setupState: 'no-approved-revision' } }
   const metadata = { ...ship, approvals: [], sync: { status: 'unavailable' }, canApprove: true }
@@ -72,7 +98,7 @@ it('B4D row18 owner controls use the source revision and explain busy or missing
   expect(screen.getByText('Only the project owner can approve a source revision')).toBeInTheDocument()
   view.rerender(<IosSurface enabled ship={{ ...ship, revision: null }} />)
   expect(screen.queryByTestId('ios-ship-approve')).not.toBeInTheDocument()
-  expect(screen.getByText('Select a drawing version before approving')).toBeInTheDocument()
+  expect(screen.getByText('Select an imported native source before approving')).toBeInTheDocument()
 })
 
 it('B4D row19 approved and consumed sources have status text and no approval button', () => {
@@ -116,7 +142,7 @@ it('I1 row9 renders setup, provider progress, receipt and launch reason from shi
   const ship = { phase: 'setup-required', readiness: { setupState: 'no-approved-revision', setupAction: 'Approve revision r1' }, execution: null, receipt: null }
   const view = render(<IosSurface enabled ship={ship} onLaunch={() => {}} />)
   expect(view.container.querySelector('[data-rung="source"]')).toHaveAttribute('data-state', 'missing')
-  expect(screen.getByText('Select a drawing version and ask the project owner to approve it.')).toBeInTheDocument()
+  expect(screen.getByText('Select an imported native source and ask the project owner to approve it.')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Launch TestFlight build' })).toBeDisabled()
   expect(screen.getByText('Finish setup before starting a build.')).toBeInTheDocument()
   const running = { ...ship, phase: 'running', readiness: { setupState: 'none' }, execution: { status: 'running', stage: 'BUILT', updated_at: '2026-09-17T12:00:00Z' } }

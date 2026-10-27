@@ -4229,7 +4229,7 @@ export default function App() {
     ...iosShipController,
     controllerLive: shipControllerLive,
     contract: iosContract,
-    revision: canonicalVersionId || null,
+    revision: iosShipController.revision,
     error: shipErrorSentence(iosShipController.error),
     onLaunch: iosShipController.phase === 'ready' ? iosShipController.launch : null,
     launchReason: shipLaunchReason(iosShipController),
