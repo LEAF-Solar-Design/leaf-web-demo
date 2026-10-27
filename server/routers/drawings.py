@@ -1852,27 +1852,28 @@ def save_plan_version(drawing_id: str,
     plan_digest: Optional[str] = None
     plan_bytes: Optional[bytes] = None
     canonical = {}
+    required_plan_validation = leg != "dxf-sidecar" or bool(mutations.get("block_defs"))
     try:
         base_digest = write_loop.version_content_sha256(
             backend, str(tenant_id), drawing_id, head_v)
     except Exception:  # Optional replay metadata cannot refuse a save.
         base_digest = None
     base_intake = None
-    if leg != "dxf-sidecar" or base_digest is not None:
+    if required_plan_validation or base_digest is not None:
         try:
             _base_v, base_intake = write_loop.read_intake(
                 backend, str(tenant_id), drawing_id, int(head_v))
         except write_loop.ProofStateUnreadable as exc:
-            if leg != "dxf-sidecar":
+            if required_plan_validation:
                 return error_response(ErrorCode.INTERNAL, str(exc),
                                       retryable=True, status_code=503)
         except (KeyError, ValueError):
-            if leg != "dxf-sidecar":
+            if required_plan_validation:
                 return error_response(ErrorCode.BAD_PARAMS,
                                       "drawing unavailable or malformed request",
                                       retryable=False, status_code=400)
         except Exception:
-            if leg != "dxf-sidecar":
+            if required_plan_validation:
                 raise
     if base_intake is not None:
         try:
@@ -1882,11 +1883,12 @@ def save_plan_version(drawing_id: str,
             # The lowering runs here too, so a plan the live WorkItem would
             # refuse (a non-planar polyline, a collinear closed one) is refused
             # on this leg as well, with the same sentence.
-            if base_digest is not None:
+            if base_digest is not None or required_plan_validation:
                 plan_bytes = mutation_plan.emit_plan(
-                    canonical, base_sha256=base_digest, base_intake=base_intake)
+                    canonical, base_sha256=base_digest or hashlib.sha256(head_source).hexdigest(),
+                    base_intake=base_intake)
         except Exception as exc:
-            if leg != "dxf-sidecar":
+            if required_plan_validation:
                 if not isinstance(exc, ValueError):
                     raise
                 return error_response(ErrorCode.BAD_PARAMS,
@@ -1900,11 +1902,13 @@ def save_plan_version(drawing_id: str,
             if leg in ("dwg-plan", "dwg-plan-live") or mutations.get("block_defs"):
                 plan_digest = stored_plan_digest
 
-        if plan_bytes is not None and (leg in ("dwg-plan-live", "dxf-sidecar") or canonical.get("block_defs")
+        required_result_comparison = required_plan_validation and (
+                leg == "dwg-plan-live" or canonical.get("block_defs")
                 or any(e.get("kind") == "MLEADER" for e in canonical.get("added", []))
                 or "MULTILEADER" in canonical.get("removed_kinds", {}).values()
                 or "mleaders_unsupported" in base_intake
-                or "mleaders_unsupported_handles" in base_intake):
+                or "mleaders_unsupported_handles" in base_intake)
+        if plan_bytes is not None and (required_result_comparison or leg == "dxf-sidecar"):
             # The client computes the plan from the same entity list it wrote the
             # DXF from, so a mismatch is a client defect. Never commit a plan the
             # bytes beside it contradict.
@@ -2000,7 +2004,7 @@ def save_plan_version(drawing_id: str,
                         for field in mutation_plan.STYLE_FIELDS)):
                     raise ValueError(properties_note)
             except Exception as exc:
-                if leg == "dxf-sidecar":
+                if leg == "dxf-sidecar" and not required_result_comparison:
                     plan_bytes = None
                     plan_digest = None
                 else:
@@ -2009,6 +2013,11 @@ def save_plan_version(drawing_id: str,
                     return error_response(ErrorCode.BAD_PARAMS,
                                           f"the uploaded DXF does not carry the plan's result: {exc}",
                                           retryable=False, status_code=422)
+
+    if base_digest is None:
+        # The fallback digest above supports existing integrity refusals only.
+        # A stored replay plan must bind the parent's actual content.
+        plan_bytes = None
 
     if leg == "dwg-plan-live":
         co = store.load_manifest(backend, str(tenant_id), drawing_id).get("checkout")
@@ -2089,6 +2098,20 @@ def save_plan_version(drawing_id: str,
                 "note": "browser edit via the isolated engine worker"}
         cost = {"engine_usd": 0.0, "engine": "client-wasm"}
 
+    source_stored = False
+    source_attempted = False
+
+    def prepare_sidecar_plan(version):
+        nonlocal source_stored, source_attempted
+        source_attempted = True
+        try:
+            write_loop.publish_edited_source(
+                backend, str(tenant_id), drawing_id, version, data, payload)
+        except Exception:  # noqa: BLE001 - preserve the sidecar save's nonfatal failure
+            return False
+        source_stored = True
+        return True
+
     try:
         with write_loop.drawing_mutation_refusal_guard() as refusal:
             if refusal is not None:
@@ -2099,7 +2122,8 @@ def save_plan_version(drawing_id: str,
                 parent_version=int(parent_version),
                 meta=meta, holder=holder, fence=fence,
                 require_parent_is_head=True,
-                mutation_plan_bytes=plan_bytes)
+                mutation_plan_bytes=plan_bytes,
+                prepare_mutation_plan=prepare_sidecar_plan if leg == "dxf-sidecar" else None)
     except store.CheckoutDenied as exc:
         return _denied(checkout_capability.CapabilityRejected(str(exc)))
     except ValueError as exc:
@@ -2120,8 +2144,7 @@ def save_plan_version(drawing_id: str,
     # The sidecar leg keeps the raw full-fidelity DXF beside the version (F-3);
     # the plan leg's version is the applied intake, which the engine reopens
     # through the synthesizer, so no sidecar is stored for it.
-    source_stored = False
-    if leg == "dxf-sidecar":
+    if leg == "dxf-sidecar" and not source_attempted:
         source_stored = True
         try:
             write_loop.publish_edited_source(

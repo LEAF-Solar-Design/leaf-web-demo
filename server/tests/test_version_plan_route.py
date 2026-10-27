@@ -206,6 +206,73 @@ def test_unchanged_sidecar_stores_empty_plan(client, tmp_path):
     _assert_plan(client, backend, saves.DWG_DRAWING, expected)
 
 
+def test_sidecar_is_published_before_plan_becomes_visible(client, tmp_path, monkeypatch):
+    import store
+    import write_loop
+
+    backend = _seed_unchanged_dwg(tmp_path)
+    expected = _expected(backend, saves.DWG_DRAWING, {})
+    real_publish = write_loop.publish_edited_source
+    published = []
+
+    def publish(*args, **kwargs):
+        assert _get(client).status_code == 404
+        assert not backend.exists(store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2))
+        real_publish(*args, **kwargs)
+        assert _get(client).status_code == 404
+        published.append(True)
+
+    monkeypatch.setattr(write_loop, "publish_edited_source", publish)
+    response = saves._post(client, saves.DWG_DRAWING, {})
+    assert response.status_code == 201, response.text
+    assert response.json()["source_stored"] is True
+    assert published == [True]
+    _assert_plan(client, backend, saves.DWG_DRAWING, expected)
+
+
+@pytest.mark.parametrize("partial_write", [False, True])
+def test_failed_sidecar_publication_commits_without_plan(client, tmp_path, monkeypatch, partial_write):
+    import store
+    import write_loop
+
+    real_publish = write_loop.publish_edited_source
+
+    def fail(*args, **kwargs):
+        if partial_write:
+            real_publish(*args, **kwargs)
+        raise OSError("sidecar publication failed")
+
+    monkeypatch.setattr(write_loop, "publish_edited_source", fail)
+    baseline_dir = tmp_path / "baseline"
+    baseline_dir.mkdir()
+    _seed_unchanged_dwg(baseline_dir)
+    real_put = write_loop._put_bytes_version
+
+    def without_plan(*args, **kwargs):
+        kwargs["mutation_plan_bytes"] = None
+        return real_put(*args, **kwargs)
+
+    # Main commits the intake and reports the nonfatal source-storage failure.
+    with monkeypatch.context() as baseline:
+        baseline.setenv("LEAF_STORE_DIR", str(baseline_dir / "drawings"))
+        baseline.setattr(write_loop, "_put_bytes_version", without_plan)
+        expected = saves._post(client, saves.DWG_DRAWING, {})
+    assert expected.status_code == 201, expected.text
+    assert expected.json()["source_stored"] is False
+
+    backend = _seed_unchanged_dwg(tmp_path)
+    response = saves._post(client, saves.DWG_DRAWING, {})
+    assert response.status_code == expected.status_code, response.text
+    assert response.json() == expected.json()
+    entry = store.resolve_version_entry(backend, saves.TENANT, saves.DWG_DRAWING, 2)[2]
+    assert "plan_sha256" not in entry
+    assert "parent_version" not in entry
+    assert not backend.exists(store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2))
+    plan = _get(client)
+    assert plan.status_code == 404
+    assert plan.json()["error"]["error_code"] == "no_plan"
+
+
 def test_gated_live_sidecar_still_stores_plan(client, tmp_path, monkeypatch):
     import deps
 
@@ -414,7 +481,9 @@ def test_plan_write_failure_commits_like_no_plan(
 
 @pytest.mark.parametrize("cleanup_fails", [False, True])
 @pytest.mark.parametrize("error_kind", [None, "oserror", "conflict"])
-def test_postgres_plan_write_failure_is_optional(monkeypatch, caplog, cleanup_fails, error_kind):
+@pytest.mark.parametrize("sidecar_ready", [False, True])
+def test_postgres_plan_write_failure_is_optional(
+        monkeypatch, caplog, cleanup_fails, error_kind, sidecar_ready):
     import store
     from datetime import timedelta
 
@@ -464,23 +533,33 @@ def test_postgres_plan_write_failure_is_optional(monkeypatch, caplog, cleanup_fa
         monkeypatch.setattr(backend, "put_if_absent_or_verify", fail_plan)
     if cleanup_fails:
         monkeypatch.setattr(backend, "delete", fail_delete)
+
+    def prepare(version):
+        assert version == 2
+        assert version_row["state"] == "reserved"
+        assert row["head"] == 1
+        assert not backend.exists(key)
+        return sidecar_ready
+
     version = store._pg_put(
         backend, "tenant", "drawing", b"version bytes", 1,
         {"note": "public note", "plan_sha256": hashlib.sha256(plan).hexdigest()},
-        holder="writer", fence=1, mutation_plan_bytes=plan)
+        holder="writer", fence=1, mutation_plan_bytes=plan,
+        prepare_mutation_plan=prepare)
     assert version == row["head"] == row["latest"] == 2
     assert version_row["state"] == "ready"
     assert backend.get(store.drawing_version_key("tenant", "drawing", 2)) == b"version bytes"
     entry = store._decode_plan_note({"v": 2, "note": version_row["note"]})
-    if error_type is None:
+    if error_type is None and sidecar_ready:
         assert entry["plan_sha256"] == hashlib.sha256(plan).hexdigest()
         assert entry["parent_version"] == 1
         assert backend.get(key) == plan
     else:
         assert entry == {"v": 2, "note": "public note"}
-        assert backend.exists(key) == cleanup_fails
+        assert backend.exists(key) == (cleanup_fails and sidecar_ready)
         warnings = [r.getMessage() for r in caplog.records if r.name == store.__name__]
-        assert warnings == [f"Plan write failed drawing=drawing version=2 exception={error_type.__name__}"]
+        assert warnings == ([f"Plan write failed drawing=drawing version=2 exception={error_type.__name__}"]
+                            if sidecar_ready else [])
 
 
 @pytest.mark.parametrize("tamper", [False, True])

@@ -1337,6 +1337,7 @@ def _pg_put(
     holder: Optional[str] = None, fence: Optional[int] = None,
     bundle: dict | None = None,
     mutation_plan_bytes: bytes | None = None,
+    prepare_mutation_plan: Callable[[int], bool] | None = None,
 ) -> int:
     db = _db()
     digest = _sha256(data)
@@ -1442,6 +1443,9 @@ def _pg_put(
 
     plan_key = version_plan_key(tenant_id, drawing_id, version)
     note = meta.get("note")
+    if (mutation_plan_bytes is not None and prepare_mutation_plan is not None
+            and not prepare_mutation_plan(version)):
+        mutation_plan_bytes = None
     if mutation_plan_bytes is not None:
         try:
             backend.put_if_absent_or_verify(plan_key, mutation_plan_bytes)
@@ -1923,12 +1927,17 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
                 holder: str | None = None, fence: int | None = None,
                 require_parent_is_head: bool = False,
                 graph_bundle: dict | None = None,
-                mutation_plan_bytes: bytes | None = None) -> int:
+                mutation_plan_bytes: bytes | None = None,
+                prepare_mutation_plan: Callable[[int], bool] | None = None) -> int:
     """Append a NEW immutable version (v = latest+1, parent = parent_version) and
     advance head + latest. This is the primitive the DWG write path calls.
 
     Returns the new integer version. A write from a non-latest head branches the
     DAG (parent linkage is enough; we keep the model simple).
+
+    `prepare_mutation_plan(version)` publishes prerequisites at the reserved
+    version before storing a plan or exposing its metadata. False omits the
+    optional plan while preserving the version commit.
 
     ABANDONED BLOBS (legacy authority). A publication that wrote its DWG and
     then failed to save the manifest leaves a blob beyond latest that no
@@ -2001,6 +2010,7 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
             int(parent_version) if parent_version is not None else None,
             meta or {}, holder=holder, fence=fence, bundle=bundle,
             mutation_plan_bytes=mutation_plan_bytes,
+            prepare_mutation_plan=prepare_mutation_plan,
         )
     # Under the SAME guard as acquire/release, because this is a load, edit,
     # save of the same one manifest document and `save_manifest` writes the
@@ -2098,6 +2108,9 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         })
         m["head"] = new_v
         m["latest"] = new_v
+        if (mutation_plan_bytes is not None and prepare_mutation_plan is not None
+                and not prepare_mutation_plan(new_v)):
+            mutation_plan_bytes = None
         if mutation_plan_bytes is None:
             save_manifest(backend, tid, did, m)
         else:

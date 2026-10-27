@@ -41,7 +41,7 @@ import time
 from contextlib import contextmanager
 from decimal import Decimal, ROUND_HALF_UP
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Optional, Tuple
 
 from envelopes import DEFAULT_HTTP_STATUS, ErrorCode, err_envelope, ok_envelope
 import entity_scope_containment as containment
@@ -1393,7 +1393,8 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                        fence: Optional[int] = None,
                        require_parent_is_head: bool = False,
                        graph_bundle: Optional[Dict[str, Any]] = None,
-                       mutation_plan_bytes: Optional[bytes] = None) -> int:
+                       mutation_plan_bytes: Optional[bytes] = None,
+                       prepare_mutation_plan: Optional[Callable[[int], bool]] = None) -> int:
     """put_drawing takes a local path (immutability + sha are computed there), so
     stage `data` to a temp file and append the new version.
 
@@ -1411,7 +1412,8 @@ def _put_bytes_version(backend, tenant_id: str, drawing_id: str, data: bytes,
                                  holder=holder, fence=fence,
                                  require_parent_is_head=require_parent_is_head,
                                  graph_bundle=graph_bundle,
-                                 mutation_plan_bytes=mutation_plan_bytes)
+                                 mutation_plan_bytes=mutation_plan_bytes,
+                                 prepare_mutation_plan=prepare_mutation_plan)
     finally:
         try:
             os.remove(tmp)
