@@ -1,6 +1,6 @@
 """HTTP API for the canonical Project/Job entity (FastAPI APIRouter).
 
-Self-contained router â€” NOT mounted into server/app.py here (a sibling owns that
+Self-contained router — NOT mounted into server/app.py here (a sibling owns that
 file). Integration is one line, documented in platform/README.md:
 
     from platform.api import router as platform_router   # (or the leaf_platform alias)
@@ -54,10 +54,10 @@ class CreateOrgBody(BaseModel):
     model_config = ConfigDict(extra="forbid")
     name: str = Field(min_length=1, max_length=200)
     tier: Optional[str] = None
-    # DEV SEAM (contract/BILLING.md Â§6): with auth OFF, a caller may bootstrap
+    # DEV SEAM (contract/BILLING.md §6): with auth OFF, a caller may bootstrap
     # the org WITH its identity binding so cross-repo harnesses can exercise the
     # billing org-resolve path. With LEAF_AUTH_LIVE=1 a client-supplied identity
-    # is never trusted â€” the route 422s if these are present.
+    # is never trusted — the route 422s if these are present.
     external_subject: Optional[str] = Field(default=None, min_length=1, max_length=500)
     external_authority: str = Field(default="auth0", min_length=1, max_length=100)
 
@@ -188,7 +188,7 @@ class ReviewSignatureBody(BaseModel):
 
 
 # --------------------------------------------------------------------------- #
-# orgs â€” the tenant anchor every project/job route requires
+# orgs — the tenant anchor every project/job route requires
 # --------------------------------------------------------------------------- #
 def _org_self_provision_allowed() -> bool:
     # Fail closed unless self-provisioning or a named non-production runtime is explicit.
@@ -199,7 +199,7 @@ def _org_self_provision_allowed() -> bool:
 # DEV POSTURE (open endpoint) vs LIVE AUTH (F6): POST /api/orgs mints an org.
 # With auth OFF (demo) it is UNGATED so the demo can bootstrap the first org_id
 # (chicken/egg: you cannot present an org you do not yet have). With
-# LEAF_AUTH_LIVE=1 it is GATED behind require_auth_when_live â€” org creation
+# LEAF_AUTH_LIVE=1 it is GATED behind require_auth_when_live — org creation
 # becomes a side effect of a real, verified login and an UNAUTHENTICATED call is
 # rejected (401); a client-supplied identity is never trusted. Documented in
 # platform/README.md. GET /api/orgs/{org_id} keeps the same 404-not-403
@@ -798,7 +798,7 @@ def import_drawing_version(
 ):
     """Adopt a ready same-org account upload using server-derived refs and provenance."""
     # Two independent gates, both fail-closed, checked in this order:
-    #   1. the lane's own activation flag (default OFF) â€” a deployment that has
+    #   1. the lane's own activation flag (default OFF) — a deployment that has
     #      not explicitly enabled upload/import never writes at all;
     #   2. the shared cutover fence, held across the commit, so a drain started
     #      mid-flight cannot be crossed by this already-admitted request.
@@ -843,7 +843,7 @@ def create_job(project_id: uuid.UUID, body: CreateJobBody,
     if body.kind not in JOB_KINDS:
         raise HTTPException(status_code=422, detail=f"kind must be one of {list(JOB_KINDS)}")
     # ownership check first: 404 (not 403) if the project is not the caller's
-    # â€” kept BEFORE entitlement so a cross-org probe learns nothing new.
+    # — kept BEFORE entitlement so a cross-org probe learns nothing new.
     if store.get_project(org_id, project_id) is None:
         raise HTTPException(status_code=404, detail="project not found")
     # Tier-branching entitlement enforcement (P1 floor): the caller org's tier
@@ -1104,7 +1104,7 @@ def resolve_shared_evidence_bundle(bundle_id: uuid.UUID, body: ShareTokenBody):
 
 
 # --------------------------------------------------------------------------- #
-# offboarding (admin/operator-gated â€” the only hard-delete path)
+# offboarding (admin/operator-gated — the only hard-delete path)
 # --------------------------------------------------------------------------- #
 # Integration seam: the credential-broker / OSS siblings inject the real purge hooks
 # by overriding these module attributes. Defaults are no-ops so a standalone deploy
@@ -1149,14 +1149,14 @@ def offboard(org_id: uuid.UUID, x_admin_token: str | None = Header(default=None)
 
 
 # --------------------------------------------------------------------------- #
-# billing tier sync (flag-gated skeleton, DARK by default â€” contract/BILLING.md Â§3)
+# billing tier sync (flag-gated skeleton, DARK by default — contract/BILLING.md §3)
 # --------------------------------------------------------------------------- #
 class BillingTierSyncBody(BaseModel):
-    """Subscription facts as leaf_website's Stripe webhook knows them â€”
+    """Subscription facts as leaf_website's Stripe webhook knows them —
     the SAME fields the Post-Login Action reads from app_metadata.leaf, so
     both legs derive the tier from identical inputs. Never carries a
-    Claude/Anthropic credential (contract/AUTH.md Â§0) and never carries a
-    literal tier (single derivation path â€” the mapping table decides)."""
+    Claude/Anthropic credential (contract/AUTH.md §0) and never carries a
+    literal tier (single derivation path — the mapping table decides)."""
     plan: Optional[str] = None
     subscription_active: Optional[bool] = None
     subscription_status: Optional[str] = None
@@ -1195,15 +1195,15 @@ def _require_billing_sync_caller(x_billing_sync_secret: str | None) -> None:
 def billing_org_resolve(body: BillingOrgResolveBody,
                         x_billing_sync_secret: str | None = Header(default=None)):
     """Resolve a verified external identity to its platform org UUID
-    (contract/BILLING.md Â§6 durable linkage).
+    (contract/BILLING.md §6 durable linkage).
 
-    leaf_website's Stripe webhook calls this ONCE per org â€” on the first
-    subscription event with no stored linkage â€” and persists the returned
+    leaf_website's Stripe webhook calls this ONCE per org — on the first
+    subscription event with no stored linkage — and persists the returned
     UUID in its own DB (Organization.platformOrgId). Same trusted-internal-
     caller model and fail-closed gates as tier-sync; read-only (resolves a
     binding the platform already owns, writes nothing).
 
-    404 in every unresolvable case â€” unknown identity (an account predating
+    404 in every unresolvable case — unknown identity (an account predating
     platform bootstrap), a non-OWNER binding (the contract keys the linkage
     on the org owner; member/reviewer identities must not enumerate), and a
     non-active org (offboarding marks the org BEFORE revoking its bindings,

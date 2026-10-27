@@ -2195,7 +2195,7 @@ def _split_sql_statements(sql: str) -> List[str]:
     """Split migration DDL without breaking quoted or dollar-quoted bodies.
 
     Migrations are intentionally plain SQL, but immutable-ledger triggers use
-    PostgreSQL ``$$`` function bodies.  A naÃ¯ve ``split(';')`` would execute a
+    PostgreSQL ``$$`` function bodies.  A naïve ``split(';')`` would execute a
     function one fragment at a time.  This small lexer is sufficient for SQL
     migrations: it recognizes line comments, single-quoted strings, and tagged
     dollar quotes while preserving every byte sent to PostgreSQL.
@@ -2307,7 +2307,7 @@ MIGRATION_GLOB = "[0-9][0-9][0-9][0-9]_*.sql"
 
 def apply_migration(sql_path: Optional[Path] = None) -> None:
     """Apply migrations. With no arg, apply EVERY ``NNNN_*.sql`` in ``migrations/``
-    in sorted (numeric-prefix) order â€” so a fresh deploy gets 0001 (tables) AND
+    in sorted (numeric-prefix) order — so a fresh deploy gets 0001 (tables) AND
     0002 (deletion/purge columns) and any future migration, not just 0001. All
     migrations are idempotent (CREATE TABLE / ADD COLUMN IF NOT EXISTS). Shipped
     migrations are recorded with their source hash and skipped after a matching

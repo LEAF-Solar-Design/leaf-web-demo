@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Leaf web demo â€” full test-orchestration gate runner (CI-ready).
+Leaf web demo — full test-orchestration gate runner (CI-ready).
 
 WHY THIS EXISTS
 ---------------
@@ -9,7 +9,7 @@ The suites in this repo CANNOT share one pytest process. They cross-contaminate:
   * auth suites toggle LEAF_AUTH_LIVE (a process-global env flag);
   * write / job / drawing suites share on-disk state (jobs.db, the versioned
     drawing store, authored_tools.json, broker ledger/tenants);
-  * every suite boots its own broker+app on ephemeral ports â€” combined, their
+  * every suite boots its own broker+app on ephemeral ports — combined, their
     module-scoped fixtures collide;
   * the repo contains a `platform/` package that SHADOWS the stdlib `platform`
     module whenever the repo root lands on sys.path, so the platform suite has to
@@ -39,28 +39,28 @@ Special handling, all documented on the scoreboard:
     the compose stack, so it runs only with LEAF_CONTAINER_SMOKE=1 and SKIPs
     (with reason) otherwise, or when Docker is unavailable (script exit 3).
   * a child that fails to SPAWN (OSError) or dies with no output is a FAIL row
-    with an explicit note and retries like any red suite â€” never a runner
+    with an explicit note and retries like any red suite — never a runner
     crash that loses the scoreboard. Drill it with
     LEAF_GATE_FAULT_INJECT="<suite-id>:spawn" (first attempt only; see
     scripts/test_gate_runner.py, registered as gate-runner-selftest).
   * `--only` is REPEATABLE and unions its matches, a substring that matches no
     suite exits 2 rather than silently shrinking the run, and the scoreboard
-    echoes the exact selection that produced it â€” so the printed result can be
+    echoes the exact selection that produced it — so the printed result can be
     checked against the command that was typed.
   * a suite id registered twice exits 2 before anything runs. The id is the
     handle `--only` matches and the name of the child's log file, so a
     duplicate runs one test file twice and can answer to two different
-    expected floors at once â€” a scoreboard that cannot say which floor the
+    expected floors at once — a scoreboard that cannot say which floor the
     gate stands on.
   * `harness-audit-high` (kind="npm-audit") tells a real lockfile advisory
     apart from an npmjs.org registry outage: exit 0 is PASS, exit 1 with a
     parseable advisory JSON report is FAIL, and a registry/transport error is
-    UNAVAILABLE â€” retried up to AUDIT_MAX_ATTEMPTS times with backoff INSIDE
+    UNAVAILABLE — retried up to AUDIT_MAX_ATTEMPTS times with backoff INSIDE
     this one suite (never re-entering the outage through the generic
     --retry), never counted as a shard failure, and called out on the
     scoreboard with a "NOT PROVEN BY AUDIT" line. See run_npm_audit_suite for
     the classification (a transport signal requires line-adjacency to its own
-    marker â€” never a bare 5xx digit anywhere in the output) and
+    marker — never a bare 5xx digit anywhere in the output) and
     verify_shard_results for what an UNAVAILABLE suite costs the fan-in: never
     a free PROVEN, only a lockfile-blob-sha transitivity proof against a prior
     PASSED audit, or a FAIL naming exactly that.
@@ -215,7 +215,7 @@ def _npx() -> str:
     return shutil.which("npx") or "npx"
 
 
-# Standard Git for Windows install paths â€” the only bash on a Windows box that
+# Standard Git for Windows install paths — the only bash on a Windows box that
 # sees this repo at its Windows path.
 _GIT_BASH_WIN = (
     r"C:\Program Files\Git\bin\bash.exe",
@@ -224,7 +224,7 @@ _GIT_BASH_WIN = (
 
 
 def _is_wsl_launcher(path: str) -> bool:
-    r"""True for %SystemRoot%\System32\bash.exe â€” the WSL launcher, not a shell.
+    r"""True for %SystemRoot%\System32\bash.exe — the WSL launcher, not a shell.
 
     It runs a Linux distro with a /mnt/c view of the tree, so a script started
     through it reports `uname -sm` as "Linux x86_64" and cannot execute the
@@ -232,7 +232,7 @@ def _is_wsl_launcher(path: str) -> bool:
     those two signals: it would conclude the deps are unusable and unpack
     web/vendor/node_modules-linux-x64.tar.gz OVER the Windows web/node_modules
     that the web-build / web-customization-check / web-staging-fixes-check
-    suites need â€” one suite silently breaking three others.
+    suites need — one suite silently breaking three others.
     """
     try:
         system32 = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32"
@@ -1215,7 +1215,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_wave4.py"), 9),
         Suite("server-wave5", "server tests/test_wave5.py", "pytest", SERVER,
               _py_pytest("tests/test_wave5.py"), 21),
-        # Card F-7 tripwire (mushy_fold vendor pin) â€” shipped with PR #474 but
+        # Card F-7 tripwire (mushy_fold vendor pin) — shipped with PR #474 but
         # never registered here, so it only ever ran by hand until this row.
         # Standardization slice 7b extended it in the same PR that gave it a
         # gate row for the first time.
@@ -1240,7 +1240,7 @@ def build_suites() -> List[Suite]:
         Suite("server-broker-tenant-state", "server tests/test_broker_tenant_state.py", "pytest",
               SERVER, _py_pytest("tests/test_broker_tenant_state.py"), 12),
         # main's site-demo lane shipped WITHOUT a gate entry, so it only ever ran
-        # by hand â€” same gap this branch closed for its own suites.
+        # by hand — same gap this branch closed for its own suites.
         Suite("server-site", "server tests/test_site.py", "pytest", SERVER,
               _py_pytest("tests/test_site.py"), 12),
         Suite("server-string-panels-units", "server tests/test_string_panels_units.py", "pytest", SERVER,
@@ -1434,7 +1434,7 @@ def build_suites() -> List[Suite]:
         # two CAGE tests, which need util-linux's prlimit/setpriv as well as
         # dwg2dxf; the third covers the two seccomp-specific real tests, which
         # additionally need the compiled syscall-denylist file
-        # deploy/Dockerfile.app bakes in â€” the cage and its seccomp filter are
+        # deploy/Dockerfile.app bakes in — the cage and its seccomp filter are
         # what bound a memory-corruption exploit in the parser, so none of these
         # five may be allowed to skip for any OTHER reason.
         # Floor 25, not 22: 30 tests, of which exactly those 5 are host-gated, so
@@ -1617,7 +1617,7 @@ def build_suites() -> List[Suite]:
         # issue #29 red-suite registry (https://github.com/Evan-Haug/leaf-web-demo/issues/29):
         # all six now fixed-then-registered. test_sessions_e2e's measured "7 errors"
         # were purely its module `harness` fixture failing `npm run build` in a
-        # worktree with no harness node_modules â€” NOT a code defect; it passes 9/9
+        # worktree with no harness node_modules — NOT a code defect; it passes 9/9
         # once the harness is installed (the same harness the harness-vitest/tsc
         # suites require). It self-builds the harness on setup (~14s).
         Suite("server-sessions-e2e", "server tests/test_sessions_e2e.py", "pytest", SERVER,
@@ -1648,9 +1648,9 @@ def build_suites() -> List[Suite]:
         Suite("server-capabilities-cold-import", "server tests/test_capabilities_cold_import.py", "pytest",
               SERVER, _py_pytest("tests/test_capabilities_cold_import.py"), 1),
         # --- broker keystone (census #4, 2026-07-22): test_broker_boundary's --- #
-        # one red was a stale pre-Â§19 assertion (offline `dwg` no longer
-        # ignored) â€” fixed and registered per the #29 fix-then-register rule.
-        # The no-da-imports static invariant + Â§8 ledger-line schema freeze
+        # one red was a stale pre-§19 assertion (offline `dwg` no longer
+        # ignored) — fixed and registered per the #29 fix-then-register rule.
+        # The no-da-imports static invariant + §8 ledger-line schema freeze
         # gates ride the same lane.
         # Floor 86, re-measured 2026-09-10 at origin/main 5bd6894f. It sat at 59
         # while the suite executed 86 on BOTH a Windows host and Linux CI (native
@@ -2170,7 +2170,7 @@ def build_suites() -> List[Suite]:
         # The APS scratch-key collision guard. It shipped with the client.py fix
         # but was NEVER registered here, so it gated nothing: the same defect
         # stayed live in both da/ drivers for as long as the suite "existed".
-        # Fully offline â€” an autouse fixture stubs the credential source and the
+        # Fully offline — an autouse fixture stubs the credential source and the
         # two APS mint/lookup points, so it needs neither credentials nor
         # network (it used to need both, and only passed on a box holding real
         # APS credentials).
@@ -2225,13 +2225,13 @@ def build_suites() -> List[Suite]:
         # cwd is the REPO ROOT because test_control_plane.py opens
         # executor/contracts/schemas/*.json relative to it. `-P` (safe path)
         # keeps that cwd OFF sys.path, so the repo's platform/ package cannot
-        # shadow the stdlib during pytest plugin import â€” the window before
+        # shadow the stdlib during pytest plugin import — the window before
         # executor/conftest.py runs and appends the repo root for `executor.*`.
-        # Floor 136 is the Windows executed count (142 collected âˆ’ 2 opt-in
-        # Postgres skips âˆ’ 4 Windows-only environment skips), re-measured
+        # Floor 136 is the Windows executed count (142 collected − 2 opt-in
+        # Postgres skips − 4 Windows-only environment skips), re-measured
         # 2026-08-07 on this tree.
         # Linux CI executes 140 (the POSIX/chmod/symlink probes run there) and
-        # reports upward drift â€” the same min-across-environments convention
+        # reports upward drift — the same min-across-environments convention
         # as server-customization-adversarial.
         #
         # The previous floor of 111 was set 2026-08-06 by #487 and then drifted
@@ -2856,7 +2856,7 @@ def build_suites() -> List[Suite]:
         # invariant broke instead of pointing at the mega-test.
         # 2 -> 3 on 2026-08-07: the relay now orders its two services so the
         # one a superseded release abandoned goes first, and that one is
-        # EXECUTED â€” the real dispatch script against a fake gh â€” so the named
+        # EXECUTED — the real dispatch script against a fake gh — so the named
         # test says which service the relay actually deploys first and onto
         # which tag, not merely whether its text still reads that way.
         Suite("build-platform-images-workflow",
@@ -2878,7 +2878,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("test_build_platform_images_workflow.py"), 53),
         # Vendored mushy-code integrity (PR #474 review, P2): the pin verifier
         # must be a CI fact, not a manual command. Registered with its suite the
-        # day it shipped â€” no fix-then-register debt. 2 = verify READY + the
+        # day it shipped — no fix-then-register debt. 2 = verify READY + the
         # prove-the-checker-can-fail case.
         Suite("vendor-pin-verify", "scripts test_vendor_pin.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_vendor_pin.py"), 2),
@@ -3439,7 +3439,7 @@ def build_suites() -> List[Suite]:
         # CONTRACT in its file header since W4d ("a greyed control with no
         # reason is the gap ToolsPanel's lock-note closed"), and nothing
         # enforced it: a reason map missing a key renders an EMPTY reason, and
-        # `undefined` is silent â€” no test, no build error, no console warning.
+        # `undefined` is silent — no test, no build error, no console warning.
         Suite("web-honesty-ladder",
               "every disabled or absent control carries a reason", "script", WEB,
               [_npm(), "run", "check:honesty-ladder"], None),
@@ -3477,7 +3477,7 @@ def build_suites() -> List[Suite]:
         Suite("web-version-restore-proof",
               "web /app version restore browser proof", "script", WEB,
               [_npm(), "run", "proof:version-restore"], None),
-        # The daily authoring cap refuses with 429 (CONTRACT-ADDENDUM Â§17). The
+        # The daily authoring cap refuses with 429 (CONTRACT-ADDENDUM §17). The
         # only thing standing between that refusal and a red "Couldn't author
         # the tool" is api.js tagging quota_kind=="daily_author"; nothing else
         # covered that, so a rename on either side would have shipped silently.
@@ -3761,7 +3761,7 @@ def build_suites() -> List[Suite]:
                "e2e/ios-ship-surface.spec.mjs", "--workers=1"], None),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
-        # --- containerized harness smoke (census #13) â€” OPT-IN --- #
+        # --- containerized harness smoke (census #13) — OPT-IN --- #
         # Builds + boots the real compose stack (broker+harness+app, mock agent)
         # and proves the authed app->harness hop, durable grant/tenant volumes,
         # and secret-free logs. Needs Docker + compose >= 2.24 and several minutes
@@ -4127,7 +4127,7 @@ except Exception as e:
 
 
 def _dsn_from_env_local() -> str:
-    """DATABASE_URL from platform/.env.local ('' when absent) â€” the SAME file,
+    """DATABASE_URL from platform/.env.local ('' when absent) — the SAME file,
     key, and quoting rules the probe applies, so probe verdict and injected DSN
     can never disagree."""
     envf = REPO / "platform" / ".env.local"
@@ -4161,7 +4161,7 @@ def probe_platform_db() -> tuple[bool, str, str]:
     receive it as DATABASE_URL: the probe accepts a file-only DSN
     (platform/.env.local), but suites that gate themselves on the ENV VAR
     (server/tests/test_g1a_canonical_e2e.py's skipif) would then silently skip
-    inside a green suite â€” probe REACHABLE must mean the suite actually runs.
+    inside a green suite — probe REACHABLE must mean the suite actually runs.
     The probe connects with exactly the dsn it returns."""
     envf = REPO / "platform" / ".env.local"
     dsn = gate_database_url()
@@ -4409,8 +4409,8 @@ AUDIT_WORST_CASE_WALL_S = (AUDIT_MAX_ATTEMPTS * AUDIT_SUBPROCESS_TIMEOUT_S
                            + sum(AUDIT_BACKOFF_S))  # == 350
 AUDIT_ADVISORY_ENDPOINT = "registry.npmjs.org/-/npm/v1/security/advisories/bulk"
 # Real reason phrases npm itself prints next to a 5xx transport failure. Used
-# ONLY as a same-LINE co-occurrence check (see _audit_transport_signal) â€”
-# never a whole-blob substring test â€” specifically so this can never fire on
+# ONLY as a same-LINE co-occurrence check (see _audit_transport_signal) —
+# never a whole-blob substring test — specifically so this can never fire on
 # an unrelated 5xx-shaped number (an EJSONPARSE byte offset, a package version
 # like 1.500.0) that happens to share a digit pattern with a real HTTP status.
 _AUDIT_REASON_PHRASES: tuple[tuple[str, str], ...] = (
@@ -4425,15 +4425,15 @@ _AUDIT_HTTP5XX = re.compile(r"\b5\d\d\b")
 
 def _audit_transport_signal(combined: str) -> Optional[str]:
     """A REAL registry/transport signal, or None. Every branch below requires
-    the number or errno to sit on the SAME LINE as its own marker â€” never a
-    whole-blob regex search â€” because round 1 caught exactly that shape of
+    the number or errno to sit on the SAME LINE as its own marker — never a
+    whole-blob regex search — because round 1 caught exactly that shape of
     bug: `_AUDIT_HTTP5XX.search(combined)` matched a bare 500-599 number
     ANYWHERE in npm's output, so an EJSONPARSE byte offset ("...at position
     512...") or a package version ("foo@1.500.0") reclassified a real,
     non-registry failure as a registry outage. The four signal shapes here are
     exactly the ones _classify_npm_audit's docstring promises and nothing
     more; an unrecognized failure still falls through to FAIL."""
-    # (a) npm's own explicit "the audit endpoint itself errored" text â€” this
+    # (a) npm's own explicit "the audit endpoint itself errored" text — this
     # phrase is npm's, never emitted for any other condition, so it needs no
     # line-adjacency check of its own.
     if "audit endpoint returned an error" in combined:
@@ -4445,14 +4445,14 @@ def _audit_transport_signal(combined: str) -> Optional[str]:
             if m:
                 return f"HTTP {m.group(0)}"
         # (b2) an "npm warn audit" / "npm error" line carrying a real HTTP
-        # reason phrase â€” the digit on that SAME line if npm printed one,
+        # reason phrase — the digit on that SAME line if npm printed one,
         # else the phrase's own mapped code.
         if "npm warn audit" in line or "npm error" in line:
             for phrase, code in _AUDIT_REASON_PHRASES:
                 if phrase in line:
                     m = _AUDIT_HTTP5XX.search(line)
                     return f"HTTP {m.group(0) if m else code}"
-        # (c) a known errno, but ONLY on an npm error line â€” the same errno
+        # (c) a known errno, but ONLY on an npm error line — the same errno
         # text inside, say, a test's own assertion message must never count.
         if "npm error" in line:
             for errno in _AUDIT_ERRNOS:
@@ -4543,13 +4543,13 @@ def _cheap_lockfile_sha(cwd: Path) -> str:
 
 
 def _lockfile_blob_sha(cwd: Path) -> str:
-    """The git BLOB hash of cwd/package-lock.json at HEAD â€” the exact-bytes
+    """The git BLOB hash of cwd/package-lock.json at HEAD — the exact-bytes
     identity the lockfile-transitivity rule is built on (see verify_shard_
     results' UNAVAILABLE handling), distinct from _cheap_lockfile_sha's COMMIT
     hash above: two different commits (different trees) can carry the
     byte-identical lockfile, and it is exactly that case the transitivity rule
-    exists to recognize â€” "same audit input, already proven clean, on some
-    EARLIER tree" â€” so a commit hash would refuse a match a blob hash allows.
+    exists to recognize — "same audit input, already proven clean, on some
+    EARLIER tree" — so a commit hash would refuse a match a blob hash allows.
     Never raises, returns '' (never a placeholder string) on any failure, so a
     caller comparing shas never gets a false-equal from two unreadable results
     both defaulting to the same sentinel."""
@@ -4775,7 +4775,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
                 # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
                 # quote glyphs. A byte outside cp1252 killed the reader thread,
                 # left proc.stdout as None, and crashed the whole runner mid-gate
-                # â€” the acceptance instrument itself failing on output encoding.
+                # — the acceptance instrument itself failing on output encoding.
                 encoding="utf-8", errors="replace",
             )
             out = _text(proc.stdout) + "\n" + _text(proc.stderr)
@@ -4913,7 +4913,7 @@ def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int,
     try:
         return run_suite(suite, log_dir, attempt=attempt,
                          **({"reporting_disabled": True} if reporting_disabled else {}))
-    except Exception as exc:  # noqa: BLE001 â€” the scoreboard is the contract
+    except Exception as exc:  # noqa: BLE001 — the scoreboard is the contract
         return Result(suite, "FAIL", "err", 0.0,
                       note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
 
@@ -4991,7 +4991,7 @@ def describe_selection(patterns: List[str]) -> str:
 # CI splits the catalog across N isolated runner checkouts (test-gate.yml
 # matrix). Isolation is the point: suites share on-disk state inside one
 # checkout (jobs.db, the versioned drawing store, authored_tools.json, broker
-# ledgers â€” see the module docstring), so suites run serially by default.
+# ledgers — see the module docstring), so suites run serially by default.
 # With --jobs > 1, the shared-state group below still runs serially. Nothing about a suite's
 # environment, retry, floor, or log changes under sharding; only WHICH suites
 # a given invocation runs.
@@ -5116,7 +5116,7 @@ def partition_suites(suites: List[Suite], shard_count: int) -> List[List[Suite]]
     Heaviest suite first (ties broken by id), each into the currently
     least-loaded shard (ties broken by lowest index). Every input on both
     sides of a tie is totally ordered, so the same catalog and count always
-    produce the same partition â€” the property the fan-in verifier recomputes
+    produce the same partition — the property the fan-in verifier recomputes
     and stands on. Within a shard, suites run in catalog order, like a full
     run does.
     """
@@ -5443,7 +5443,7 @@ def _fingerprint_argv(argv: List[str]) -> List[str]:
     for npm/npx, Git Bash discovery), so its absolute path legitimately
     differs between jobs of one CI run: shard jobs run setup-node, the
     fan-in does not, and run 30938231420's fan-in resolved a different npm
-    than every shard â€” refusing all eight as fingerprint mismatches. Hash
+    than every shard — refusing all eight as fingerprint mismatches. Hash
     the command IDENTITY (interpreter/tool token) instead of its path;
     positional targets and flags still hash raw."""
     if not argv:
@@ -5455,7 +5455,7 @@ def _fingerprint_argv(argv: List[str]) -> List[str]:
         # String-normalize both separator styles: on Linux, Path() is
         # PosixPath and does NOT split C:\...\npm.cmd at backslashes, so a
         # Windows-shaped path would escape canonicalization there while being
-        # canonicalized on Windows â€” the fingerprint would then depend on the
+        # canonicalized on Windows — the fingerprint would then depend on the
         # OS that computed it (sol-critic #436 round 3, and the real
         # gate-shard-6 red on run 30940064231).
         name = head.replace("\\", "/").rsplit("/", 1)[-1].lower()
@@ -5470,7 +5470,7 @@ def _fingerprint_argv(argv: List[str]) -> List[str]:
 def _fingerprint_cwd(cwd: Path) -> str:
     """Every catalog cwd is built from REPO (server/, da/, the repo root, the
     repo PARENT for the platform suites), so what identifies a suite is its
-    position RELATIVE to the repo â€” the absolute prefix in front of it is a
+    position RELATIVE to the repo — the absolute prefix in front of it is a
     property of the checkout, not of the catalog.
 
     Hashing that prefix raw bound the fingerprint to one checkout layout, and
@@ -5502,9 +5502,9 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
 
     It is an intra-run integrity token: compared between the shard jobs and
     the fan-in of a single CI run, or between local runs of one worktree. The
-    per-JOB parts of a command are canonicalized out â€” toolchain LOCATION
+    per-JOB parts of a command are canonicalized out — toolchain LOCATION
     inside argv (see _fingerprint_argv) and the checkout root in front of each
-    cwd (see _fingerprint_cwd) â€” so the value tracks the CATALOG and survives
+    cwd (see _fingerprint_cwd) — so the value tracks the CATALOG and survives
     a runner that hands every job its own checkout directory."""
     entries = [{
         "id": s.id, "label": s.label, "kind": s.kind, "cwd": _fingerprint_cwd(s.cwd),
@@ -5566,11 +5566,11 @@ def selection_catalog(root: Path) -> dict:
 # preview; the merge that lands on main mints a NEW commit whose tree is
 # byte-identical whenever main did not move in between. Binding the proof to
 # the tree lets the push-to-main build recognize "these exact bytes already
-# passed the full gate" and skip re-running it, while ANY skew â€” main moved,
-# a different merge result, a hand-edited commit â€” changes the tree and runs
+# passed the full gate" and skip re-running it, while ANY skew — main moved,
+# a different merge result, a hand-edited commit — changes the tree and runs
 # the full gate. Precedent: leaf_website #200 binds promotion proof to HEAD.
 #
-# Trust model: this file only proves CONTENT â€” that a proof document names the
+# Trust model: this file only proves CONTENT — that a proof document names the
 # expected tree and the exact catalog this checkout derives. WHO minted the
 # document is deliberately out of scope here: a forged file can claim any
 # source, so the consuming workflow establishes provenance from the artifact
@@ -5578,12 +5578,12 @@ def selection_catalog(root: Path) -> dict:
 # path) BEFORE this verifier ever opens the file.
 #
 # SCHEMA 2 (this fix, 2026-09-04): a proof now also carries `audit_suites`, one
-# entry per kind="npm-audit" suite this run observed â€” {id, status, and, ONLY
+# entry per kind="npm-audit" suite this run observed — {id, status, and, ONLY
 # when status is PASS, lockfile_blob_sha}. Two rules this buys, both enforced
 # by CODE, not by convention:
 #   1. verify_gate_proof REFUSES any proof whose audit_suites carries a
 #      status of UNAVAILABLE. A registry outage must never become a reusable
-#      green skip â€” this is the one check standing between "npmjs.org was
+#      green skip — this is the one check standing between "npmjs.org was
 #      down for five minutes" and "the audit gate silently never runs again
 #      for 30 days" (round-1 blocker 2). It runs inside the SAME function the
 #      probe job and the fan-in's own re-verify step both already call, so
@@ -5594,12 +5594,12 @@ def selection_catalog(root: Path) -> dict:
 #      OWN audit_suites entry for that suite id is PASS. An UNAVAILABLE
 #      audit-suite status is recorded here too (never laundered into PASS),
 #      but it carries no lockfile_blob_sha and so can never itself serve as
-#      the next build's ancestor â€” the chain can only ever be exactly one
+#      the next build's ancestor — the chain can only ever be exactly one
 #      real green run long, never an indefinite string of "outage, but
 #      blessed by the last outage" proofs.
 # Bumping the schema also means an OLD schema-1 proof (minted before this fix)
 # is refused outright rather than silently trusted with an assumption about
-# fields it never wrote â€” the correct direction for a proof format gaining a
+# fields it never wrote — the correct direction for a proof format gaining a
 # new required check.
 # --------------------------------------------------------------------------- #
 GATE_PROOF_SCHEMA = 2
@@ -5621,7 +5621,7 @@ def checkout_tree_identity(repo: Path = REPO) -> tuple[str, str, str]:
 
     `problem` is non-empty whenever a tree-bound proof would be dishonest:
     not a git checkout, or a working tree that differs from HEAD's committed
-    tree (dirty tracked files OR untracked files â€” the suites ran on the
+    tree (dirty tracked files OR untracked files — the suites ran on the
     working tree, so anything beyond the committed tree means the tree hash
     does not name what was actually tested). CI checkouts are always clean;
     this refusal exists for local runs."""
@@ -5652,7 +5652,7 @@ def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
     `suite_statuses` is the {suite_id: status} map this run observed (from the
     shard result files); only entries for kind="npm-audit" suites are ever
     written out, as `audit_suites`, and only a PASS entry also carries the
-    CURRENT lockfile_blob_sha (see _lockfile_blob_sha) â€” an UNAVAILABLE entry
+    CURRENT lockfile_blob_sha (see _lockfile_blob_sha) — an UNAVAILABLE entry
     is recorded honestly but with no blob sha, so it can never serve as a
     transitivity ancestor. EVERY registered kind="npm-audit" suite gets an
     entry, including MISSING when the map is None or lacks that id (an older
@@ -5718,7 +5718,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     The UNAVAILABLE check is requirement (1) of the round-1 blocker-2 fix: a
     registry outage must never become a reusable green skip. It runs here,
     inside the ONE function both the reuse probe and the fan-in's own
-    tree-identity re-verify step call, so neither needed a workflow change â€”
+    tree-identity re-verify step call, so neither needed a workflow change —
     a proof minted while npmjs.org was down (or shown provably unchanged only
     via the lockfile-transitivity rule in verify_shard_results) can never
     itself be replayed as "the audit already ran clean here".
@@ -5728,7 +5728,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     CHECKED rather than assumed, so a proof whose recorded catalog does not
     match the one this checkout derives is refused instead of trusted on the
     strength of an equal tree hash. It deliberately does NOT refuse a proof
-    minted from a differently-rooted checkout â€” cwds are hashed relative to
+    minted from a differently-rooted checkout — cwds are hashed relative to
     the repo (see _fingerprint_cwd), because runners that give every job its
     own checkout directory would otherwise refuse every honest proof. Refusal
     is always safe: the caller falls back to running the full gate."""
@@ -5790,7 +5790,7 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     print(f"VERIFIED: gate proof binds tree {tree} on catalog fingerprint "
           f"{fingerprint} (self-reported mint: run {src.get('run_id') or '?'} "
           f"attempt {src.get('run_attempt') or '?'}, event "
-          f"{src.get('event') or '?'} â€” informational; provenance comes from "
+          f"{src.get('event') or '?'} — informational; provenance comes from "
           f"the artifact's workflow_run metadata)")
     return 0
 
@@ -5929,9 +5929,9 @@ def _shard_suite_statuses(results_dir: Path) -> dict[str, str]:
 def verify_shard_results(results_dir: Path, *,
                          prior_proofs_dir: Optional[Path] = None) -> int:
     """Fan-in: prove the shard set covered the exact catalog, exactly once,
-    on the same tree, and everything passed. Exit 0 only on that proof â€” WITH
+    on the same tree, and everything passed. Exit 0 only on that proof — WITH
     ONE EXCEPTION, and it is never a free pass: an UNAVAILABLE npm-audit
-    suite (a registry/transport outage, never a lockfile finding â€” see
+    suite (a registry/transport outage, never a lockfile finding — see
     run_npm_audit_suite) never prints the plain PROVEN line. Instead this
     prints "NOT PROVEN BY AUDIT: <suite> unavailable (<reason>)" and exits 0
     ONLY when the audit's own input is provably unchanged: the CURRENT git
@@ -5939,7 +5939,7 @@ def verify_shard_results(results_dir: Path, *,
     the NEWEST proof under `prior_proofs_dir` whose audit_suites entry for
     that suite id is PASS (see _newest_proof_with_passed_audit and emit_gate_
     proof's schema-2 note above). No prior_proofs_dir, no matching file, or a
-    differing blob sha all FAIL the fan-in with the same distinct line â€” this
+    differing blob sha all FAIL the fan-in with the same distinct line — this
     keeps the merge honest by TRANSITIVITY (same lockfile bytes, previously
     proven clean on some earlier tree) and never by assumption. UNAVAILABLE
     on any OTHER suite kind is treated as shard corruption: that status is
@@ -5993,7 +5993,7 @@ def verify_shard_results(results_dir: Path, *,
             shards[i] = d
             if d.get("catalog_fingerprint") != fingerprint:
                 problems.append(
-                    f"shard {i}: catalog fingerprint mismatch â€” it partitioned a "
+                    f"shard {i}: catalog fingerprint mismatch — it partitioned a "
                     f"different catalog (different tree, floors, or commands)")
             want_ids = [s.id for s in expected_partition[i]]
             if d.get("suite_ids") != want_ids:
@@ -6022,7 +6022,7 @@ def verify_shard_results(results_dir: Path, *,
                 problems.append(f"shard {i}: executed_total {claimed} != per-suite sum {actual}")
             # Statuses are an allowlist, not a denylist: rejecting only the
             # literal FAIL would let a corrupt file carrying any OTHER value
-            # (say NOT_RUN) count as complete passing coverage â€” fail-open in
+            # (say NOT_RUN) count as complete passing coverage — fail-open in
             # the acceptance instrument (sol-critic #436 round 1). UNAVAILABLE
             # (a registry/transport outage on an audit-style suite, never a
             # lockfile finding) is recognized alongside PASS/FAIL/SKIP; the
@@ -6039,7 +6039,7 @@ def verify_shard_results(results_dir: Path, *,
             # check, and a fabricated suite-level SKIP is only legitimate for
             # suites that HAVE a suite-level skip gate. The verifier holds the
             # real catalog, so it re-checks both against the suite's own
-            # configuration â€” the same quantities coverage_verdict enforced
+            # configuration — the same quantities coverage_verdict enforced
             # inside the shard.
             for e in entries:
                 suite = suites_by_id.get(e.get("id"))
@@ -6265,7 +6265,7 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     # A full UNAVAILABLE note ("registry unavailable (...): ... after 3
     # attempts; NOT PROVEN BY AUDIT: ...") can run past 200 characters and
     # stretch the whole table (the "="*len(line) rule) to match (round-1
-    # nit 4) â€” cap it here and truncate in fmt() below. Nothing is lost: the
+    # nit 4) — cap it here and truncate in fmt() below. Nothing is lost: the
     # UNAVAILABLE callout right after this table (search "NOT PROVEN BY
     # AUDIT:") always prints the note in full, and the shard/log-dir JSON
     # never truncates it either.
@@ -6276,7 +6276,7 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
         for i, cell in enumerate(row):
             cell = str(cell)
             if i == 5 and len(cell) > widths[5]:
-                cell = cell[:widths[5] - 1] + "â€¦"
+                cell = cell[:widths[5] - 1] + "…"
             if i in (1, 2, 3, 4):
                 cells.append(cell.rjust(widths[i]))
             else:
@@ -6326,14 +6326,14 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     # row in a long scoreboard is exactly as easy to miss as a flake -- call it
     # out by name so the merge step (and a human skimming CI) can see it
     # without diffing every row. Every callout line is printed with the
-    # literal "NOT PROVEN BY AUDIT: " prefix at its own start â€” never just
-    # echoing the note verbatim â€” so it is a structurally distinct, grep-able
+    # literal "NOT PROVEN BY AUDIT: " prefix at its own start — never just
+    # echoing the note verbatim — so it is a structurally distinct, grep-able
     # marker distinct from the row's NOTE column (which never starts a line
     # with that text; the row always starts with the suite label). round-1
     # blocker 3: the prior version printed the bare note when one was
     # present, which happened to ALSO contain this phrase mid-string (see
     # run_npm_audit_suite), so a test asserting the phrase appeared anywhere
-    # in stdout passed even with this whole block deleted â€” the row's own
+    # in stdout passed even with this whole block deleted — the row's own
     # NOTE column already carried it.
     for r in results:
         if r.status == "UNAVAILABLE":
@@ -6586,7 +6586,7 @@ def main() -> int:
                     suite_statuses=_shard_suite_statuses(results_dir))
                 if problem:
                     print(f"gate proof NOT emitted ({problem}); the verdict "
-                          f"above stands â€” the next identical-tree build just "
+                          f"above stands — the next identical-tree build just "
                           f"runs the full gate")
                 else:
                     print(f"gate proof emitted -> {args.emit_proof}")
@@ -6681,7 +6681,7 @@ def main() -> int:
         record_attempt(res, log_dir, 1)
         attempts = 1
         # Retry a FAILED integration suite (these boot real servers -> load
-        # flakes), including spawn failures â€” a child that never started is
+        # flakes), including spawn failures — a child that never started is
         # retried exactly like a red one.
         while (res.status == "FAIL" and attempts <= args.retry):
             attempts += 1
@@ -6706,7 +6706,7 @@ def main() -> int:
             tail += f"  {res.note}"
         # Width 11, not 4: UNAVAILABLE (11 chars) previously just overran a
         # 4-wide field with no padding, misaligning every row after it
-        # (round-1 nit 4) â€” PASS/FAIL/SKIP still fit inside 11 with room.
+        # (round-1 nit 4) — PASS/FAIL/SKIP still fit inside 11 with room.
         print(f"{res.status:<11} {tail}")
         if res.status == "FAIL" and args.fail_fast:
             print(f"  --fail-fast: stopping after {suite.id}")
