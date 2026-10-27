@@ -24,7 +24,7 @@ import re
 REPO_ROOT = Path(__file__).resolve().parents[2]
 INVENTORY_PATH = REPO_ROOT / "platform" / "authority-inventory.json"
 
-EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 92)]
+EXPECTED_MIGRATIONS = [f"{number:04d}" for number in range(1, 93)]
 EXPECTED_SELECTOR_DEFAULTS = {
     "LEAF_LAB_RUN_STORE": "sqlite",
     "LEAF_LAB_STORE": "sqlite",

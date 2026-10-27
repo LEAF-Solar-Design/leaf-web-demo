@@ -195,6 +195,7 @@ import LocalCadConnect from './localCad/LocalCadConnect.jsx'
 import { createLocalCadBridge } from './localCad/localCadBridge.js'
 import ProjectWorkspacePanels, { paneForCapability, deriveBoardPaneSeats, BoardPaneState, PersistentSeat, useBoardConversation, ConversationOpening, AnnotationPaneState } from './workspace/ProjectWorkspacePanels.jsx'
 import ProjectMaterialIntake from './workspace/ProjectMaterialIntake.jsx'
+import PhotoMaterialIntake from './workspace/PhotoMaterialIntake.jsx'
 import useMaterialIntake from './workspace/useMaterialIntake.js'
 import ProjectStartPanel from './workspace/ProjectStartPanel.jsx'
 import useCatalogController from './controllers/catalog/useCatalogController.js'
@@ -384,7 +385,8 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
   }
   return <ProjectMaterialIntake project={project} upload={projectUpload}
     intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
-    onRetry={materialIntake.retry} mock={false} />
+    onRetry={materialIntake.retry} mock={false}
+    photos={<PhotoMaterialIntake projectId={project?.project_id} />} />
 }
 
 function promoteStandaloneUpload({ receipt }, attempt, current, setFromUpload) {
@@ -5153,6 +5155,7 @@ export default function App() {
                 }
               } : undefined,
               onOpenDrawing: () => setProjectPane('material'),
+              onOpenPhotos: !mock && signedIn && openProjectId ? () => setProjectPane('material') : null,
               onOpenVersion: () => setProjectPane('versions'),
               onOpenJob: (job) => { setBoardJob(job); setProjectPane('jobs') },
               onOpenTool: () => setProjectPane('tools'),
