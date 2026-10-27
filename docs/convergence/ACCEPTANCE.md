@@ -221,7 +221,50 @@ Paid by W4c-0 (receipts named so the ledger stays auditable):
   colour under `.studio-ground` (landing.css); the old shell keeps `#0f0f11`
   via the inline fallback.
 
-### Surface grounds (W4a, panel-free slice; operator direction 2026-09-02: "the cad surface on each tab should be a similar workspace, appropriate to the application")
+### Shared artifact environment (F04, current Studio-hosted standard)
+
+Browser, CAD, Solar CAD, iOS, Ops and a mounted Studio Lab share one small
+centered chooser, a recoverable compact profile strip, and closed-by-default
+Project (left) and Studio (right) fixed-edge overlays. The chooser offers
+existing project/material and description paths, with Continue only when
+there is actual workspace content. Entry is session memory scoped to the
+authenticated account/project and independently to each profile. Choose
+brings the chooser forward without resetting work. Authority changes clear
+entry and Browser preview bytes; stale artifact callbacks must be refused.
+
+The chooser stays mounted and inert after entry, receding with opacity,
+scale and translation over 210ms while the artifact appears. Reduced motion
+is immediate. The actual drawing viewer, iOS readiness/ship lane, Ops
+workspace and Studio Lab remain their existing renderers. No full-width
+header, ribbon or footer reserves artifact space by default. Existing tools,
+account, command and execution controls live inside Studio. The Project
+subtree owns a single campaign panel across panel and profile changes;
+existing persistent conversation seats retain their authority/provider.
+
+Overlays are viewport-bounded internal scrollers with reachable close
+controls and accessible toggles. Only one is open at a time, including on
+phones. Escape uses the shared ownership stack only while a panel is open,
+yields to foreground sheets/menus and restores toggle focus on dismissal.
+Panel controls do not select or close a project. Drawing occlusion measures
+the visible edge overlays rather than the former header/ribbon reserves.
+
+Browser shows an honest absence of output until trusted artifact retrieval
+delivers exact decoded HTML. Its viewport preview uses srcDoc with
+`allow-scripts allow-downloads`, never `allow-same-origin`, and is labeled
+Verified preview. A handoff reveals Browser and enters its workspace even
+when initiated from another profile. This is not evidence of deployment or
+of Jessica's web/native app being built. External deployed-app descriptors
+remain a future producer task.
+
+Focused implementation checks are in `workspaceEnvironment.test.jsx`,
+`browserAssetGround.test.jsx`, `CampaignPanel.test.jsx` and
+`surfaceGrounds.test.jsx`. These are checks to run, not new proof receipts.
+Root must record focused-suite/build results, protected native CI and real
+staging viewport replay (desktop and phone, keyboard and pointer, retained
+inputs/canvas and cross-project stale-preview refusal). Sheets and standalone
+or embedded Lab scenes outside Studio hosting are outside this change.
+
+### Historical surface grounds (W4a; Studio chrome/window behavior superseded by F04)
 
 Under the rail the ground is each tab's workspace, never the drawing behind
 every tab: CAD and Solar CAD keep the portaled Viewer; Browser gets the
@@ -255,7 +298,7 @@ booleans, dormant reveals nothing). Contract:
   with W4's token re-pin. Board tiles are read-only in W4a; version select,
   job reattach, and built-tool open move onto the board with W5 showcases.
 
-### Floating rails, dark chrome, the drawing cockpit (W4b; operator direction 2026-09-02: "all rails should be floating in front of entire-screen workspace", "where is the opencad UI for the cad bit")
+### Historical floating rails and drawing cockpit (W4b; default expanded Studio chrome superseded by F04)
 
 Under the rail the console's grid keeps its columns (layout, scroll,
 keyboard, and a11y contracts untouched) but reads as instruments over a

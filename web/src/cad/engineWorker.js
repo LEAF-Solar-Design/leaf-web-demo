@@ -65,7 +65,7 @@ function defaultCreateWorker() {
   if (typeof Worker === 'undefined') {
     throw new Error('engineWorker: Worker API is not available in this environment')
   }
-  return new Worker(new URL(import.meta.url), { type: 'module' })
+  return new Worker(new URL('./engineWorker.js', import.meta.url), { type: 'module' })
 }
 
 // Main-thread handle onto the (possibly not-yet-instantiated) engine worker.

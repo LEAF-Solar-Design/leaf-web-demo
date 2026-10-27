@@ -6,6 +6,7 @@ import { humanizeError } from '../errorHumanize.js'
 import { authTenantScope } from '../drawing/drawingIdentity.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import './campaigns.css'
+import { BrowserArtifactContext } from '../site/BrowserAssetGround.jsx'
 
 const conflictMessage = 'This question already has a different recorded answer. Reload to see it.'
 const messageOf = error => error?.code === 'answer_conflict' ? conflictMessage : humanizeError(error)
@@ -212,6 +213,7 @@ function humanBytes(value) {
 }
 
 function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = false }) {
+  const openBrowserArtifact = useContext(BrowserArtifactContext)
   const [preview, setPreview] = useState(null)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState(null)
@@ -241,7 +243,9 @@ function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = 
         let html
         try { html = new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(result.bytes) }
         catch { throw new Error('The verified tool could not be opened because its HTML is not valid UTF-8.') }
-        setPreview({ html, name: result.name })
+        if (openBrowserArtifact) {
+          if (openBrowserArtifact({ html, name: result.name }) === false) throw new Error('The workspace changed. Open this verified tool again from the current project.')
+        } else setPreview({ html, name: result.name })
       } else {
         const url = urlApi.createObjectURL(new Blob([result.bytes], { type: result.mediaType }))
         const link = document.createElement('a')

@@ -45,14 +45,19 @@ it('main keeps telemetry first and installs the proof bridge once after render u
   assert.deepEqual(apiImport.specifiers.map((node) => [node.imported?.name, node.local.name]), [
     ['getSession', 'getSession'], ['getSurfaceConfig', 'getSurfaceConfig'], ['submitSurfaceConfig', 'submitSurfaceConfig'],
   ])
-  const calls = body.filter((node) => node.type === 'ExpressionStatement').map((node) => node.expression)
-  assert.equal(calls.length, 2)
-  assert.equal(calls[0].callee.property.name, 'render')
-  assert.equal(calls[1].callee.name, 'installSurfaceConfigProofBridge')
+  assert.equal(imports.some(node => node.source.value === 'react-dom/client'), false, 'Next owns the root')
+  const root = body.find(node => node.type === 'ExportDefaultDeclaration').declaration
+  assert.equal(root.id.name, 'StudioRoot')
+  const effect = root.body.body.find(node => node.type === 'ExpressionStatement').expression
+  assert.equal(effect.callee.name, 'useEffect')
+  assert.deepEqual(effect.arguments[1].elements, [], 'install after the root mounts')
+  const calls = effect.arguments[0].body.body.map(node => node.expression)
+  assert.equal(calls.length, 1)
+  assert.equal(calls[0].callee.name, 'installSurfaceConfigProofBridge')
   const text = (node) => source.slice(node.start, node.end)
-  assert.equal(calls[1].arguments.length, 2)
-  assert.equal(text(calls[1].arguments[0]), 'window')
-  const properties = calls[1].arguments[1].properties
+  assert.equal(calls[0].arguments.length, 2)
+  assert.equal(text(calls[0].arguments[0]), 'window')
+  const properties = calls[0].arguments[1].properties
   assert.deepEqual(properties.map((node) => node.key.name), ['hostname', 'env', 'clients'])
   assert.deepEqual(properties.map((node) => text(node.value)), [
     'window.location.hostname', 'import.meta.env', '{ getSession, getSurfaceConfig, submitSurfaceConfig }',
@@ -2090,7 +2095,7 @@ describe('project board live pane wiring', () => {
     assert.equal(derived.conversationTarget, 'conversation-board')
     assert.equal(derived.conversationMounted, true)
     assert.ok(appSource.includes('attach: attachAgentSession, onOpen: openAgentMode'))
-    assert.ok(appSource.includes("const boardHostsProject = boardVisible && surfaceSlots.ground === 'board'"))
+    assert.ok(appSource.includes("const boardHostsProject = (!!studioGround && surfaceSlots.chrome.shell === 'cockpit') || (boardVisible && surfaceSlots.ground === 'board')"))
     assert.ok(appSource.includes('if (mock || session.status !== \'active\') clearAgentSession()'))
     assert.ok(!appSource.includes('!signedIn || session.status !== \'active\') clearAgentSession()'))
   })
@@ -2325,7 +2330,7 @@ describe('project board live pane wiring', () => {
   it('BI03-19 App binds the Settings action slot and eligibility inputs', () => {
     const grounds = elements('SurfaceGrounds')[0]
     const actions = expression(grounds, 'actions')
-    assert.equal(source(actions.test), "surfaceSlots.ground === 'board'")
+    assert.equal(source(actions.test), "boardHostsProject")
     const open = actions.consequent.properties.find((prop) => csuKey(prop) === 'onOpenSettings').value
     assert.equal(source(open.test), 'paneSeats.lifecycleEligible')
     assert.equal(source(open.alternate), 'undefined')
@@ -3941,9 +3946,9 @@ describe('J1 Browser composition', () => {
   const PURE = '(?:\\/\\*\\s*@__PURE__\\s*\\*\\/\\s*)?$'
 
   it('J1B row1: the Browser board hosts the campaign and summary panels', () => {
-    assert.match(compiled, /const boardHostsProject = boardVisible && surfaceSlots\.ground === "board";/)
+    assert.match(compiled, /const boardHostsProject = !!studioGround && surfaceSlots\.chrome\.shell === "cockpit" \|\| boardVisible && surfaceSlots\.ground === "board";/)
     const grounds = compiled.search(/React\.createElement\(\s*SurfaceGrounds,/)
-    const panelSlot = compiled.indexOf('panel: surfaceSlots.ground === "board" ?', grounds)
+    const panelSlot = compiled.indexOf('panel: boardHostsProject ?', grounds)
     const intakeAt = compiled.slice(panelSlot).search(/React\.createElement\(\s*LiveProjectMaterialIntake,/)
     const intake = panelSlot + intakeAt
     assert.ok(grounds >= 0 && panelSlot > grounds && intakeAt > 0, 'the board panel slot must exist')
@@ -4412,7 +4417,7 @@ describe('W4g bleed-2b: profile presentation preserves the engine document', () 
     const end = appSource.indexOf('const onReturnToDrawing =', start)
     assert.match(appSource.slice(start, end), /settle\(\)/)
     assert.match(appSource, new RegExp("data-studio-transition=\\{studioGround && phase !== 'idle' \\? phase : undefined\\}"))
-    assert.match(appSource, /const effectiveGround = studioGround \? \(boardVisible \? 'board' : surfaceGround\(activeSurface\)\) : null/)
+    assert.match(appSource, /const effectiveGround = studioGround \? \(surfaceSlots\.chrome\.shell === 'cockpit' \? surfaceGround\(activeSurface\) : boardVisible \? 'board' : surfaceGround\(activeSurface\)\) : null/)
     assert.match(appSource, /const leavingGround = useLeavingGround\(effectiveGround\)/)
     assert.match(appSource, new RegExp('leavingGround=\\{leavingGround\\}'))
     const viewer = appSource.slice(appSource.indexOf('? createPortal(<div className="studio-ground-viewer"'), appSource.indexOf(': viewerEl', appSource.indexOf('? createPortal(<div className="studio-ground-viewer"')))
@@ -4461,7 +4466,7 @@ const stripped = esbuild.transformSync(appSource, { loader: 'jsx' }).code
 describe('studio unobstructed drawing viewport', () => {
   it('passes the measured safe rectangle only in the studio', () => {
     assert.match(appNoComments, new RegExp('safeRect=\\{studioGround \\? drawingViewport : null\\}'))
-    assert.ok(appNoComments.includes('useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, STUDIO_DRAWING_OCCLUDERS)'))
+    assert.ok(appNoComments.includes("useDrawingViewport(studioGround && groundShowsDrawing(activeSurface) ? studioGround : null, surfaceSlots.chrome.shell === 'cockpit' ? ENVIRONMENT_OCCLUDERS : STUDIO_DRAWING_OCCLUDERS)"))
     assert.ok(appNoComments.includes('drawingViewportRef.current = drawingViewport'))
   })
   it('uses safe bounds for result visibility and Show result framing', () => {
