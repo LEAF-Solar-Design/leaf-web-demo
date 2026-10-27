@@ -97,6 +97,30 @@ async function client() {
   return _clientP
 }
 
+export function preloadAuthClient() {
+  void client().catch(() => {})
+}
+
+export async function loginWithPopupFromClick() {
+  if (!authConfigured) return { ok: false, reason: 'unconfigured' }
+  let popup
+  try {
+    // Open before the first await so the browser retains the click gesture.
+    popup = window.open('', 'leaf-auth', 'popup,width=480,height=680')
+    if (!popup) return { ok: false, reason: 'blocked' }
+    const c = await client()
+    await c.loginWithPopup({
+      authorizationParams: { audience: AUDIENCE, redirect_uri: window.location.origin },
+    }, { popup, timeoutInSeconds: 120 })
+    const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
+    if (!token || !storeToken(token)) throw new Error('Token storage failed')
+    return { ok: true }
+  } catch (error) {
+    try { if (popup && !popup.closed) popup.close() } catch { /* best-effort cleanup */ }
+    return { ok: false, reason: error?.error === 'cancelled' || error?.error === 'popup_closed' ? 'cancelled' : 'failed' }
+  }
+}
+
 // Kick the Authorization-Code + PKCE redirect to Auth0 Universal Login.
 export async function login() {
   // Keep the no-argument declaration used by the checkout wiring checker.
