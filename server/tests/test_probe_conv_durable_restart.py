@@ -39,6 +39,7 @@ class Fake(p.LiveAdapters):
         self.unchanged_tasks = False
         self.unhealthy = False
         self.tail_defect = None
+        self.conversations = [{"conversation_id": CONVERSATION}]
         self.replay_new = False
         self.posts = []
         self.saved = []
@@ -102,10 +103,14 @@ class Fake(p.LiveAdapters):
             assert key == "p058-offline-1"
             if self.created is None:
                 self.created = {"message_id": MESSAGE, "created_at": CREATED,
+                                "conversation_id": CONVERSATION,
                                 "content": body["content"]}
                 return 201, deepcopy(self.created)
             assert self.posts[1] == self.posts[2]
             return 200, {**self.created, "message_id": PROJECT if self.replay_new else MESSAGE}
+        if path.endswith("/conversations"):
+            assert method == "GET" and body is None and key is None
+            return 200, {"conversations": deepcopy(self.conversations)}
         assert path.endswith("/recovery/tail?limit=50")
         items = [deepcopy(self.created)]
         gaps = []
@@ -113,6 +118,9 @@ class Fake(p.LiveAdapters):
             items = []
         if self.tail_defect == "missing_after" and self.restarts:
             items = []
+        if ((self.tail_defect == "foreign_before" and not self.restarts)
+                or (self.tail_defect == "foreign_after" and self.restarts)):
+            items.append({**self.created, "conversation_id": PROJECT})
         if self.tail_defect == "duplicate":
             items *= 2
         if self.tail_defect == "gaps":
@@ -265,6 +273,49 @@ def test_tail_missing_before(tmp_path):
     code, fake = invoke(tmp_path, fake)
     assert code == 1 and receipt(tmp_path)["reason"] == "tail_missing_before"
     assert fake.restarts == 0 and len(fake.posts) == 2
+
+
+def test_foreign_tail_before_restart_is_superseded(tmp_path):
+    fake = Fake()
+    fake.tail_defect = "foreign_before"
+    code, fake = invoke(tmp_path, fake)
+    r = receipt(tmp_path)
+    assert code == 3 and r["outcome"] == "UNKNOWN"
+    assert r["reason"] == "tail_superseded"
+    assert not fake.force_calls and fake.restarts == 0
+    assert not r["checks"]["restarted"] and len(fake.posts) == 2
+
+
+def test_foreign_tail_after_restart_is_superseded(tmp_path):
+    fake = Fake()
+    fake.tail_defect = "foreign_after"
+    code, fake = invoke(tmp_path, fake)
+    r = receipt(tmp_path)
+    assert code == 3 and r["outcome"] == "UNKNOWN"
+    assert r["reason"] == "tail_superseded" and r["checks"]["restarted"]
+    assert not r["checks"]["tail_after"] and len(fake.posts) == 2
+
+
+def test_empty_tail_with_newer_conversation_is_superseded(tmp_path):
+    fake = Fake()
+    fake.tail_defect = "missing_before"
+    fake.conversations.append({"conversation_id": PROJECT})
+    code, fake = invoke(tmp_path, fake)
+    r = receipt(tmp_path)
+    assert code == 3 and r["outcome"] == "UNKNOWN"
+    assert r["reason"] == "tail_superseded"
+    assert not fake.force_calls and len(fake.posts) == 2
+
+
+def test_empty_tail_with_probe_conversation_newest_is_missing(tmp_path):
+    fake = Fake()
+    fake.tail_defect = "missing_before"
+    fake.conversations.insert(0, {"conversation_id": PROJECT})
+    code, fake = invoke(tmp_path, fake)
+    r = receipt(tmp_path)
+    assert code == 1 and r["outcome"] == "FAIL"
+    assert r["reason"] == "tail_missing_before"
+    assert not fake.force_calls and len(fake.posts) == 2
 
 
 @pytest.mark.parametrize("field", ["content", "created_at"])

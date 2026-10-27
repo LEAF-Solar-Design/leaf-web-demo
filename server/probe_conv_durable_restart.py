@@ -163,6 +163,16 @@ class Probe:
         require(status == 200, "UNKNOWN", "tail_unreadable")
         items, gaps = body["items"], body["gaps"]
         require(isinstance(items, list) and isinstance(gaps, list), "UNKNOWN", "tail_unreadable")
+        require(all(item.get("conversation_id") == self.receipt["conversation_id"]
+                    for item in items), "UNKNOWN", "tail_superseded")
+        if not items:
+            status, body = self.http("GET", self.base)
+            require(status == 200, "UNKNOWN", "tail_unreadable")
+            conversations = body["conversations"]
+            require(isinstance(conversations, list), "UNKNOWN", "tail_unreadable")
+            require(bool(conversations)
+                    and conversations[-1].get("conversation_id") == self.receipt["conversation_id"],
+                    "UNKNOWN", "tail_superseded")
         matches = [item for item in items if item.get("message_id") == self.receipt["message_id"]]
         reason = "tail_missing_after" if after else "tail_missing_before"
         require(len(matches) == 1 and not gaps, "FAIL", reason)
