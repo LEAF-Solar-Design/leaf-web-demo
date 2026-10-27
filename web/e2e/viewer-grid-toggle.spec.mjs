@@ -57,6 +57,7 @@ test('the grid toggle shows and hides a camera-anchored grid behind the drawing;
   page.on('pageerror', (error) => pageErrors.push(error.message))
   await install(page)
   await page.goto('/app')
+  await page.getByRole('navigation', { name: 'Workspace controls' }).getByRole('button', { name: 'Studio', exact: true }).click()
   await expect(page.locator('.studio-ground .viewer-canvas canvas')).toHaveCount(1, { timeout: 30_000 })
 
   const grid = page.locator('[data-toggle="grid"]')
