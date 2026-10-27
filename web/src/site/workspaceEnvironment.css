@@ -67,3 +67,11 @@
 
 .studio-shell .app[data-environment-panel] header.top .who { min-width: 0; width: 100%; }
 .studio-shell .app[data-environment-panel] header.top .who > * { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* Service setup expands inside the scrollable Studio panel. An anchored
+   popover below its bottom trigger would be clipped by the overlay. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .link-svc { display: block; width: 100%; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .link-svc .claude-pop {
+  position: relative; inset: auto; width: 100%; max-width: 100%; max-height: none;
+  box-sizing: border-box; margin-top: 8px; background: var(--leaf-surface);
+  transform: none; z-index: 1;
+}
