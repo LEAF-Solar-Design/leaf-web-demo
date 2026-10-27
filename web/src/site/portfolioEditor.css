@@ -1,0 +1,23 @@
+.portfolio, .portfolio * { box-sizing: border-box; }
+.portfolio { background: white; color: #202020; font: 16px/1.6 Arial, sans-serif; min-height: 100%; width: 100%; min-width: 0; padding: clamp(20px,4vw,64px); overflow-wrap: anywhere; }
+.portfolio nav { display: flex; flex-wrap: wrap; gap: 12px 24px; margin-bottom: 48px; }
+.portfolio button, .portfolio a { color: inherit; font: inherit; }
+.portfolio nav button { background: none; border: 0; padding: 4px; cursor: pointer; }
+.portfolio nav a { text-decoration: none; padding: 4px; }
+.portfolio h1 { font: 400 clamp(32px,5vw,64px)/1.15 Georgia,serif; }
+.portfolio p { white-space: pre-wrap; max-width: 70ch; }
+.portfolio-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 32px; }
+.portfolio-grid button, .portfolio-grid a { display: block; min-width: 0; background: none; border: 0; text-align: left; padding: 0; text-decoration: none; cursor: pointer; }
+.portfolio img { display: block; width: 100%; height: auto; max-height: 75vh; object-fit: contain; }
+.portfolio figure { margin: 0; min-width: 0; }
+.portfolio-photo { display: block; min-height: 100px; }
+.portfolio-viewer { position: fixed; inset: 0; z-index: 200; background: white; overflow: auto; padding: 24px; }
+.portfolio-viewer img { max-height: 80vh; }
+.portfolio-viewer button { margin-bottom: 16px; }
+.portfolio :focus-visible { outline: 2px solid #202020; outline-offset: 4px; }
+.portfolio-editor { display: grid; gap: 14px; min-width: 0; }
+.portfolio-editor section { display: grid; gap: 14px; min-width: 0; padding-block: 12px; border-top: 1px solid #ddd; }
+.portfolio-editor h3, .portfolio-editor h4 { margin-bottom: 0; }
+.browser-asset-viewport:has(.portfolio) { top: 68px; height: calc(100% - 68px); overflow: auto; }
+.browser-asset-viewport .portfolio-viewer { top: 68px; }
+@media(max-width:600px) { .portfolio-grid { grid-template-columns: minmax(0,1fr); } .portfolio nav { margin-bottom: 24px; } }

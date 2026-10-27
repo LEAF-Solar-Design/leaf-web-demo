@@ -160,5 +160,132 @@ class WebPageTemplateTests(unittest.TestCase):
             self.assertIn("100dvh", css)
 
 
-if __name__ == "__main__":
+def portfolio_document():
+    preview = b'optimized preview fixture'
+    return {
+        'schema': 'leaf.portfolio.v1', 'name': 'Jessica Sargent', 'headline': 'Selected work',
+        'introduction': 'Cakes and pastry', 'about': 'Made with care.',
+        'contact': {'email': 'hello@example.com', 'location': 'Portland'},
+        'resume': [{'heading': 'Experience', 'entries': [{'title': 'Pastry chef', 'subtitle': 'Kitchen', 'dates': '2024', 'description': 'Baking'}]}],
+        'theme': 'light', 'categories': [{'slug': 'cakes', 'title': 'Cakes', 'description': '', 'hero': 0,
+            'images': [{'material_id': '11111111-1111-4111-8111-111111111111', 'sha256': 'a' * 64,
+                        'preview_sha256': hashlib.sha256(preview).hexdigest(), 'title': 'A cake', 'alt': 'Chocolate cake'}]}],
+    }
+
+
+class PortfolioTemplateTests(unittest.TestCase):
+    def test_deep_detach_and_exact_nested_shape(self):
+        original = portfolio_document()
+        detached = template.validate_document(original)
+        detached['categories'][0]['images'][0]['title'] = 'Changed'
+        self.assertEqual(original['categories'][0]['images'][0]['title'], 'A cake')
+        paths = [(), ('contact',), ('categories', 0), ('categories', 0, 'images', 0),
+                 ('resume', 0), ('resume', 0, 'entries', 0)]
+        for path in paths:
+            value = portfolio_document()
+            target = value
+            for key in path:
+                target = target[key]
+            target['unknown'] = 'value'
+            with self.subTest(path=path), self.assertRaises(ValueError):
+                template.validate_document(value)
+
+    def test_bad_schema_refs_hero_slug_and_prose(self):
+        mutations = [
+            lambda d: d.update(schema='leaf.portfolio.import.v1'),
+            lambda d: d.update(theme='dark'),
+            lambda d: d['categories'][0].update(hero=True),
+            lambda d: d['categories'][0].update(hero=1),
+            lambda d: d['categories'][0].update(slug='about'),
+            lambda d: d['categories'][0].update(slug='../cakes'),
+            lambda d: d['categories'][0]['images'][0].update(material_id='../../secret'),
+            lambda d: d['categories'][0]['images'][0].update(sha256='A' * 64),
+            lambda d: d['categories'][0]['images'][0].update(alt=''),
+            lambda d: d['categories'][0]['images'].append(dict(d['categories'][0]['images'][0])),
+            lambda d: d['contact'].update(email='a@b.com\n'),
+            lambda d: d['contact'].update(email='javascript:alert(1)'),
+            lambda d: d.update(about='<script>bad</script>'),
+            lambda d: d.update(introduction='https://example.com'),
+            lambda d: d['resume'][0]['entries'][0].update(description='bad\u202e'),
+        ]
+        for mutate in mutations:
+            value = portfolio_document()
+            mutate(value)
+            with self.subTest(mutate=mutate), self.assertRaises(ValueError):
+                template.validate_document(value)
+
+    def test_item_and_document_bounds(self):
+        for mutate in [lambda d: d.update(categories=[]), lambda d: d.update(resume=d['resume'] * 9),
+                       lambda d: d['resume'][0].update(entries=d['resume'][0]['entries'] * 21),
+                       lambda d: d['categories'][0].update(images=[])]:
+            value = portfolio_document(); mutate(value)
+            with self.assertRaises(ValueError):
+                template.validate_document(value)
+        value = portfolio_document()
+        # All individual fields fit; the aggregate canonical UTF-8 limit fails.
+        entry = dict(title='x' * 200, subtitle='x' * 240, dates='x' * 120, description='🍰' * 2400)
+        value['resume'] = [{'heading': 'Experience', 'entries': [dict(entry) for _ in range(20)]} for _ in range(8)]
+        with self.assertRaisesRegex(ValueError, '512 KiB'):
+            template.validate_document(value)
+
+    def test_category_reuse_counts_toward_total_and_still_requires_unique_ids(self):
+        value = portfolio_document()
+        image = value['categories'][0]['images'][0]
+        value['categories'][0]['images'] = [dict(image, material_id=f'00000000-0000-0000-0000-{index:012x}') for index in range(200)]
+        self.assertEqual(len(template.validate_document(value)['categories'][0]['images']), 200)
+        value['categories'].append(dict(slug='breads', title='Breads', description='', hero=0, images=[dict(image)]))
+        with self.assertRaisesRegex(ValueError, '200 images'):
+            template.validate_document(value)
+        value['categories'][0]['images'] = [dict(image)]
+        self.assertEqual(len(template.validate_document(value)['categories']), 2)
+        value['categories'][1]['slug'] = 'cakes'
+        with self.assertRaises(ValueError):
+            template.validate_document(value)
+
+    def test_source_routes_assets_manifest_and_literal_data(self):
+        value = portfolio_document()
+        value['about'] = 'A "quote", `literal`, {braces}, \\ and Café'
+        mid = value['categories'][0]['images'][0]['material_id']
+        previews = {mid: b'optimized preview fixture'}
+        first = template.source_archive(value, 3, previews)
+        self.assertEqual(first, template.source_archive(value, 3, previews))
+        self.assertNotEqual(first, template.source_archive(value, 4, previews))
+        with zipfile.ZipFile(io.BytesIO(first)) as archive:
+            manifest = json.loads(archive.read('source-manifest.json'))
+            self.assertEqual(manifest['document_sha256'], template.document_digest(value))
+            self.assertEqual(manifest['revision'], 3)
+            self.assertEqual(set(manifest['files']), set(archive.namelist()) - {'source-manifest.json'})
+            for path, record in manifest['files'].items():
+                raw = archive.read(path)
+                self.assertEqual(record, {'sha256': hashlib.sha256(raw).hexdigest(), 'size_bytes': len(raw)})
+            for route in ['app/page.jsx', 'app/[slug]/page.jsx', 'app/about/page.jsx', 'app/resume/page.jsx']:
+                source = archive.read(route).decode()
+                self.assertNotIn(value['about'], source)
+                self.assertNotIn('dangerouslySetInnerHTML', source)
+            self.assertIn('generateStaticParams', archive.read('app/[slug]/page.jsx').decode())
+            self.assertIn('Escape', archive.read('app/Gallery.jsx').decode())
+            self.assertEqual(archive.read(f'public/images/{mid}.jpg'), previews[mid])
+            asset = json.loads(archive.read('asset-manifest.json'))[mid]
+            self.assertEqual(asset['sha256'], 'a' * 64)
+            self.assertEqual(asset['preview_sha256'], hashlib.sha256(previews[mid]).hexdigest())
+            self.assertEqual(json.loads(archive.read('portfolio.json')), value)
+            self.assertEqual(json.loads(archive.read('package.json'))['dependencies'], template.PACKAGE_VERSIONS)
+        for bad in [{}, {mid: b'wrong preview'}, {mid: previews[mid], 'foreign': b'bytes'}]:
+            with self.assertRaises(ValueError):
+                template.source_archive(value, 3, bad)
+
+    def test_preview_and_archive_bounds_fail_before_output(self):
+        module = template._portfolio_template()
+        value = portfolio_document()
+        previews = {value['categories'][0]['images'][0]['material_id']: b'optimized preview fixture'}
+        module.MAX_PREVIEW_BYTES = 1
+        with self.assertRaisesRegex(ValueError, '64 MiB'):
+            module.source_archive(value, 1, previews, template.PACKAGE_VERSIONS)
+        module.MAX_PREVIEW_BYTES = 64 * 1024 * 1024
+        module.MAX_ARCHIVE_BYTES = 1
+        with self.assertRaisesRegex(ValueError, '80 MiB'):
+            module.source_archive(value, 1, previews, template.PACKAGE_VERSIONS)
+
+
+if __name__ == '__main__':
     unittest.main()
