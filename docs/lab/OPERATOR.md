@@ -1,5 +1,49 @@
 # Lab worker operator guide
 
+## Program dossier
+
+The selected Leaf Automation program is `studio-engine-lab-20260930`. Its
+capability inventory is `artifacts/lab-program/manifest.json`, schema
+`leaf.lab-program-manifest.v1`. Selected slices are SEL-008, SEL-107, SEL-112,
+SEL-213, SEL-220, SEL-221, SEL-316 and SEL-403. Each capability records its
+limits, sanitized identity binding, rollback, operator steps and gate. Identity
+describes the proof relationship; private identifiers stay outside this guide.
+
+The inventory must explicitly bind Test trade, Practice, Rust pending-version
+activation and restart, and the report-only Keeper to their selected slices.
+Run `node scripts/verify-lab-program.mjs` for offline dossier inspection; use
+`--manifest FILE` and `--receipts-root DIR` for alternate local inputs. Missing
+receipts are pending unless `--require-selected-receipts` is supplied. Exit 1
+is failure, 2 is usage, and 3 is a required missing receipt; failure outranks
+missing. A passing dossier establishes evidence consistency only.
+
+## Save, conflict, replay and commit signals
+
+- Save acknowledgment: `leaf.lab.saved-revision` carries `revision`, `sha256`
+  and `kind`; the history client records `lastSaved.revision` and
+  `lastSaved.sha256` after a successful save response. Confirm the intended head
+  and digest before running; local edits or an enqueue acknowledgment are not
+  durable save evidence. On `lab.save_failed`, keep edits and inspect the
+  refusal before retrying.
+- Conflict: `lab_save_conflict` with `stale_expected_head`, or
+  `lab_artifact_conflict`, means the expected head lost its comparison. Fetch
+  the latest revision, compare and reconcile edits, then save against that
+  head. Do not force overwrite. `lab_publish_cas_fail` requires the same
+  refresh and review before another publication attempt.
+- Replay: the `leaf.lab-replay.v1` receipt moves from `status: in_progress` to
+  `status: complete`, retaining `last_commit`. Wait for complete and confirm
+  mirror mode and digest equality before cutover. On `lab_replay_divergence`,
+  stop promotion, preserve evidence and reconcile the discrepancy; do not
+  clear frozen state or fabricate completion.
+- Durable commit: compare the saved `revision` and `sha256` with authoritative
+  readback and the replay `last_commit` / verified head. A local git commit
+  alone does not establish completed ledger reconciliation or publication.
+- Publication: a successful publish returns `receipt_id`, `expected_head`,
+  `new_head` and `sha256`; confirm `published_revision` matches the intended
+  saved revision and retain the immutable `lab_publish_receipts` evidence
+  privately. The current client does not retain the publish receipt ID. Do
+  not substitute `lastSaved` or a successful run for a publication receipt.
+
 ## Canvas performance proof
 
 The isolated production proof renders 500 blocks and 1000 pipes using the real
@@ -22,7 +66,7 @@ For the release proof, use the Mac mini through the shared tooling's
 root, using its installed Windows path:
 
 ```powershell
-python "$HOME/.claude/scripts/mini_e2e.py" run --worktree . --config playwright.lab-perf.config.mjs --host mac-mini --log-dir <dir>
+python "$HOME/.claude/scripts/mini_e2e.py" run --worktree . --config playwright.lab-perf.config.mjs --host <proof-host> --log-dir <dir>
 ```
 
 The limits are mount <= 500 ms, pan frame p50 <= 16.7 ms and p95 <= 33 ms.
@@ -47,7 +91,7 @@ this proof does not attest graph admission or execution. Mount ends at the first
 animation frame after all 500 node cards enter the DOM; initial dependency layout
 finishes separately before pan measurement. See [WAVE2-REPLAY.md](WAVE2-REPLAY.md).
 
-Measured hardware: Apple M4 Pro, 12 cores, 48 GB, macOS (darwin 27.0.0), headless Chromium 148.0.7778.96 (Mac mini, mini_e2e job 147a73d9, 2026-10-26).
+Measured hardware: Apple M4 Pro, 12 cores, 48 GB, macOS (darwin 27.0.0), headless Chromium 148.0.7778.96. Host and routed job identifiers are retained only in private evidence.
 
 Measured: mount 134.9 ms (budget 500), pan p50 12.8 ms (16.7), pan p95 27 ms (33), relayout 2.43 s, 500 nodes and 1000 edges rendered. The 200-block / 400-pipe document cap is unchanged; raising it needs this receipt passing on the release candidate.
 
@@ -56,7 +100,7 @@ verified tenant. Run creation, reads, events, and cancellation require `build`.
 Worker pause and resume also require `deploy`. Worker control is global: a
 pause affects every tenant using this database.
 
-## Stop
+## Stopping the worker
 
 Set `LEAF_LAB_WORKER_DISABLED=1` in the worker process environment to stop
 claims and suspend execution. Apply the environment change to every running
@@ -96,7 +140,7 @@ accept inline graphs or caller-supplied run IDs. Host graphs and, by default,
 effectful graphs are refused before enqueue. A tenant can queue at most 16 runs; queue overflow is
 `409 lab_run_queue_full`.
 
-## Signals
+## Paging
 
 The worker emits EMF metrics: `LabRunTerminal` counts worker terminal outcomes
 by status, `LabLeaseTakeover` counts reclaimed expired leases, and
@@ -199,7 +243,7 @@ before adopting this release. The default `LEAF_LAB_GIT_TENANTS` allowlist is
 empty. Add the tenant explicitly and set `LEAF_LAB_GIT_SINGLE_WRITER=attested`
 only after checking all of the following:
 
-- One leaf-platform ECS task writes the repositories: desired count 1,
+- One `leaf-platform` ECS task writes the repositories: desired count 1,
   maximum percent 100, minimum healthy percent 0.
 - No other service, manual RunTask, or process using a shared volume writes
   these tenant repositories. Service deployment settings alone cannot prove this.
@@ -335,6 +379,15 @@ activation ticks, including expiry processing. Resume the worker through
 tick. Only the active worker color schedules, at most once every five seconds.
 The same tenant transaction serializes enqueueing and the activation pointer.
 
+## Production migration order
+
+Production migrations must run **forward-normal** through
+`migrate-leaf-platform-production-db.yml` before any image carrying Lab
+migrations is adopted, including images whose Lab rail remains off. Then
+complete G3/P-176 credential and readiness gates, including verified credential
+readback. Only after those gates may a fresh Studio exposure yes authorize
+exposure; earlier evidence or an earlier yes does not carry forward.
+
 Production migration `0089_lab_activations.sql` must run **forward-normal**
 through `migrate-leaf-platform-production-db.yml` before adopting any image that
 reads these tables, even with the Lab rail off. Roll back the image without
@@ -351,3 +404,41 @@ return 503 `lab_sandbox_unavailable`. Malformed execution markers return 422
 `lab_execution_invalid`; live APS and write/solve/cloud-proposal capabilities
 return 403 `lab_aps_refused` or `lab_write_refused`. Lab data plans return 403
 `lab_plan_refused`.
+
+## Ratification and production gates
+
+Evidence ratification checks the selected capability proofs, limitations,
+identity bindings, rollback and operator steps. A `ratification` gate in the
+manifest describes evidence review; a `production` gate identifies a capability
+that additionally needs production authorization. Neither a passing receipt nor
+a passing offline checker authorizes trade, approval, migration, deployment or
+Studio exposure. Production still requires the migration order, G3/P-176 and a
+fresh Studio exposure yes. Keeper remains report-only: it cannot approve or
+execute a trade. Test trade is bounded proof activity, not general trading
+authority. Practice is a separate release walk with its own proof binding.
+
+## Receipts
+
+The planner populates this table from the selected manifest when proofs exist.
+Each manifest capability contributes one row (including repeated citations
+when multiple capabilities share a proof). Use receipt paths relative to the
+receipts root and lowercase SHA-256 of the exact parsed bytes. No payload,
+host row or private identity belongs here. The checker requires exact table
+and manifest agreement; an empty table cannot ratify a populated inventory.
+
+| Path | SHA-256 |
+| --- | --- |
+
+## Glossary
+
+- Capability: one manifest entry binding a selected slice to evidence, limits,
+  identity, rollback, operator steps and a review gate.
+- Test trade: the bounded SEL-221 money walk proof, without general trade authority.
+- Practice: the SEL-112 practice release walk, distinct from production approval.
+- Rust: the SEL-221 pending-version activation and restart proof binding.
+- Keeper: the SEL-221 report-only observer; it has no approval or execution authority.
+- Ratification: acceptance of evidence, without production authorization.
+- Production gate: a separate authorization requirement before production action.
+- Replay: reconstruction and reconciliation of ledger revisions into git history.
+- Commit: durable saved content with authoritative revision and digest readback.
+- Publication: an immutable receipt binding the published pointer to saved content.
