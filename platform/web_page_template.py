@@ -161,6 +161,8 @@ def validate_document(document: dict) -> dict:
     is no field for executable source, HTML, CSS, links, or resource fetching.
     Text is preserved exactly, including newlines; no silent trimming occurs.
     """
+    if type(document) is dict and 'schema' in document:
+        return _portfolio_template().validate_document(document)
     if type(document) is not dict or set(document) != set(_TEXT_LIMITS) | set(_ENUMS):
         raise ValueError("Page must contain exactly the six supported fields")
     for field, (minimum, maximum) in _TEXT_LIMITS.items():
@@ -187,9 +189,24 @@ def document_digest(document: dict) -> str:
     return hashlib.sha256(_canonical_json(validate_document(document))).hexdigest()
 
 
-def source_archive(document: dict, revision: int) -> bytes:
+def _portfolio_template():
+    # Also support the dependency-free static suite's direct module loading.
+    if __package__:
+        from . import portfolio_page_template
+        return portfolio_page_template
+    import importlib.util
+    from pathlib import Path
+    spec = importlib.util.spec_from_file_location('portfolio_page_template', Path(__file__).with_name('portfolio_page_template.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def source_archive(document: dict, revision: int, previews=None) -> bytes:
     """Export a deterministic ZIP with no user data interpolated into source."""
     page = validate_document(document)
+    if page.get('schema') == 'leaf.portfolio.v1':
+        return _portfolio_template().source_archive(page, revision, previews or {}, PACKAGE_VERSIONS)
     if type(revision) is not int or not 1 <= revision <= 9007199254740991:
         raise ValueError("Revision must be a positive safe integer")
     package = {"name": "coming-soon-page", "version": "1.0.0", "private": True,

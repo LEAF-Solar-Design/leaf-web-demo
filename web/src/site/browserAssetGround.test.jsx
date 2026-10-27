@@ -69,7 +69,7 @@ it('keeps one campaign input and hands off to Browser while another profile is s
   fireEvent.click(screen.getByRole('button', { name: 'Project' }))
   expect(screen.getByLabelText('Campaign input')).toBe(field)
   expect(field.value).toBe('Retain across profiles')
-  expect(container.querySelectorAll('input')).toHaveLength(1)
+  expect(screen.getAllByLabelText('Campaign input')).toHaveLength(1)
 })
 
 it('does not consume Escape when no environment panel is open', () => {

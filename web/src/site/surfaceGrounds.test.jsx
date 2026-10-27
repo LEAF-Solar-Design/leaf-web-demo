@@ -53,7 +53,7 @@ it('J2 row1 the device stage receives and invokes the ready controller launch', 
 
 it('J2 row3 all four setup states reach the disabled tool and device stage', () => {
   const states = [
-    ['no-approved-revision', PROFILE_REASONS.shipNoRevision, 'source', 'missing', 'Select a drawing version and ask the project owner to approve it.'],
+    ['no-approved-revision', PROFILE_REASONS.shipNoRevision, 'source', 'missing', 'Select an imported native source and ask the project owner to approve it.'],
     ['grant-not-ready', PROFILE_REASONS.shipGrant, 'grant', 'missing', 'Ask the project owner to connect the Apple account before starting a build.'],
     ['executor-busy', PROFILE_REASONS.shipExecutorBusy, 'executor', 'busy', 'Another build is using the build computer. Check again when it finishes.'],
     ['executor-unavailable', PROFILE_REASONS.shipExecutorUnavailable, 'executor', 'unavailable', 'The build computer is unavailable. Ask support to reconnect it, then check again.'],

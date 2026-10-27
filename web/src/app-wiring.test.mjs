@@ -4065,10 +4065,13 @@ describe('C-05 ship context wiring', () => {
     assert.equal(codeOnly(literals), literals)
   })
 
-  it('C-05 row8 consumes the existing contract and canonical revision', () => {
+  it('C-05 row8 preserves the contract and controller-selected revision', () => {
     const contract = { receipt_id: 'receipt' }
-    assert.equal(project({ phase: 'ready' }, contract).contract, contract)
-    assert.equal(project({ phase: 'ready' }, contract).revision, 'revision-j2')
+    const controller = { phase: 'ready', revision: 'source-revision-f15' }
+    const ship = project(controller, contract)
+    assert.equal(ship.contract, contract)
+    assert.equal(ship.revision, 'source-revision-f15')
+    assert.equal(project({ phase: 'idle', revision: null }).revision, null)
   })
 })
 describe('C-04C Solar shown-document readiness', () => {
