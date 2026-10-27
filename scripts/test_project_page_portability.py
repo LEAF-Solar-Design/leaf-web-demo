@@ -15,13 +15,18 @@ import zipfile
 ROOT = Path(__file__).resolve().parents[1]
 
 
-def test_project_page_database_and_independent_next_build(tmp_path):
+def test_project_page_database():
     node, npm = shutil.which('node'), shutil.which('npm')
     assert node and npm, 'Node and npm are required for the independent source proof'
     database = subprocess.run([node, str(ROOT / 'scripts/prove_project_page_database.mjs'), sys.executable],
                               cwd=ROOT, capture_output=True, text=True, timeout=300)
     print(database.stdout[-14000:])
     assert database.returncode == 0, database.stderr[-6000:]
+
+
+def test_project_page_independent_next_build(tmp_path):
+    npm = shutil.which('npm')
+    assert npm, 'npm is required for the independent source proof'
     spec = importlib.util.spec_from_file_location('page_template', ROOT / 'platform/web_page_template.py')
     template = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(template)
