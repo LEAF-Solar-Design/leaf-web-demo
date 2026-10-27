@@ -131,6 +131,31 @@ def test_mock_plan_round_trips_exact_emitted_bytes(client, tmp_path):
     _assert_plan(client, backend, saves.DWG_DRAWING, expected)
 
 
+@pytest.mark.parametrize("live", [False, True])
+def test_noop_set_layer_is_rejected_only_on_plan_leg(client, tmp_path, monkeypatch, live):
+    import deps
+    import store
+    import write_loop
+
+    backend = _seed_unchanged_dwg(tmp_path)
+    before = store.load_manifest(backend, saves.TENANT, saves.DWG_DRAWING)
+    monkeypatch.setattr(deps, "APS_LIVE", live)
+    mutations = {"set_layer": [{"handle": "A", "layer": "Roof"}]}
+    response = saves._post(client, saves.DWG_DRAWING, mutations)
+    if live:
+        assert response.status_code == 201, response.text
+        assert response.json()["commit"] == "dxf-sidecar"
+        _assert_plan(client, backend, saves.DWG_DRAWING,
+                     _expected(backend, saves.DWG_DRAWING, mutations))
+    else:
+        assert response.status_code == 422, response.text
+        assert "set_layer 'A' is a no-op" in response.text
+        assert store.load_manifest(backend, saves.TENANT, saves.DWG_DRAWING) == before
+        assert not backend.exists(store.drawing_version_key(saves.TENANT, saves.DWG_DRAWING, 2))
+        assert not backend.exists(store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2))
+        assert not backend.exists(write_loop.edited_source_key(saves.TENANT, saves.DWG_DRAWING, 2))
+
+
 def test_parent_without_content_digest_commits_without_plan(client, tmp_path):
     import store
     import write_loop

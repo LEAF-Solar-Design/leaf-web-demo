@@ -1877,9 +1877,13 @@ def save_plan_version(drawing_id: str,
                 raise
     if base_intake is not None:
         try:
-            canonical = mutation_plan.validate_mutations(
-                base_intake, mutations, allow_transforms=True, allow_xdata=False,
-                reject_noop=False)
+            if leg == "dxf-sidecar":
+                canonical = mutation_plan.validate_mutations(
+                    base_intake, mutations, allow_transforms=True, allow_xdata=False,
+                    reject_noop=False)
+            else:
+                canonical = mutation_plan.validate_mutations(
+                    base_intake, mutations, allow_transforms=True, allow_xdata=False)
             # The lowering runs here too, so a plan the live WorkItem would
             # refuse (a non-planar polyline, a collinear closed one) is refused
             # on this leg as well, with the same sentence.
