@@ -31,6 +31,7 @@ import errno
 import hashlib
 import importlib.util
 import json
+import logging
 import os
 import re
 import sys
@@ -55,6 +56,7 @@ import requests  # noqa: E402  (only OSSBackend.exists references requests.HTTPE
 import tenant_id_validator as _tid  # noqa: E402  (the ONE shared reject-don't-collapse rule)
 
 _platform_db = None
+LOGGER = logging.getLogger(__name__)
 
 
 def authority_mode() -> str:
@@ -1338,11 +1340,6 @@ def _pg_put(
 ) -> int:
     db = _db()
     digest = _sha256(data)
-    if mutation_plan_bytes is not None:
-        meta = dict(meta, note=_PLAN_NOTE_PREFIX + json.dumps({
-            "note": meta.get("note"),
-            **_version_plan_fields(meta, parent_version),
-        }, separators=(",", ":")))
 
     def reserve(conn):
         row = conn.execute(
@@ -1443,6 +1440,21 @@ def _pg_put(
         _pg_mark_version_state(tenant_id, drawing_id, version, "orphaned")
         raise
 
+    plan_key = version_plan_key(tenant_id, drawing_id, version)
+    note = meta.get("note")
+    if mutation_plan_bytes is not None:
+        try:
+            backend.put_if_absent_or_verify(plan_key, mutation_plan_bytes)
+        except Exception as exc:
+            with contextlib.suppress(Exception):
+                backend.delete(plan_key)
+            LOGGER.warning("Plan write failed drawing=%s version=%s exception=%s",
+                           drawing_id, version, type(exc).__name__)
+        else:
+            note = _PLAN_NOTE_PREFIX + json.dumps({
+                "note": note, **_version_plan_fields(meta, parent_version),
+            }, separators=(",", ":"))
+
     def finalize(conn):
         updated = conn.execute(
             """
@@ -1477,29 +1489,29 @@ def _pg_put(
             return False
         conn.execute(
             """
-            UPDATE drawing_store_versions SET state = 'ready', ready_at = NOW()
+            UPDATE drawing_store_versions
+            SET state = 'ready', ready_at = NOW(), note = %(note)s
             WHERE tenant_id = %(tenant)s AND drawing_id = %(drawing)s
               AND version = %(version)s AND state = 'reserved'
             """,
             {
                 "tenant": tenant_id, "drawing": drawing_id,
-                "version": version,
+                "version": version, "note": note,
             },
         )
-        if mutation_plan_bytes is not None:
-            backend.put_if_absent_or_verify(
-                version_plan_key(tenant_id, drawing_id, version), mutation_plan_bytes)
         return True
 
     try:
         finalized = db.run_transaction(finalize, isolation="serializable")
     except Exception:
         if mutation_plan_bytes is not None:
-            backend.delete(version_plan_key(tenant_id, drawing_id, version))
+            with contextlib.suppress(Exception):
+                backend.delete(plan_key)
         raise
     if not finalized:
         if mutation_plan_bytes is not None:
-            backend.delete(version_plan_key(tenant_id, drawing_id, version))
+            with contextlib.suppress(Exception):
+                backend.delete(plan_key)
         if bundle is not None:
             # A concurrent retry may have finalized the same apply while this
             # reservation was uploading. It is a success only for exact bytes.
@@ -2089,15 +2101,23 @@ def put_drawing(backend: StorageBackend, tenant_id: str, drawing_id: str, local_
         if mutation_plan_bytes is None:
             save_manifest(backend, tid, did, m)
         else:
-            m["versions"][-1].update(_version_plan_fields(meta, parent_version))
             plan_key = version_plan_key(tid, did, new_v)
-            plan_existed = backend.exists(plan_key)
             try:
+                plan_existed = backend.exists(plan_key)
                 backend.put_if_absent_or_verify(plan_key, mutation_plan_bytes)
+            except Exception as exc:
+                with contextlib.suppress(Exception):
+                    backend.delete(plan_key)
+                LOGGER.warning("Plan write failed drawing=%s version=%s exception=%s",
+                               did, new_v, type(exc).__name__)
+            else:
+                m["versions"][-1].update(_version_plan_fields(meta, parent_version))
+            try:
                 save_manifest(backend, tid, did, m)
             except Exception:
-                if not plan_existed:
-                    backend.delete(plan_key)
+                if "plan_sha256" in m["versions"][-1] and not plan_existed:
+                    with contextlib.suppress(Exception):
+                        backend.delete(plan_key)
                 raise
         return new_v
 

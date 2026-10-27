@@ -232,32 +232,147 @@ def test_read_plan_works_with_mutations_disabled(client, tmp_path, monkeypatch):
     assert _get(client, version=3).status_code == 404
 
 
-@pytest.mark.parametrize("failure", ["manifest", "plan"])
-def test_failed_publication_leaves_no_plan(client, tmp_path, monkeypatch, failure):
+def test_failed_manifest_publication_leaves_no_plan(client, tmp_path, monkeypatch):
     import store
 
     backend = saves._seed_dwg_backed(tmp_path)
     real = store.FilesystemBackend.put
 
     def fail(self, key, data):
-        if ((failure == "manifest" and key.endswith("manifest.json"))
-                or (failure == "plan" and key.endswith(".plan.txt"))):
+        if key.endswith("manifest.json"):
             raise OSError("publication failed")
         return real(self, key, data)
 
     monkeypatch.setattr(store.FilesystemBackend, "put", fail)
-    if failure == "plan":
-        # Exercise a partial object write followed by an error, through the
-        # immutable publication seam used by the real store.
-        def fail_plan(self, key, data):
-            real(self, key, data)
-            raise OSError("plan publication failed")
-
-        monkeypatch.setattr(store.FilesystemBackend, "put_if_absent_or_verify", fail_plan)
     response = saves._post(client, saves.DWG_DRAWING, {})
     assert response.status_code == 500, response.text
     assert _get(client).status_code == 404
     assert not backend.exists(store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2))
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("error_kind", ["oserror", "conflict"])
+def test_plan_write_failure_commits_like_no_plan(
+        client, tmp_path, monkeypatch, caplog, cleanup_fails, error_kind):
+    import store
+    import write_loop
+
+    error_type = OSError if error_kind == "oserror" else store.ImmutableConflict
+    baseline_dir = tmp_path / "baseline"
+    baseline_dir.mkdir()
+    saves._seed_dwg_backed(baseline_dir)
+    real_publish = write_loop._put_bytes_version
+
+    def without_plan(*args, **kwargs):
+        kwargs["mutation_plan_bytes"] = None
+        return real_publish(*args, **kwargs)
+
+    with monkeypatch.context() as baseline:
+        baseline.setenv("LEAF_STORE_DIR", str(baseline_dir / "drawings"))
+        baseline.setattr(write_loop, "_put_bytes_version", without_plan)
+        expected = saves._post(client, saves.DWG_DRAWING, {})
+    assert expected.status_code == 201, expected.text
+
+    backend = saves._seed_dwg_backed(tmp_path)
+    real_put = store.FilesystemBackend.put
+    real_delete = store.FilesystemBackend.delete
+
+    def fail_plan(self, key, data):
+        real_put(self, key, data)
+        raise error_type("private-plan-text")
+
+    def delete(self, key):
+        if cleanup_fails and key.endswith(".plan.txt"):
+            raise OSError("cleanup failed")
+        return real_delete(self, key)
+
+    monkeypatch.setattr(store.FilesystemBackend, "put_if_absent_or_verify", fail_plan)
+    monkeypatch.setattr(store.FilesystemBackend, "delete", delete)
+    response = saves._post(client, saves.DWG_DRAWING, {})
+    assert response.status_code == expected.status_code, response.text
+    assert response.json() == expected.json()
+    entry = store.resolve_version_entry(backend, saves.TENANT, saves.DWG_DRAWING, 2)[2]
+    assert "plan_sha256" not in entry
+    assert "parent_version" not in entry
+    assert backend.exists(store.drawing_version_key(saves.TENANT, saves.DWG_DRAWING, 2))
+    plan = _get(client)
+    assert plan.status_code == 404
+    assert plan.json()["error"]["error_code"] == "no_plan"
+    assert backend.exists(store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2)) == cleanup_fails
+    warnings = [r.getMessage() for r in caplog.records if r.name == store.__name__]
+    assert warnings == [f"Plan write failed drawing={saves.DWG_DRAWING} version=2 "
+                        f"exception={error_type.__name__}"]
+
+
+@pytest.mark.parametrize("cleanup_fails", [False, True])
+@pytest.mark.parametrize("error_kind", [None, "oserror", "conflict"])
+def test_postgres_plan_write_failure_is_optional(monkeypatch, caplog, cleanup_fails, error_kind):
+    import store
+    from datetime import timedelta
+
+    error_type = (None if error_kind is None else
+                  OSError if error_kind == "oserror" else store.ImmutableConflict)
+    backend = store.InMemoryBackend()
+    row = {"head": 1, "latest": 1, "checkout_holder": "writer", "checkout_fence": 1,
+           "checkout_expires_at": store.datetime.now(store.timezone.utc) + timedelta(minutes=5)}
+    version_row = {}
+
+    class Connection:
+        def execute(self, sql, params):
+            if "SELECT head" in sql:
+                self.result = row
+            elif "INSERT INTO drawing_store_versions" in sql:
+                version_row.update(params, state="reserved")
+            elif "SET head =" in sql:
+                row["head"] = params["version"]
+                self.result = {"tenant_id": "tenant"}
+            elif "SET state = 'ready'" in sql:
+                version_row.update(params, state="ready")
+            elif "SET latest =" in sql:
+                row["latest"] = params["version"]
+            else:
+                raise AssertionError(sql)
+            return self
+
+        def fetchone(self):
+            return self.result
+
+    class Database:
+        def run_transaction(self, callback, **kwargs):
+            return callback(Connection())
+
+    monkeypatch.setattr(store, "_db", lambda: Database())
+    plan = b"LEAF_MUTATION_PLAN|private-plan-text"
+    key = store.version_plan_key("tenant", "drawing", 2)
+
+    def fail_plan(key, data):
+        backend.put(key, data)
+        raise error_type("private-plan-text")
+
+    def fail_delete(key):
+        raise OSError("cleanup failed")
+
+    if error_type is not None:
+        monkeypatch.setattr(backend, "put_if_absent_or_verify", fail_plan)
+    if cleanup_fails:
+        monkeypatch.setattr(backend, "delete", fail_delete)
+    version = store._pg_put(
+        backend, "tenant", "drawing", b"version bytes", 1,
+        {"note": "public note", "plan_sha256": hashlib.sha256(plan).hexdigest()},
+        holder="writer", fence=1, mutation_plan_bytes=plan)
+    assert version == row["head"] == row["latest"] == 2
+    assert version_row["state"] == "ready"
+    assert backend.get(store.drawing_version_key("tenant", "drawing", 2)) == b"version bytes"
+    entry = store._decode_plan_note({"v": 2, "note": version_row["note"]})
+    if error_type is None:
+        assert entry["plan_sha256"] == hashlib.sha256(plan).hexdigest()
+        assert entry["parent_version"] == 1
+        assert backend.get(key) == plan
+    else:
+        assert entry == {"v": 2, "note": "public note"}
+        assert backend.exists(key) == cleanup_fails
+        warnings = [r.getMessage() for r in caplog.records if r.name == store.__name__]
+        assert warnings == [f"Plan write failed drawing=drawing version=2 exception={error_type.__name__}"]
 
 
 @pytest.mark.parametrize("tamper", [False, True])
