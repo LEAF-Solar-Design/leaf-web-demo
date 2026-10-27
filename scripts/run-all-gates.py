@@ -3562,6 +3562,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_drawings_cross_tenant_canary.py"), 10),
         Suite("server-router-authz-negative", "server tests/test_router_authz_negative.py", "pytest", SERVER,
               _py_pytest("tests/test_router_authz_negative.py"), 102),
+        Suite("server-operator-router-authz-negative", "server tests/test_operator_router_authz_negative.py", "pytest", SERVER,
+              _py_pytest("tests/test_operator_router_authz_negative.py"), 106),
         Suite("server-mutation-scope-diff", "server tests/test_mutation_scope_diff.py", "pytest", SERVER,
               _py_pytest("tests/test_mutation_scope_diff.py"), 20),
         # Registered WITH the file, per the #29 fix-then-register rule. The
