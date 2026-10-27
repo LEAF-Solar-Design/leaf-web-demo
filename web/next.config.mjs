@@ -8,8 +8,12 @@ const webRoot = path.dirname(fileURLToPath(import.meta.url))
 export default function nextConfig(phase) {
   // Next loads .env* before invoking this configuration function.
   const development = phase === 'phase-development-server'
+  const devInstance = development && process.env.LEAF_NEXT_DEV_INSTANCE
+  if (devInstance && !/^[a-z0-9-]{1,48}$/.test(devInstance)) throw new Error('Invalid Next development instance')
   return {
     ...(development ? {} : { output: 'export' }),
+    // Independent flag proofs must not share Next's compiler cache or dev lock.
+    ...(devInstance ? { distDir: `.next-dev-${devInstance}` } : {}),
     reactStrictMode: true,
     images: { unoptimized: true },
     poweredByHeader: false,

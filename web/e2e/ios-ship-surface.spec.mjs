@@ -5,14 +5,14 @@ import { CAT_PROJECT, CAT_PROJECT_VERSION, catProofResponse, makeCatProofState }
 const FIXTURE_TOKEN = 'fixture-token'
 
 // iOS ship-surface browser proof. Runs ONLY under playwright.ios.config.mjs,
-// which serves the same /app from two Vite instances: one built with
+// which serves the same /app from two Next.js instances: one built with
 // VITE_IOS_SURFACE=0 (project ios-flag-off) and one with VITE_IOS_SURFACE=1
 // (project ios-flag-on). The flag is folded at build time (src/ios/flag.js),
 // so the dormant/live split below is the real build fence, not a mock.
 //
 // Every walk is the same honest path: a signed-in console opens the Cat Roof
 // workspace project on the Browser board, selects its canonical drawing
-// version, then switches to the iOS tab, where useIosShipController owns
+// version, then selects the iOS profile, where useIosShipController owns
 // readiness, launch, following and reload recovery. Only /api is mocked.
 
 const API = 'http://leaf-proof.invalid/api/**'
@@ -122,11 +122,17 @@ const readPointer = (page) => page.evaluate((key) => sessionStorage.getItem(key)
 // console on the Browser surface with project and revision both concrete.
 async function openProjectRevision(page, calls) {
   await page.goto('/app?surface=browser')
-  await page.getByRole('region', { name: 'Workspace projects', exact: true })
+  await page.getByRole('button', { name: 'Open project or material', exact: true }).click()
+  const projectPanel = page.getByRole('region', { name: 'Project sidebar', exact: true })
+  await projectPanel.getByRole('region', { name: 'Workspace projects', exact: true })
     .getByRole('list', { name: 'Projects', exact: true })
     .getByRole('button', { name: CAT_PROJECT.name, exact: true })
     .click({ timeout: 30_000 })
-  const version = page.locator('.studio-ground .workspace-summary select')
+  await expect.poll(() => calls.some((call) => call.method === 'GET'
+    && call.path === `/api/projects/${PROJECT_ID}`)).toBe(true)
+  // Opening a project starts a new quiet workspace scope. Reopen its panel.
+  await page.getByRole('button', { name: 'Open project or material', exact: true }).click()
+  const version = projectPanel.getByRole('combobox', { name: 'Canonical drawing version', exact: true })
   await expect(version).toBeVisible({ timeout: 20_000 })
   await version.selectOption(REVISION)
   await expect(version).toHaveValue(REVISION)
@@ -136,8 +142,12 @@ async function openProjectRevision(page, calls) {
 }
 
 async function showIosSurface(page) {
-  await page.getByRole('tab', { name: 'iOS', exact: true }).click()
-  await expect(page.getByRole('tab', { name: 'iOS', exact: true })).toHaveAttribute('aria-selected', 'true')
+  const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  await controls.getByRole('combobox', { name: 'Workspace profile', exact: true }).selectOption('ios')
+  // Wait for the committed profile before opening its floating Studio panel.
+  await expect(page.locator('.workspace-environment')).toHaveAttribute('data-profile', 'ios')
+  await controls.getByRole('button', { name: 'Studio', exact: true }).click()
+  await expect(page.getByRole('region', { name: 'Studio sidebar', exact: true })).toBeVisible()
   const device = page.locator('.studio-ground [data-ground="ios"]')
   await expect(device).toBeVisible({ timeout: 20_000 })
   return device
@@ -218,12 +228,16 @@ test('@flag-on a launch progresses from running through the build stage to a del
   const device = await showIosSurface(page)
   await expect(device).toHaveAttribute('data-state', 'ready', { timeout: 20_000 })
 
+  // The lane owns this action in the viewport; close the overlay before clicking it.
+  await page.getByRole('button', { name: 'Close Studio', exact: true }).click()
   await launchButton(device).click()
   await expect(device).toHaveAttribute('data-state', 'running', { timeout: 15_000 })
   await expect(device.locator('.device-stage')).toHaveText('MAC_ALLOCATED')
   await expect(device.locator('[data-rung="build"]')).toHaveAttribute('data-state', 'busy')
   await expect(device.locator('[data-rung="delivery"]')).toHaveAttribute('data-state', 'busy')
   await expect(launchButton(device)).toHaveCount(0)
+  await page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('button', { name: 'Studio', exact: true }).click()
   await expect(ribbonLaunch(page)).toBeDisabled()
 
   // The launch carried the exact approved record and its idempotency key.
