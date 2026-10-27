@@ -35,6 +35,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
+import requests
 from fastapi import APIRouter, Depends, File, Form, Header, HTTPException, Request, UploadFile
 from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel, Field
@@ -282,8 +283,12 @@ def get_version_plan(drawing_id: str, version: str,
         return plan_error("no_plan", "this version has no stored mutation plan", 404)
     try:
         data = backend.get(store.version_plan_key(str(tenant_id), drawing_id, v))
-    except KeyError:
+    except (KeyError, FileNotFoundError):
         return plan_error("no_plan", "this version has no stored mutation plan", 404)
+    except requests.HTTPError as exc:
+        if exc.response is not None and exc.response.status_code == 404:
+            return plan_error("no_plan", "this version has no stored mutation plan", 404)
+        raise
     import mutation_plan
     if (len(data) > mutation_plan.MAX_PLAN_BYTES
             or hashlib.sha256(data).hexdigest() != entry["plan_sha256"]):

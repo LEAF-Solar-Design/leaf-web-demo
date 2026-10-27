@@ -410,6 +410,52 @@ def test_another_tenant_cannot_read_plan(client, tmp_path):
     assert _get(client).status_code == 200
 
 
+def test_deleted_filesystem_plan_is_no_plan(client, tmp_path):
+    import store
+
+    backend = _seed_unchanged_dwg(tmp_path)
+    assert saves._post(client, saves.DWG_DRAWING, {}).status_code == 201
+    entry = store.resolve_version_entry(backend, saves.TENANT, saves.DWG_DRAWING, 2)[2]
+    assert entry["plan_sha256"]
+    key = store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2)
+    path = tmp_path / "drawings" / key
+    assert path.is_file()
+    path.unlink()
+    response = _get(client)
+    assert response.status_code == 404, response.text
+    assert response.json()["error"]["error_code"] == "no_plan"
+    assert store.resolve_version_entry(backend, saves.TENANT, saves.DWG_DRAWING, 2)[2] == entry
+
+
+@pytest.mark.parametrize("failure", ["key", "file", "http404", "http403", "http500", "oserror"])
+def test_plan_read_errors_only_missing_objects_are_no_plan(client, tmp_path, monkeypatch, failure):
+    import requests
+    import store
+
+    _seed_unchanged_dwg(tmp_path)
+    assert saves._post(client, saves.DWG_DRAWING, {}).status_code == 201
+    real_get = store.FilesystemBackend.get
+    plan_key = store.version_plan_key(saves.TENANT, saves.DWG_DRAWING, 2)
+
+    def get(self, key):
+        if key != plan_key:
+            return real_get(self, key)
+        if failure.startswith("http"):
+            response = requests.Response()
+            response.status_code = int(failure[4:])
+            raise requests.HTTPError("plan read failed", response=response)
+        error_type = {"key": KeyError, "file": FileNotFoundError, "oserror": OSError}[failure]
+        raise error_type("plan read failed")
+
+    monkeypatch.setattr(store.FilesystemBackend, "get", get)
+    response = _get(client)
+    if failure in {"key", "file", "http404"}:
+        assert response.status_code == 404, response.text
+        assert response.json()["error"]["error_code"] == "no_plan"
+    else:
+        assert response.status_code == 500, response.text
+
+
 def test_tampered_plan_never_returns_text(client, tmp_path):
     import store
 
