@@ -12,6 +12,7 @@ const linkFlowBoot = process.env.LEAF_E2E_MANAGED !== '1'
   && process.argv.some((arg) => arg.endsWith('link-service-flow.spec.mjs'))
 let webServer
 if (linkFlowBoot) {
+  const tenant = '9db9c09d-3779-4f5d-9d08-5621508bdc56'
   const repo = fileURLToPath(new URL('../', import.meta.url))
   const run = mkdtempSync(join(tmpdir(), 'leaf-link-flow-'))
   const paths = {
@@ -39,7 +40,7 @@ if (linkFlowBoot) {
     LEAF_E2E_MANAGED: '1', LEAF_CUSTOMIZATION_R5_MODE: 'off', LEAF_CUSTOMIZATION_R6_MODE: 'off',
     LEAF_E2E_BASE_URL: 'http://127.0.0.1:5275', LEAF_E2E_API_BASE: 'http://127.0.0.1:8230',
     LEAF_APP_PUBLIC_BASE_URL: 'http://127.0.0.1:8230', LEAF_CORS_ORIGINS: 'http://127.0.0.1:5275',
-    VITE_TENANT_ID: 'demo-tenant', VITE_STARTUP_FETCH_TIMEOUT_MS: '15000',
+    LEAF_E2E_TENANT_ID: tenant, VITE_TENANT_ID: tenant, VITE_STARTUP_FETCH_TIMEOUT_MS: '15000',
     JOBS_DB: join(run, 'jobs.db'), SESSIONS_DB: join(run, 'sessions.db'),
     LEAF_AGENT_LEDGER: join(run, 'agent-ledger.jsonl'), BROKER_LEDGER: join(run, 'broker-ledger.jsonl'),
     BROKER_TENANTS: join(run, 'broker-tenants.json'), LEAF_GRANT_FILE: join(run, 'no-legacy-grant.token'),
@@ -61,10 +62,9 @@ if (linkFlowBoot) {
     process.env.LEAF_LINK_FLOW_PORTS_CLEARED = '1'
   }
   // /try?proof=1 loads /api/session?dwg=cat before reading cat-panels
-  // versions. Both use demo-tenant (the session's auth-off default and
-  // VITE_TENANT_ID above). Neither ID is a curated bootstrap alias, so
-  // provision both fixtures explicitly; ordinary unknown reads still fail.
-  execFileSync('python', ['-B', join(repo, 'scripts/seed_proof_drawings.py'), '--tenant', 'demo-tenant'],
+  // versions. Both use the UUID tenant through the UI setting and context
+  // headers below. Seed both explicitly; ordinary unknown reads still fail.
+  execFileSync('python', ['-B', join(repo, 'scripts/seed_proof_drawings.py'), '--tenant', tenant],
     { cwd: repo, env: { ...process.env, APS_LIVE: '0' }, stdio: 'inherit', timeout: 30_000 })
   webServer = {
     command: 'npm --prefix harness run build && python scripts/start-leaf.py --strict-ports --with-harness --broker-port 8240 --app-port 8230 --harness-port 8250 --web-port 5275',
@@ -90,6 +90,9 @@ export default defineConfig({
   }]],
   use: {
     baseURL: process.env.LEAF_E2E_BASE_URL || 'http://127.0.0.1:5275',
+    ...(process.env.LEAF_E2E_TENANT_ID ? {
+      extraHTTPHeaders: { 'X-Tenant-Id': process.env.LEAF_E2E_TENANT_ID },
+    } : {}),
     browserName: 'chromium',
     headless: true,
     video: 'on',

@@ -4,7 +4,7 @@ import { requireLocalReady } from './requireReady.mjs'
 
 const API_BASE = process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230'
 const REGISTRY = '/api/tenant/mcp-servers'
-const HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
+const HEADERS = { 'X-Tenant-Id': process.env.LEAF_E2E_TENANT_ID || 'demo-tenant' }
 const local = (value) => ['localhost', '127.0.0.1', '[::1]'].includes(new URL(value).hostname)
 
 async function openLinkedServices(page) {
