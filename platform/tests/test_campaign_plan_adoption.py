@@ -9,13 +9,15 @@ import uuid
 import pytest
 
 from leaf_platform import campaign_plan_adoption as adoption
+from leaf_platform import campaign_plan as planning_policy
 from leaf_platform import campaign_execution as execution, campaigns, db
 from leaf_platform import campaign_enrollment as enrollment
 from test_campaign_bridge import mounted, call, bind_body, admit_body, SOURCE
 
 
 def document(scope):
-    return dict(contract='leaf.campaign-plan.v1', campaign_id=str(scope[2]),
+    return dict(contract=planning_policy.PLAN_CONTRACT, campaign_id=str(scope[2]),
+        implementation_policy=dict(planning_policy.IMPLEMENTATION_POLICY),
         prompt_digest=hashlib.sha256('Organize crêpe recipes\nKeep the full prompt.'.encode()).hexdigest(),
         source_sha=SOURCE, summary='Recipe campaign', open_questions=[], tasks=[
             dict(task_key='recipes', title='Organize recipes', spec='Build recipe storage',
@@ -59,6 +61,30 @@ def children(mounted):
     return [row for row in snapshot(mounted)['tasks'] if row['parent_task_id'] is not None]
 
 
+def test_real_postgres_legacy_first_task_and_plan_replay_are_unchanged(mounted):
+    with execution._cursor() as cur:
+        scope = enrollment.resolve_worker_scope(cur, mounted.eid, 'worker-service')
+    spec = planning_policy.first_task_spec(scope, SOURCE, scope['prompt'],
+                                           contract=planning_policy.LEGACY_PLAN_CONTRACT)
+    original = execution.submit_task(*mounted.scope, task_key='campaign-plan',
+        idempotency_key='campaign-plan', kind='task', capability='campaign.plan',
+        title='Plan campaign from accepted prompt', stages=['implementation', 'build_test'],
+        owned_paths=['.leaf/campaign-plan.json'], depends_on=[], source_sha=SOURCE,
+        declared_artifacts=['campaign-plan'], verify_command=planning_policy.VERIFY_COMMAND,
+        spec=spec)
+    legacy = document(mounted.scope)
+    legacy['contract'] = planning_policy.LEGACY_PLAN_CONTRACT
+    del legacy['implementation_policy']
+    request, _ = prepare(mounted, legacy)
+    response = call(mounted, 'plan', **request)
+    assert children(mounted)[0]['spec'] == 'Build recipe storage'
+    saved = next(row for row in snapshot(mounted)['tasks'] if row['task_key'] == 'campaign-plan')
+    assert saved['spec'] == spec and saved['payload_fingerprint'] == original['payload_fingerprint']
+    db.reset_pool()
+    replay = call(mounted, 'plan', **request)
+    assert replay == dict(response, receipt=dict(response['receipt'], replayed=True))
+
+
 @pytest.mark.parametrize('size', [64001, 262144])
 def test_real_postgres_raw_adoption_restart_replay(mounted, size):
     request, implementation = prepare(mounted, size=size)
@@ -74,6 +100,8 @@ def test_real_postgres_raw_adoption_restart_replay(mounted, size):
     response = call(mounted, 'plan', **request)
     assert response['adopted'] == dict(tasks=1, capability_tasks=0, questions=0)
     assert children(mounted)[0]['stages'] == ['implementation', 'build_test', 'publication']
+    assert children(mounted)[0]['spec'] == planning_policy.POLICY_PREFIX + 'Build recipe storage'
+    assert json.loads(base64.b64decode(request['plan_b64']))['implementation_policy'] == planning_policy.IMPLEMENTATION_POLICY
     assert response['receipt']['stage'] == 'build_test'
     db.reset_pool()
     replay = call(mounted, 'plan', **request)
@@ -106,9 +134,18 @@ def test_real_postgres_raw_adoption_restart_replay(mounted, size):
 
 
 @pytest.mark.parametrize('failure', ['duplicate', 'campaign', 'prompt', 'source', 'hash', 'size',
-                                      'base64', 'oversized', 'revoked', 'other-enrollment'])
+                                      'base64', 'oversized', 'revoked', 'other-enrollment',
+                                      'missing-policy', 'changed-policy', 'downgrade', 'spec-limit'])
 def test_real_postgres_invalid_plan_has_no_durable_effect(mounted, failure):
     plan = document(mounted.scope)
+    if failure in ('missing-policy', 'downgrade'):
+        plan.pop('implementation_policy')
+    if failure == 'downgrade':
+        plan['contract'] = planning_policy.LEGACY_PLAN_CONTRACT
+    if failure == 'changed-policy':
+        plan['implementation_policy']['web_framework'] = 'vite'
+    if failure == 'spec-limit':
+        plan['tasks'][0]['spec'] = 'x' * 16384
     if failure in ('campaign', 'prompt', 'source'):
         field = {'campaign': 'campaign_id', 'prompt': 'prompt_digest', 'source': 'source_sha'}[failure]
         plan[field] = str(uuid.uuid4()) if failure == 'campaign' else '0' * (40 if failure == 'source' else 64)
@@ -140,7 +177,8 @@ def test_real_postgres_invalid_plan_has_no_durable_effect(mounted, failure):
     before = snapshot(mounted)
     with pytest.raises(mounted.bridge.BridgeError) as error:
         call(mounted, 'plan', **request)
-    expected = (422 if failure in ('duplicate', 'campaign', 'prompt', 'source') else
+    expected = (422 if failure in ('duplicate', 'campaign', 'prompt', 'source',
+                                   'missing-policy', 'changed-policy', 'downgrade', 'spec-limit') else
                 413 if failure == 'oversized' else 403 if failure == 'revoked' else 409)
     assert error.value.status == expected
     assert snapshot(mounted) == before and not children(mounted)
@@ -183,6 +221,7 @@ def test_real_postgres_capabilities_questions_and_dependencies(mounted):
     result = call(mounted, 'plan', **request)
     assert result['adopted'] == dict(tasks=3, capability_tasks=1, questions=1)
     tasks = {row['task_key']: row for row in children(mounted)}
+    assert all(row['spec'].startswith(planning_policy.POLICY_PREFIX) for row in tasks.values())
     key = 'CAP-' + hashlib.sha256(b'recipe.device').hexdigest()[:24]
     assert set(tasks['recipes']['depends_on']) == {'campaign-plan', key}
     assert set(tasks['index']['depends_on']) == {'campaign-plan', key, 'recipes'}

@@ -13,7 +13,7 @@ import uuid
 from . import campaign_enrollment as enrollment
 from . import campaign_execution as execution
 from . import campaigns
-from .campaign_plan import validate_plan
+from .campaign_plan import validate_plan, planning_task_contract, adopted_task_spec
 
 ACCEPTANCE = 'leaf.campaign.plan-adoption.v1'
 MAX_BYTES = 262144
@@ -116,7 +116,7 @@ def _response(receipt, *, replayed=False):
                              questions=len(result['question_ids'])))
 
 
-def _capability(cur, scope, planning, name, digest):
+def _capability(cur, scope, planning, name, digest, contract):
     suffix = hashlib.sha256(name.encode()).hexdigest()[:24]
     key = 'CAP-' + suffix
     path = '.leaf/capabilities/' + suffix + '/capability.json'
@@ -128,13 +128,13 @@ def _capability(cur, scope, planning, name, digest):
         owned_paths=[path], declared_artifacts=['capability-contract'],
         verify_command=shlex.join(['python', '-m', 'json.tool', path]),
         depends_on=['campaign-plan'],
-        spec=('Implement capability ' + name + ' for this project. Record its inputs, outputs, '
+        spec=adopted_task_spec('Implement capability ' + name + ' for this project. Record its inputs, outputs, '
               'device/provider access, permissions, retry/recovery and guided physical actions '
               'when needed in ' + path + '. Resolve existing access and ask concrete necessary '
               'questions through the existing campaign client. Publish through canonical Mushy '
               'and demonstrate two distinct successful client invocations in this project. '
               'The pending capability link requires trusted lifecycle evidence before completion. '
-              'This requirement grants no money, provider access or new permissions.'))
+              'This requirement grants no money, provider access or new permissions.', contract))
     params = dict(scope, task=execution._uuid(task['task_id']))
     cur.execute('SELECT * FROM campaign_capability_links WHERE ' + execution.SCOPE +
                 ' AND task_id=%(task)s FOR UPDATE', params)
@@ -217,9 +217,10 @@ def adopt_plan(enrollment_id, subject, *, task_id, attempt_id, fence, result_fin
             execution._conflict('stale_attempt')
         plan = validate_plan(raw, campaign_id=scope['campaign'],
                              prompt_digest=hashlib.sha256(scope['prompt'].encode('utf-8')).hexdigest(),
-                             source_sha=planning['source_sha'])
+                             source_sha=planning['source_sha'],
+                             expected_contract=planning_task_contract(scope, planning))
         # The validator has already established an acyclic closed graph.
-        capabilities = {name: _capability(cur, scope, planning, name, plan_sha256)
+        capabilities = {name: _capability(cur, scope, planning, name, plan_sha256, plan['contract'])
                         for name in sorted({name for item in plan['tasks']
                                             for name in item['capabilities_required']})}
         tasks, questions = {}, []
@@ -230,7 +231,8 @@ def adopt_plan(enrollment_id, subject, *, task_id, attempt_id, fence, result_fin
                     continue
                 task = execution._submit_task_cursor(
                     cur, scope, **{key: item[key] for key in (
-                        'task_key', 'title', 'spec', 'capability', 'owned_paths')},
+                        'task_key', 'title', 'capability', 'owned_paths')},
+                    spec=adopted_task_spec(item['spec'], plan['contract']),
                     stages=['implementation', 'build_test', 'publication'],
                     source_sha=planning['source_sha'], parent_task_id=planning['task_id'],
                     verify_command=shlex.join(item['verify_argv']), declared_artifacts=item['artifacts'],
