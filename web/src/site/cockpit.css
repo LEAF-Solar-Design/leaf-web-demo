@@ -23,7 +23,7 @@
      canvas #212830 from (250,155) to the status bar
 
    Ribbon grammar (the reference's own constants, ROW_H = 26): a large tool
-   is a 39px icon over a 10px two-line label, 57px wide, spanning the three
+   is a 39px icon over a 10px two-line label, 66px wide, spanning the three
    rows; a small tool is an 18px icon in a 26px square, 2px apart, column
    flow; the panel label is 10px grey on the row under the tools.
 
@@ -344,7 +344,7 @@
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[aria-expanded="true"] { background: var(--ck-hover); }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool .ribbon-tool-label { display: none; }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] {
-  grid-row: 1 / span 3; width: 57px; height: 78px; box-sizing: border-box;
+  grid-row: 1 / span 3; width: 66px; height: 78px; box-sizing: border-box;
   flex-direction: column; justify-content: space-between; padding: 5px 2px 4px; gap: 3px;
 }
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .ribbon-tool[data-size="large"] .ribbon-tool-label {

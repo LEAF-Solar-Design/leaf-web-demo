@@ -342,7 +342,7 @@
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[aria-expanded="true"] { background: var(--ck-hover); }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool .ribbon-tool-label { display: none; }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] {
-  grid-row: 1 / span 3; width: 57px; height: 78px; box-sizing: border-box;
+  grid-row: 1 / span 3; width: 66px; height: 78px; box-sizing: border-box;
   flex-direction: column; justify-content: space-between; padding: 5px 2px 4px; gap: 3px;
 }
 .studio-shell .app[data-studio-shell="cockpit"][data-surface] .ribbon-tool[data-size="large"] .ribbon-tool-label {
