@@ -26,6 +26,13 @@ ORIGIN = "https://platform-staging.leafdesign.ai"
 SECRET_ID = "stg/leaf/acceptance-tenant-b"
 ACCOUNT = "807034087062"
 REGION = "us-east-1"
+REVISION_LABEL = "org.opencontainers.image.revision"
+COMPONENT_KEYS = {
+    "app": ("LEAF_RUNTIME_ENV", "LEAF_JOBS_STORE", "LEAF_BROKER_STORE",
+            "LEAF_DRAWING_STORE", "LEAF_BLOB_STORE", "LEAF_STORE_DIR"),
+    "broker": ("LEAF_BROKER_STORE", "LEAF_DRAWING_STORE", "LEAF_BLOB_STORE",
+               "LEAF_STORE_DIR"),
+}
 TOOL = "measure-panel-area"
 ACK = "p080-r3-staging-only"
 EXPECTED = {"layer": "p080_r3", "count": 2, "total_area": 300.0,
@@ -58,6 +65,43 @@ class Refusal(Exception):
 def require(ok, reason):
     if not ok:
         raise Refusal(reason)
+
+
+def check_component(component, task, definition, entry, source, env, receipt):
+    require(task["lastStatus"] == "RUNNING"
+            and task["taskArn"].split(":")[4] == ACCOUNT
+            and task["taskArn"].split(":")[3] == REGION,
+            "runtime_refused")
+    containers = [c for c in definition["containerDefinitions"]
+                  if c["name"] == entry["container"]]
+    require(len(containers) == 1, "runtime_refused")
+    container = containers[0]
+    actual = [c for c in task["containers"] if c["name"] == entry["container"]]
+    labels = container.get("dockerLabels", {})
+    require(len(actual) == 1 and actual[0].get("imageDigest") == entry["image_digest"]
+            and (REVISION_LABEL not in labels or labels[REVISION_LABEL] == source),
+            "source_refused")
+    effective = {v["name"]: v["value"] for v in container.get("environment", [])}
+    for override in task.get("overrides", {}).get("containerOverrides", []):
+        if override["name"] == container["name"]:
+            effective.update({v["name"]: v["value"]
+                              for v in override.get("environment", [])})
+    for key in COMPONENT_KEYS[component]:
+        require(effective.get(key) == env.get(key), "authority_refused")
+    # The runner's protected URL must come from the same reviewed secret
+    # reference as BOTH services, rather than a similarly named database.
+    secrets = {v["name"]: v["valueFrom"] for v in container.get("secrets", [])}
+    require(secrets.get("DATABASE_URL") == receipt["database_secret_arn"], "database_refused")
+    volumes = {v["name"]: v for v in definition.get("volumes", [])}
+    mounts = [m for m in container.get("mountPoints", [])
+              if m["containerPath"] == "/data/drawings" and not m.get("readOnly")]
+    require(len(mounts) == 1 and volumes[mounts[0]["sourceVolume"]].get(
+        "efsVolumeConfiguration", {}).get("fileSystemId") == receipt["efs_id"],
+        "mount_refused")
+
+
+def served_source_ok(status, body, source) -> bool:
+    return status == 200 and isinstance(body, dict) and body.get("source_sha") == source
 
 
 def preflight(args, env):
@@ -549,39 +593,11 @@ class LiveAdapters:
             require(not described.get("failures") and len(described["tasks"]) == 1,
                     "runtime_refused")
             task = described["tasks"][0]
-            require(task["lastStatus"] == "RUNNING"
-                    and task["taskArn"].split(":")[4] == ACCOUNT
-                    and task["taskArn"].split(":")[3] == REGION,
-                    "runtime_refused")
             definition = ecs.describe_task_definition(
                 taskDefinition=task["taskDefinitionArn"])["taskDefinition"]
-            containers = [c for c in definition["containerDefinitions"]
-                          if c["name"] == entry["container"]]
-            require(len(containers) == 1, "runtime_refused")
-            container = containers[0]
-            actual = [c for c in task["containers"] if c["name"] == entry["container"]]
-            require(len(actual) == 1 and actual[0].get("imageDigest") == entry["image_digest"]
-                    and container.get("dockerLabels", {}).get(
-                        "org.opencontainers.image.revision") == source,
-                    "source_refused")
-            effective = {v["name"]: v["value"] for v in container.get("environment", [])}
-            for override in task.get("overrides", {}).get("containerOverrides", []):
-                if override["name"] == container["name"]:
-                    effective.update({v["name"]: v["value"]
-                                      for v in override.get("environment", [])})
-            for key in ("LEAF_RUNTIME_ENV", "LEAF_JOBS_STORE", "LEAF_BROKER_STORE",
-                        "LEAF_DRAWING_STORE", "LEAF_BLOB_STORE", "LEAF_STORE_DIR"):
-                require(effective.get(key) == self.env.get(key), "authority_refused")
-            # The runner's protected URL must come from the same reviewed secret
-            # reference as BOTH services, rather than a similarly named database.
-            secrets = {v["name"]: v["valueFrom"] for v in container.get("secrets", [])}
-            require(secrets.get("DATABASE_URL") == r["database_secret_arn"], "database_refused")
-            volumes = {v["name"]: v for v in definition.get("volumes", [])}
-            mounts = [m for m in container.get("mountPoints", [])
-                      if m["containerPath"] == "/data/drawings" and not m.get("readOnly")]
-            require(len(mounts) == 1 and volumes[mounts[0]["sourceVolume"]].get(
-                "efsVolumeConfiguration", {}).get("fileSystemId") == r["efs_id"],
-                "mount_refused")
+            check_component(component, task, definition, entry, source, self.env, r)
+        status, body = self.http("GET", "/api/health", None)
+        require(served_source_ok(status, body, source), "source_refused")
         self.runtime_receipt = r
         row = self.query("SELECT current_database() AS name")[0]
         require(row["name"] == r["database_name"], "database_refused")
@@ -631,7 +647,8 @@ class LiveAdapters:
 
     def http(self, method, path, token, body=None, correlation=None):
         import requests
-        require(path in {"/api/run", "/api/tools", "/api/entitlements", "/api/session/identity"}
+        require(path in {"/api/run", "/api/tools", "/api/entitlements", "/api/session/identity",
+                         "/api/health"}
                 or re.fullmatch(r"/api/jobs/[0-9a-f-]{36}(/close)?", path), "destination_refused")
         headers = {"Authorization": "Bearer " + token} if token is not None else {}
         if body is not None:
