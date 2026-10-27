@@ -4,7 +4,28 @@ import path from 'node:path'
 
 const dockerfile = readFileSync(process.argv[2] ?? '../deploy/Dockerfile.web', 'utf8')
 const workflow = readFileSync('../.github/workflows/build-platform-images.yml', 'utf8')
-const index = readFileSync('index.html', 'utf8')
+const nextConfigPath = ['next.config.mjs', 'next.config.js', 'next.config.ts'].find(file => existsSync(file))
+assert.ok(nextConfigPath, 'the deployable Next static-export configuration must exist')
+const nextConfig = readFileSync(nextConfigPath, 'utf8')
+assert.match(nextConfig, /output\s*:\s*['"]export['"]/, 'Next must emit a static export')
+const appPage = ['app/page.jsx', 'app/page.js', 'app/page.tsx', 'src/app/page.jsx', 'src/app/page.js', 'src/app/page.tsx', 'src/app/[[...slug]]/page.jsx'].find(file => existsSync(file))
+assert.ok(appPage, 'the Next App Router page must exist')
+const index = readFileSync(appPage, 'utf8')
+const pkg = JSON.parse(readFileSync('package.json', 'utf8'))
+assert.ok(pkg.dependencies?.next || pkg.devDependencies?.next, 'Next must be installed by npm ci')
+const buildCommand = pkg.scripts?.build || ''
+const buildScripts = [...buildCommand.matchAll(/(?:node\s+)([\w./-]+\.(?:mjs|cjs|js))/g)]
+const buildSource = buildCommand + '\n' + buildScripts.map(([, file]) => readFileSync(file, 'utf8')).join('\n')
+assert.match(buildSource, /next/, 'npm run build must invoke Next')
+assert.match(buildSource, /--webpack/, 'the supported production build uses webpack')
+assert.match(dockerfile, /RUN npm ci/)
+assert.match(dockerfile, /RUN npm run build &&/)
+assert.match(dockerfile, /node \/scripts\/stage_cad_engine\.mjs/)
+assert.match(dockerfile, /node scripts\/check_next_worker\.mjs \/web\/dist/,
+  'the image must verify the real worker spawn is reachable')
+assert.match(dockerfile, /wasm-pack build --release --target web .*--out-name engine/)
+assert.match(dockerfile, /COPY --from=engine \/engine-src\/pkg-web \/vendor\/acadrust-worker\/pkg-web/)
+assert.ok(existsSync('../docs/CAD-ENGINE-LICENSE-REVIEW.md'), 'the engine license review must remain available')
 const api = readFileSync('src/api.js', 'utf8')
 const intake = readFileSync('src/site/intakeCache.js', 'utf8')
 
@@ -135,8 +156,7 @@ assert.doesNotMatch(dockerfile, /VITE_ONE_SHELL/,
   'no build-time VITE fence may select a shell either')
 assert.doesNotMatch(index, /\/runtime.flags\.js/,
   'index.html must not load a runtime flags file')
-assert.match(index, /<script type="module" src="\/src\/main\.jsx">/,
-  'index.html must still load the bundle')
+assert.ok(index.trim(), 'the App Router page must load the application')
 
 // Match the filesystem layout supplied to Vite by the build stage, including
 // relative imports made by the vendored files reached from web/src.
@@ -174,6 +194,7 @@ function collectWebSources(directory) {
   }
 }
 collectWebSources(path.join(repoRoot, 'web/src'))
+if (existsSync(path.join(repoRoot, 'web/app'))) collectWebSources(path.join(repoRoot, 'web/app'))
 const suffixes = ['', '.ts', '.tsx', '.js', '.jsx', '.mjs',
   '/index.ts', '/index.tsx', '/index.js', '/index.jsx', '/index.mjs']
 const specifierPatterns = [

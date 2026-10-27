@@ -9,6 +9,7 @@ import {
   SCHEMA,
   TARGET_ORIGIN,
   collectInteractiveProof,
+  canonicalScriptPath,
   parseArgs,
   sha256,
   validateInteractiveProof,
@@ -27,7 +28,7 @@ const config = {
     service_name: 'leaf-platform-web',
     task_definition_arn: 'arn:aws:ecs:us-east-1:807034087062:task-definition/leaf-platform-web:42',
     image_digest: `sha256:${'8'.repeat(64)}`, source_revision: 'a'.repeat(40),
-    asset_path: '/assets/index-proof.js', asset_sha256: assetSha,
+    asset_path: '/_next/static/chunks/app/[[...slug]]/page-proof.js', asset_sha256: assetSha,
   },
   expectedPrincipalA: { subject_sha256: sha256(rawSubject), tenant_id_sha256: sha256(rawTenant), reviewed: true },
 }
@@ -87,6 +88,21 @@ function proof() {
 }
 
 assert.equal(validateInteractiveProof(proof(), config).schema, SCHEMA)
+
+assert.equal(canonicalScriptPath('/_next/static/chunks/app/%5B%5B...slug%5D%5D/page-proof.js'), config.deployedWebSource.asset_path)
+assert.equal(canonicalScriptPath('/_next/static/chunks/app/%5b%5b...slug%5d%5d/page-proof.js'), config.deployedWebSource.asset_path)
+for (const asset_path of ['/assets/index-rollback.js', '/_next/static/chunks/webpack-a123.js', '/_next/static/chunks/app/page-b456.js', '/_next/static/chunks/app/%5B%5B...slug%5D%5D/page-proof.js']) {
+  const nextConfig = { ...config, deployedWebSource: { ...config.deployedWebSource, asset_path } }
+  const nextProof = { ...proof(), deployed_web_source: { ...nextConfig.deployedWebSource } }
+  assert.equal(validateInteractiveProof(nextProof, nextConfig).schema, SCHEMA)
+}
+for (const asset_path of ['https://evil.example/a.js', '//evil.example/a.js', '/_next/static/../a.js', '/_next/static/%2e%2e/a.js', '/_next/static/chunks/a.js?x=1', '/_next/static/chunks/a.js#x',
+  '/_next/static/chunks/app/%5B%5B...slug%5D%5D/../../secret.js', '/_next/static/chunks/%2Fa.js',
+  '/_next/static/chunks/%5Ca.js', '/_next/static/chunks/%255Bslug%255D/a.js', '/_next/static/chunks/%ZZ/a.js']) {
+  assert.equal(canonicalScriptPath(asset_path), null)
+  const unsafe = { ...config, deployedWebSource: { ...config.deployedWebSource, asset_path } }
+  assert.throws(() => validateInteractiveProof({ ...proof(), deployed_web_source: unsafe.deployedWebSource }, unsafe))
+}
 
 const parsed = parseArgs([
   '--challenge', config.challenge,
@@ -229,7 +245,7 @@ function fakePlaywright(options = {}) {
       if (evaluateCount === 1) return { status: 200, body: { source_sha: config.sourceSha } }
       if (evaluateCount === 2) {
         assert.equal(argument, config.deployedWebSource.asset_path)
-        return { status: 200, sha256: assetSha }
+        return { status: 200, sha256: assetSha, scripts: ['/_next/static/chunks/webpack-proof.js', config.deployedWebSource.asset_path.replace(/\[/g, '%5B').replace(/\]/g, '%5D')] }
       }
       if (evaluateCount === 3 || evaluateCount === 6) return 401
       if (evaluateCount === 4) return { status: 200, token: tokens[0] }

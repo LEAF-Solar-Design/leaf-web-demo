@@ -19,6 +19,7 @@
 import { Component, lazy, Suspense, useRef, useState } from 'react'
 import { PRODUCT_SURFACES, surfaceGround } from './productSurfaces.js'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
+import { BrowserAssetGround } from './BrowserAssetGround.jsx'
 import { DeviceGround } from '../ios/DeviceGround.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from './groundWindow.js'
 import '../integrations/ops-workspace.css'
@@ -122,10 +123,12 @@ export default function SurfaceGrounds({
   studioPresentation = false, studioShell = false,
   iosEnabled, iosContract, revision, ship, onLaunch,
   projectId, session, signedIn, accountScope,
+  browserPanel, onBrowserPanel, onSelectSurface, environmentProfiles, onDescribe, onEnterWorkspace,
 }) {
   // This component is also invoked directly by its prop-contract tests, so
   // identity memoization lives outside React while retaining useMemo semantics.
-  const groundOccluders = withGroundToolsOccluder(occluders)
+  const groundOccluders = studioShell ? NO_OCCLUDERS : withGroundToolsOccluder(occluders)
+  const BoardGround = studioShell ? BrowserAssetGround : ProjectBoardGround
   const projectLabel = workspaceProject?.kind === 'project'
     ? workspaceProject.label
     : workspaceProject?.drawingName || null
@@ -136,7 +139,12 @@ export default function SurfaceGrounds({
           ios literals). An unknown surface still activates neither:
           surfaceGround falls closed to the CAD contract, whose ground is
           'drawing'. */}
-      <ProjectBoardGround
+      <BoardGround
+        {...(studioShell ? {
+          browserActive: surfaceGround(surface) === 'board', browserPanel, onBrowserPanel,
+          projectId, signedIn, accountScope,
+          profile: surface, profiles: environmentProfiles, onSelect: onSelectSurface, onDescribe, onEnterWorkspace,
+        } : {})}
         active={boardVisible ?? surfaceGround(surface) === 'board'}
         leavingGround={leavingGround}
         contained={studioShell || (boardVisible === true && groundShowsDrawing(surface))}
@@ -157,7 +165,7 @@ export default function SurfaceGrounds({
         mock={mock}
       />
       <DeviceGround
-        active={!boardVisible && surfaceGround(surface) === 'device-stage'}
+        active={(studioShell || !boardVisible) && surfaceGround(surface) === 'device-stage'}
         leavingGround={leavingGround}
         studioShell={studioShell}
         occluders={groundOccluders}
@@ -168,10 +176,10 @@ export default function SurfaceGrounds({
         ship={ship}
         onLaunch={onLaunch}
       />
-      <LazyLabGround active={!boardVisible && surfaceGround(surface) === 'lab'}
+      <LazyLabGround active={(studioShell || !boardVisible) && surfaceGround(surface) === 'lab'}
         mock={mock} studioShell={studioShell} occluders={groundOccluders} />
       <LazyOpsGround
-        active={!boardVisible && surfaceGround(surface) === 'integrations'}
+        active={(studioShell || !boardVisible) && surfaceGround(surface) === 'integrations'}
         projectId={projectId}
         projectLabel={projectLabel}
         session={session}

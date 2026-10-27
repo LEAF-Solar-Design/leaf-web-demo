@@ -3,6 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import CampaignPanel from './CampaignPanel.jsx'
 import useCampaigns from './useCampaigns.js'
 import { uploadProjectInput } from './api.js'
+import { BrowserArtifactContext } from '../site/BrowserAssetGround.jsx'
+import WorkspaceEnvironment from '../site/WorkspaceEnvironment.jsx'
+import { useState } from 'react'
 
 vi.mock('./useCampaigns.js', async importOriginal => ({ ...await importOriginal(), default: vi.fn() }))
 vi.mock('./api.js', () => ({ uploadProjectInput: vi.fn() }))
@@ -34,6 +37,30 @@ beforeEach(() => {
 afterEach(cleanup)
 
 const panel = props => <CampaignPanel projectId={P} projectName="Document studio" signedIn {...props} />
+
+function EnvironmentCampaign({ profile }) {
+  const [edgePanel, setEdgePanel] = useState('none')
+  return <WorkspaceEnvironment scopeKey={P} profile={profile} panel={edgePanel} onPanel={setEdgePanel}>
+    {panel()}
+  </WorkspaceEnvironment>
+}
+
+it('retains one campaign subtree and its draft through edge-panel and profile changes', () => {
+  const { container, rerender } = render(<EnvironmentCampaign profile="browser" />)
+  fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+  const field = screen.getByLabelText('Prompt')
+  const campaignNode = container.querySelector('.campaign-panel')
+  fireEvent.change(field, { target: { value: 'Keep this project request' } })
+  for (const profile of ['cad', 'solar', 'ios', 'ops', 'browser']) {
+    fireEvent.click(screen.getByRole('button', { name: 'Studio' }))
+    rerender(<EnvironmentCampaign profile={profile} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+    expect(container.querySelectorAll('.campaign-panel')).toHaveLength(1)
+    expect(container.querySelector('.campaign-panel')).toBe(campaignNode)
+    expect(screen.getByLabelText('Prompt')).toBe(field)
+    expect(field.value).toBe('Keep this project request')
+  }
+})
 
 // Existing control/security cases exercise the controls after explicit expansion.
 function render(ui) {
@@ -734,6 +761,31 @@ describe('release evidence panel', () => {
     }
     expect(screen.getByRole('button', { name: 'Record answer' }).closest('details')).toBeNull()
     expect(screen.queryByRole('button', { name: 'Open tool records-to-csv.html' })).toBeNull()
+  })
+  it('hands verified UTF-8 HTML to the Browser provider instead of opening an inline preview', async () => {
+    readyOutput()
+    const accept = vi.fn().mockReturnValue(true)
+    render(<BrowserArtifactContext.Provider value={accept}>{panel()}</BrowserArtifactContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await waitFor(() => expect(accept).toHaveBeenCalledWith({ html: toolHtml, name: 'records-to-csv.html' }))
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
+  })
+  it('does not hand malformed UTF-8 HTML to Browser', async () => {
+    readyOutput()
+    campaign.downloadReleaseArtifact.mockResolvedValue({ name: 'records-to-csv.html', mediaType: 'text/html', bytes: new Uint8Array([0xff]) })
+    const accept = vi.fn()
+    render(<BrowserArtifactContext.Provider value={accept}>{panel()}</BrowserArtifactContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByText('The verified tool could not be opened because its HTML is not valid UTF-8.')
+    expect(accept).not.toHaveBeenCalled()
+  })
+  it('reports a refused stale handoff without falling back to an inline preview', async () => {
+    readyOutput()
+    const accept = vi.fn().mockReturnValue(false)
+    render(<BrowserArtifactContext.Provider value={accept}>{panel()}</BrowserArtifactContext.Provider>)
+    fireEvent.click(screen.getByRole('button', { name: 'Open tool records-to-csv.html' }))
+    await screen.findByText('The workspace changed. Open this verified tool again from the current project.')
+    expect(screen.queryByTitle('Release tool: records-to-csv.html')).toBeNull()
   })
   it('renders exact UTF-8 HTML with srcdoc and removes it on close, replacement and unmount', async () => {
     const artifact = readyOutput()
