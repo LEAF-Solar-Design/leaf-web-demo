@@ -48,6 +48,10 @@
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .drafting-ribbon[data-overflow-open="true"] .ribbon-panels { position: relative; inset: auto; max-height: none; width: 100%; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .converse-card { margin-right: 0; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar.bar-command-line { flex-direction: column; align-items: stretch; }
+/* The full-viewport cockpit centers this dock with margin-left: -360px.
+   Once it joins the sidebar flow, that margin puts Run outside the scroll
+   origin and clips its hit region, letting the drawing receive the click. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-dock { margin: 0 !important; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line :is(.bar-input, .bar-controls) { width: 100%; min-width: 0; height: auto; box-sizing: border-box; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-controls { flex-wrap: wrap; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-field { min-width: 0; min-height: 64px; font-size: 16px; }
