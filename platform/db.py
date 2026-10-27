@@ -353,6 +353,9 @@ _REQUIRED_COLUMNS = {
         "content_sha256", "revision", "created_by_binding_id", "created_at",
         "updated_at",
     },
+    "project_web_page_revisions": {
+        "org_id", "project_id", "revision", "document", "digest", "actor_binding_id", "created_at",
+    },
     "project_lifecycle_receipts": {
         "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
         "idempotency_key", "input_digest", "result_json", "created_at",
@@ -1082,6 +1085,20 @@ _REQUIRED_CONSTRAINTS = {
         "project_files", "CHECK (revision > 0)"),
     "project_files_scope_path_unique": _catalog_contract(
         "project_files", "UNIQUE (org_id, project_id, path)"),
+    "project_web_page_revisions_pkey": _catalog_contract(
+        "project_web_page_revisions", "PRIMARY KEY (org_id, project_id, revision)"),
+    "project_web_page_revisions_org_id_project_id_fkey": _catalog_contract(
+        "project_web_page_revisions", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_web_page_revisions_org_id_actor_binding_id_fkey": _catalog_contract(
+        "project_web_page_revisions", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_web_page_revisions_revision_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK (revision > 0)"),
+    "project_web_page_revisions_document_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK", "jsonb_typeof(document) = 'object'"),
+    "project_web_page_revisions_digest_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK", "digest ~ '^[0-9a-f]{64}$'"),
     "project_lifecycle_receipts_pkey": _catalog_contract(
         "project_lifecycle_receipts", "PRIMARY KEY (receipt_id)"),
     "project_lifecycle_receipts_project_fk": _catalog_contract(
@@ -1154,6 +1171,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "project_web_page_revisions_immutable": _catalog_contract(
+        "project_web_page_revisions", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_web_page_revision_immutable()"),
     "tenant_cost_events_immutable": _catalog_contract(
         "tenant_cost_events", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_tenant_cost_mutation()"),
