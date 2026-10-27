@@ -10,6 +10,19 @@ import { setLayoutEngineLoader } from './canvas/dependencyLayout.js'
 import { setGraphCanvasLoader } from './canvas/GraphView.jsx'
 import { createWidgetDoc } from './widgets/useWidgetEditor.js'
 import { createTextElement } from './widgets/widgetDoc.js'
+import { login, loginWithPopupFromClick, preloadAuthClient } from '../auth.js'
+
+const tokenEvents = vi.hoisted(() => new Set())
+vi.mock('../auth.js', async (original) => ({
+  ...await original(),
+  login: vi.fn().mockResolvedValue(undefined),
+  loginWithPopupFromClick: vi.fn(),
+  preloadAuthClient: vi.fn(),
+  subscribeTokenStored: (listener) => {
+    tokenEvents.add(listener)
+    return () => tokenEvents.delete(listener)
+  },
+}))
 
 // The shell proves the lazy mount; one Node gate proves real ELK.
 const elkImport = vi.hoisted(() => vi.fn())
@@ -48,6 +61,9 @@ const fakeEngine = {
 const canvasImport = vi.fn(() => import('./canvas/LabCanvas.jsx'))
 
 beforeEach(() => {
+  login.mockClear()
+  loginWithPopupFromClick.mockReset()
+  preloadAuthClient.mockClear()
   canvasImport.mockClear()
   setGraphCanvasLoader(canvasImport)
   setLayoutEngineLoader(fakeEngine.load)
@@ -83,6 +99,58 @@ describe('Lab view registration', () => {
 })
 
 describe('LabWorkbench', () => {
+  it('redirects standalone sign-in without preloading or opening a popup', () => {
+    render(<LabWorkbench status={{ state: 'signed-out' }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(login).toHaveBeenCalledOnce()
+    expect(loginWithPopupFromClick).not.toHaveBeenCalled()
+    expect(preloadAuthClient).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['blocked', 'The sign-in window was blocked or could not finish. Allow pop-ups for this site, then try again.'],
+    ['failed', 'The sign-in window was blocked or could not finish. Allow pop-ups for this site, then try again.'],
+    ['cancelled', 'Sign-in was cancelled.'],
+  ])('starts embedded popup sign-in synchronously and displays %s', async (reason, message) => {
+    let finish
+    loginWithPopupFromClick.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const { rerender } = render(<LabWorkbench status={{ state: 'signed-out' }} embedded />)
+    expect(preloadAuthClient).toHaveBeenCalledOnce()
+    rerender(<LabWorkbench status={{ state: 'signed-out' }} embedded />)
+    expect(preloadAuthClient).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(loginWithPopupFromClick).toHaveBeenCalledOnce()
+    expect(login).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Signing in' })).toBeDisabled()
+    await act(async () => { finish({ ok: false, reason }) })
+    expect(screen.getByText(message)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled()
+  })
+
+  it('re-reads uncontrolled status on token storage and leaves signed-out without reloading', async () => {
+    const fetchImpl = vi.fn()
+      .mockResolvedValueOnce({ ok: false, status: 401 })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({
+        ok: true, schema: 'leaf.lab-status.v1', rail: 'on', posture: 'local', tenant: 't1',
+      }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    let finish
+    loginWithPopupFromClick.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    const { unmount } = render(<LabWorkbench route={route('widgets')} embedded />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Sign in' }))
+    await act(async () => {
+      for (const listener of tokenEvents) listener()
+      finish({ ok: true })
+    })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls.every(([url]) => url.endsWith('/api/lab/status'))).toBe(true)
+    expect(screen.getByRole('navigation', { name: 'Lab views' })).toBeVisible()
+    expect(screen.queryByText('Sign in to use Lab.')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull()
+    unmount()
+    expect(tokenEvents.size).toBe(0)
+  })
+
   it('refreshes Test trade evidence from host revisions and delegates the request to the bridge', async () => {
     let callbacks
     const requestTestTrade = vi.fn().mockResolvedValue({ ok: true })

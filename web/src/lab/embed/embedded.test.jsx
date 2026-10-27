@@ -15,6 +15,12 @@ vi.mock('./hostBridge.js', () => ({
   }),
 }))
 vi.mock('../useLabSurfaceStatus.js', () => ({ useLabSurfaceStatus: vi.fn() }))
+vi.mock('../../auth.js', async (original) => ({
+  ...await original(),
+  login: vi.fn(),
+  loginWithPopupFromClick: vi.fn(),
+  preloadAuthClient: vi.fn(),
+}))
 vi.mock('../views.js', () => ({
   registerLabViews: () => ['graph', 'widgets', 'history', 'runs', 'deploys', 'test-trade'].map((id) => ({
     id, label: id, path: id === 'graph' ? '/app/lab' : `/app/lab/${id}`,
@@ -46,6 +52,7 @@ vi.mock('../canvas/LabCanvas.jsx', async () => {
 })
 
 import { useLabSurfaceStatus } from '../useLabSurfaceStatus.js'
+import { login, loginWithPopupFromClick, preloadAuthClient } from '../../auth.js'
 import LabGround, { setLabHostBridgeLoader } from '../LabGround.jsx'
 import LabWorkbench from '../LabWorkbench.jsx'
 import { createLabHostBridge } from './hostBridge.js'
@@ -80,6 +87,41 @@ const canvas = async () => {
 }
 
 describe('Lab embedded mode', () => {
+  it.each([
+    ['blocked', 'The sign-in window was blocked or could not finish. Allow pop-ups for this site, then try again.'],
+    ['cancelled', 'Sign-in was cancelled.'],
+  ])('offers synchronous popup sign-in in the signed-out frame and reports %s', async (reason, message) => {
+    framed()
+    useLabSurfaceStatus.mockReturnValue({ state: 'signed-out' })
+    let finish
+    loginWithPopupFromClick.mockImplementation(() => new Promise(resolve => { finish = resolve }))
+    render(<LabGround active />)
+    expect(screen.getByText('Sign in to use Lab.')).toBeVisible()
+    expect(preloadAuthClient).toHaveBeenCalledOnce()
+    fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+    expect(loginWithPopupFromClick).toHaveBeenCalledOnce()
+    expect(login).not.toHaveBeenCalled()
+    expect(screen.getByRole('button', { name: 'Signing in' })).toBeDisabled()
+    await act(async () => { finish({ ok: false, reason }) })
+    expect(screen.getByText(message)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Sign in' })).toBeEnabled()
+    expect(connections).toHaveLength(0)
+  })
+
+  it('leaves the controlled signed-out frame when popup sign-in refreshes its status', async () => {
+    framed()
+    useLabSurfaceStatus.mockReturnValue({ state: 'signed-out' })
+    loginWithPopupFromClick.mockResolvedValue({ ok: true })
+    const { rerender } = render(<LabGround active />)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Sign in' })) })
+    useLabSurfaceStatus.mockReturnValue({ state: 'on', posture: 'local' })
+    rerender(<LabGround active />)
+    await canvas()
+    expect(screen.queryByText('Sign in to use Lab.')).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull()
+    expect(screen.getByRole('navigation', { name: 'Lab views' })).toBeVisible()
+  })
+
   it('links to Test trade evidence with every embed parameter retained', async () => {
     framed()
     window.history.replaceState({}, '', '/app/lab?embed=1&channel=retained')
