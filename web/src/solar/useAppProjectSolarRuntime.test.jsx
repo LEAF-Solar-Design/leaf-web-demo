@@ -8,6 +8,8 @@ import { PROJECT_SOLAR_RUN_REASONS } from './solarProjectCompletion.js'
 import { projectSizingConductorFeedback } from './SolarSizingForm.jsx'
 import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
 import { getDrawingIntake } from '../api.js'
+import { createSolarProjectClient } from './solarProjectClient.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
 
 vi.mock('../api.js', () => ({ getDrawingIntake: vi.fn(async () => null) }))
 
@@ -60,6 +62,112 @@ beforeEach(() => {
   })
 })
 afterEach(cleanup)
+
+it('G17 runtime worker refusal clears pending and run lock', async () => {
+  vi.useFakeTimers()
+  const gate = deferred()
+  const fetchImpl = vi.fn().mockReturnValueOnce(gate.promise)
+    .mockResolvedValueOnce({ ok: false, status: 503, json: async () => workerUnavailable })
+  const wire = createSolarProjectClient({ fetchImpl })
+  wire.setScope(B, 'session-1')
+  try {
+    const h = await setup({ toolName: 'solar-panels-from-drawing' })
+    h.client.submitRun.mockImplementation(wire.submitRun)
+    const intent = wire.prepareRun({ tool: h.prepared.tool, params: { drawing_id: D, expected_rev: 0 },
+      catalogDigest: digest, idempotencyKey: 'g17-runtime-1' })
+    let pending
+    await act(async () => {
+      pending = h.result.current.onProjectSubmit(intent, h.options)
+      await drain()
+    })
+    expect(h.result.current.busy).toBe(true)
+    expect(h.result.current.projectPending).toMatchObject({ tool: intent.tool, binding: B })
+    await act(async () => {
+      gate.resolve({ ok: false, status: 503, json: async () => workerUnavailable })
+      expect(await pending).toEqual(local('sip_r4_worker_unavailable', 503))
+      await drain()
+    })
+    const message = 'No worker was available to start Import panels from drawing. Try again later: Refresh preview, then Review & run.'
+    expect(h.result.current.busy).toBe(false)
+    expect(h.result.current.projectPending).toBeNull()
+    expect(h.result.current.notice).toBe(message)
+    expect(h.result.current.projectOutcome.outcome).toEqual({ state: 'refused', jobId: null,
+      outputVersionId: null, reasonCode: 'sip_r4_worker_unavailable', message })
+    expect(h.result.current.publishedVersionId).toBeNull()
+    expect(h.props.completedVersionRef.current).not.toHaveBeenCalled()
+    expect(h.ws.selectCanonicalVersion).not.toHaveBeenCalled()
+    expect(h.ws.rehydrate).not.toHaveBeenCalled()
+    expect(h.client.readJob).not.toHaveBeenCalled()
+    expect(h.client.readSolar).not.toHaveBeenCalled()
+    expect(h.client.downloadArtifact).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledOnce()
+    expect(vi.getTimerCount()).toBe(0)
+    // The synchronous outcome callback must release m.run before the awaited
+    // submission continuation decides whether the 503 needs an uncertainty lock.
+    expect(await submitWith(h, { ...intent, idempotencyKey: 'g17-runtime-2' }))
+      .toEqual(local('sip_r4_worker_unavailable', 503))
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(h.client.submitRun).toHaveBeenCalledTimes(2)
+    expect(vi.getTimerCount()).toBe(0)
+    h.unmount()
+  } finally { cleanup(); wire.dispose(); vi.useRealTimers() }
+})
+
+it('G17 runtime lost-submit refusal retains uncertainty lock', async () => {
+  const fetchImpl = vi.fn().mockRejectedValueOnce(new Error('private transport loss'))
+    .mockResolvedValueOnce({ ok: false, status: 503, json: async () => workerUnavailable })
+  const wire = createSolarProjectClient({ fetchImpl })
+  wire.setScope(B, 'session-1')
+  try {
+    const h = await setup({ toolName: 'solar-panels-from-drawing' })
+    h.client.submitRun.mockImplementation(wire.submitRun)
+    const intent = wire.prepareRun({ tool: h.prepared.tool, params: { drawing_id: D, expected_rev: 0 },
+      catalogDigest: digest, idempotencyKey: 'g17-lost-1' })
+    expect(await submitWith(h, intent)).toEqual(local('SIP_R13B_OUTCOME_UNKNOWN'))
+    expect(h.result.current.projectOutcome.outcome.state).toBe('outcome_unknown')
+    expect(h.result.current.notice).toBe(PROJECT_SOLAR_RUN_REASONS.outcome_unknown)
+    expect(h.result.current.busy).toBe(false)
+    expect(h.result.current.projectPending).toBeNull()
+    expect(h.client.readJob).not.toHaveBeenCalled()
+    expect(h.props.completedVersionRef.current).not.toHaveBeenCalled()
+    expect(h.ws.selectCanonicalVersion).not.toHaveBeenCalled()
+    expect(h.ws.rehydrate).not.toHaveBeenCalled()
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    expect(fetchImpl.mock.calls[0][1].body).toBe(fetchImpl.mock.calls[1][1].body)
+    expect(await submitWith(h, { ...intent, idempotencyKey: 'g17-lost-2' }))
+      .toEqual(local('SIP_R13B_RUN_IN_PROGRESS'))
+    await h.install(V)
+    expect(await submitWith(h, { ...intent, idempotencyKey: 'g17-lost-3' }))
+      .toEqual(local('SIP_R13B_RUN_IN_PROGRESS'))
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    h.unmount()
+  } finally { cleanup(); wire.dispose() }
+})
+
+it('G17 runtime suppresses a late worker refusal after the drawing scope changes', async () => {
+  const gate = deferred()
+  const wire = createSolarProjectClient({ fetchImpl: vi.fn(() => gate.promise) })
+  wire.setScope(B, 'session-1')
+  try {
+    const h = await setup({ toolName: 'solar-panels-from-drawing' })
+    h.client.submitRun.mockImplementation(wire.submitRun)
+    const intent = wire.prepareRun({ tool: h.prepared.tool, params: { drawing_id: D, expected_rev: 0 },
+      catalogDigest: digest, idempotencyKey: 'g17-stale' })
+    let pending
+    await act(async () => { pending = h.result.current.onProjectSubmit(intent, h.options); await drain() })
+    await h.install(X)
+    await act(async () => {
+      gate.resolve({ ok: false, status: 503, json: async () => workerUnavailable })
+      await pending
+      await drain()
+    })
+    expect(h.result.current.notice ?? '').not.toContain('No worker was available')
+    expect(h.result.current.projectOutcome).toBeNull()
+    expect(h.client.readJob).not.toHaveBeenCalled()
+    expect(h.props.completedVersionRef.current).not.toHaveBeenCalled()
+    h.unmount()
+  } finally { cleanup(); wire.dispose() }
+})
 
 it('S1-123 keeps the specific panel-group refusal in the run notice', async () => {
   const h = await setup()

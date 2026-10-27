@@ -350,6 +350,8 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"live staging probe is opt-in",)),
         Suite("server-w1-graph-versions", "server tests/test_w1_graph_versions.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_graph_versions.py"), 18),
+        Suite("server-solar-worker-refusal-wire", "server tests/test_solar_worker_refusal_wire.py", "pytest", SERVER,
+              _py_pytest("tests/test_solar_worker_refusal_wire.py"), 1),
         # sf-solar-ground-graph: Ground frames with tracker metadata on the shared W1 graph contract.
         Suite("server-solar-ground-graph", "server tests/test_solar_ground_graph.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_ground_graph.py"), 48),
