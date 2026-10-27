@@ -477,6 +477,37 @@ def test_live_http_disables_redirects_and_sends_bearer_and_key(monkeypatch):
     assert json.loads(request.data) == {"content": "probe"}
 
 
+def test_live_http_sends_user_agent_and_timeout(monkeypatch):
+    import urllib.request
+
+    calls = []
+
+    class Response:
+        status = 200
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self):
+            return b'{}'
+
+    class Opener:
+        def open(self, request, timeout):
+            calls.append((request, timeout))
+            return Response()
+
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Opener())
+    assert p.LiveAdapters("staging").http("GET", "/api/health", "t") == (200, {})
+    assert len(calls) == 1
+    request, timeout = calls[0]
+    assert p.USER_AGENT == "leaf-p058-probe/1"
+    assert request.get_header("User-agent") == p.USER_AGENT
+    assert timeout == p.HTTP_TIMEOUT_S
+
+
 def test_live_restart_retains_task_definition(monkeypatch):
     calls = []
 
