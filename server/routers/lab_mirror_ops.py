@@ -61,6 +61,20 @@ def _done(state):
 
 
 def _enable(tenant):
+    try:
+        return _enable_unmapped(tenant)
+    except ledger.StoreMigrating:
+        raise HTTPException(status_code=409, detail="lab_store_migrating")
+    except ledger.StoreUnavailable:
+        raise HTTPException(status_code=503, detail="lab_store_unavailable")
+    except HTTPException:
+        raise
+    except Exception as error:
+        LOG.warning("lab_mirror_enable_failed class=%s", type(error).__name__)
+        raise HTTPException(status_code=503, detail="lab_mirror_unavailable")
+
+
+def _enable_unmapped(tenant):
     state = lab_artifacts_git.mirror_status(tenant)
     if _done(state):
         return "complete"
@@ -71,15 +85,6 @@ def _enable(tenant):
         if code == "lab_mirror_mode_refused" and _done(lab_artifacts_git.mirror_status(tenant)):
             return "complete"
         raise HTTPException(status_code=_status(code), detail=code)
-    except ledger.StoreMigrating:
-        raise HTTPException(status_code=409, detail="lab_store_migrating")
-    except ledger.StoreUnavailable:
-        raise HTTPException(status_code=503, detail="lab_store_unavailable")
-    except HTTPException:
-        raise
-    except Exception as error:
-        LOG.warning("lab_mirror_enable_failed class=%s", type(error).__name__)
-        raise HTTPException(status_code=503, detail="lab_mirror_unavailable")
     status = (state.get("receipt") or {}).get("status") if isinstance(state, dict) else None
     if status in ("complete", "in_progress"):
         return status

@@ -9,6 +9,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
+import lab_artifacts
 import lab_artifacts_git
 from routers import lab_mirror_ops
 
@@ -99,6 +100,41 @@ def test_already_mirrored(client, fakes):
     assert response.status_code == 200
     assert response.json() == {"status": "complete"}
     fakes.enable.assert_not_called()
+
+
+def test_first_status_store_unavailable(client, fakes):
+    fakes.status.side_effect = lab_artifacts.StoreUnavailable("lab_db_unset")
+    response = client.post(ENABLE, json={"tenant": TENANT}, headers=SECRET)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "lab_store_unavailable"}
+    fakes.enable.assert_not_called()
+    assert TENANT not in response.text
+    assert "doc-91c2" not in response.text
+
+
+def test_first_status_store_migrating(client, fakes):
+    fakes.status.side_effect = lab_artifacts.StoreMigrating("lab_store_migrating")
+    response = client.post(ENABLE, json={"tenant": TENANT}, headers=SECRET)
+    assert response.status_code == 409
+    assert response.json() == {"detail": "lab_store_migrating"}
+    fakes.enable.assert_not_called()
+    assert TENANT not in response.text
+    assert "doc-91c2" not in response.text
+
+
+def test_refused_status_reread_store_unavailable(client, fakes):
+    fakes.status.side_effect = [
+        {"mode": "ledger", "receipt": {}},
+        lab_artifacts.StoreUnavailable("lab_db_unset"),
+    ]
+    fakes.enable.side_effect = lab_artifacts_git.MirrorError("lab_mirror_mode_refused")
+    response = client.post(ENABLE, json={"tenant": TENANT}, headers=SECRET)
+    assert response.status_code == 503
+    assert response.json() == {"detail": "lab_store_unavailable"}
+    assert fakes.status.call_count == 2
+    fakes.enable.assert_called_once_with(TENANT, "ops:lab-mirror-enable")
+    assert TENANT not in response.text
+    assert "doc-91c2" not in response.text
 
 
 def test_race_to_mirrored(client, fakes):
