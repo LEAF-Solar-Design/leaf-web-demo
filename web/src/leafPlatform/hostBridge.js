@@ -231,13 +231,16 @@ export class LeafHostBridge {
     return this.sendCommand('drawing.focus_objects', action, payload)
   }
 
-  applyPlan({ planText, planSha256, parentVersion, resultVersion, drawingStoreId }) {
+  applyPlan({ planText, planSha256, parentVersion, resultVersion, drawingStoreId, resultContentSha256 }) {
     if (!Number.isSafeInteger(parentVersion) || parentVersion < 1 || resultVersion !== parentVersion + 1) {
       return Promise.reject(new Error('invalid_plan_version'))
     }
+    if (typeof resultContentSha256 !== 'string' || resultContentSha256.length !== 64 || !/^[a-f0-9]{64}$/.test(resultContentSha256)) {
+      return Promise.reject(new Error('invalid_result_digest'))
+    }
     return this.sendCommand('drawing.apply_plan', 'apply_plan', {
       planText, planSha256, parentVersion, resultVersion,
-      resultDrawingVersionId: this.state.ready?.drawingVersionId, drawingStoreId,
+      resultDrawingVersionId: this.state.ready?.drawingVersionId, drawingStoreId, resultContentSha256,
     }, 'leaf.mutation_plan.v1')
   }
 

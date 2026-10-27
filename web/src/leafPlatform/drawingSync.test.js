@@ -2,13 +2,14 @@ import { describe, expect, it, vi } from 'vitest'
 import { resolveDrawingStore, pull, publish } from './drawingSync.js'
 
 const drawingStoreId = 'roof-1'
+const resultDigest = (version) => version.toString(16).padStart(64, '0')
 const ready = { drawingVersionId: 'bound-version' }
 const mappedProject = (source) => ({ drawing_versions: [{ version_id: ready.drawingVersionId, provenance: { source } }] })
 function dependencies(head = 4) {
   return {
     api: {
       getDrawingVersions: vi.fn().mockResolvedValue({ head }),
-      getDrawingVersionPlan: vi.fn(async (_, version) => ({ plan_text: `plan ${version}`, plan_sha256: `sha ${version}` })),
+      getDrawingVersionPlan: vi.fn(async (_, version) => ({ plan_text: `plan ${version}`, plan_sha256: `sha ${version}`, result_sha256: resultDigest(version) })),
       takeCheckout: vi.fn().mockResolvedValue({ acquired: true, checkout_capability: 'capability' }),
       releaseCheckout: vi.fn().mockResolvedValue({ released: true }),
       saveEditedDrawingVersion: vi.fn().mockResolvedValue({ new_version: { version: head + 1 } }),
@@ -45,6 +46,7 @@ describe('pull', () => {
     expect(await pull({ ...deps, cursor: 1 })).toEqual({ cursor: 4, applied: [2, 3, 4], reason: null })
     expect(deps.bridge.applyPlan.mock.calls.map(([args]) => args)).toEqual([2, 3, 4].map((version) => ({
       drawingStoreId, planText: `plan ${version}`, planSha256: `sha ${version}`, parentVersion: version - 1, resultVersion: version,
+      resultContentSha256: resultDigest(version),
     })))
   })
   it('requires a first publish without reading the head', async () => {
@@ -54,11 +56,24 @@ describe('pull', () => {
   })
   it('stops at a missing plan and retains progress', async () => {
     const deps = dependencies()
-    deps.api.getDrawingVersionPlan.mockResolvedValueOnce({ plan_text: 'plan', plan_sha256: 'sha' })
+    deps.api.getDrawingVersionPlan.mockResolvedValueOnce({ plan_text: 'plan', plan_sha256: 'sha', result_sha256: resultDigest(2) })
       .mockRejectedValueOnce(Object.assign(new Error('missing'), { status: 404 }))
     expect(await pull({ ...deps, cursor: 1 })).toEqual({ cursor: 2, applied: [2], reason: 'no_plan' })
     expect(deps.bridge.applyPlan).toHaveBeenCalledTimes(1)
   })
+  it.each([null, undefined, '', 'a'.repeat(63), 'a'.repeat(65), 'A'.repeat(64), 'g'.repeat(64), `${'a'.repeat(64)}\n`, 123])(
+    'stops before a second plan with an invalid result digest and retains progress %#', async (result_sha256) => {
+      const deps = dependencies()
+      deps.api.getDrawingVersionPlan.mockResolvedValueOnce({ plan_text: 'plan 2', plan_sha256: 'sha 2', result_sha256: resultDigest(2) })
+        .mockResolvedValueOnce({ plan_text: 'plan 3', plan_sha256: 'sha 3', result_sha256 })
+      expect(await pull({ ...deps, cursor: 1 })).toEqual({ cursor: 2, applied: [2], reason: 'no_result_digest' })
+      expect(deps.bridge.applyPlan).toHaveBeenCalledTimes(1)
+      expect(deps.bridge.applyPlan).toHaveBeenCalledWith({
+        drawingStoreId, planText: 'plan 2', planSha256: 'sha 2', parentVersion: 1, resultVersion: 2,
+        resultContentSha256: resultDigest(2),
+      })
+      expect(deps.api.getDrawingVersionPlan).toHaveBeenCalledTimes(2)
+    })
   it('stops on a stale callback', async () => {
     const deps = dependencies()
     deps.bridge.applyPlan.mockResolvedValueOnce({ status: 'stale', reason: 'sync_cursor_mismatch' })

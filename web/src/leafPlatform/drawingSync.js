@@ -23,9 +23,13 @@ export async function pull({ api, bridge, drawingStoreId, cursor }) {
         if (error?.status === 404) return { cursor, applied, reason: 'no_plan' }
         throw error
       }
+      if (typeof plan.result_sha256 !== 'string' || plan.result_sha256.length !== 64 || !/^[a-f0-9]{64}$/.test(plan.result_sha256)) {
+        return { cursor, applied, reason: 'no_result_digest' }
+      }
       const outcome = await bridge.applyPlan({
         planText: plan.plan_text, planSha256: plan.plan_sha256,
         parentVersion: version - 1, resultVersion: version, drawingStoreId,
+        resultContentSha256: plan.result_sha256,
       })
       if (outcome.status !== 'applied') return { cursor, applied, reason: outcome.reason || outcome.status }
       cursor = version
