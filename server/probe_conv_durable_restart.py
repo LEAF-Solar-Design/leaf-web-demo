@@ -145,7 +145,8 @@ class Probe:
         require(isinstance(nonce, str) and bool(re.fullmatch(r"[0-9a-f]{16}", nonce)),
                 "UNKNOWN", "nonce_unreadable")
         self.content = "p058 " + args.run_id + " " + nonce
-        self.body = {"content": self.content, "metadata": {"probe": "p058", "run_id": args.run_id}}
+        self.body = {"content": self.content,
+                     "metadata": {"source": "p058-probe", "client_message_id": "p058-" + args.run_id}}
         self.key = "p058-" + args.run_id
         self.receipt["content_sha256"] = sha(self.content)
         status, body = self.http("POST", self.message_path, self.body, self.key)

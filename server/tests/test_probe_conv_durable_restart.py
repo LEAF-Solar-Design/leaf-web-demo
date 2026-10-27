@@ -98,7 +98,7 @@ class Fake(p.LiveAdapters):
                 return 201, {"conversation_id": CONVERSATION}
             assert path.endswith("/" + CONVERSATION + "/messages")
             assert body == {"content": "p058 offline-1 0123456789abcdef",
-                            "metadata": {"probe": "p058", "run_id": "offline-1"}}
+                            "metadata": {"source": "p058-probe", "client_message_id": "p058-offline-1"}}
             assert key == "p058-offline-1"
             if self.created is None:
                 self.created = {"message_id": MESSAGE, "created_at": CREATED,
@@ -246,6 +246,17 @@ def test_happy_path_exact_pass_receipt(tmp_path):
     assert r["finished_at"] >= r["started_at"]
     assert len(fake.posts) == 3 and fake.restarts == 1
     assert not (tmp_path / "offline-1" / "receipt.json.tmp").exists()
+
+
+def test_probe_metadata_accepted_by_real_validator(tmp_path):
+    from conversations import validate_message_metadata
+
+    code, fake = invoke(tmp_path)
+    assert code == 0
+    metadata = fake.posts[1][1]["metadata"]
+    assert metadata == {"source": "p058-probe", "client_message_id": "p058-offline-1"}
+    assert validate_message_metadata(metadata) == metadata
+    assert fake.posts[2][1] == fake.posts[1][1]
 
 
 def test_tail_missing_before(tmp_path):
