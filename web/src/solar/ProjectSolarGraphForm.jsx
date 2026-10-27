@@ -35,7 +35,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
     }
     owner.current = { binding, bindingKey, authorityKey, client: projectClient, name,
       alive: true, generation: 0, controllers: new Set(), armed: null, candidate: null,
-      lock: null, accepted: null, blocked: false, digest: catalogDigest, coordinateKey: null }
+      lock: null, accepted: null, blocked: false, workerRefusalHold: false, digest: catalogDigest, coordinateKey: null }
   }
   const scope = owner.current
   const [draft, setDraft] = useState(null)
@@ -124,6 +124,7 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
     }) : null
     return () => {
       scope.alive = false
+      scope.workerRefusalHold = false
       invalidate()
       unsubscribe?.()
     }
@@ -132,6 +133,12 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
   useEffect(() => {
     const previous = scope.previewInputs
     scope.previewInputs = { coordinateKey, catalogDigest, busy, refresh, available: Boolean(available) }
+    if (scope.workerRefusalHold) {
+      // Busy becoming idle must not replace a definite refusal or re-arm its intent.
+      if (previous && previous.coordinateKey === coordinateKey && previous.catalogDigest === catalogDigest
+          && previous.refresh === refresh && previous.available === Boolean(available)) return undefined
+      scope.workerRefusalHold = false
+    }
     const inputOnly = previous && previous.coordinateKey !== coordinateKey
       && previous.catalogDigest === catalogDigest && previous.busy === busy && previous.refresh === refresh
       && previous.available === Boolean(available)
@@ -298,7 +305,10 @@ export default function ProjectSolarGraphForm({ tool, solarBinding, authorityKey
       if (!scopeCurrent() || !submittedScopeCurrent()) return
       const feedback = projectSolarGraphFeedback({ tool: name, submission })
       if (feedback.state === 'submitted') scope.accepted = { jobId: feedback.jobId, isCurrent: submittedScopeCurrent }
-      if (feedback.state === 'refused') scope.blocked = false
+      if (feedback.state === 'refused') {
+        scope.blocked = false
+        if (feedback.reasonCode === 'sip_r4_worker_unavailable') scope.workerRefusalHold = true
+      }
       setCurrent({ reason: null, feedback })
     } catch {
       if (scopeCurrent()) {

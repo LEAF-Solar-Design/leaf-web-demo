@@ -170,6 +170,10 @@ it('G17 busy-to-idle worker refusal requires an explicit Refresh preview', async
   expect(action().disabled).toBe(true)
   expect(refresh().disabled).toBe(false)
   expect(h.submit).toHaveBeenCalledOnce()
+  fireEvent.click(refresh())
+  await arm()
+  expect(h.client.catalog).toHaveBeenCalledTimes(previews + 1)
+  expect(h.submit).toHaveBeenCalledOnce()
 })
 
 it('G17 a worker refusal preserves typed schedule coordinates and drawing binding', async () => {
@@ -191,6 +195,30 @@ it('G17 a worker refusal preserves typed schedule coordinates and drawing bindin
   await arm()
   expect(location().value).toBe(' +1.0, 2.0, -0 ')
   expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toBe(intent)
+  expect(h.submit).toHaveBeenCalledOnce()
+})
+
+it('G17 editing an input after worker refusal still previews', async () => {
+  const h = harness('solar-schedule')
+  h.submissions.push(Promise.resolve({ ok: false, status: 503,
+    reason: 'SIP_R4_WORKER_UNAVAILABLE', envelope: workerUnavailable }))
+  render(<ProjectSolarGraphForm {...h.props} />)
+  fireEvent.change(location(), { target: { value: '1,2' } })
+  await submitAndWait(h)
+  expect(feedback()).toContain('No worker was available to start Schedule.')
+  const previews = h.client.catalog.mock.calls.length
+  const previewGate = deferred()
+  h.previews.push(previewGate.promise)
+  fireEvent.change(location(), { target: { value: '3,4' } })
+  expect(action().disabled).toBe(true)
+  await waitFor(() => expect(h.client.catalog).toHaveBeenCalledTimes(previews + 1))
+  expect(action().disabled).toBe(true)
+  expect(h.submit).toHaveBeenCalledOnce()
+  expect(h.client.catalog.mock.calls.at(-1)[0].intents[0]).toMatchObject({ binding,
+    params: { insertion_point: [3, 4, 0] } })
+  await act(async () => { previewGate.resolve(catalog(h.name)); await previewGate.promise })
+  await arm()
+  expect(location().value).toBe('3,4')
   expect(h.submit).toHaveBeenCalledOnce()
 })
 

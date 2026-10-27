@@ -350,8 +350,6 @@ def build_suites() -> List[Suite]:
               allowed_skip_reasons=(r"live staging probe is opt-in",)),
         Suite("server-w1-graph-versions", "server tests/test_w1_graph_versions.py", "pytest", SERVER,
               _py_pytest("tests/test_w1_graph_versions.py"), 18),
-        Suite("server-solar-worker-refusal-wire", "server tests/test_solar_worker_refusal_wire.py", "pytest", SERVER,
-              _py_pytest("tests/test_solar_worker_refusal_wire.py"), 1),
         # sf-solar-ground-graph: Ground frames with tracker metadata on the shared W1 graph contract.
         Suite("server-solar-ground-graph", "server tests/test_solar_ground_graph.py", "pytest", SERVER,
               _py_pytest("tests/test_solar_ground_graph.py"), 48),
@@ -1142,7 +1140,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_repository_source.py"), 8),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py") +
-              ["tests/test_solar_worker_coverage.py", "tests/test_leaf_cloud_grants_m2m.py"], 20),
+              ["tests/test_solar_worker_coverage.py", "tests/test_solar_worker_refusal_wire.py",
+               "tests/test_leaf_cloud_grants_m2m.py"], 20),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 14),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
