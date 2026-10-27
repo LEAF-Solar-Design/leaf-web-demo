@@ -56,9 +56,9 @@ describe('w3 monitor and account popovers', () => {
     expect(onRefresh).toHaveBeenCalledTimes(1)
   })
 
-  it('refreshes once per authorization return and allows a new Connect to refresh again', async () => {
-    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn() }
-    vi.spyOn(window, 'open').mockReturnValue(popup)
+  it('refreshes once per authorization return and allows a new Connect after the previous tab closes', async () => {
+    const popup = { opener: window, location: { replace: vi.fn() }, close: vi.fn(), closed: false }
+    const open = vi.spyOn(window, 'open').mockReturnValue(popup)
     const onRefresh = vi.fn().mockResolvedValue([service])
     render(<LinkServiceDrawer {...drawerProps} servers={[service]}
       onConnect={async () => ({ authorize_url: 'https://signin.test' })} onRefresh={onRefresh} />)
@@ -70,6 +70,8 @@ describe('w3 monitor and account popovers', () => {
     await act(async () => { fireEvent.focus(window) })
     expect(onRefresh).toHaveBeenCalledTimes(1)
 
+    popup.closed = true
+    open.mockReturnValue({ ...popup, closed: false })
     fireEvent.click(screen.getByRole('button', { name: 'Connect' }))
     await waitFor(() => expect(popup.location.replace).toHaveBeenCalledTimes(2))
     await act(async () => { fireEvent.focus(window) })
