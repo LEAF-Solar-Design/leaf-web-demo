@@ -18,7 +18,8 @@ RFC 8414 authorization-server metadata, RFC 7591 dynamic client registration,
 PKCE S256 + RFC 8707 resource indicator) runs entirely server-side. Every
 outbound call is bounded (`_HTTP_TIMEOUT_S` timeout, `_MAX_RESPONSE_BYTES`
 body cap) and every failure is one of a NAMED fail-closed state
-(metadata_missing, dcr_refused, timeout, state_mismatch, audience_mismatch)
+(metadata_missing, dcr_refused, timeout, state_mismatch, audience_mismatch,
+service_unavailable)
 — never a bare 500, never a partial record (a failed connect leaves the
 record in `state: "error"`, not half-written).
 
@@ -50,6 +51,7 @@ import deps
 import entitlements
 import tenant_mcp_store
 from envelopes import ErrorCode, err_envelope, with_envelope_fields
+from operator_egress_guard import OperatorEgressDenied
 from routers.tenant import _require_grant_owner
 
 router = APIRouter()
@@ -178,6 +180,7 @@ _LABEL_MAX_LEN = 80
 _LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 _.-]{0,79}$")
 
 _CONNECT_ERROR_STATUS = {
+    "service_unavailable": 503,
     "metadata_missing": 502,
     "dcr_refused": 502,
     "timeout": 504,
@@ -187,7 +190,7 @@ _CONNECT_ERROR_STATUS = {
 
 
 class McpConnectError(Exception):
-    """One of the five NAMED fail-closed connect states (module docstring)."""
+    """One of the named fail-closed connect states (module docstring)."""
 
     def __init__(self, code: str, detail: str) -> None:
         super().__init__(detail)
@@ -224,6 +227,12 @@ def _iso_now() -> str:
 
 def _error_body(code: str) -> JSONResponse:
     status = _CONNECT_ERROR_STATUS.get(code, 502)
+    if code == "service_unavailable":
+        return JSONResponse(status_code=status, content=err_envelope(
+            ErrorCode.BROKER_UNREACHABLE,
+            "This service connection is not available in this workspace yet. Your account has not been connected.",
+            retryable=False,
+        ))
     if code == "timeout":
         error_code, retryable = ErrorCode.TIMEOUT, True
     elif code in ("metadata_missing", "dcr_refused"):
@@ -506,6 +515,11 @@ def connect_server(server_id: str, request: Request, tenant: Any = Depends(_requ
     redirect_uri = f"{_base_url(request)}/api/tenant/mcp-servers/callback"
     try:
         authorize_url = _start_connect(tid, record, redirect_uri)
+    except OperatorEgressDenied:
+        # Preserve the operator-plane boundary. Provider connections must run
+        # through the tenant integration service, never bypass this guard.
+        tenant_mcp_store.update_record(tid, server_id, state="error", error_detail="service_unavailable")
+        return _error_body("service_unavailable")
     except tenant_mcp_store.TenantMcpStoreError as exc:
         raise HTTPException(status_code=429, detail=str(exc)) from exc
     except McpConnectError as exc:
@@ -537,6 +551,9 @@ def oauth_callback(
         return _error_body("state_mismatch")
     try:
         token = _exchange_code(pending, code)
+    except OperatorEgressDenied:
+        tenant_mcp_store.update_record(tenant_id, server_id, state="error", error_detail="service_unavailable")
+        return _error_body("service_unavailable")
     except McpConnectError as exc:
         tenant_mcp_store.update_record(tenant_id, server_id, state="error", error_detail=exc.code)
         return _error_body(exc.code)
@@ -571,7 +588,7 @@ def health_server(server_id: str, tenant: Any = Depends(_require_grant_owner)):
         resp = requests.head(record["url"], timeout=_HEALTH_TIMEOUT_S, allow_redirects=False)
         state = "connected" if resp.status_code < 500 else "error"
         resp.close()
-    except requests.RequestException:
+    except (requests.RequestException, OperatorEgressDenied):
         state = "error"
     return deps.tenant_echo(with_envelope_fields({"id": server_id, "state": state}), tenant)
 

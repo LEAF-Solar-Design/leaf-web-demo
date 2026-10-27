@@ -15,12 +15,31 @@ import SurfaceGrounds, { DeviceGround, ProjectBoardGround, groundShowsDrawing, m
 import { ProjectBoardGround as DirectProjectBoardGround } from './ProjectBoardGround.jsx'
 import { DeviceGround as DirectDeviceGround } from '../ios/DeviceGround.jsx'
 import { BoardTiles } from './BoardTiles.jsx'
+import { BrowserAssetGround } from './BrowserAssetGround.jsx'
+import { NO_OCCLUDERS } from './groundWindow.js'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
 import ProductSurfaceTabs from '../components/ProductSurfaceTabs.jsx'
 import { productSurfaceStates } from './productSurfaces.js'
 import { PROFILE_REASONS, profileRibbonTabs, shipLaunchReason, shipErrorSentence } from '../lib/ribbonClusters.js'
 
 afterEach(cleanup)
+
+it('shares the environment owner across Studio profiles and keeps each artifact renderer', () => {
+  for (const surface of ['browser', 'cad', 'solar', 'ios', 'ops', 'lab']) {
+    const panel = <input defaultValue="Existing campaign" />
+    const onSelectSurface = vi.fn()
+    const grounds = SurfaceGrounds({ surface, studioShell: true, boardVisible: true, panel, onSelectSurface }).props.children
+    expect(grounds[0].type).toBe(BrowserAssetGround)
+    expect(grounds[0].props.profile).toBe(surface)
+    expect(grounds[0].props.panel).toBe(panel)
+    expect(grounds[0].props.onSelect).toBe(onSelectSurface)
+    expect(grounds[1].type).toBe(DirectDeviceGround)
+    expect(grounds[1].props.active).toBe(surface === 'ios')
+    expect(grounds[2].props.active).toBe(surface === 'lab')
+    expect(grounds[3].props.active).toBe(surface === 'ops')
+    for (const ground of grounds) expect(ground.props.occluders).toBe(NO_OCCLUDERS)
+  }
+})
 
 it('J2 row1 the device stage receives and invokes the ready controller launch', () => {
   const launch = vi.fn()
@@ -224,19 +243,23 @@ describe('extracted ground exports', () => {
   })
 })
 
-it('themes both persistent grounds through the shell contract without a paper frame measurement', () => {
+it('retains one project board across shell profiles and opens it only as an overlay', () => {
   const { container, rerender } = render(<SurfaceGrounds surface="browser" studioShell studioPresentation />)
-  const board = container.querySelector('[data-ground="browser"]')
+  const board = container.querySelector('[data-ground="browser-asset"]')
   const device = container.querySelector('[data-ground="ios"]')
-  expect(board.getAttribute('data-studio-shell')).toBe('cockpit')
   expect(device.getAttribute('data-studio-shell')).toBe('cockpit')
-  expect(board.getAttribute('data-board-layout')).toBe('contained')
+  expect(screen.getByText('No app to show yet')).toBeTruthy()
+  expect(container.querySelector('[data-ground="browser"]').hidden).toBe(true)
   expect(board.hidden).toBe(false)
   rerender(<SurfaceGrounds surface="ios" studioShell studioPresentation />)
-  expect(container.querySelector('[data-ground="browser"]')).toBe(board)
+  expect(container.querySelector('[data-ground="browser-asset"]')).toBe(board)
   expect(container.querySelector('[data-ground="ios"]')).toBe(device)
   expect(board.hidden).toBe(true)
   expect(device.hidden).toBe(false)
+  rerender(<SurfaceGrounds surface="cad" boardVisible studioShell studioPresentation />)
+  expect(container.querySelector('[data-ground="browser"]').hidden).toBe(true)
+  rerender(<SurfaceGrounds surface="cad" boardVisible studioShell studioPresentation browserPanel="project" />)
+  expect(container.querySelector('[data-ground="browser"]').hidden).toBe(false)
   const css = readFileSync(`${process.cwd()}/src/site/studioShell.css`, 'utf8')
   expect(css).toContain('[data-studio-shell="cockpit"]')
   expect(css).toContain('text-transform: none')

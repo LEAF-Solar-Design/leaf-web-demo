@@ -402,6 +402,45 @@ def test_health_unknown_server_404():
     assert resp.status_code == 404
 
 
+def test_connect_preserves_provider_egress_boundary_with_actionable_error(monkeypatch):
+    import socket
+
+    record = tenant_mcp_store.register(_TENANT, url="https://mcp.vercel.com",
+                                       label="Vercel", host="mcp.vercel.com")
+
+    def denied_metadata(_url):
+        # Exercise the real audit hook before DNS or network access occurs.
+        socket.getaddrinfo("mcp.vercel.com", 443)
+        raise AssertionError("provider egress boundary did not fire")
+
+    monkeypatch.setattr(tenant_mcp, "_fetch_metadata", denied_metadata)
+    response = client().post(f"/api/tenant/mcp-servers/{record['id']}/connect")
+    assert response.status_code == 503
+    assert "not available in this workspace" in response.text
+    assert "operator_egress_denied" not in response.text
+    assert "authorize_url" not in response.text
+    stored = tenant_mcp_store.get_record(_TENANT, record["id"])
+    assert stored["state"] == "error"
+    assert not stored.get("oauth")
+
+
+def test_health_preserves_provider_egress_boundary(monkeypatch):
+    import socket
+
+    record = tenant_mcp_store.register(_TENANT, url="https://mcp.vercel.com",
+                                       label="Vercel", host="mcp.vercel.com")
+
+    def denied_head(*args, **kwargs):
+        socket.getaddrinfo("mcp.vercel.com", 443)
+        raise AssertionError("provider egress boundary did not fire")
+
+    monkeypatch.setattr(tenant_mcp.requests, "head", denied_head)
+    response = client().get(f"/api/tenant/mcp-servers/{record['id']}/health")
+    assert response.status_code == 200
+    assert response.json()["state"] == "error"
+    assert "operator_egress_denied" not in response.text
+
+
 def test_delete_revokes_best_effort_and_removes(fake_as):
     base, cfg = fake_as
     record = _seed_record(_TENANT, base + "/mcp")

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+from html.parser import HTMLParser
 import json
 from pathlib import Path
 import re
@@ -33,13 +34,58 @@ _RUN_ID = re.compile(r"^[1-9][0-9]{5,19}$")
 _ATTEMPT = re.compile(r"^[1-9][0-9]*$")
 _DEPLOYMENT_ID = re.compile(r"^dpl_[A-Za-z0-9]{20,64}$")
 _DEPLOYMENT_URL = re.compile(r"^[a-z0-9][a-z0-9-]*\.vercel\.app$")
-_ENTRY_ASSET = re.compile(rb"assets/index-[A-Za-z0-9_-]+\.js")
+_SCRIPT_PATH = re.compile(r"(?:assets/[A-Za-z0-9_-]+\.js|_next/static/(?:[A-Za-z0-9_@.\[\]-]+/)*[A-Za-z0-9_@.\[\]-]+\.js)")
 _LOGIN = re.compile(r"^[A-Za-z0-9-]{1,39}$")
 _UTC = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$")
 
 
 class ReleaseError(ValueError):
     """The supplied deployment evidence is not safe to publish."""
+
+
+def referenced_scripts(html: str, web_dist: Path | None = None) -> list[str]:
+    """Read actual script elements, never strings embedded in inline payloads.
+
+    Only Next's encoded route brackets are decoded. Other encoding, traversal,
+    remote origins, query substitution, and alternate asset roots are refused.
+    """
+    class Scripts(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__(convert_charrefs=True)
+            self.paths: list[str] = []
+
+        def handle_starttag(self, tag, attrs):
+            if tag != "script":
+                return
+            sources = [value for key, value in attrs if key == "src"]
+            if not sources:
+                return
+            source = sources[0]
+            if len(sources) != 1 or not source:
+                raise ReleaseError("web script has an invalid source")
+            relative = source[1:] if source.startswith("/") else source
+            relative = re.sub(r"%5[bBdD]", lambda match: "[" if match[0][-1].lower() == "b" else "]", relative)
+            if not _SCRIPT_PATH.fullmatch(relative) or any(
+                part in {".", ".."} for part in relative.split("/")
+            ):
+                raise ReleaseError("web script has an unsafe asset path")
+            if relative not in self.paths:
+                self.paths.append(relative)
+
+    parser = Scripts()
+    parser.feed(html)
+    if not parser.paths:
+        raise ReleaseError("web artifact has no referenced script assets")
+    if web_dist is not None:
+        root = web_dist.resolve()
+        for entry in parser.paths:
+            target = web_dist / entry
+            components = [web_dist.joinpath(*entry.split("/")[:index])
+                          for index in range(1, len(entry.split("/")) + 1)]
+            if (not target.is_file() or root not in target.resolve().parents
+                    or any(component.is_symlink() for component in components)):
+                raise ReleaseError("web artifact has a missing or unsafe script asset")
+    return parser.paths
 
 
 def _exact(value: dict[str, Any], keys: set[str], label: str) -> None:
@@ -239,10 +285,7 @@ def prepare(
         "source_sha": source,
     }:
         raise ReleaseError("web health identity differs from the release source")
-    index = (web_dist / "index.html").read_bytes()
-    entries = sorted(set(item.decode("ascii") for item in _ENTRY_ASSET.findall(index)))
-    if len(entries) != 1 or not (web_dist / entries[0]).is_file():
-        raise ReleaseError("web artifact does not contain one referenced entry asset")
+    entries = referenced_scripts((web_dist / "index.html").read_text(encoding="utf-8"), web_dist)
     config = load_json(web_dist / "vercel.json")
     if (
         set(config) != {"rewrites"}
@@ -287,6 +330,7 @@ def prepare(
                 },
             },
             {"handle": "filesystem"},
+            {"src": "/(?:_next/static|assets)/.*", "status": 404},
             {"src": "/.*", "dest": "/index.html"},
         ],
     }

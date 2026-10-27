@@ -1,0 +1,77 @@
+.workspace-environment { position: fixed; inset: 0; pointer-events: none; z-index: 12; color: var(--leaf-ink); }
+.environment-focus { position: absolute; inset: 0; outline: none; pointer-events: none; }
+.environment-backdrop { position: absolute; inset: 0; background: var(--leaf-ground); opacity: .94; pointer-events: auto; transition: opacity 210ms ease; }
+.workspace-environment:is([data-profile="cad"], [data-profile="solar"]) .environment-backdrop { background-image: linear-gradient(var(--leaf-line) 1px, transparent 1px), linear-gradient(90deg, var(--leaf-line) 1px, transparent 1px); background-size: 40px 40px; }
+.environment-phone { width: min(280px, 65vw); height: min(570px, 75vh); border: 2px solid var(--leaf-line); border-radius: 38px; margin: 10vh auto; }
+.environment-chooser { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(340px, calc(100vw - 40px)); padding: 20px; box-sizing: border-box; border: 1px solid var(--leaf-line); border-radius: 16px; background: var(--leaf-surface); text-align: center; pointer-events: auto; opacity: 1; transition: opacity 210ms ease, transform 210ms ease; }
+.environment-chooser h1 { font-size: 20px; line-height: 1.3; }
+.environment-chooser button { display: block; width: 100%; margin-top: 8px; }
+.workspace-environment button, .workspace-environment select { min-height: 44px; border: 1px solid var(--leaf-line); border-radius: 8px; padding: 6px 10px; background: var(--leaf-surface); color: var(--leaf-ink); cursor: pointer; }
+.environment-strip { position: fixed; top: 10px; left: 12px; right: 12px; display: flex; align-items: center; gap: 6px; pointer-events: auto; opacity: .85; transition: opacity 210ms ease; }
+.workspace-environment[data-entered="true"] .environment-strip { opacity: 1; }
+.environment-strip label { display: flex; align-items: center; gap: 6px; font-size: 12px; }
+.environment-strip > button:last-child { margin-left: auto; }
+.workspace-environment[data-entered="true"] .environment-backdrop { opacity: 0; pointer-events: none; }
+.workspace-environment[data-entered="true"] .environment-chooser { opacity: 0; transform: translate(-50%, -54%) scale(.96); pointer-events: none; }
+.studio-shell:has(.workspace-environment) .studio-ground { inset: 0 !important; }
+.studio-shell:has(.workspace-environment) :is(.studio-ground-viewer, .studio-ground-device, .studio-ground-ops, [data-ground="lab"], .browser-asset-viewport) { transition: opacity 210ms ease; }
+.studio-shell:has(.workspace-environment[data-entered="false"]) :is(.studio-ground-viewer, .studio-ground-device, .studio-ground-ops, [data-ground="lab"], .browser-asset-viewport) { opacity: 0; visibility: hidden; }
+/* In this hosting mode all shared chrome lives inside the right overlay. */
+.studio-shell .app[data-environment-panel] { position: fixed; inset: 68px 12px 12px auto; width: min(520px, calc(100vw - 24px)); height: auto; min-height: 0; display: block; overflow: auto; overscroll-behavior: contain; padding: 0 12px 12px; box-sizing: border-box; background: var(--leaf-surface); border: 1px solid var(--leaf-line); border-radius: 12px; pointer-events: auto; z-index: 14; }
+.studio-shell .app[data-environment-panel]:not([data-environment-panel="studio"]) { display: none !important; }
+.studio-shell .app[data-environment-panel] :is(.studio-drawer-tabs, .start-board-gloss, .tc-product-tabs) { display: none !important; }
+.studio-shell .app[data-environment-panel] :is(header.top, aside.nav, .rail-stack, aside.rail, .center-col, main.center-scroll, .bar-dock, .tc-product-frame, .tc-product-morph, .tc-product-nav, .studio-profile-info, .drafting-ribbon, .studio-ribbon-host, .studio-profile-host) { position: static !important; inset: auto !important; transform: none !important; width: 100% !important; max-width: 100%; height: auto !important; max-height: none !important; min-height: 0; overflow: visible !important; margin: 0; box-sizing: border-box; visibility: visible !important; opacity: 1; pointer-events: auto; }
+.studio-shell .app[data-environment-panel] :is(header.top, header.top .proj, header.top .who) { display: flex !important; flex-wrap: wrap !important; }
+.studio-shell .app[data-environment-panel] :is(aside.nav, .rail-stack, aside.rail) { display: block !important; }
+.studio-shell .app[data-environment-panel] .rail-stack > * { height: auto !important; max-height: none !important; overflow: visible !important; }
+.studio-shell .app[data-environment-panel] .browser-panel-heading { margin: 0 -12px; z-index: 20; }
+.studio-shell:has(.workspace-environment) .browser-project-panel { z-index: 14; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] { position: fixed !important; inset: 68px 12px 12px auto !important; width: min(520px, calc(100vw - 24px)) !important; height: auto !important; min-height: 0 !important; display: block; overflow: auto !important; padding: 0 12px 12px !important; grid-template-columns: none; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel]:not([data-environment-panel="studio"]) { display: none !important; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .studio-chrome-host { display: block !important; position: static !important; inset: auto !important; height: auto !important; overflow: visible !important; pointer-events: auto; }
+.studio-shell .app[data-environment-panel] :is(.drafting-ribbon, .ribbon-body, .ribbon-groups, .cockpit-top-band, .cockpit-quick, .cockpit-tabs, .cockpit-doctabs, .viewer-toolbar, .properties-dock, .cockpit-prompt-slot) { position: static !important; inset: auto !important; height: auto !important; max-height: none !important; width: 100% !important; overflow: visible !important; flex-wrap: wrap; }
+.studio-shell .app[data-environment-panel] .ribbon-body { overflow-x: auto !important; }
+.studio-shell .app[data-environment-panel] :is(.cockpit-band, .cockpit-ribbon-tabs) { position: static !important; inset: auto !important; width: 100% !important; height: auto !important; flex-wrap: wrap !important; overflow: visible !important; }
+.studio-shell .app[data-environment-panel] header.top :is(.proj, .who) { display: flex !important; flex-wrap: wrap !important; }
+.studio-shell .app[data-environment-panel] .tc-account-signout { display: inline-flex !important; }
+.studio-shell .app[data-environment-panel] header.top :is(button, input, select) { min-height: 44px; }
+.studio-shell .app[data-environment-panel] .workspace-card { position: static !important; inset: auto !important; height: auto !important; min-height: 0 !important; overflow: visible !important; }
+.studio-shell .app[data-environment-panel] :is(.drawing-navigation, .result-block, .cockpit-view, .drawing-objects-panel, .drawing-find-band, [data-cad-overview], .bar) { position: static !important; inset: auto !important; transform: none !important; width: 100% !important; max-width: 100% !important; height: auto !important; max-height: none !important; overflow: visible !important; box-sizing: border-box; }
+.studio-shell:has(.workspace-environment) :is(.studio-ground-device, .studio-ground-ops, .studio-ground-lab) { inset: 0 !important; }
+/* Keep glass pseudo-elements and command menus anchored to their own hosts. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] :is(header.top, .bar.bar-command-line, .result-block, .properties-dock, .cockpit-view, .drafting-ribbon, .viewer-toolbar) { position: relative !important; }
+/* The old canvas host has zero height because its instruments were fixed.
+   In the overlay those instruments take space in the normal document flow. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .workspace-card > .viewer-wrap { position: relative; display: block; height: auto !important; min-height: 0; overflow: visible; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] :is(.cockpit-cube-wrap, .cockpit-cube-wcs, .viewer-wrap > .legend, .viewer-wrap > .selection-readout) { position: relative !important; inset: auto !important; margin: 8px 0; max-height: none; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .viewer-wrap > :is(.legend, .selection-readout) { width: 100%; max-width: 100%; min-width: 0; box-sizing: border-box; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .drafting-ribbon[data-overflow-open="true"] .ribbon-panels { position: relative; inset: auto; max-height: none; width: 100%; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .converse-card { margin-right: 0; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar.bar-command-line { flex-direction: column; align-items: stretch; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line :is(.bar-input, .bar-controls) { width: 100%; min-width: 0; height: auto; box-sizing: border-box; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-controls { flex-wrap: wrap; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-command-line .bar-field { min-width: 0; min-height: 64px; font-size: 16px; }
+/* Drawing controls remain available inside Studio, without a viewport footer. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] footer.foot-bar { position: relative !important; inset: auto !important; display: flex !important; flex-wrap: wrap; width: 100%; max-width: 100%; height: auto !important; min-height: 0; padding: 8px 0; gap: 8px; overflow: visible !important; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .foot-region { flex-wrap: wrap; height: auto !important; max-width: 100%; min-width: 0; gap: 6px; overflow: visible; padding: 4px 0; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .cockpit-status-toggles { flex-wrap: wrap; height: auto !important; max-width: 100%; }
+@media (max-width: 480px) {
+  .environment-strip { left: 6px; right: 6px; gap: 4px; }
+  .environment-strip label { font-size: 0; gap: 0; min-width: 0; }
+  .environment-strip select { width: 100%; max-width: 112px; font-size: 12px; }
+  .environment-strip button { padding-inline: 8px; font-size: 12px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .workspace-environment *, .studio-shell:has(.workspace-environment) :is(.studio-ground-viewer, .studio-ground-device, .studio-ground-ops, [data-ground="lab"], .browser-asset-viewport) { transition: none !important; }
+}
+
+.studio-shell .app[data-environment-panel] header.top .who { min-width: 0; width: 100%; }
+.studio-shell .app[data-environment-panel] header.top .who > * { max-width: 100%; white-space: normal; overflow-wrap: anywhere; }
+/* Service setup expands inside the scrollable Studio panel. An anchored
+   popover below its bottom trigger would be clipped by the overlay. */
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .link-svc { display: block; width: 100%; }
+.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .link-svc .claude-pop {
+  position: relative; inset: auto; width: 100%; max-width: 100%; max-height: none;
+  box-sizing: border-box; margin-top: 8px; background: var(--leaf-surface);
+  transform: none; z-index: 1;
+}

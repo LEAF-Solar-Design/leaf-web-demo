@@ -4,6 +4,11 @@ __pycache__/
 node_modules/
 web/dist/
 web/dist-lab-perf/
+web/.next/
+web/out/
+web/next-env.d.ts
+web/public/engine/engine.js
+web/public/engine/engine_bg.wasm
 *.log
 .serena/
 server/jobs.db
@@ -68,4 +73,5 @@ harness/sessions-data/
 
 # Vercel CLI project link and Cygwin/MSYS crash dumps
 web/.vercel/
+web/.next-dev-*/
 *.stackdump
