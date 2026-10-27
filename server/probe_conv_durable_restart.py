@@ -172,7 +172,11 @@ class Probe:
 
     def restart(self, args):
         self.phase = "restart_unobserved"
-        self.a.force_new_deployment(args.env)
+        service = self.a.service(args.env)
+        task_definition = self.receipt["task_definition"]
+        require(steady(service) and service.get("taskDefinition") == task_definition,
+                "REFUSED", "service_drifted")
+        self.a.force_new_deployment(args.env, task_definition)
         deadline = self.a.monotonic() + RESTART_TIMEOUT_S
         while True:
             try:
@@ -314,11 +318,11 @@ class LiveAdapters:
             if not token:
                 return count
 
-    def force_new_deployment(self, environment):
+    def force_new_deployment(self, environment, task_definition):
         config = ENVIRONMENTS[environment]
-        # Omitting taskDefinition retains the service's current revision.
         self.client("ecs").update_service(cluster=config["cluster"],
-                                          service=config["service"], forceNewDeployment=True)
+                                          service=config["service"], taskDefinition=task_definition,
+                                          forceNewDeployment=True)
 
     def http(self, method, path, token, body=None, key=None):
         import urllib.error

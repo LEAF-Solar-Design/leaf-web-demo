@@ -35,6 +35,7 @@ class Fake(p.LiveAdapters):
         self.builds = 0
         self.build_reads = 0
         self.restarts = 0
+        self.force_calls = []
         self.unchanged_tasks = False
         self.unhealthy = False
         self.tail_defect = None
@@ -73,8 +74,9 @@ class Fake(p.LiveAdapters):
     def running_tasks(self, environment):
         return ["b" * 32 if self.restarts and not self.unchanged_tasks else "a" * 32]
 
-    def force_new_deployment(self, environment):
+    def force_new_deployment(self, environment, task_definition):
         assert len(self.posts) == 2
+        self.force_calls.append((environment, task_definition))
         self.restarts += 1
 
     def save(self, receipt):
@@ -263,6 +265,36 @@ def test_tail_changed_after(tmp_path, field):
     assert len(fake.posts) == 2
 
 
+@pytest.mark.parametrize("defect", ["task_definition", "unsteady"])
+def test_service_drifted_before_restart_refused(tmp_path, monkeypatch, defect):
+    fake = Fake()
+    original_service = fake.service
+
+    def service(environment):
+        result = original_service(environment)
+        if len(fake.posts) == 2:
+            if defect == "task_definition":
+                result["taskDefinition"] = DEFINITION.rsplit(":", 1)[0] + ":43"
+            else:
+                result["deployments"][0]["rolloutState"] = "IN_PROGRESS"
+        return result
+
+    monkeypatch.setattr(fake, "service", service)
+    code, fake = invoke(tmp_path, fake)
+    r = receipt(tmp_path)
+    assert code == 2 and r["outcome"] == "REFUSED"
+    assert r["reason"] == "service_drifted" and r["task_definition"] == DEFINITION
+    assert not fake.force_calls and fake.restarts == 0
+    assert len(fake.posts) == 2 and not r["checks"]["restarted"]
+
+
+def test_restart_receives_recorded_task_definition(tmp_path):
+    code, fake = invoke(tmp_path)
+    assert code == 0
+    assert fake.force_calls == [("staging", receipt(tmp_path)["task_definition"])]
+    assert fake.force_calls[0][1] == DEFINITION
+
+
 def test_restart_tasks_unchanged_times_out(tmp_path):
     fake = Fake()
     fake.unchanged_tasks = True
@@ -392,6 +424,6 @@ def test_live_restart_retains_task_definition(monkeypatch):
 
     adapter = p.LiveAdapters("production")
     monkeypatch.setattr(adapter, "client", lambda name: ECS() if name == "ecs" else None)
-    adapter.force_new_deployment("production")
+    adapter.force_new_deployment("production", DEFINITION)
     assert calls == [{"cluster": "leaf-automation-production", "service": "leaf-platform",
-                      "forceNewDeployment": True}]
+                      "taskDefinition": DEFINITION, "forceNewDeployment": True}]
