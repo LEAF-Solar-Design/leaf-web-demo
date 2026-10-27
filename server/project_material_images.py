@@ -40,7 +40,9 @@ def decode_image(raw):
         env = {'HOME': temporary, 'TMPDIR': temporary, 'TEMP': temporary, 'TMP': temporary,
                'LANG': 'C.UTF-8', 'LC_ALL': 'C.UTF-8'}
         if os.name == 'nt':
-            env['SYSTEMROOT'] = os.environ.get('SYSTEMROOT', r'C:\Windows')
+            system_root = os.environ.get('SYSTEMROOT')
+            if system_root:
+                env['SYSTEMROOT'] = system_root
         try:
             result = subprocess.run([sys.executable, '-I', str(Path(__file__).with_name('project_material_image_decoder.py'))],
                                     cwd=directory, env=env, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,

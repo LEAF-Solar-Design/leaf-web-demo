@@ -2373,10 +2373,11 @@ describe('project board live pane wiring', () => {
       ['material', 'catalog', 'conversation', 'annotations', 'authoring', 'settings'])
     const actions = expression(elements('SurfaceGrounds')[0], 'actions').consequent
     assert.deepEqual(actions.properties.map(csuKey), ['transferProjectId', 'transferStatus', 'onTransferVersion',
-      'onOpenDrawing', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability', 'onOpenSettings'])
+      'onOpenDrawing', 'onOpenPhotos', 'onOpenVersion', 'onOpenJob', 'onOpenTool', 'onOpenFamily', 'onOpenCapability', 'onOpenSettings'])
     const bindings = objectBindings(actions)
     for (const [key, expected] of Object.entries({
       onOpenDrawing: "() => setProjectPane('material')", onOpenVersion: "() => setProjectPane('versions')",
+      onOpenPhotos: "!mock && signedIn && openProjectId ? () => setProjectPane('material') : null",
       onOpenJob: "(job) => { setBoardJob(job); setProjectPane('jobs') }",
       onOpenTool: "() => setProjectPane('tools')",
       onOpenFamily: "(family) => { setFamilyOpen(family.family_id, true); setNavExpanded(true); setProjectPane('catalog') }",
@@ -3871,9 +3872,9 @@ describe('J1 Browser composition', () => {
     let allowed = true
     const intake = { begin: (target) => { events.push(['begin', target]); return allowed }, retry: () => {} }
     const onAttached = () => {}
-    const renderAdapter = new Function('React', 'ProjectMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake',
+    const renderAdapter = new Function('React', 'ProjectMaterialIntake', 'PhotoMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake',
       adapter + '\nreturn LiveProjectMaterialIntake')(
-      { createElement: (type, props) => ({ type, props }) }, 'ProjectMaterialIntake', () => upload,
+      { createElement: (type, props) => ({ type, props }) }, 'ProjectMaterialIntake', 'PhotoMaterialIntake', () => upload,
       (options) => { assert.equal(options.upload, upload); assert.equal(options.onAttached, onAttached); return intake },
     )
     const element = renderAdapter({ project, artifacts, onAttached })
