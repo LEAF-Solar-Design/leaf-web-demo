@@ -148,4 +148,46 @@ def test_app_diagnostic_proxy_strips_unknown_and_secret_fields(monkeypatch):
     assert "must-not-escape" not in encoded
     assert "/must/not/escape" not in encoded
     assert body["schema"] == "leaf.grant-diagnostic.v1"
+    assert body["backend"] == "file"
     assert body["record_format"] == "v1"
+
+
+@pytest.mark.parametrize(
+    ("harness_fields", "expected_backend"),
+    [
+        ({"backend": "vault"}, "vault"),
+        ({"backend": "file"}, "file"),
+        ({"backend": "Vault"}, "file"),
+        ({"backend": " vault"}, "file"),
+        ({"backend": "hashicorp"}, "file"),
+        ({"backend": None}, "file"),
+        ({"backend": 5}, "file"),
+        ({}, "file"),
+    ],
+)
+def test_app_diagnostic_proxy_whitelists_backend(
+    monkeypatch, harness_fields, expected_backend
+):
+    monkeypatch.setenv("LEAF_AUTHOR_HARNESS_URL", "http://harness.internal")
+    monkeypatch.setattr(
+        broker_client, "harness_headers",
+        lambda: {"X-Harness-Secret": "shared-secret"},
+    )
+
+    class Response:
+        status_code = 200
+
+        @staticmethod
+        def json():
+            return {**harness_fields, "token": "must-not-escape"}
+
+    def fake_get(url, *, headers, timeout):
+        return Response()
+
+    import requests
+    monkeypatch.setattr(requests, "get", fake_get)
+    body = tenant_router.grant_diagnostic(tenant="tenant a")
+    encoded = json.dumps(body)
+    assert body["backend"] == expected_backend
+    assert '"token"' not in encoded
+    assert "must-not-escape" not in encoded
