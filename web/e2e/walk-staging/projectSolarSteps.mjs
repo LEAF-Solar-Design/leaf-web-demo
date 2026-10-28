@@ -1,4 +1,4 @@
-import { expect } from '@playwright/test'
+import { expect, test } from '@playwright/test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createActionRecorder, classifyStagingOutcome, stagingActionRecorder } from '../walk/stagingEvidence.mjs'
 import { stagingDelivery } from '../walk/stagingDelivery.mjs'
@@ -14,6 +14,11 @@ import {
 
 const TOOL = 'solar-solve-proposal'
 const code = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(value) ? value : null
+
+function stagingSolveTimeout() {
+  const timeout = Number(process.env.LEAF_WALK_STAGING_SOLVE_TIMEOUT_MS)
+  return Number.isFinite(timeout) && timeout >= 60_000 && timeout <= 1_800_000 ? timeout : 900_000
+}
 
 export function stagingNetworkPath(url) {
   const parsed = new URL(url)
@@ -201,13 +206,20 @@ export function proposalCatalogState(body) {
   })
 }
 
-export function proposalFormValues(graph) {
-  const frame = graph?.frames?.[0]
-  if (!frame?.matrix?.length) return { frame: frame?.id ?? 'walk-staging-frame', request: { grid: {} } }
+const framePanelCount = frame => frame?.matrix?.flat().filter(cell => cell.panel_ref).length ?? 0
+
+export function proposalFormValues(graph, { frameId } = {}) {
+  const frames = graph?.frames ?? []
+  const candidates = frames.map(frame => ({ frame, count: framePanelCount(frame) })).filter(row => row.count > 0)
+  const preferred = typeof frameId === 'string' && frameId.length > 0
+    ? candidates.find(row => row.frame.id === frameId) : undefined
+  const selected = preferred ?? candidates.reduce((smallest, row) =>
+    !smallest || row.count < smallest.count ? row : smallest, undefined)
+  if (!selected) return { frame: frames[0]?.id ?? 'walk-staging-frame', request: { grid: {} } }
+  const { frame, count } = selected
   // Wire shape and graph coordinates follow server/tests/test_w1_solve_commit.py
   // (case fixture) and server/tests/fixtures/w1_stringer_request_4x6.json.
   const panels = new Map(graph.panels.map(panel => [panel.id, panel]))
-  const count = frame.matrix.flat().filter(cell => cell.panel_ref).length
   const length = Math.max(1, graph.settings?.panels_in_sequence ?? 1)
   return { frame: frame.id, request: { grid: {
     Dwgname: 'walk-staging', Modify: [],
@@ -368,6 +380,10 @@ async function ensureProjectPanel(page, region, label) {
 }
 
 export async function withStagingProject(page, baseURL, projectId, token, testInfo, action, options = {}) {
+  if (testInfo.title === 'project-solar-proposal-review') {
+    const timeout = stagingSolveTimeout() + 300_000
+    if (testInfo.timeout < timeout) test.setTimeout(timeout)
+  }
   assertAllowedStagingHost(baseURL)
   assertStagingTokenIdentity(token, process.env)
   const runtime = { page, stack: { baseURL }, cleanup: [], evidence: { projectSolar: { steps: [] } },
@@ -449,9 +465,13 @@ export async function reviewStagingProposal(runtime, {
   await assertions(frame).toBeEnabled({ timeout: 10_000 }).catch(() => {})
   if (!await walkEnabled(frame, 'Frame')) return refused('run_solve_disabled')
   // These are references, never cloud credentials. The server resolves the grant.
-  // w1-staging is also used by server/tests/test_w1_cloud_solve_probe.py.
-  const values = proposalFormValues(solar.context.graph)
-  await walkFill(form.getByLabel('Grant ref', { exact: true }), 'w1-staging', 'Grant ref')
+  // Staging resolves the M2M grant 'staging-solver'; 'w1-staging' is the local probe grant.
+  const values = proposalFormValues(solar.context.graph, { frameId: process.env.LEAF_WALK_STAGING_SCRATCH_FRAME_ID })
+  runtime.evidence ??= {}
+  runtime.evidence.projectSolar ??= {}
+  runtime.evidence.projectSolar.solveFrame = { id: values.frame,
+    panels: framePanelCount(solar.context.graph?.frames?.find(frame => frame.id === values.frame)) }
+  await walkFill(form.getByLabel('Grant ref', { exact: true }), process.env.LEAF_WALK_STAGING_GRANT_REF || 'staging-solver', 'Grant ref')
   await walkFill(form.getByLabel('Request', { exact: true }), JSON.stringify(values.request), 'Request')
   await walkFill(frame, values.frame, 'Frame')
   await walkSelect(form.getByRole('combobox', { name: 'Phase', exact: true }), '0', 'Phase')
@@ -482,6 +502,7 @@ export async function reviewStagingProposal(runtime, {
     const accepted = await runResponse.json()
     assertions(isUuid(accepted.job_id)).toBe(true)
     let job
+    // Allow standby evaluation and cold engine startup; slow polling after the first minute.
     await assertions.poll(async () => {
       job = await read(page, solar.apiBase, `/api/jobs/${accepted.job_id}`, solar.binding)
       assertions(job.job_id).toBe(accepted.job_id)
@@ -490,7 +511,7 @@ export async function reviewStagingProposal(runtime, {
       assertions(job.input_version_id).toBe(solar.binding.input_version_id)
       assertions(job.tool_name).toBe(TOOL)
       return ['complete', 'failed', 'refused', 'cancelled'].includes(job.status)
-    }, { timeout: 90_000, intervals: [250, 500, 1000] }).toBe(true)
+    }, { timeout: stagingSolveTimeout(), intervals: [250, 500, ...Array.from({ length: 60 }, () => 1000), 5000] }).toBe(true)
     if (job.status !== 'complete') return refused(refusalCode(job, `solve_job_${job.status}`))
     await assertions(page.getByRole('button', { name: 'Commit proposal', exact: true })).toBeVisible({ timeout: 30_000 })
     return { job_id: accepted.job_id, reviewVisible: true }
