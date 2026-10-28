@@ -28,6 +28,68 @@ async function expectCenterHit(control) {
   })).toBe(true)
 }
 
+async function expectPhoneViewControls(page, info, phase) {
+  const measure = () => page.evaluate(() => {
+    const rect = selector => {
+      const b = document.querySelector(selector).getBoundingClientRect()
+      return { x:b.x, y:b.y, right:b.right, bottom:b.bottom, width:b.width, height:b.height }
+    }
+    return { width:innerWidth, height:innerHeight, scroll:document.documentElement.scrollWidth,
+      profile:rect('.environment-strip'), view:rect('.cockpit-view'), find:rect('.drawing-navigation'),
+      command:rect('.bar-dock'), input:rect('.bar-command-line .bar-field'),
+      commandControls:rect('.bar-command-line .bar-controls') }
+  })
+  await expect.poll(async () => {
+    const g = await measure()
+    return g.view.y >= g.profile.bottom && g.find.y >= g.view.bottom
+      && g.find.bottom <= g.command.y
+  }).toBe(true)
+  const geometry = await measure()
+  await info.attach(`${phase}-phone-view-geometry`, { body:JSON.stringify(geometry, null, 2), contentType:'application/json' })
+  expect(geometry.scroll).toBeLessThanOrEqual(geometry.width)
+  for (const b of [geometry.view, geometry.find, geometry.command, geometry.input, geometry.commandControls]) {
+    expect(b.width).toBeGreaterThan(0)
+    expect(b.height).toBeGreaterThan(0)
+    expect(b.x).toBeGreaterThanOrEqual(0)
+    expect(b.y).toBeGreaterThanOrEqual(0)
+    expect(b.right).toBeLessThanOrEqual(geometry.width + 1)
+    expect(b.bottom).toBeLessThanOrEqual(geometry.height + 1)
+  }
+  expect(geometry.input.bottom).toBeLessThanOrEqual(geometry.commandControls.y)
+  const view = page.getByRole('toolbar', { name:'View', exact:true })
+  const zoom = view.getByRole('button', { name:'Zoom in', exact:true })
+  const fit = view.getByRole('button', { name:'Fit drawing to view', exact:true })
+  const find = page.getByRole('combobox', { name:'Find in drawing', exact:true })
+  const submit = page.locator('.drawing-find-submit')
+  // These centers used to hit Project and Workspace profile in the dock.
+  for (const control of [zoom, fit, find, submit]) await expectCenterHit(control)
+  await zoom.click()
+  await fit.click()
+  await find.click()
+  await expect(find).toBeFocused()
+  await submit.click()
+  await expectCenterHit(page.locator('.bar-command-line .bar-field'))
+}
+
+async function exercisePhoneViewControls(page, info, phase) {
+  await expect(page.locator('.viewer-title')).toContainText('cat.dwg')
+  await expectPhoneViewControls(page, info, phase)
+  const toolRail = page.getByRole('button', { name:'Tool rail', exact:true })
+  await expect(toolRail).toHaveAttribute('aria-expanded', 'false')
+  await toolRail.click()
+  await expect(toolRail).toHaveAttribute('aria-expanded', 'true')
+  await toolRail.click()
+  await expect(toolRail).toHaveAttribute('aria-expanded', 'false')
+  await expectPhoneViewControls(page, info, `${phase}-rail-closed`)
+  await page.getByRole('navigation', { name:'Workspace controls', exact:true })
+    .getByRole('button', { name:'Studio', exact:true }).click()
+  const studio = page.getByRole('region', { name:'Studio sidebar', exact:true })
+  await expect(studio).toBeVisible()
+  await studio.getByRole('button', { name:'Close Studio', exact:true }).click()
+  await expect(studio).toBeHidden()
+  await expectPhoneViewControls(page, info, `${phase}-studio-closed`)
+}
+
 async function expectNaturalPanelFit(ribbon, info) {
   const measure = () => ribbon.evaluate(el => {
     const band = el.getBoundingClientRect()
@@ -150,6 +212,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
       await close.click()
     }
     await expectDraftingBands(page, info, 'solar')
+    if (size === 'phone') await exercisePhoneViewControls(page, info, 'solar')
     await controls.getByRole('combobox', { name:'Workspace profile', exact:true }).selectOption('cad')
     await controls.getByRole('button', { name:'Studio', exact:true }).click()
     const environment = page.locator('.workspace-environment')
@@ -169,6 +232,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
     await expect(manage).toHaveAttribute('aria-selected', 'true')
     await expect(environment).toHaveAttribute('data-entered', 'true')
     await expectDraftingBands(page, info, 'cad-manage')
+    if (size === 'phone') await exercisePhoneViewControls(page, info, 'cad-manage')
     await page.screenshot({ path:info.outputPath(`docked-${size}-cad-manage.png`) })
     const more = ribbon.getByRole('button', { name:'More panels', exact:true })
     const hiddenPanels = ribbon.locator('.ribbon-cluster[hidden]')
@@ -224,6 +288,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
     await expectCenterHit(manage)
     await expect(environment).toHaveAttribute('data-entered', 'true')
     await expectDraftingBands(page, info, 'cad-collapsed')
+    if (size === 'phone') await expectPhoneViewControls(page, info, 'cad-collapsed')
     await page.screenshot({ path:info.outputPath(`docked-${size}-cad.png`) })
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width)
   })
