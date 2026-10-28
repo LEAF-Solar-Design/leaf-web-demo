@@ -18,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -584,6 +585,7 @@ def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
         if (request.reservation.artifact_root != request.reservation.run_root / "artifacts"
                 or not math.isfinite(request.deadline)):
             return 1
+        disarm_refused = False
         while effects.clock.monotonic() < request.deadline:
             remaining = request.deadline - effects.clock.monotonic()
             try:
@@ -592,14 +594,24 @@ def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
                 break
             if event == "disarm":
                 # Independently observe absence; a sender's claim is not proof.
-                owned = effects.host.authority_inventory(request.run_id)
-                _validate_ownership(owned, request.run_id, allocated=False)
-                if (not effects.host.private_absent(request.reservation)
-                        or any(process.stop(effects.clock.monotonic() + CLEANUP_TIMEOUT_S) is not True
-                               for process in request.processes)):
-                    return 1
-                request.channel.acknowledge()
-                return 0
+                stopped = True
+                for process in request.processes:
+                    try:
+                        if process.stop(effects.clock.monotonic() + CLEANUP_TIMEOUT_S) is not True:
+                            stopped = False
+                    except BaseException:
+                        stopped = False
+                try:
+                    owned = effects.host.authority_inventory(request.run_id)
+                    _validate_ownership(owned, request.run_id, allocated=False)
+                    absent = effects.host.private_absent(request.reservation)
+                except BaseException:
+                    absent = False
+                if absent and stopped:
+                    request.channel.acknowledge()
+                    return 0
+                disarm_refused = True
+                break
             if event not in (None, "alive"):
                 return 1
             effects.clock.wait(min(0.05, max(0.0, request.deadline - effects.clock.monotonic())))
@@ -619,7 +631,8 @@ def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
         for process in request.processes:
             scope.acquire(ResourceKind.STACK_PROCESS,
                 lambda process=process: process.stop(effects.clock.monotonic() + CLEANUP_TIMEOUT_S))
-        return 0 if scope.close().ok else 1
+        proof = scope.close()
+        return 0 if proof.ok and not disarm_refused else 1
     except BaseException:
         return 1
 
@@ -2427,6 +2440,27 @@ class _WindowsJob:
             self.handle = None
 
 
+def _signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass  # An absent owned group needs no further signal.
+
+
+def _group_empty(pgid, deadline):
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
+
+
 class _RuntimeProcess:
     def __init__(self, spec):
         self.spec = spec
@@ -2535,8 +2569,10 @@ class _RuntimeProcess:
             def kill():
                 if self.job is not None:
                     self.job.stop(deadline)
-                else:
+                elif os.name == "nt":
                     self.process.kill()
+                else:
+                    _signal_group(self.process.pid, signal.SIGKILL)
             def wait(seconds):
                 try:
                     self.process.wait(timeout=seconds)
@@ -2545,11 +2581,16 @@ class _RuntimeProcess:
                     return False
             if self.identity is None:
                 # A suspended child whose identity/assignment failed never ran.
-                self.process.kill()
+                if os.name == "nt":
+                    self.process.kill()
+                else:
+                    _signal_group(self.process.pid, signal.SIGKILL)
                 stopped = wait(max(0.0, deadline - time.monotonic()))
                 if self.job is not None:
                     stopped = self.job.stop(deadline) and stopped
                     self.job.close()
+                elif os.name != "nt":
+                    return stopped and _group_empty(self.process.pid, deadline)
                 return stopped
             stopped = stop_owned(StopRequest(self.identity, observe, terminate, kill, wait),
                                  effects=production_effects(), deadline=deadline)
@@ -2558,9 +2599,9 @@ class _RuntimeProcess:
                 empty = self.job.stop(deadline)
                 self.job.close()
                 return stopped and empty
-            # There is no retained process-tree capability on POSIX in A/C.
-            # Stop the owned child but refuse a descendant-cleanup success claim.
-            return False
+            if os.name == "nt":
+                return False
+            return stopped and _group_empty(self.process.pid, deadline)
         except BaseException:
             return False
         finally:

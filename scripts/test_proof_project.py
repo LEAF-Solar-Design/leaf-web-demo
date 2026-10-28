@@ -1715,6 +1715,111 @@ def assert_entry_error(scope, operation, error, stage=p.Stage.TEARDOWN):
 
 
 class TestProjectLifetime:
+    def test_d_c_disarm_stops_every_process(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledged = [], []
+        first = SimpleNamespace(stop=lambda deadline: (stops.append("first"), False)[1])
+        second = SimpleNamespace(stop=lambda deadline: (stops.append("second"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (first, second), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert stops == ["first", "second", "second", "first"]
+        assert acknowledged == []
+
+    def test_d_c_disarm_failure_falls_back(self):
+        c = lifetime_case()
+        events, acknowledged = [], []
+        inventory = c.host.authority_inventory
+        ownership = inventory("run-test")
+        def observe(run_id):
+            events.append("inventory")
+            return inventory(run_id)
+        def absent(reservation):
+            events.append("disarm-check")
+            return False
+        c.host.authority_inventory = observe
+        c.host.private_absent = absent
+        process = SimpleNamespace(stop=lambda deadline: (events.append("stop"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            ownership, channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        check = events.index("disarm-check")
+        assert events[:check].count("stop") == 1
+        assert events[check + 1:] == ["stop", "inventory", "inventory"]
+        assert c.teardown == ["authority", "private"] and not c.private
+        assert acknowledged == []
+
+    def test_d_c_disarm_success_acknowledges(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledged = [], []
+        first = SimpleNamespace(stop=lambda deadline: (stops.append("first"), True)[1])
+        second = SimpleNamespace(stop=lambda deadline: (stops.append("second"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (first, second), 1)
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert stops == ["first", "second"] and acknowledged == [True]
+        assert c.teardown == []
+
+    def test_d_c_posix_group_kill(self, monkeypatch):
+        c = lifetime_case()
+        calls = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: None,
+            kill=lambda: calls.append("child-kill"))
+        def stop_owned(request, *, effects, deadline):
+            assert request.identity is process.identity and effects is c.effects
+            request.kill()
+            return True
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", stop_owned)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: calls.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty", lambda pgid, deadline: True)
+        assert process.stop(p.time.monotonic() + 1) is True
+        assert calls == [(7, p.signal.SIGKILL)]
+
+    def test_d_c_posix_stop_group_empty(self, monkeypatch):
+        c = lifetime_case()
+        checked = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), True)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is True
+        assert checked == [(7, deadline)] and process._stopped
+
+    def test_d_c_posix_stop_group_lingers(self, monkeypatch):
+        c = lifetime_case()
+        checked = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), False)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is False
+        assert not process._stopped and checked == [(7, deadline)]
+        assert process.stop(deadline) is False
+        assert not process._stopped and checked == [(7, deadline), (7, deadline)]
+
     def test_d_b_c1_cancel_error(self):
         c = lifetime_case()
         with pytest.raises(TypeError):
@@ -2186,7 +2291,7 @@ class TestProjectLifetime:
         request = p.GuardianRequest("run-test", c.plan.reservation,
             c.host.authority_inventory("run-test"), channel, (process,), 1)
         assert p.guardian_main(request, effects=c.effects) == 1
-        assert stops == [p.CLEANUP_TIMEOUT_S] and acknowledgements == []
+        assert stops == [p.CLEANUP_TIMEOUT_S] * 2 and acknowledgements == []
 
     def test_d_c1_disarm_live_job(self, monkeypatch):
         c = lifetime_case()
@@ -2204,7 +2309,7 @@ class TestProjectLifetime:
             c.host.authority_inventory("run-test"), channel, (child,), 1)
         assert child.poll() == 0
         assert p.guardian_main(request, effects=c.effects) == 1
-        assert acknowledged == [] and checked == [p.CLEANUP_TIMEOUT_S]
+        assert acknowledged == [] and checked == [p.CLEANUP_TIMEOUT_S] * 2
         assert not child._stopped
 
     def test_d_c1_disarm_stopped_job(self, monkeypatch):
@@ -2634,9 +2739,9 @@ class TestProjectLifetime:
         channel = SimpleNamespace(receive=lambda timeout: "disarm", acknowledge=lambda: c.teardown.append("ack"))
         request = p.GuardianRequest("run-test", c.plan.reservation,
             c.host.authority_inventory("run-test"), channel, deadline=1)
-        assert p.guardian_main(request, effects=c.effects) == 1 and c.teardown == []
+        assert p.guardian_main(request, effects=c.effects) == 1 and c.teardown == ["authority", "private"]
         c.private = False
-        assert p.guardian_main(request, effects=c.effects) == 0 and c.teardown == ["ack"]
+        assert p.guardian_main(request, effects=c.effects) == 0 and c.teardown == ["authority", "private", "ack"]
 
     def test_preexisting_run_collision(self, monkeypatch):
         c = lifetime_case()
