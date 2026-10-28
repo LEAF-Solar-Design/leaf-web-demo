@@ -22,7 +22,7 @@ import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErr
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
 import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled,
-  enterWorkspaceEnvironment, openSolarCadProfile } from './fixtures.mjs'
+  enterWorkspaceIfChooser, enterWorkspaceEnvironment, openSolarCadProfile } from './fixtures.mjs'
 import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
@@ -918,7 +918,8 @@ const stagingAssertions = value => ({
 })
 stagingAssertions.poll = callback => ({ toBe: async expected => assert.equal(await callback(), expected) })
 
-function workspaceEnvironmentFake({ present = true, entered = 'false', resume = true, controlsPresent = true } = {}) {
+function workspaceEnvironmentFake({ present = true, entered = 'false', resume = true, controlsPresent = true,
+  offered = true, settles = true } = {}) {
   const events = []
   let expanded = 'false', profile = 'cad', entryClicked = false
   // Project's locator assertion delegates to _expect; environment polls read
@@ -938,6 +939,7 @@ function workspaceEnvironmentFake({ present = true, entered = 'false', resume = 
       const value = this.attributes()[name] ?? null
       if ((name === 'data-entered' && entryClicked) || (name === 'data-profile' && profile === 'solar')) {
         events.push(`assert:${name}=${value}`)
+        if (name === 'data-entered') entryClicked = false
       }
       return value
     }
@@ -955,10 +957,10 @@ function workspaceEnvironmentFake({ present = true, entered = 'false', resume = 
       assert.equal(role, 'button')
       assert.equal(exact, true)
       assert.ok(['Continue workspace', 'Open project or material'].includes(name))
-      return { isVisible: async () => resume, click: async options => {
+      return { isVisible: async () => offered && name === (resume ? 'Continue workspace' : 'Open project or material'), click: async options => {
         assert.deepEqual(options, { timeout: 15_000 })
         assert.equal(name, resume ? 'Continue workspace' : 'Open project or material')
-        events.push(name); entered = 'true'; entryClicked = true
+        events.push(name); entered = settles ? 'true' : 'false'; entryClicked = true
         if (!resume) expanded = 'true'
       } }
     },
@@ -985,7 +987,23 @@ function workspaceEnvironmentFake({ present = true, entered = 'false', resume = 
       } }
     },
   }
-  return { page, events }
+  return { page, events, setPresent: value => { present = value }, setEntered: value => { entered = value } }
+}
+
+function boundedWorkspacePoll({ passes = 4, beforePass = () => {} } = {}) {
+  const polls = []
+  const assertions = (value, message) => walkExpect(value, message)
+  assertions.poll = (read, options) => ({ toBe: async expected => {
+    const poll = { timeout: options.timeout, passes: 0 }
+    polls.push(poll)
+    for (let pass = 1; pass <= passes; pass++) {
+      poll.passes = pass
+      beforePass(pass, poll)
+      if (await read() === expected) return
+    }
+    throw new Error('fake poll reached its timeout')
+  } })
+  return { polls, assertions }
 }
 
 test('workspace entry continues an existing workspace and waits for entry', async () => {
@@ -1002,11 +1020,82 @@ test('workspace entry opens project intake, closes Project and waits for entry',
 })
 
 test('workspace entry leaves absent and already entered environments alone', async () => {
+  const { assertions } = boundedWorkspacePoll()
   for (const options of [{ present: false }, { entered: 'true' }]) {
     const { page, events } = workspaceEnvironmentFake(options)
-    await enterWorkspaceEnvironment(page)
+    await enterWorkspaceEnvironment(page, assertions)
     assert.deepEqual(events, [])
   }
+})
+
+test('workspace entry waits for the environment to attach on the third poll pass', async () => {
+  const fake = workspaceEnvironmentFake({ present: false })
+  const { polls, assertions } = boundedWorkspacePoll({ beforePass: pass => fake.setPresent(pass >= 3) })
+  await enterWorkspaceEnvironment(fake.page, assertions)
+  assert.deepEqual(polls, [{ timeout: 20_000, passes: 3 }])
+  assert.deepEqual(fake.events, ['Continue workspace', 'assert:data-entered=true'])
+})
+
+test('workspace entry tolerates an environment absent for the whole settle bound', async () => {
+  const { page, events } = workspaceEnvironmentFake({ present: false })
+  const { polls, assertions } = boundedWorkspacePoll()
+  await enterWorkspaceEnvironment(page, assertions)
+  assert.deepEqual(polls, [{ timeout: 20_000, passes: 4 }])
+  assert.deepEqual(events, [])
+})
+
+test('workspace entry refuses a fourth entry click with a data-entered diagnostic', async () => {
+  const { page, events } = workspaceEnvironmentFake({ settles: false })
+  const { polls, assertions } = boundedWorkspacePoll({ passes: 8 })
+  await assert.rejects(enterWorkspaceEnvironment(page, assertions), /data-entered.*3 clicks/)
+  assert.deepEqual(polls, [{ timeout: 20_000, passes: 4 }])
+  assert.equal(events.filter(event => event === 'Continue workspace').length, 3)
+})
+
+test('workspace chooser entry ignores Describe and returns false when no entry is offered', async () => {
+  for (const options of [{ offered: false }, { present: false }, { entered: 'true' }]) {
+    // The fake rejects any button lookup or click for Describe what to create.
+    const { page, events } = workspaceEnvironmentFake(options)
+    assert.equal(await enterWorkspaceIfChooser(page), false)
+    assert.deepEqual(events, [])
+  }
+  for (const resume of [true, false]) {
+    const { page, events } = workspaceEnvironmentFake({ resume })
+    assert.equal(await enterWorkspaceIfChooser(page), true)
+    assert.equal(events[0], resume ? 'Continue workspace' : 'Open project or material')
+  }
+})
+
+test('private drawing canvas readiness re-enters after a workspace scope reset', async () => {
+  const fake = workspaceEnvironmentFake()
+  let canvasPasses = 0
+  const { polls, assertions } = boundedWorkspacePoll()
+  const page = { ...fake.page,
+    goto: async () => {},
+    request: {
+      post: async () => ({ status: () => 202, json: async () => ({ drawing_id: 'scope-reset-drawing' }) }),
+      get: async () => ({ ok: () => true, json: async () => ({ status: 'ready' }) }),
+    },
+    getByRole: (role, options) => {
+      if (role !== 'region') return fake.page.getByRole(role, options)
+      return { locator: () => ({ boundingBox: async () => {
+        if (++canvasPasses === 1) {
+          fake.setEntered('false')
+          return null
+        }
+        assert.equal(fake.events.filter(event => event === 'Continue workspace').length, 2)
+        return { width: 100, height: 100 }
+      } }) }
+    },
+  }
+  const runtime = { page, evidence: {} }
+  await setupStep({ setup: { steps: [], context: {} } }, runtime, { kind: 'open-private-drawing', surface: 'cad' }, assertions)
+  assert.equal(canvasPasses, 2)
+  assert.equal(fake.events.filter(event => event === 'Continue workspace').length, 2)
+  assert.deepEqual(polls, [
+    { timeout: 20_000, passes: 1 }, { timeout: 60_000, passes: 2 },
+  ])
+  assert.equal(runtime.evidence.drawingId, 'scope-reset-drawing')
 })
 
 test('Solar profile selection proves the environment profile and reuses workspace entry', async () => {
