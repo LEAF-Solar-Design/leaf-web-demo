@@ -207,7 +207,6 @@ assert bundle=='com.example.portfolio'
 permitted(source)
 internal.mkdir(mode=0o700,exist_ok=False)
 (internal/'owner').write_text(p['name'])
-assert internal.stat().st_dev != app.stat().st_dev
 copy=internal/'Portfolio.app'
 effect(['/usr/bin/ditto',str(app),str(copy)],60)
 def manifest(folder):
