@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react'
+import { readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import { humanizeError } from '../errorHumanize.js'
 import {
   SOLAR_STRING_COMPOSER_REASONS, STRING_ADD_TOOL, STRING_MULTI_ADD_TOOL,
@@ -301,7 +302,14 @@ function ProjectStringComposer(props) {
         publish(candidate.submissionFeedback.refusal); setPhase('refused')
         return
       } finally { handoff.finish() }
-      if (result?.ok === true && result.status === 202 && result.data?.status === 'submitted' &&
+      if (readProjectSolarWorkerRefusal(result)) {
+        const refusal = projectSolarWorkerRefusal(candidate.intent.tool)
+        candidate.submissionFeedback = null
+        scope.candidate = null
+        scope.armed = null
+        publish({ ok: false, code: refusal.reasonCode, reason: refusal.message }, result)
+        setPhase('refused')
+      } else if (result?.ok === true && result.status === 202 && result.data?.status === 'submitted' &&
           typeof result.data.job_id === 'string' && projectJobId.test(result.data.job_id)) {
         scope.submitted = candidate
         candidate.submissionFeedback = null
@@ -335,7 +343,7 @@ function ProjectStringComposer(props) {
   if (!binding || !supported || !dependencies || !available) return <div><p className="solar-step-note" role="status">{refusal.reason}</p>{cancel}</div>
   return <div data-phase={phase}>
     {!view && <p className="solar-step-note" role="status">{PROJECT_STRING_COMPOSER_REASONS.loading}</p>}
-    {refusal && <p className="solar-step-note" role={view?.ok ? 'alert' : 'status'}>{refusal.reason}</p>}
+    {refusal && <p className="solar-step-note" role={view?.ok ? 'alert' : 'status'}>{refusal.reason}{refusal.code === 'sip_r4_worker_unavailable' && ` (${refusal.code})`}</p>}
     {isScopeCurrent() && scope.submitted === scope.candidate && scope.submitted && scope.candidate.fingerprint === fingerprint &&
       <p className="solar-step-note" role="status">{PROJECT_STRING_COMPOSER_REASONS.submitted}</p>}
     {scope.lock && <p className="solar-step-note" role="status">{phase === 'submitting'
@@ -352,7 +360,7 @@ function ProjectStringComposer(props) {
         setQueue={(update) => change(setQueue, update)} move={move} setQueuePage={setQueuePage}
         preview={preview} sizes={sizes} shownPreviewPage={shownPreviewPage} setPreviewPage={setPreviewPage} />
       <button className="chip-act" disabled={disabled || !armed} onClick={review}>Review &amp; run</button>
-      {message?.refusal && <button className="chip-act" disabled={disabled || !armed} onClick={review}>Retry</button>}
+      {message?.refusal && message.refusal.code !== 'sip_r4_worker_unavailable' && <button className="chip-act" disabled={disabled || !armed} onClick={review}>Retry</button>}
       <button className="chip-act" disabled={disabled || !preview.ok || (!!scope.submitted && scope.submitted === scope.candidate)}
         onClick={() => { invalidate(); setFeedback(null); setRefresh((value) => value + 1) }}>Refresh preview</button>
     </>}

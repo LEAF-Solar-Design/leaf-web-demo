@@ -9,6 +9,8 @@ import { projectSizingConductorFeedback, useProjectSizingConductor, MODULE_PARAM
 import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason, MODULE_PARAMETER_KEYS,
   deriveProjectSizingState, buildProjectSizingRequest } from './solarSizingModel.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
+import { projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import { recordToEnvelope, runToolAsync } from '../api.js'
 import { solarFlowRunOutcome } from './solarFlowModel.js'
 import { SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
@@ -200,6 +202,29 @@ async function submitColdRun(outcome = coldFailure()) {
 }
 
 describe('SolarSizingForm', () => {
+  it.each([true, false])('G20b sizing worker refusal classification: %s', async (worker) => {
+    const h = r9Harness()
+    h.props.onProjectSubmit.mockResolvedValue({ ok: false, status: 503,
+      reason: worker ? 'SIP_R4_WORKER_UNAVAILABLE' : 'HTTP_ERROR', envelope: worker ? workerUnavailable : null })
+    render(<SolarSizingForm {...h.props} />)
+    await r9Ready()
+    fireEvent.click(run())
+    const refusal = projectSolarWorkerRefusal('solar-size-strings')
+    await waitFor(() => expect(screen.getByTestId('project-solar-sizing-feedback').textContent).toBe(worker
+      ? `${refusal.message} (${refusal.reasonCode})` : PROJECT_SIZING_CONDUCTOR_REASONS.service_unavailable))
+    if (worker) {
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+      expect(screen.queryByText(/uncertain|outcome is unknown|retry the same request/i)).toBeNull()
+      const intent = h.props.onProjectSubmit.mock.calls[0][0]
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }))
+      await r9Ready()
+      expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(2)
+      fireEvent.click(run())
+      await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
+      expect(h.props.onProjectSubmit.mock.calls[1][0]).not.toBe(intent)
+    }
+  })
+
   async function moduleSearchForm(search = vi.fn(async () => moduleResult())) {
     const h = r14Harness()
     h.client.searchSizingModules = search

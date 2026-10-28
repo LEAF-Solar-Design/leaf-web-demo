@@ -1,4 +1,5 @@
 import { useEffect, useId, useRef, useState } from 'react'
+import { readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import { humanizeError } from '../errorHumanize.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { solarSizingRunSentence, SOLAR_SIZING_RUN_REASONS } from './solarSizingRunReasons.js'
@@ -323,7 +324,14 @@ export function useProjectSizingConductor(props, { toolName, deriveState, buildR
       const result = await latest.current.onProjectSubmit(accepted.candidate.intent,
         { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent })
       if (!pending.isCurrent()) return
-      if (result?.ok === true && result.status === 202 && result.data?.status === 'submitted'
+      if (readProjectSolarWorkerRefusal(result)) {
+        const refusal = projectSolarWorkerRefusal(toolName)
+        scope.retry = null
+        scope.candidate = null
+        scope.armed = null
+        setFeedback({ scope, generation: scope.generation, outcome: result,
+          reason: refusal.reasonCode, text: refusal.message, code: refusal.reasonCode })
+      } else if (result?.ok === true && result.status === 202 && result.data?.status === 'submitted'
           && typeof result.data.job_id === 'string' && projectJobId.test(result.data.job_id)) {
         scope.retry = null
         setFeedback({ scope, generation: scope.generation, outcome: result, text: 'Request submitted.', code: null })
@@ -459,6 +467,7 @@ function ProjectSolarSizingForm(props) {
     {runMessage && <p role="status" data-testid="project-solar-sizing-feedback">
       {humanizeError(runMessage.reason === 'request_timeout' && runMessage.phase === 'submission'
         ? 'The submission was not confirmed. Retry the same request to check its status.' : runMessage.text)}
+      {runMessage.code === 'sip_r4_worker_unavailable' && ` (${runMessage.code})`}
     </p>}
     {suggestion && <div role="status">
       <p>At {suggestion.standard_string_length} modules the cold-weather open-circuit voltage is {suggestion.string_voltage.toFixed(1)} V, above the {suggestion.max_dc_voltage.toFixed(1)} V limit. {suggestion.suggested_string_length} modules stay within it.</p>
