@@ -18,7 +18,7 @@ async function backend(page) {
   })
 }
 
-for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 390, height: 844 }]]) {
+for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wide-desktop', { width: 1600, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`docked workspace chrome remains usable at ${size}`, async ({ page }, info) => {
     test.setTimeout(120_000)
     page.setDefaultTimeout(15_000)
@@ -29,6 +29,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['pho
     await controls.getByRole('button', { name: 'Studio', exact: true }).click()
     const rail = page.getByRole('region', { name: 'Studio sidebar', exact: true })
     await expect(rail).toBeVisible()
+    await expect(page.locator('nav.tc-product-nav')).toBeHidden()
     await expect(page.locator('.environment-backdrop')).toHaveCSS('opacity', '0')
     await expect(page.locator('.environment-chooser')).toHaveCSS('opacity', '0')
     await page.screenshot({ path: info.outputPath(`docked-${size}-open.png`) })
@@ -61,6 +62,13 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['pho
     await controls.getByRole('button', { name:'Project', exact:true }).click()
     await expect(page.getByRole('region', { name:'Project sidebar', exact:true })).toBeVisible()
     await page.getByRole('button', { name:'Close Project', exact:true }).click()
+    await controls.getByRole('combobox', { name:'Workspace profile', exact:true }).selectOption('solar')
+    await controls.getByRole('button', { name:'Studio', exact:true }).click()
+    await expect(page.locator('.workspace-environment')).toHaveAttribute('data-profile', 'solar')
+    await expect(page.locator('.workspace-environment')).toHaveAttribute('data-entered', 'true')
+    await expect(page.locator('.app[data-studio-shell]')).toHaveAttribute('data-surface', 'solar')
+    await expect(page.locator('nav.tc-product-nav')).toBeHidden()
+    await page.screenshot({ path:info.outputPath(`docked-${size}-solar.png`) })
     await controls.getByRole('combobox', { name:'Workspace profile', exact:true }).selectOption('cad')
     await controls.getByRole('button', { name:'Studio', exact:true }).click()
     await expect(page.locator('#drafting-ribbon')).toBeVisible()

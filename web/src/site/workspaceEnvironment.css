@@ -80,7 +80,7 @@
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top .mark .mark-lockup { height: 26px; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] header.top .proj { display: flex; flex-wrap: wrap; min-width: 0; max-width: 100%; }
 .studio-shell:has(.workspace-environment) .browser-asset-viewport { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); height: auto; }
-.studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .tc-product-nav { display: none; }
+.studio-shell:has(.workspace-environment) .app[data-studio-shell][data-surface][data-environment-panel] nav.tc-product-nav { display: none; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity aside.nav { display: block; padding: 12px; overflow: visible; min-height: 0; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity,
 .studio-shell:has(.workspace-environment) .browser-project-panel { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); }
