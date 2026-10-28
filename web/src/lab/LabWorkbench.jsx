@@ -2,6 +2,7 @@ import { lazy, Suspense, useCallback, useEffect, useRef, useState } from 'react'
 import { LiveValues, useLiveGraph } from './canvas/GraphView.jsx'
 import { createHostProvider } from './host/hostProvider.js'
 import { guardSink } from './host/hostResidency.js'
+import { canonicalJSON } from './contract.js'
 import { fetchLabStatus, formatLabRoute, parseLabRoute } from './labRoute.js'
 import { registerLabViews } from './views.js'
 import { login, loginWithPopupFromClick, preloadAuthClient, subscribeTokenStored } from '../auth.js'
@@ -38,6 +39,10 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
   const root = useRef(null)
   const restoration = useRef(null)
   const initialReport = useRef(true)
+  const initialProposalPending = useRef(true)
+  const latestDraft = useRef(null)
+  const lastProposalDocument = useRef(null)
+  const admittedRef = useRef(false)
   const actionAt = useRef(null)
   const [opened, setOpened] = useState(!hidden)
   const [revision, setRevision] = useState(0)
@@ -46,19 +51,22 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
   const retainedProvider = useRef(emptyProvider)
   const connect = useCallback(({ onSource }) => {
     const connection = createHostBridge({
-      onAdmitted: () => setAdmitted(true),
+      onAdmitted: () => { admittedRef.current = true; setAdmitted(true) },
       onChange: ({ ready, problems }) => setHostProposal({ ready, problems }),
       onSource,
-      onReload: () => { setReloaded(true); setAdmitted(false); onReload(true) },
+      onReload: () => { setReloaded(true); admittedRef.current = false; setAdmitted(false); onReload(true) },
       onRestore: (draft) => new Promise((resolve) => {
         restoration.current = resolve
         initialReport.current = true
+        initialProposalPending.current = false
+        latestDraft.current = null
         setOpened(true)
         live.onChange(null)
         setRestored((previous) => ({ document: draft.document, revision: (previous?.revision || 0) + 1 }))
       }),
     })
     bridge.current = connection
+    lastProposalDocument.current = null
     onBridge(connection)
     return {
       start: () => connection.start(),
@@ -68,6 +76,7 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
         onBridge(null)
         restoration.current?.()
         restoration.current = null
+        admittedRef.current = false
         setAdmitted(false)
         setHostProposal(null)
       },
@@ -89,21 +98,42 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
     onHostSource({ provider: source, revision })
   }, [source, revision, onHostSource])
 
+  const propose = useCallback((draft, triggeredAt = actionAt.current ?? performance.now()) => {
+    try {
+      return guardSink('proposal', next => {
+        const pending = bridge.current?.proposal(next, triggeredAt)
+        if (admittedRef.current) lastProposalDocument.current = canonicalJSON(next.document)
+        return pending
+      })(draft)
+    } catch {
+      setHostProposal({ ready: false, problems: ['Proposal refused: host data cannot leave the runtime'] })
+      return Promise.resolve(false)
+    }
+  }, [])
+
   const changed = useCallback((draft) => {
+    latestDraft.current = draft
     live.onChange(draft)
     if (initialReport.current) {
       initialReport.current = false
+      // A host restore is already known to the host; its report is not an edit.
+      if (restoration.current) lastProposalDocument.current = canonicalJSON(draft.document)
       restoration.current?.()
       restoration.current = null
       return
     }
-    const triggeredAt = actionAt.current ?? performance.now()
-    try {
-      void guardSink('proposal', next => bridge.current?.proposal(next, triggeredAt))(draft)?.catch(() => {})
-    } catch {
-      setHostProposal({ ready: false, problems: ['Proposal refused: host data cannot leave the runtime'] })
+    void propose(draft)?.catch(() => {})
+  }, [live.onChange, propose])
+
+  useEffect(() => {
+    // Only the automatic initial proposal waits for readiness and admission.
+    if (initialProposalPending.current && admitted && live.ready && graph && latestDraft.current === graph) {
+      initialProposalPending.current = false
+      if (lastProposalDocument.current !== canonicalJSON(graph.document)) {
+        void propose(latestDraft.current)?.catch(() => {})
+      }
     }
-  }, [live.onChange])
+  }, [admitted, live.ready, graph, propose])
 
   return <div ref={root} className="lab-graph-view" hidden={hidden}
     onPointerDownCapture={() => { actionAt.current = performance.now() }}
@@ -117,12 +147,8 @@ function EmbeddedGraph({ hidden, enabled, onReload, createHostBridge, onHostSour
         <button type="button" disabled={!enabled || !admitted || !live.ready || reloaded || hostProposal?.ready === false || bridge.current?.state?.status === 'too_large'}
           onClick={() => {
             const triggeredAt = performance.now()
-            // Publish the current draft before asking the host to sign it.
-            try {
-              void guardSink('proposal', draft => bridge.current?.proposal(draft, triggeredAt))(graph)?.then(() => bridge.current?.run(triggeredAt)).catch(() => {})
-            } catch {
-              setHostProposal({ ready: false, problems: ['Proposal refused: host data cannot leave the runtime'] })
-            }
+            // Ensure the host has the current draft before asking it to sign.
+            void propose(graph, triggeredAt)?.then(sent => sent !== false && bridge.current?.run(triggeredAt)).catch(() => {})
           }}>Run graph</button>
         <a href={formatLabRoute({ view: 'test-trade', params: { ...route?.params, embed: '1' } })}
           onClick={(event) => {

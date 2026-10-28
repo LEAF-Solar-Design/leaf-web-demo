@@ -57,6 +57,7 @@ _REQUIRED_COLUMNS = {
         "response_bytes", "response_sha256", "solver_endpoint", "solver_version",
         "candidate_bytes", "candidate_sha256", "proof_bytes", "proof_sha256",
         "sender_worker", "sender_attempt", "refusal_code", "created_at", "updated_at",
+        "grid_id", "send_protocol", "sent_at", "send_principal_sha256",
     },
     "demo_sessions": {
         "id", "subject", "tenant_id", "org_id", "created_at", "expires_at",
@@ -851,6 +852,12 @@ _REQUIRED_CONSTRAINTS = {
         "response_sha256 = encode(sha256(response_bytes), 'hex')",
         "candidate_sha256 = encode(sha256(candidate_bytes), 'hex')",
         "proof_sha256 = encode(sha256(proof_bytes), 'hex')"),
+    "project_solve_exchanges_async_shape_check": _catalog_contract(
+        "project_solve_exchanges", "CHECK", "send_protocol IS NULL",
+        "send_protocol = 'async-idempotent-v1'", "grid_id IS NULL",
+        "'prepared'", "'outcome_unknown'", "sent_at IS NULL", "sent_at IS NOT NULL",
+        "send_principal_sha256 IS NULL", "send_principal_sha256 IS NOT NULL",
+        "send_principal_sha256 ~ '^[0-9a-f]{64}$'"),
     "project_solve_exchanges_shape_check": _catalog_contract(
         "project_solve_exchanges", "CHECK", "response_bytes IS NULL", "response_sha256 IS NULL",
         "candidate_bytes IS NULL", "candidate_sha256 IS NULL", "proof_bytes IS NULL",
@@ -1211,6 +1218,9 @@ _REQUIRED_TRIGGERS = {
     "project_solve_exchanges_guard": _catalog_contract(
         "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION guard_project_solve_exchange()"),
+    "project_solve_exchanges_async_guard": _catalog_contract(
+        "project_solve_exchanges", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION guard_project_solve_async()"),
     "project_sizing_exchange_completion": _catalog_contract(
         "project_sizing_exchanges", "AFTER INSERT OR UPDATE",
         "DEFERRABLE INITIALLY DEFERRED", "FOR EACH ROW",

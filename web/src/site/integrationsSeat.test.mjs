@@ -26,8 +26,8 @@ describe('the console Link-a-service drawer sits in the rail column, not over th
   })
 
   it('mounts it inside the .rail-stack column, after the job monitor and inbox', () => {
-    const stackOpen = app.indexOf('<div className="rail-stack">')
-    assert.notEqual(stackOpen, -1, 'App.jsx must open a <div className="rail-stack"> column')
+    const stackOpen = app.search(/<div\s+className="rail-stack"[\s>]/)
+    assert.notEqual(stackOpen, -1, 'App.jsx must open the rail-stack column')
     const jobRail = app.indexOf('<SurfaceFrame.JobRail />', stackOpen)
     const inbox = app.indexOf('<SurfaceFrame.Inbox />', jobRail)
     const mount = app.indexOf(MOUNT, inbox)

@@ -6,6 +6,7 @@ from psycopg.types.json import Jsonb
 from . import project_lifecycle as lifecycle
 from .db import run_transaction
 from .web_page_template import document_digest, validate_document
+from . import portfolio_page_template
 
 
 def _authorize(cur, org_id, project_id, actor_id, *, write=False):
@@ -26,6 +27,49 @@ def _page(row):
     if document_digest(document) != row['digest']:
         raise lifecycle.LifecycleConflict('The saved page could not be verified.')
     return {'revision': row['revision'], 'digest': row['digest'], 'document': document}
+
+
+def _resolve_images(cur, org_id, project_id, document):
+    if document.get('schema') != 'leaf.portfolio.v1':
+        return {}
+    result = {}
+    for mid, image in sorted(portfolio_page_template.image_references(document).items()):
+        cur.execute('SELECT * FROM project_materials WHERE org_id=%s AND project_id=%s AND material_id=%s FOR SHARE',
+                    (org_id, project_id, mid))
+        row = cur.fetchone()
+        if row is None or any(row[key] != image[key] for key in ('sha256', 'preview_sha256')):
+            raise ValueError('A portfolio photo is missing from this project or its digests do not match. Re-select the photo.')
+        result[mid] = dict(row)
+    return result
+
+
+def export_source(org_id, project_id, actor_id, *, revision, target='web'):
+    from . import web_page_template
+    import project_material_images as images
+    page = read(org_id, project_id, actor_id, revision=revision)
+    if target not in ('web', 'ios'):
+        raise ValueError('Unsupported source target.')
+    if target == 'ios' and page['document'].get('schema') != 'leaf.portfolio.v1':
+        raise ValueError('Create and save a portfolio before exporting native iOS source.')
+
+    def resolve(conn):
+        with conn.cursor() as cur:
+            _authorize(cur, org_id, project_id, actor_id)
+            return _resolve_images(cur, org_id, project_id, page['document'])
+    rows = run_transaction(resolve)
+    previews, total = {}, 0
+    for mid, row in rows.items():
+        raw = images.read_content(org_id, project_id, row, 'preview')
+        total += len(raw)
+        if total > portfolio_page_template.MAX_PREVIEW_BYTES:
+            raise ValueError('Portfolio previews exceed 64 MiB. Reduce the selected photos.')
+        previews[mid] = raw
+    # Recheck authority after storage reads, just as the content endpoint does.
+    lifecycle.require_project_role(org_id, project_id, actor_id, write=False)
+    if target == 'ios':
+        from . import portfolio_ios_template
+        return page, portfolio_ios_template.source_archive(page['document'], page['revision'], previews)
+    return page, web_page_template.source_archive(page['document'], page['revision'], previews)
 
 
 def read(org_id, project_id, actor_id, *, revision=None):
@@ -54,6 +98,7 @@ def save(org_id, project_id, actor_id, *, expected_revision, document):
     def operation(conn):
         with conn.cursor() as cur:
             _authorize(cur, org_id, project_id, actor_id, write=True)
+            _resolve_images(cur, org_id, project_id, document)
             cur.execute('SELECT revision,digest,document FROM project_web_page_revisions '
                         'WHERE org_id=%s AND project_id=%s ORDER BY revision DESC LIMIT 1', (org_id, project_id))
             current = _page(cur.fetchone())

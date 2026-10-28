@@ -43,6 +43,9 @@ function readChromeTop() {
   const vh = window.innerHeight
   let top = null
   for (const el of document.querySelectorAll(NARROW_CHROME)) {
+    // The docked workspace activity rail is side chrome, including its catalog.
+    // Its top edge must not collapse the phone coach's available height.
+    if (el.closest('.app[data-environment-panel] > #project-workspace-activity')) continue
     const r = el.getBoundingClientRect()
     const studio = el.closest('.app[data-studio-shell="cockpit"]')
     if (!r.height || r.top < (studio ? 0 : vh * NARROW_CHROME_MIN_TOP) || r.top >= vh) continue

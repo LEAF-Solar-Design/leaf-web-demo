@@ -1173,7 +1173,10 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_mcp_staging_probe.py"), 24),
         Suite("server-probe-staging-async-job",
               "server tests/test_probe_staging_async_job.py", "pytest", SERVER,
-              _py_pytest("tests/test_probe_staging_async_job.py"), 16),
+              _py_pytest("tests/test_probe_staging_async_job.py"), 23),
+        Suite("server-probe-conv-durable-restart",
+              "server tests/test_probe_conv_durable_restart.py", "pytest", SERVER,
+              _py_pytest("tests/test_probe_conv_durable_restart.py"), 16),
         Suite("server-mcp-tenant-registry",
               "server tests/test_tenant_mcp.py", "pytest", SERVER,
               _py_pytest("tests/test_tenant_mcp.py"), 33,
@@ -3683,6 +3686,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_cost_vendors.py"), 15),
         Suite("server-save-plan-version", "server tests/test_save_plan_version.py", "pytest", SERVER,
               _py_pytest("tests/test_save_plan_version.py"), 39),
+        Suite("server-version-plan-route", "server tests/test_version_plan_route.py", "pytest", SERVER,
+              _py_pytest("tests/test_version_plan_route.py"), 26),
         Suite("server-search", "server tests/test_search.py", "pytest", SERVER,
               _py_pytest("tests/test_search.py"), 9),
         Suite("server-session-fanout", "server tests/test_session_fanout.py", "pytest", SERVER,
@@ -3741,7 +3746,7 @@ def build_suites() -> List[Suite]:
         Suite("web-link-service-flow", "web managed link service OAuth flow", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.local.config.mjs",
                "e2e/local/link-service-flow.spec.mjs", "e2e/local/trust-state.spec.mjs", "--workers=1"], None,
-              uses_database=True),
+              uses_database=True, db_gated=True),
         # Browser proofs from studio-lanes-20260930 (lanes C, stu2-d, stu2-h, the
         # lifecycle panel, the iOS ship surface, the viewer grid toggle). One row
         # per Playwright config; every config derives its dev server port from

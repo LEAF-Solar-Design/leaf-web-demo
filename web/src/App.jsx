@@ -4115,6 +4115,11 @@ export default function App() {
   // key the stack hands back.
   usePhoneDrawerEscape({ studioShell, phoneViewport: drawerViewport, studioDrawer }, () => setStudioDrawer('none'))
   const [studioRibbonHost, setStudioRibbonHost] = useState(null)
+  const [studioActivityHost, setStudioActivityHost] = useState(null)
+  const [activityFallback, setActivityFallback] = useState(null)
+  const seatStudioActivity = content => studioShell
+    ? (studioActivityHost ? createPortal(content, studioActivityHost) : null)
+    : content
   const projectSwitcherRef = useRef(null)
   // Each bump opens the header switcher on its inline create field.
   const [projectCreateRequest, setProjectCreateRequest] = useState(0)
@@ -4229,7 +4234,7 @@ export default function App() {
     ...iosShipController,
     controllerLive: shipControllerLive,
     contract: iosContract,
-    revision: canonicalVersionId || null,
+    revision: iosShipController.revision,
     error: shipErrorSentence(iosShipController.error),
     onLaunch: iosShipController.phase === 'ready' ? iosShipController.launch : null,
     launchReason: shipLaunchReason(iosShipController),
@@ -4264,17 +4269,21 @@ export default function App() {
   useLayoutEffect(() => {
     const h = document.querySelector('header.top')
     const f = document.querySelector('footer.foot-bar')
+    const commandDock = document.querySelector('.bar-dock')
     if (!h || !f) return undefined
     const sync = () => {
       const r = document.documentElement.style
       r.setProperty('--drawer-top', `${Math.round(h.getBoundingClientRect().height)}px`)
       r.setProperty('--drawer-bottom', `${Math.round(f.getBoundingClientRect().height)}px`)
+      if (commandDock) r.setProperty('--environment-controls-bottom', `${Math.max(Math.round(f.getBoundingClientRect().height), Math.ceil(window.innerHeight - commandDock.getBoundingClientRect().top))}px`)
     }
     sync()
     if (typeof ResizeObserver === 'undefined') return undefined
     const ro = new ResizeObserver(sync)
     ro.observe(h); ro.observe(f)
-    return () => ro.disconnect()
+    if (commandDock) ro.observe(commandDock)
+    window.addEventListener('resize', sync)
+    return () => { ro.disconnect(); window.removeEventListener('resize', sync) }
   }, [])
 
   // M1 exit fades for the parent-mounted panels: hold the mount through the
@@ -4864,12 +4873,7 @@ export default function App() {
       }}
     >
     <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-drawer={studioShell && !browserAssetActive ? studioDrawer : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
-      id={studioShell ? 'browser-studio-panel' : undefined}
-      role={studioShell ? 'region' : undefined}
-      aria-label={studioShell ? 'Studio sidebar' : undefined}
       data-environment-panel={studioShell ? browserPanel : undefined}
-      inert={studioShell && browserPanel !== 'studio' ? INERT_VALUE : undefined}
-      aria-hidden={studioShell && browserPanel !== 'studio' ? 'true' : undefined}
       onClickCapture={(event) => {
         if (event.target instanceof Element && event.target.closest('.ribbon-tool:not(:disabled), .cockpit-quick button:not(:disabled), .cp-run:not(:disabled)')) {
           if (exitPending()) { event.preventDefault(); event.stopPropagation(); return }
@@ -4882,10 +4886,6 @@ export default function App() {
         if (event.target instanceof Element && event.target.closest('.drafting-ribbon, .cockpit-quick, #cockpit-import-pane input[type="file"]')) returnToDrawing()
       }}
     >
-      {studioShell && <div className="browser-panel-heading"><strong>Studio</strong><button id="browser-studio-close" type="button" onClick={() => {
-        setBrowserPanel('none')
-        document.querySelector('.environment-strip button[aria-controls="browser-studio-panel"]')?.focus()
-      }}>Close Studio</button></div>}
       <header className="top">
         <div className="mark" role="img" aria-label="Leaf Automation"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="" aria-hidden="true" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
         {/* W4e: on the studio's drafting surfaces the header IS the
@@ -4999,7 +4999,7 @@ export default function App() {
           setAuthorOpen(true), and rTarget / anyFamilyOpen read toolsOpen and
           openFamilies to pick the R-key retry rung. A rail that owned them
           would have silently cut those wires. */}
-      <NavRail
+      {seatStudioActivity(<NavRail
         activeSurface={activeSurface}
         studio={studioGround}
         navSpine={navSpine}
@@ -5046,7 +5046,7 @@ export default function App() {
         claudeNotLinked={claudeNotLinked}
         onLinkClaude={() => setClaudeOpen(true)}
         buildEntitled={canBuild}
-      />
+      />)}
 
       <div className="center-col">
         <main className="center-scroll">
@@ -5975,6 +5975,8 @@ export default function App() {
         </div>,
         )}
 
+        <div className="environment-activity-fallback" ref={setActivityFallback} />
+        <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div className="result-block enter" style={{ '--rank': 2 }} ref={resultBlockRef}>
           <ResultPanel
             navigation={viewNavigation}
@@ -6027,6 +6029,7 @@ export default function App() {
           )}
         </div>
 
+        </PersistentSeat>
         {/* Agent tier (wire §11): the conversational surface for this drawing's
             session. LIVE only — never rendered in mock. 'race' keeps the chip
             primary; taking the chip unmounts this (onRun) without cancelling
@@ -6060,6 +6063,7 @@ export default function App() {
           paneSeats.annotationTarget,
         )}
 
+        <PersistentSeat destination={studioShell ? studioActivityHost : activityFallback}>
         <div ref={setConversationSource} />
         {paneSeats.conversationMounted && (
           <PersistentSeat destination={paneSeats.conversationTarget}>
@@ -6117,6 +6121,7 @@ export default function App() {
           </PersistentSeat>
         )}
 
+        </PersistentSeat>
         {/* Studio drafting surfaces host it in the dock (see the dock's Plan
             section); everywhere else it renders here, unchanged. Slice 4a: the
             choice is the frame's `entitlement.placement`, declared once. */}
@@ -6244,8 +6249,21 @@ export default function App() {
           <button type="button" aria-expanded={studioDrawer === 'plan'} onClick={() => toggleStudioDrawer('plan')}>Plan</button>
         </div>
       )}
-      <div className="rail-stack">
-        {studioShell && <SurfaceFrame.Frame />}
+      <div className="rail-stack"
+        id={studioShell ? 'project-workspace-activity' : undefined}
+        role={studioShell ? 'region' : undefined}
+        aria-label={studioShell ? 'Studio sidebar' : undefined}
+        hidden={studioShell && browserPanel !== 'studio'}
+        inert={studioShell && browserPanel !== 'studio' ? INERT_VALUE : undefined}
+        aria-hidden={studioShell && browserPanel !== 'studio' ? 'true' : undefined}>
+        {studioShell && <>
+          <div className="browser-panel-heading"><strong>Studio</strong><button id="browser-studio-close" type="button" onClick={() => {
+            setBrowserPanel('none')
+            document.querySelector('.environment-strip button[aria-controls="project-workspace-activity"]')?.focus()
+          }}>Close Studio</button></div>
+          <div className="environment-activity-host" ref={setStudioActivityHost} />
+          <SurfaceFrame.Frame />
+        </>}
         {!mock && !knownGuest && <SurfaceFrame.Conversations />}
         <SurfaceFrame.JobRail />
         <SurfaceFrame.Inbox />

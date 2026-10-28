@@ -20,12 +20,20 @@ import os
 from pathlib import Path
 import re
 import time
+from types import SimpleNamespace
 import uuid
 
 ORIGIN = "https://platform-staging.leafdesign.ai"
 SECRET_ID = "stg/leaf/acceptance-tenant-b"
 ACCOUNT = "807034087062"
 REGION = "us-east-1"
+REVISION_LABEL = "org.opencontainers.image.revision"
+COMPONENT_KEYS = {
+    "app": ("LEAF_RUNTIME_ENV", "LEAF_JOBS_STORE", "LEAF_BROKER_STORE",
+            "LEAF_DRAWING_STORE", "LEAF_BLOB_STORE", "LEAF_STORE_DIR"),
+    "broker": ("LEAF_BROKER_STORE", "LEAF_DRAWING_STORE", "LEAF_BLOB_STORE",
+               "LEAF_STORE_DIR"),
+}
 TOOL = "measure-panel-area"
 ACK = "p080-r3-staging-only"
 EXPECTED = {"layer": "p080_r3", "count": 2, "total_area": 300.0,
@@ -58,6 +66,43 @@ class Refusal(Exception):
 def require(ok, reason):
     if not ok:
         raise Refusal(reason)
+
+
+def check_component(component, task, definition, entry, source, env, receipt):
+    require(task["lastStatus"] == "RUNNING"
+            and task["taskArn"].split(":")[4] == ACCOUNT
+            and task["taskArn"].split(":")[3] == REGION,
+            "runtime_refused")
+    containers = [c for c in definition["containerDefinitions"]
+                  if c["name"] == entry["container"]]
+    require(len(containers) == 1, "runtime_refused")
+    container = containers[0]
+    actual = [c for c in task["containers"] if c["name"] == entry["container"]]
+    labels = container.get("dockerLabels", {})
+    require(len(actual) == 1 and actual[0].get("imageDigest") == entry["image_digest"]
+            and (REVISION_LABEL not in labels or labels[REVISION_LABEL] == source),
+            "source_refused")
+    effective = {v["name"]: v["value"] for v in container.get("environment", [])}
+    for override in task.get("overrides", {}).get("containerOverrides", []):
+        if override["name"] == container["name"]:
+            effective.update({v["name"]: v["value"]
+                              for v in override.get("environment", [])})
+    for key in COMPONENT_KEYS[component]:
+        require(effective.get(key) == env.get(key), "authority_refused")
+    # The runner's protected URL must come from the same reviewed secret
+    # reference as BOTH services, rather than a similarly named database.
+    secrets = {v["name"]: v["valueFrom"] for v in container.get("secrets", [])}
+    require(secrets.get("DATABASE_URL") == receipt["database_secret_arn"], "database_refused")
+    volumes = {v["name"]: v for v in definition.get("volumes", [])}
+    mounts = [m for m in container.get("mountPoints", [])
+              if m["containerPath"] == "/data/drawings" and not m.get("readOnly")]
+    require(len(mounts) == 1 and volumes[mounts[0]["sourceVolume"]].get(
+        "efsVolumeConfiguration", {}).get("fileSystemId") == receipt["efs_id"],
+        "mount_refused")
+
+
+def served_source_ok(status, body, source) -> bool:
+    return status == 200 and isinstance(body, dict) and body.get("source_sha") == source
 
 
 def preflight(args, env):
@@ -175,6 +220,8 @@ class Probe:
                 "submission_started": False, "setup_started": False,
                 "job_id": None, "close_started": False,
                 "samples": [], "acknowledged_202": False,
+                "submit_http_status": None, "submit_body_status": None,
+                "submit_error_code": None,
                 "outcome": "failed", "cleanup_complete": False,
                 "removal_started": False,
                 "result_match": False, "database_http_agree": False,
@@ -195,6 +242,19 @@ class Probe:
                     "tool": TOOL, "params": {"layer": "p080_r3"}, "dwg": drawing,
                     "dwg_version": 1, "catalog_digest": digest,
                 }, "p080-r3:" + args.run_id)
+                self.receipt["submit_http_status"] = (
+                    status if type(status) is int and 100 <= status <= 599 else None)
+                if isinstance(body, dict):
+                    if "status" in body:
+                        self.receipt["submit_body_status"] = (
+                            body["status"] if body["status"] in
+                            ("submitted", "queued", "running", "complete", "failed") else "other")
+                    error = body.get("error")
+                    for code in (error.get("error_code") if isinstance(error, dict) else None,
+                                 body.get("error_code")):
+                        if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code):
+                            self.receipt["submit_error_code"] = code
+                            break
                 if status == 202 and body.get("status") == "submitted":
                     candidate = body.get("job_id")
                     if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f-]{36}", candidate):
@@ -394,6 +454,7 @@ def validate_receipt(r):
     keys = {"schema", "drawing", "fixture_sha256", "tenant_sha256", "run_id", "source",
             "submission_started", "setup_started", "job_id", "close_started", "samples",
             "acknowledged_202", "outcome", "cleanup_complete", "removal_started",
+            "submit_http_status", "submit_body_status", "submit_error_code",
             "execution_outcome", "reason"}
     keys.update({"result_match", "database_http_agree", "broker_non_aps"})
     outcomes = {"passed", "failed", "submission_unknown", "cleanup_pending",
@@ -414,6 +475,15 @@ def validate_receipt(r):
         require(type(r.get(key)) is bool, "receipt_refused")
     for key in ("result_match", "database_http_agree", "broker_non_aps"):
         require(type(r.get(key)) is bool, "receipt_refused")
+    status = r.get("submit_http_status")
+    require(status is None or type(status) is int and 100 <= status <= 599,
+            "receipt_refused")
+    require(r.get("submit_body_status") in
+            (None, "submitted", "queued", "running", "complete", "failed", "other"),
+            "receipt_refused")
+    code = r.get("submit_error_code")
+    require(code is None or isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code),
+            "receipt_refused")
     require(r.get("job_id") is None or str(uuid.UUID(r["job_id"])) == r["job_id"],
             "receipt_refused")
     require(isinstance(r.get("samples"), list) and len(r["samples"]) <= 8, "receipt_refused")
@@ -549,39 +619,11 @@ class LiveAdapters:
             require(not described.get("failures") and len(described["tasks"]) == 1,
                     "runtime_refused")
             task = described["tasks"][0]
-            require(task["lastStatus"] == "RUNNING"
-                    and task["taskArn"].split(":")[4] == ACCOUNT
-                    and task["taskArn"].split(":")[3] == REGION,
-                    "runtime_refused")
             definition = ecs.describe_task_definition(
                 taskDefinition=task["taskDefinitionArn"])["taskDefinition"]
-            containers = [c for c in definition["containerDefinitions"]
-                          if c["name"] == entry["container"]]
-            require(len(containers) == 1, "runtime_refused")
-            container = containers[0]
-            actual = [c for c in task["containers"] if c["name"] == entry["container"]]
-            require(len(actual) == 1 and actual[0].get("imageDigest") == entry["image_digest"]
-                    and container.get("dockerLabels", {}).get(
-                        "org.opencontainers.image.revision") == source,
-                    "source_refused")
-            effective = {v["name"]: v["value"] for v in container.get("environment", [])}
-            for override in task.get("overrides", {}).get("containerOverrides", []):
-                if override["name"] == container["name"]:
-                    effective.update({v["name"]: v["value"]
-                                      for v in override.get("environment", [])})
-            for key in ("LEAF_RUNTIME_ENV", "LEAF_JOBS_STORE", "LEAF_BROKER_STORE",
-                        "LEAF_DRAWING_STORE", "LEAF_BLOB_STORE", "LEAF_STORE_DIR"):
-                require(effective.get(key) == self.env.get(key), "authority_refused")
-            # The runner's protected URL must come from the same reviewed secret
-            # reference as BOTH services, rather than a similarly named database.
-            secrets = {v["name"]: v["valueFrom"] for v in container.get("secrets", [])}
-            require(secrets.get("DATABASE_URL") == r["database_secret_arn"], "database_refused")
-            volumes = {v["name"]: v for v in definition.get("volumes", [])}
-            mounts = [m for m in container.get("mountPoints", [])
-                      if m["containerPath"] == "/data/drawings" and not m.get("readOnly")]
-            require(len(mounts) == 1 and volumes[mounts[0]["sourceVolume"]].get(
-                "efsVolumeConfiguration", {}).get("fileSystemId") == r["efs_id"],
-                "mount_refused")
+            check_component(component, task, definition, entry, source, self.env, r)
+        status, body = self.http("GET", "/api/health", None)
+        require(served_source_ok(status, body, source), "source_refused")
         self.runtime_receipt = r
         row = self.query("SELECT current_database() AS name")[0]
         require(row["name"] == r["database_name"], "database_refused")
@@ -589,9 +631,11 @@ class LiveAdapters:
     def connect(self):
         import psycopg
         from psycopg.rows import dict_row
-        return psycopg.connect(self.env["DATABASE_URL"], autocommit=True,
-                               connect_timeout=5, row_factory=dict_row,
-                               options="-c statement_timeout=5000 -c lock_timeout=3000")
+        conn = psycopg.connect(self.env["DATABASE_URL"], autocommit=True,
+                               connect_timeout=5, row_factory=dict_row)
+        conn.execute("SELECT set_config('statement_timeout', '5000', false), "
+                     "set_config('lock_timeout', '3000', false)")
+        return conn
 
     def query(self, sql, params=(), connection=None):
         if connection is not None:
@@ -621,8 +665,11 @@ class LiveAdapters:
         rows = self.query("SELECT tier, disabled FROM broker_tenants WHERE tenant_id=%s", (tenant,))
         # Pure policy module, no broker/application startup.
         import entitlements
-        return (len(rows) == 1 and not rows[0]["disabled"]
-                and entitlements.entitlements_for(rows[0]["tier"]).get("run_read") is True)
+        if len(rows) > 1 or (rows and rows[0]["disabled"]):
+            return False
+        tier = (entitlements.DEFAULT_TIER if not rows or rows[0]["tier"] is None
+                else entitlements.resolve_tier(SimpleNamespace(tier=rows[0]["tier"])))
+        return entitlements.entitlements_for(tier).get("run_read") is True
 
     def check_origin(self):
         # Resolve redirect/authentication failures before loading the bearer.
@@ -631,7 +678,8 @@ class LiveAdapters:
 
     def http(self, method, path, token, body=None, correlation=None):
         import requests
-        require(path in {"/api/run", "/api/tools", "/api/entitlements", "/api/session/identity"}
+        require(path in {"/api/run", "/api/tools", "/api/entitlements", "/api/session/identity",
+                         "/api/health"}
                 or re.fullmatch(r"/api/jobs/[0-9a-f-]{36}(/close)?", path), "destination_refused")
         headers = {"Authorization": "Bearer " + token} if token is not None else {}
         if body is not None:

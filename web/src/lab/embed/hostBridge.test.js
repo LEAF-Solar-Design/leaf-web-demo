@@ -169,6 +169,7 @@ describe('admitted Lab channel', () => {
   it('refuses publication before admission and validates the document and exact source', async () => {
     const h = harness()
     const request = { doc: createWidgetDoc(), source: { artifact_id: 'widget-1', revision: 1, digest: '0'.repeat(64) } }
+    request.doc.formats.la.h = 128
     expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
     await h.bridge.start()
     expect(await h.bridge.publishWidget(request)).toEqual({ ok: false, reason: 'not_admitted' })
@@ -177,6 +178,10 @@ describe('admitted Lab channel', () => {
     const invalidUnicode = createWidgetDoc()
     invalidUnicode.formats.la.els = [{ ...newElement(invalidUnicode), text: '\ud800' }]
     expect(await h.bridge.publishWidget({ ...request, doc: invalidUnicode })).toEqual({ ok: false, reason: 'invalid_doc' })
+    const tall = createWidgetDoc()
+    expect(validateWidgetDoc(tall)).toEqual(tall)
+    expect(await h.bridge.publishWidget({ ...request, doc: tall })).toEqual({ ok: false, reason: 'la_too_tall' })
+    expect(h.sent()).toEqual([])
     for (const source of [null, {}, { ...request.source, extra: true }, { ...request.source, digest: 'A'.repeat(64) },
       { ...request.source, revision: 0 }, { ...request.source, revision: 1.5 },
       { ...request.source, revision: Number.MAX_SAFE_INTEGER + 1 }, { ...request.source, artifact_id: '../widget' },
@@ -210,6 +215,7 @@ describe('admitted Lab channel', () => {
     await h.bridge.start()
     await h.admit()
     const doc = createWidgetDoc()
+    doc.formats.la.h = 128
     const { text, preset, ...element } = newElement(doc)
     doc.formats.la.els = Array.from({ length: 6 }, (_, index) => ({ ...element, id: `path${index}`, kind: 'svg-path', path: 'M' }))
     doc.formats.la.els.push({ ...newElement(doc), id: 'unicode', text: 'é' })

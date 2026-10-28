@@ -29,6 +29,7 @@ JWT = ".".join([
     "SENTINEL_SIGNATURE",
 ])
 LIVE_HTTP = p.LiveAdapters.http
+LIVE_CONNECT = p.LiveAdapters.connect
 ENV = {"DATABASE_URL": DATABASE, "LEAF_RUNTIME_ENV": "staging",
        "LEAF_JOBS_STORE": "postgres", "LEAF_BROKER_STORE": "postgres",
        "LEAF_DRAWING_STORE": "postgres", "LEAF_BLOB_STORE": "filesystem",
@@ -393,6 +394,52 @@ def run(fake):
     return p.Probe(fake).run(args(), fake.env)
 
 
+def test_live_connect_sets_session_timeouts_without_startup_options(monkeypatch):
+    calls = []
+    connection = SimpleNamespace(execute=lambda sql: calls.append(("execute", sql)))
+    dict_row = object()
+
+    def connect(dsn, **kwargs):
+        calls.append(("connect", dsn, kwargs))
+        return connection
+
+    monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(connect=connect))
+    monkeypatch.setitem(sys.modules, "psycopg.rows", SimpleNamespace(dict_row=dict_row))
+
+    result = LIVE_CONNECT(p.LiveAdapters(ENV))
+    calls.append(("returned", result))
+    assert result is connection
+    assert "options" not in calls[0][2]
+    assert calls == [
+        ("connect", DATABASE, {"autocommit": True, "connect_timeout": 5,
+                               "row_factory": dict_row}),
+        ("execute", "SELECT set_config('statement_timeout', '5000', false), "
+                    "set_config('lock_timeout', '3000', false)"),
+        ("returned", connection),
+    ]
+
+
+def test_live_broker_entitled_matches_broker_tier_defaults(monkeypatch):
+    import entitlements
+
+    adapter = p.LiveAdapters(ENV)
+    assert entitlements.entitlements_for("guest").get("run_read") is not True
+    for rows, expected in [
+        ([], True),
+        ([{"tier": None, "disabled": False}], True),
+        ([{"tier": None, "disabled": True}], False),
+        ([{"tier": None, "disabled": False}] * 2, False),
+        ([{"tier": "guest", "disabled": False}], False),
+    ]:
+        def query(sql, params):
+            assert sql == "SELECT tier, disabled FROM broker_tenants WHERE tenant_id=%s"
+            assert params == (TENANT,)
+            return rows
+
+        monkeypatch.setattr(adapter, "query", query)
+        assert adapter.broker_entitled(TENANT) is expected
+
+
 def test_fixture_geometry_has_independent_expected_area():
     assert set(FIXTURE["intake"]) == {"polylines"}
     polygons = FIXTURE["intake"]["polylines"]
@@ -460,6 +507,9 @@ def test_preflight_requires_exact_staging_origin_and_ack(monkeypatch):
         "Authorization": "Bearer " + JWT, "Content-Type": "application/json",
         "Idempotency-Key": "p080-r3:offline-1"}
     assert "params" not in calls[-1][2] and calls[-1][1] == p.ORIGIN + "/api/run"
+    LIVE_HTTP(f, "GET", "/api/health", None)
+    assert calls[-1][1] == p.ORIGIN + "/api/health"
+    assert calls[-1][2]["headers"] == {}
 
 
 def test_identity_requires_protected_acceptance_b_binding(monkeypatch):
@@ -502,6 +552,141 @@ def test_runtime_requires_verified_source_and_postgres_authorities(monkeypatch):
             f.env["LEAF_STORE_DIR"] = "/foreign"
         assert run(f) == "failed"
         assert not f.secret_reads and not f.saved and not f.ingests and not f.posts
+
+
+@pytest.fixture
+def ecs_component():
+    def build(component):
+        task_arn = f"arn:aws:ecs:{p.REGION}:{p.ACCOUNT}:task/staging/0123456789abcdef"
+        definition_arn = f"arn:aws:ecs:{p.REGION}:{p.ACCOUNT}:task-definition/leaf-platform-{component}:1"
+        entry = {"task": task_arn, "container": component,
+                 "image_digest": "sha256:" + "1" * 64}
+        receipt = {"database_secret_arn": f"arn:aws:secretsmanager:{p.REGION}:{p.ACCOUNT}:secret:stg/database-abcdef",
+                   "efs_id": "fs-0123456789abcdef0"}
+        environment = {key: ENV[key] for key in p.COMPONENT_KEYS[component]}
+        if component == "broker":
+            environment["LEAF_RUNTIME_ENV"] = "production"
+        task = {"taskArn": task_arn, "taskDefinitionArn": definition_arn,
+                "lastStatus": "RUNNING",
+                "containers": [{"name": component, "imageDigest": entry["image_digest"]}]}
+        definition = {
+            "taskDefinitionArn": definition_arn,
+            "containerDefinitions": [{
+                "name": component,
+                "environment": [{"name": key, "value": value}
+                                for key, value in environment.items()],
+                "secrets": [{"name": "DATABASE_URL", "valueFrom": receipt["database_secret_arn"]}],
+                "mountPoints": [{"containerPath": "/data/drawings", "sourceVolume": "drawings",
+                                 "readOnly": False}],
+            }],
+            "volumes": [{"name": "drawings", "efsVolumeConfiguration": {
+                "fileSystemId": receipt["efs_id"]}}],
+        }
+        return task, definition, entry, receipt
+    return build
+
+
+@pytest.mark.parametrize("component", ["app", "broker"])
+@pytest.mark.parametrize("labels", [None, {}, {p.REVISION_LABEL: SOURCE}])
+def test_check_component_accepts_staging_components(ecs_component, component, labels):
+    task, definition, entry, receipt = ecs_component(component)
+    if labels is not None:
+        definition["containerDefinitions"][0]["dockerLabels"] = labels
+    if component == "broker":
+        environment = {v["name"]: v["value"]
+                       for v in definition["containerDefinitions"][0]["environment"]}
+        assert environment["LEAF_RUNTIME_ENV"] == "production"
+        assert "LEAF_JOBS_STORE" not in environment
+    assert p.check_component(component, task, definition, entry, SOURCE, ENV, receipt) is None
+
+
+@pytest.mark.parametrize("component,defect,reason", [
+    ("app", "revision", "source_refused"),
+    ("app", "digest", "source_refused"),
+    ("broker", "drawing", "authority_refused"),
+    ("app", "environment", "authority_refused"),
+    ("app", "override", "authority_refused"),
+    ("broker", "override", "authority_refused"),
+    ("app", "database", "database_refused"),
+    ("app", "efs", "mount_refused"),
+    ("app", "readonly", "mount_refused"),
+    ("app", "duplicate-mount", "mount_refused"),
+    ("app", "stopped", "runtime_refused"),
+    ("app", "account", "runtime_refused"),
+    ("app", "region", "runtime_refused"),
+    ("app", "missing-definition-container", "runtime_refused"),
+    ("app", "duplicate-definition-container", "runtime_refused"),
+    ("app", "missing-task-container", "source_refused"),
+    ("app", "duplicate-task-container", "source_refused"),
+])
+def test_check_component_refusals(ecs_component, component, defect, reason):
+    task, definition, entry, receipt = ecs_component(component)
+    container = definition["containerDefinitions"][0]
+    if defect == "revision":
+        container["dockerLabels"] = {p.REVISION_LABEL: "b" * 40}
+    elif defect == "digest":
+        task["containers"][0]["imageDigest"] = "sha256:" + "2" * 64
+    elif defect in {"drawing", "environment"}:
+        key, value = (("LEAF_DRAWING_STORE", "memory") if defect == "drawing"
+                      else ("LEAF_RUNTIME_ENV", "production"))
+        for variable in container["environment"]:
+            if variable["name"] == key:
+                variable["value"] = value
+    elif defect == "override":
+        task["overrides"] = {"containerOverrides": [{"name": component, "environment": [
+            {"name": "LEAF_DRAWING_STORE", "value": "memory"}]}]}
+    elif defect == "database":
+        container["secrets"][0]["valueFrom"] += "-other"
+    elif defect == "efs":
+        definition["volumes"][0]["efsVolumeConfiguration"]["fileSystemId"] = "fs-other"
+    elif defect == "readonly":
+        container["mountPoints"][0]["readOnly"] = True
+    elif defect == "duplicate-mount":
+        container["mountPoints"].append(deepcopy(container["mountPoints"][0]))
+    elif defect == "stopped":
+        task["lastStatus"] = "STOPPED"
+    elif defect == "account":
+        task["taskArn"] = task["taskArn"].replace(p.ACCOUNT, "000000000000")
+    elif defect == "region":
+        task["taskArn"] = task["taskArn"].replace(p.REGION, "us-west-2")
+    elif defect == "missing-definition-container":
+        definition["containerDefinitions"] = []
+    elif defect == "duplicate-definition-container":
+        definition["containerDefinitions"].append(deepcopy(container))
+    elif defect == "missing-task-container":
+        task["containers"] = []
+    elif defect == "duplicate-task-container":
+        task["containers"].append(deepcopy(task["containers"][0]))
+    else:
+        raise AssertionError(defect)
+    with pytest.raises(p.Refusal, match="^" + reason + "$"):
+        p.check_component(component, task, definition, entry, SOURCE, ENV, receipt)
+
+
+def test_check_component_merges_overrides_for_matching_container(ecs_component):
+    task, definition, entry, receipt = ecs_component("app")
+    for variable in definition["containerDefinitions"][0]["environment"]:
+        if variable["name"] == "LEAF_DRAWING_STORE":
+            variable["value"] = "memory"
+    task["overrides"] = {"containerOverrides": [
+        {"name": "app", "environment": [{"name": "LEAF_DRAWING_STORE", "value": "postgres"}]},
+        {"name": "sidecar", "environment": [{"name": "LEAF_DRAWING_STORE", "value": "memory"}]},
+    ]}
+    assert p.check_component("app", task, definition, entry, SOURCE, ENV, receipt) is None
+
+
+@pytest.mark.parametrize("status,body,expected", [
+    (200, {"source_sha": SOURCE}, True),
+    (503, {"source_sha": SOURCE}, False),
+    (201, {"source_sha": SOURCE}, False),
+    (200, {"source_sha": "b" * 40}, False),
+    (200, {}, False),
+    (200, None, False),
+    (200, [{"source_sha": SOURCE}], False),
+    (200, SOURCE, False),
+])
+def test_served_source_ok(status, body, expected):
+    assert p.served_source_ok(status, body, SOURCE) is expected
 
 
 def test_entitlement_and_catalog_refusals_precede_submission(monkeypatch):
@@ -555,6 +740,50 @@ def test_happy_path_creates_exactly_one_job_and_fetches_result(monkeypatch):
     assert running["lease_expires_at"] == 1100 and running["lease_owner_sha256"] == p.sha("SENTINEL_LEASE")
     assert receipt["cleanup_complete"] and not f.m and not f.v
     assert not f.paths(TENANT, receipt["drawing"])[0].exists()
+
+
+def test_submission_response_is_recorded_and_validated(monkeypatch):
+    keys = ("submit_http_status", "submit_body_status", "submit_error_code")
+    for response, expected in [
+        ((202, {"status": "submitted", "job_id": JOB}), (202, "submitted", None)),
+        ((409, {"ok": False, "error": {"error_code": "IDEMPOTENCY_CONFLICT"}}),
+         (409, None, "IDEMPOTENCY_CONFLICT")),
+        (None, (None, None, None)),
+        ((True, {"status": ["unexpected"], "error_code": "lowercase"}),
+         (None, "other", None)),
+        ((599, {"status": "queued", "error": {"error_code": "NESTED"},
+                 "error_code": "TOP_LEVEL"}), (599, "queued", "NESTED")),
+        ((100, {"error": {"error_code": "invalid"}, "error_code": "TOP_LEVEL"}),
+         (100, None, "TOP_LEVEL")),
+        (("202", []), (None, None, None)),
+    ]:
+        f = Fake(monkeypatch)
+        original_http = f.http
+
+        def http(method, path, token, body=None, correlation=None):
+            result = original_http(method, path, token, body, correlation)
+            if method == "POST" and path == "/api/run":
+                if response is None:
+                    raise OSError("SENTINEL_RAW_EXCEPTION")
+                return response
+            return result
+
+        monkeypatch.setattr(f, "http", http)
+        assert run(f) == "passed"
+        receipt = f.saved[-1]
+        assert tuple(receipt[key] for key in keys) == expected
+        assert len(f.posts) == 1
+        assert all(saved[key] is None for saved in f.saved
+                   if not saved["submission_started"] for key in keys)
+        p.validate_receipt(receipt)
+        for key, value in [
+            ("submit_http_status", 99), ("submit_http_status", True),
+            ("submit_http_status", "202"), ("submit_body_status", "weird"),
+            ("submit_error_code", "lowercase"),
+        ]:
+            tainted = {**receipt, key: value}
+            with pytest.raises(p.Refusal, match="receipt_refused"):
+                p.validate_receipt(tainted)
 
 
 def test_ambiguous_submit_recovers_by_read_without_reposting(monkeypatch):
@@ -707,13 +936,13 @@ def test_evidence_is_sanitized_offline_and_gate_registered(monkeypatch, capsys):
         p.validate_receipt(tainted)
     registration = (ROOT / "scripts/run-all-gates.py").read_text()
     assert 'Suite("server-probe-staging-async-job"' in registration
-    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 16)' in registration
+    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 23)' in registration
     selection = json.loads((ROOT / "scripts/ci/test-selection-map.json").read_text())
     assert "server-probe-staging-async-job" in selection["mandatory_suite_ids"]
     floors = (ROOT / "scripts/test_gate_runner.py").read_text()
-    assert '"server-probe-staging-async-job": 16' in floors
+    assert '"server-probe-staging-async-job": 23' in floors
     no_skip = floors.split("_OPERATOR_NO_SKIP_FILES = frozenset({", 1)[1].split("})", 1)[0]
     assert '"server-probe-staging-async-job"' in no_skip
     source = Path(__file__).read_text()
-    assert source.count("\ndef test_") == 16
+    assert source.count("\ndef test_") == 23
     assert not any(name in sys.modules for name in ("probe_staging_async_job_live",))

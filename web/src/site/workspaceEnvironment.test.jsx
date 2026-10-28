@@ -4,7 +4,8 @@ import { afterEach, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
 import { surfaceContract } from './productSurfaces.js'
-import WorkspaceEnvironment from './WorkspaceEnvironment.jsx'
+import WorkspaceEnvironment, { ENVIRONMENT_OCCLUDERS } from './WorkspaceEnvironment.jsx'
+import { STUDIO_DRAWING_OCCLUDERS } from './drawingOccluders.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 
 afterEach(cleanup)
@@ -17,7 +18,10 @@ function Host({ scope = 'account/project', content = false, modal = false }) {
       panel={panel} onPanel={setPanel} hasContent={content}>
       <label>Project draft<input defaultValue="Initial" /></label>
     </WorkspaceEnvironment>
-    <div id="browser-studio-panel" hidden={panel !== 'studio'}><button id="browser-studio-close" onClick={() => setPanel('none')}>Close Studio</button></div>
+    <div id="project-workspace-activity" hidden={panel !== 'studio'}>
+      <button id="browser-studio-close" onClick={() => setPanel('none')}>Close Studio</button>
+      <label>Conversation draft<input defaultValue="Describe a drawing" /></label>
+    </div>
     {modal && <Modal />}
   </>
 }
@@ -113,6 +117,33 @@ it('wires description to existing controls and has immediate reduced-motion dept
   expect(css).toMatch(/prefers-reduced-motion: reduce[\s\S]*transition: none !important/)
   expect(css).toContain('scale(.96)')
   expect(css).toContain('calc(100vw - 24px)')
+})
+
+it('keeps both panel drafts mounted while toggling and changing profiles', () => {
+  const { container } = render(<Host />)
+  fireEvent.click(screen.getByRole('button', { name: 'Studio' }))
+  const conversation = screen.getByLabelText('Conversation draft')
+  fireEvent.change(conversation, { target: { value: 'Keep conversation' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+  const project = screen.getByLabelText('Project draft')
+  fireEvent.change(project, { target: { value: 'Keep project' } })
+  select('cad')
+  fireEvent.click(screen.getByRole('button', { name: 'Studio' }))
+  expect(screen.getByLabelText('Conversation draft')).toBe(conversation)
+  expect(conversation.value).toBe('Keep conversation')
+  fireEvent.keyDown(window, { key: 'Escape' })
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Studio' }))
+  expect(container.querySelector('#project-workspace-activity').hidden).toBe(true)
+  fireEvent.click(screen.getByRole('button', { name: 'Project' }))
+  expect(screen.getByLabelText('Project draft')).toBe(project)
+  expect(project.value).toBe('Keep project')
+})
+
+it('reserves drawing space for docked instruments and edge panels, never the whole app', () => {
+  for (const entry of STUDIO_DRAWING_OCCLUDERS) expect(ENVIRONMENT_OCCLUDERS).toContain(entry)
+  expect(ENVIRONMENT_OCCLUDERS).toContainEqual(['#project-workspace-activity', 'right'])
+  expect(ENVIRONMENT_OCCLUDERS).toContainEqual(['.environment-strip', 'top'])
+  expect(ENVIRONMENT_OCCLUDERS.some(([selector]) => selector.startsWith('.app'))).toBe(false)
 })
 
 it('App keeps the Project owner independent of the edge toggle on every Studio profile', () => {

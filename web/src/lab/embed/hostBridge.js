@@ -1,6 +1,7 @@
 import { canonicalJSON } from '../contract.js'
 import { hostOrigins } from './hostOrigins.js'
 import { validateWidgetDoc } from '../widgets/widgetDoc.js'
+import { laFitProblem } from '../widgets/laFit.js'
 import { RENDERER_VERSION } from '../widgets/widgetCatalog.js'
 
 const HASH = /^[0-9a-f]{64}$/
@@ -222,6 +223,7 @@ export function createLabHostBridge({
         canonicalJSON(validated)
       }
       catch { return Promise.resolve({ ok: false, reason: 'invalid_doc' }) }
+      if (laFitProblem(validated)) return Promise.resolve({ ok: false, reason: 'la_too_tall' })
       if (!source || typeof source !== 'object' || Array.isArray(source)
         || Reflect.ownKeys(source).length !== 3
         || !['artifact_id', 'revision', 'digest'].every((key) => Object.hasOwn(source, key))

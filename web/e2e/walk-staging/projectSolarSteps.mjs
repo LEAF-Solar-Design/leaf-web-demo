@@ -1,4 +1,4 @@
-import { expect } from '@playwright/test'
+import { expect, test } from '@playwright/test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createActionRecorder, classifyStagingOutcome, stagingActionRecorder } from '../walk/stagingEvidence.mjs'
 import { stagingDelivery } from '../walk/stagingDelivery.mjs'
@@ -14,6 +14,11 @@ import {
 
 const TOOL = 'solar-solve-proposal'
 const code = value => typeof value === 'string' && /^[A-Za-z][A-Za-z0-9_]{0,127}$/.test(value) ? value : null
+
+function stagingSolveTimeout() {
+  const timeout = Number(process.env.LEAF_WALK_STAGING_SOLVE_TIMEOUT_MS)
+  return Number.isFinite(timeout) && timeout >= 60_000 && timeout <= 1_800_000 ? timeout : 900_000
+}
 
 export function stagingNetworkPath(url) {
   const parsed = new URL(url)
@@ -201,13 +206,20 @@ export function proposalCatalogState(body) {
   })
 }
 
-export function proposalFormValues(graph) {
-  const frame = graph?.frames?.[0]
-  if (!frame?.matrix?.length) return { frame: frame?.id ?? 'walk-staging-frame', request: { grid: {} } }
+const framePanelCount = frame => frame?.matrix?.flat().filter(cell => cell.panel_ref).length ?? 0
+
+export function proposalFormValues(graph, { frameId } = {}) {
+  const frames = graph?.frames ?? []
+  const candidates = frames.map(frame => ({ frame, count: framePanelCount(frame) })).filter(row => row.count > 0)
+  const preferred = typeof frameId === 'string' && frameId.length > 0
+    ? candidates.find(row => row.frame.id === frameId) : undefined
+  const selected = preferred ?? candidates.reduce((smallest, row) =>
+    !smallest || row.count < smallest.count ? row : smallest, undefined)
+  if (!selected) return { frame: frames[0]?.id ?? 'walk-staging-frame', request: { grid: {} } }
+  const { frame, count } = selected
   // Wire shape and graph coordinates follow server/tests/test_w1_solve_commit.py
   // (case fixture) and server/tests/fixtures/w1_stringer_request_4x6.json.
   const panels = new Map(graph.panels.map(panel => [panel.id, panel]))
-  const count = frame.matrix.flat().filter(cell => cell.panel_ref).length
   const length = Math.max(1, graph.settings?.panels_in_sequence ?? 1)
   return { frame: frame.id, request: { grid: {
     Dwgname: 'walk-staging', Modify: [],
@@ -220,11 +232,15 @@ export function proposalFormValues(graph) {
   } } }
 }
 
-export function canonicalProjectVersion(workspace, projectId) {
+export function canonicalProjectVersion(workspace, projectId, { pinnedVersionId } = {}) {
   expect(workspace.project?.project_id).toBe(projectId)
-  // Fixtures contain one drawing. Prefer its newest sequence, including a
-  // published scratch head from an earlier invocation of this suite.
-  const versions = workspace.drawing_versions ?? []
+  // Fixtures normally contain one drawing; staging projects can gain others.
+  // A pinned version identifies the drawing whose newest sequence to prefer,
+  // including a published scratch head from an earlier invocation of this suite.
+  let versions = workspace.drawing_versions ?? []
+  const pinnedVersion = typeof pinnedVersionId === 'string' && pinnedVersionId.length > 0
+    ? versions.find(row => row.version_id === pinnedVersionId) : undefined
+  if (pinnedVersion) versions = versions.filter(row => row.drawing_id === pinnedVersion.drawing_id)
   expect(versions.length).toBeGreaterThan(0)
   expect(new Set(versions.map(row => row.drawing_id)).size).toBe(1)
   const version = [...versions].sort((a, b) => b.seq - a.seq)[0]
@@ -351,14 +367,32 @@ export function monitorStagingSolar(page, solar) {
   }
 }
 
+async function ensureProjectPanel(page, region, label) {
+  if (await region.isVisible()) return
+  const projectToggle = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('button', { name: 'Project', exact: true })
+  if (await projectToggle.count()) {
+    if (await projectToggle.getAttribute('aria-expanded') !== 'true') await walkClick(projectToggle, label)
+  } else {
+    await walkClick(page.getByRole('button', { name: 'Open project or material', exact: true }), 'Enter workspace')
+  }
+  await expect(region).toBeVisible({ timeout: 15_000 })
+}
+
 export async function withStagingProject(page, baseURL, projectId, token, testInfo, action, options = {}) {
+  if (testInfo.title === 'project-solar-proposal-review') {
+    const timeout = stagingSolveTimeout() + 300_000
+    if (testInfo.timeout < timeout) test.setTimeout(timeout)
+  }
   assertAllowedStagingHost(baseURL)
   assertStagingTokenIdentity(token, process.env)
   const runtime = { page, stack: { baseURL }, cleanup: [], evidence: { projectSolar: { steps: [] } },
     projectSolar: { apiBase: baseURL, traffic: { runCount: 0 }, catalog: [] } }
+  runtime.projectSolarToken = token
+  testInfo.projectSolarRuntime = runtime
   return stagingEvidenceStep(runtime, testInfo, async () => {
   const finish = monitorStagingSolar(page, runtime.projectSolar)
-  try {
+  return withProjectSolarCleanup(runtime, async () => {
     await page.addInitScript(({ token, allowedOrigins }) => {
       if (allowedOrigins.includes(location.origin.toLowerCase())) localStorage.setItem('leaf.jwt', token)
     }, { token, allowedOrigins: [...allowedStagingOrigins()] })
@@ -370,28 +404,50 @@ export async function withStagingProject(page, baseURL, projectId, token, testIn
     const project = projects.find(row => row.project_id === projectId)
     expect(Boolean(project)).toBe(true)
     expect(projects.filter(row => row.name === project.name)).toHaveLength(1)
+    const workspaceProjects = page.getByRole('region', { name: 'Workspace projects', exact: true })
+    await ensureProjectPanel(page, workspaceProjects, 'Open Project panel')
+    const projectSidebar = page.getByRole('region', { name: 'Project sidebar', exact: true, includeHidden: true })
+    const projectScope = await projectSidebar.count() ? projectSidebar : page
     const response = await stagingAction(page, baseURL, 'GET', `/api/projects/${projectId}`,
-      () => walkClick(page.getByRole('region', { name: 'Workspace projects', exact: true })
+      () => walkClick(projectScope.getByRole('region', { name: 'Workspace projects', exact: true })
         .getByRole('button', { name: project.name, exact: true }), 'Open Workspace project'))
     expect(response.status()).toBe(200)
-    runtime.projectSolar.binding = canonicalProjectVersion(await response.json(), projectId)
+    const pinnedVersionId = projectId === process.env.LEAF_WALK_STAGING_SCRATCH_PROJECT_ID
+      ? process.env.LEAF_WALK_STAGING_SCRATCH_VERSION_ID
+      : projectId === process.env.LEAF_WALK_STAGING_OWNER_PROJECT_ID
+        ? process.env.LEAF_WALK_STAGING_OWNER_VERSION_ID : undefined
+    runtime.projectSolar.binding = canonicalProjectVersion(await response.json(), projectId, { pinnedVersionId })
+    // Opening a project changes scope and closes the panel that holds the Versions tile.
+    await ensureProjectPanel(page, page.getByRole('region', { name: 'Project workspace', exact: true }), 'Reopen Project panel')
     await selectProjectSolarVersion(runtime)
     runtime.projectSolar.context = await stagingContext(page, baseURL, runtime.projectSolar.binding)
     testInfo.annotations.push({ type: 'project-solar-binding', description: JSON.stringify(runtime.projectSolar.binding) })
     await action(runtime)
+  }, finish)
+  }, options.persist, options.delivery)
+}
+
+export async function withProjectSolarCleanup(runtime, action, finish = async () => {}) {
+  let failed = false
+  try {
+    return await action()
+  } catch (error) {
+    failed = true
+    throw error
   } finally {
-    try {
-      // Run all cleanups even when a release assertion fails.
-      const errors = []
-      for (const cleanup of runtime.cleanup.reverse()) {
-        try { await cleanup() } catch (error) { errors.push(error) }
-      }
-      if (errors.length) throw errors[0]
-    } finally {
-      await finish()
+    const errors = []
+    for (const cleanup of [...runtime.cleanup].reverse()) {
+      try { await cleanup() } catch (error) { errors.push(error) }
+    }
+    try { await finish() } catch (error) { errors.push(error) }
+    if (errors.length) {
+      // Cleanup diagnostics may contain secrets from transport errors.
+      const message = `Project Solar cleanup failed (${errors.length} error(s))`
+      runtime.evidence.projectSolar.cleanupError = message
+      console.error(message)
+      if (!failed) throw errors[0]
     }
   }
-  }, options.persist, options.delivery)
 }
 
 export async function reviewStagingProposal(runtime, {
@@ -409,9 +465,13 @@ export async function reviewStagingProposal(runtime, {
   await assertions(frame).toBeEnabled({ timeout: 10_000 }).catch(() => {})
   if (!await walkEnabled(frame, 'Frame')) return refused('run_solve_disabled')
   // These are references, never cloud credentials. The server resolves the grant.
-  // w1-staging is also used by server/tests/test_w1_cloud_solve_probe.py.
-  const values = proposalFormValues(solar.context.graph)
-  await walkFill(form.getByLabel('Grant ref', { exact: true }), 'w1-staging', 'Grant ref')
+  // Staging resolves the M2M grant 'staging-solver'; 'w1-staging' is the local probe grant.
+  const values = proposalFormValues(solar.context.graph, { frameId: process.env.LEAF_WALK_STAGING_SCRATCH_FRAME_ID })
+  runtime.evidence ??= {}
+  runtime.evidence.projectSolar ??= {}
+  runtime.evidence.projectSolar.solveFrame = { id: values.frame,
+    panels: framePanelCount(solar.context.graph?.frames?.find(frame => frame.id === values.frame)) }
+  await walkFill(form.getByLabel('Grant ref', { exact: true }), process.env.LEAF_WALK_STAGING_GRANT_REF || 'staging-solver', 'Grant ref')
   await walkFill(form.getByLabel('Request', { exact: true }), JSON.stringify(values.request), 'Request')
   await walkFill(frame, values.frame, 'Frame')
   await walkSelect(form.getByRole('combobox', { name: 'Phase', exact: true }), '0', 'Phase')
@@ -442,6 +502,7 @@ export async function reviewStagingProposal(runtime, {
     const accepted = await runResponse.json()
     assertions(isUuid(accepted.job_id)).toBe(true)
     let job
+    // Allow standby evaluation and cold engine startup; slow polling after the first minute.
     await assertions.poll(async () => {
       job = await read(page, solar.apiBase, `/api/jobs/${accepted.job_id}`, solar.binding)
       assertions(job.job_id).toBe(accepted.job_id)
@@ -450,7 +511,7 @@ export async function reviewStagingProposal(runtime, {
       assertions(job.input_version_id).toBe(solar.binding.input_version_id)
       assertions(job.tool_name).toBe(TOOL)
       return ['complete', 'failed', 'refused', 'cancelled'].includes(job.status)
-    }, { timeout: 90_000, intervals: [250, 500, 1000] }).toBe(true)
+    }, { timeout: stagingSolveTimeout(), intervals: [250, 500, ...Array.from({ length: 60 }, () => 1000), 5000] }).toBe(true)
     if (job.status !== 'complete') return refused(refusalCode(job, `solve_job_${job.status}`))
     await assertions(page.getByRole('button', { name: 'Commit proposal', exact: true })).toBeVisible({ timeout: 30_000 })
     return { job_id: accepted.job_id, reviewVisible: true }

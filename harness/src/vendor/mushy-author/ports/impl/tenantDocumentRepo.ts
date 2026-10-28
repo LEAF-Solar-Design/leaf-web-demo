@@ -1,6 +1,7 @@
 import { execFileSync, spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { realpathSync } from "node:fs";
+import { existsSync, realpathSync } from "node:fs";
+import { join } from "node:path";
 import type { HarnessIdentity } from "../index.js";
 import { LAB_DOCUMENT_REF, LAB_GENERATION_REF, LAB_TRANSITIONS_PREFIX, GitGenerationConflictError, LabHistoryError } from "../labDocumentPort.js";
 import type { LabDocumentInspection, LabDocumentPort, LabDocumentWrite, LabGenerationFence, LabGenerationReceipt, LabChangesRequest, LabHistoryCommit, LabOpIdentity } from "../labDocumentPort.js";
@@ -330,6 +331,9 @@ export class TenantDocumentRepo implements LabDocumentPort {
     if (!/^[A-Za-z0-9][A-Za-z0-9._-]*$/.test(tenantId)) throw new Error("invalid tenant");
     const repo = await this.opts.locate(tenantId);
     await this.opts.authority.canonicalRemote(tenantId, repo.sourceRef);
+    if (!existsSync(join(repo.dir, "HEAD"))) {
+      await this.opts.authority.initialize(tenantId, repo.dir, repo.sourceRef);
+    }
     if (this.git(repo.dir, ["rev-parse", "--is-bare-repository"]).trim() !== "true"
       || this.git(repo.dir, ["config", "--local", "--no-includes", "--get-all", "remote.origin.url"]).trim() !== repo.sourceRef) {
       throw new ForgePublicationError("refused", "Lab tenant repository mapping refused");

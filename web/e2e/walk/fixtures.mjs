@@ -1,4 +1,4 @@
-import { test as base, expect } from '@playwright/test'
+import { test as base, expect, request as playwrightRequest } from '@playwright/test'
 import { startStack } from '../../walk/stack.mjs'
 import { prepareProductionBundle } from '../../walk/sameOriginProxy.mjs'
 import { SERVER_ERROR_CAP, extractErrorId, serverDiagnostic } from '../../walk/serverDiagnostics.mjs'
@@ -1412,6 +1412,46 @@ export async function openProjectSolar(runtime, assertions = expect) {
   })
 }
 
+const readLocatorAttribute = async (locator, name) => await locator.getAttribute?.(name) ?? null
+
+export async function closeProjectPanelIfOpen(page) {
+  const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  if (!await controls.count?.()) return
+  const project = controls.getByRole('button', { name: 'Project', exact: true })
+  if (!await project.count() || await readLocatorAttribute(project, 'aria-expanded') !== 'true') return
+  await walkClick(project, 'Close Project panel')
+  await expect(project).toHaveAttribute('aria-expanded', 'false', { timeout: 15_000 })
+}
+
+export async function enterWorkspaceEnvironment(page) {
+  const environment = page.locator('section.workspace-environment')
+  if (!await environment.count() || await readLocatorAttribute(environment, 'data-entered') === 'true') return
+  const resume = environment.getByRole('button', { name: 'Continue workspace', exact: true })
+  if (await resume.isVisible()) {
+    await walkClick(resume, 'Continue workspace')
+  } else {
+    await walkClick(environment.getByRole('button', { name: 'Open project or material', exact: true }),
+      'Enter workspace')
+    await closeProjectPanelIfOpen(page)
+  }
+  await expect.poll(() => readLocatorAttribute(environment, 'data-entered'), { timeout: 15_000 }).toBe('true')
+}
+
+export async function openSolarCadProfile(page) {
+  const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  if (await controls.count?.()) {
+    const profile = controls.getByRole('combobox', { name: 'Workspace profile', exact: true })
+    if (await profile.count()) {
+      await profile.selectOption({ label: 'Solar CAD' })
+      const environment = page.locator('section.workspace-environment')
+      await expect.poll(() => readLocatorAttribute(environment, 'data-profile'), { timeout: 15_000 }).toBe('solar')
+      await enterWorkspaceEnvironment(page)
+      return
+    }
+  }
+  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
+}
+
 export async function selectProjectSolarVersion(runtime, assertions = expect) {
   const { page, projectSolar: solar } = runtime
   // web/src/site/BoardTiles.jsx:41,59-61 renders this count only from workspace versions;
@@ -1429,7 +1469,8 @@ export async function selectProjectSolarVersion(runtime, assertions = expect) {
   await assertions(version, `version ${solar.binding.input_version_id} is not listed in the Versions pane within 30 s`)
     .toBeVisible({ timeout: 30_000 })
   await version.click({ timeout: 30_000 })
-  await walkClick(page.getByRole('tab', { name: 'Solar CAD', exact: true }), 'Open Solar CAD tab')
+  await closeProjectPanelIfOpen(page)
+  await openSolarCadProfile(page)
   await assertProjectSolarDrawing(runtime, assertions)
 }
 
@@ -1440,6 +1481,7 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
     await walkClick(editor.getByRole('button', { name: /^(Close|Cancel)$/ }), 'Close Solar editor')
     await assertions(editor).toHaveCount(0)
   }
+  await closeProjectPanelIfOpen(page)
   await walkClick(page.getByRole('tab', { name: 'Solar', exact: true }), 'Open Solar tab')
   const ribbon = page.getByTestId('drafting-ribbon').locator(`button[data-tool="${tool}"]`)
   const rail = page.locator(`#solar-step-${tool}`)
@@ -1454,6 +1496,86 @@ export async function openProjectSolarTool(runtime, tool, assertions = expect, {
   return true
 }
 
+export async function releaseProjectSolarCheckout(runtime, { request = playwrightRequest, timeoutMs = 10_000 } = {}) {
+  const lease = runtime.projectSolarCheckout
+  if (!lease || lease.released) return
+  const deadline = Date.now() + timeoutMs
+  const bounded = async (action, budget = deadline - Date.now()) => {
+    let timer
+    try {
+      if (budget <= 0) throw new Error('release timeout')
+      return await Promise.race([
+        Promise.resolve().then(action),
+        new Promise((_, reject) => { timer = setTimeout(() => reject(new Error('release timeout')), budget) }),
+      ])
+    } finally { clearTimeout(timer) }
+  }
+  let context
+  let uiReleaseFailed = false
+  try {
+    if (runtime.page && !runtime.page.isClosed?.()) {
+      try {
+        // Reserve half the remaining time for a page-independent fallback.
+        await bounded(() => runtime.projectSolarReleaseUI
+          ? runtime.projectSolarReleaseUI()
+          : releaseUI(), Math.max(1, Math.floor((deadline - Date.now()) / 2)))
+        lease.released = true
+        return
+      } catch {
+        // A closed, crashed or unresponsive page must not strand the lease.
+        uiReleaseFailed = true
+      }
+    }
+    await bounded(async () => {
+      context = await request.newContext()
+      if (Date.now() >= deadline) {
+        void context.dispose().catch(() => {})
+        throw new Error('release timeout')
+      }
+      const headers = { Authorization: `Bearer ${runtime.projectSolarToken || ''}` }
+      if (lease.capability) headers['X-Checkout-Capability'] = lease.capability
+      const response = await context.delete(`${lease.apiBase}${lease.path}`, {
+        headers, timeout: Math.max(1, deadline - Date.now()),
+      })
+      if ([404, 409].includes(response.status())) return
+      if (response.status() !== 200 || (await response.json()).released !== true) throw new Error('release rejected')
+    })
+    lease.released = true
+  } catch {
+    // Transport errors can contain request headers. Persist and return only a
+    // fixed diagnostic, never the transport message, bearer or capability.
+    const error = new Error('Project Solar checkout release failed or timed out')
+    runtime.evidence ||= {}
+    runtime.evidence.projectSolar ||= {}
+    runtime.evidence.projectSolar.releaseError = error.message
+    return error
+  } finally {
+    if (uiReleaseFailed) {
+      runtime.evidence ||= {}
+      runtime.evidence.projectSolar ||= {}
+      runtime.evidence.projectSolar.releaseUiError = 'Project checkout UI release failed'
+      lease.uiReleaseFailed = true
+    }
+    if (context) {
+      try {
+        // Start disposal even when the overall deadline has elapsed, aborting
+        // a DELETE whose transport did not honour its own timeout.
+        const disposal = Promise.resolve(context.dispose()).catch(() => {})
+        await bounded(() => disposal)
+      } catch { /* Release verdict is already recorded. */ }
+    }
+  }
+
+  async function releaseUI() {
+    const response = await actionResponse(runtime.page, lease.apiBase, 'DELETE', lease.path,
+      () => walkClick(runtime.page.getByRole('group', { name: 'Project checkout', exact: true })
+        .getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
+    const body = await projectSolarResponse(response, 'release Project checkout', [200])
+    expect(body.released).toBe(true)
+    expect(body.checkout).toBe(null)
+  }
+}
+
 export async function takeProjectSolarCheckout(runtime, assertions = expect, action = actionResponse) {
   const { page, projectSolar: solar, evidence: { projectSolar: proof } } = runtime
   const checkout = () => page.getByRole('group', { name: 'Project checkout', exact: true })
@@ -1462,15 +1584,22 @@ export async function takeProjectSolarCheckout(runtime, assertions = expect, act
     const response = await action(page, solar.apiBase, 'POST', path,
       () => walkClick(checkout().getByRole('button', { name: 'Take', exact: true }), 'Take Project checkout'))
     const lease = await projectSolarResponse(response, 'Project checkout', [200])
-    // Register release before validating the lease body so a later assertion
-    // failure still relinquishes an acquired checkout through the UI.
-    if (lease.acquired === true) runtime.cleanup.push(async () => {
-      const released = await action(page, solar.apiBase, 'DELETE', path,
-        () => walkClick(checkout().getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
-      const body = await projectSolarResponse(released, 'release Project checkout', [200])
-      assertions(body.released).toBe(true)
-      assertions(body.checkout).toBe(null)
-    })
+    // Record acquisition before validating the binding or lease body.
+    if (lease.acquired === true) {
+      runtime.projectSolarCheckout = { apiBase: solar.apiBase, path, capability: lease.checkout_capability, released: false }
+      runtime.projectSolarReleaseUI = async () => {
+        const released = await action(page, solar.apiBase, 'DELETE', path,
+          () => walkClick(checkout().getByRole('button', { name: 'Release', exact: true }), 'Release Project checkout'))
+        const body = await projectSolarResponse(released, 'release Project checkout', [200])
+        assertions(body.released).toBe(true)
+        assertions(body.checkout).toBe(null)
+      }
+      runtime.cleanup.push(async () => {
+        const error = await releaseProjectSolarCheckout(runtime)
+        if (error) throw error
+        if (runtime.projectSolarCheckout.uiReleaseFailed) throw new Error('Project checkout UI release failed')
+      })
+    }
     assertions(lease.acquired).toBe(true)
     for (const key of ['organization_id', 'project_id', 'drawing_id']) assertions(lease[key]).toBe(solar.binding[key])
     assertions(lease.checkout.fence).toMatch(/^[0-9]+$/)
@@ -2438,6 +2567,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         page.off('response', onResponse)
         page.off('requestfailed', onFailed)
       }
+      await enterWorkspaceEnvironment(page)
       assertions([400, 404]).toContain(response.status())
       evidence.failedDrawing = { drawingId: 'missing.invalid', status: response.status(), response: await response.json() }
       await assertions(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
@@ -2460,6 +2590,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     case 'open-empty-workspace':
       if (recipe.signedOut) await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
       await page.goto(`/try?surface=${recipe.surface}`)
+      await enterWorkspaceEnvironment(page)
       return
     case 'open-private-drawing': {
       const selected = probe.setup.steps.find((step) => step.kind === 'select-entity')
@@ -2499,6 +2630,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         return status.status
       }, { timeout: 60_000 }).toBe('ready')
       await page.goto(`/app?drawing=${receipt.drawing_id}&surface=${recipe.surface}`)
+      await enterWorkspaceEnvironment(page)
       if (recipe.surface === 'cad' || recipe.surface === 'solar') {
         await expect.poll(async () => {
           const box = await canvas(page).boundingBox().catch(() => null)

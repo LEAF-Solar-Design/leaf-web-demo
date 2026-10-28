@@ -393,3 +393,128 @@ def test_trusted_builtin_classification_rejects_tenant_shadow(monkeypatch, tmp_p
     }
     assert tool_loader.resolve_local_file(tool, "wave0-tenant") == shadow.resolve()
     assert tool_loader.is_trusted_builtin_tool(tool, "wave0-tenant") is False
+
+
+@pytest.mark.parametrize("runtime_env", ["production", "staging"])
+def test_tracked_read_builtin_runs_in_process_with_microvm(monkeypatch, runtime_env):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", runtime_env)
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    monkeypatch.setenv("E2B_API_KEY", "test-key")
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+
+    def forbidden_sandbox(*_args, **_kwargs):
+        raise AssertionError("platform read built-in must run in-process")
+
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox_e2b", forbidden_sandbox)
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox", forbidden_sandbox)
+    tool = _package(
+        tool_loader.SERVER_DIR.parent / "engine" / "registry.json",
+        "measure-panel-area",
+    )
+    env, status = _execute(monkeypatch, tool)
+
+    assert status == 200
+    assert env["ok"] is True
+    assert env["result"]["total_area"] == pytest.approx(7015420.07)
+    assert "execution_provenance" not in env
+
+
+def test_tracked_read_builtin_runs_in_process_with_subprocess(monkeypatch):
+    monkeypatch.setattr(tool_loader, "_sandbox_tier", lambda: "subprocess")
+
+    def forbidden_sandbox(*_args, **_kwargs):
+        raise AssertionError("platform read built-in must run in-process")
+
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox_e2b", forbidden_sandbox)
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox", forbidden_sandbox)
+    tool = _package(
+        tool_loader.SERVER_DIR.parent / "engine" / "registry.json",
+        "measure-panel-area",
+    )
+    env, status = _execute(monkeypatch, tool)
+
+    assert status == 200
+    assert env["ok"] is True
+    assert env["result"]["total_area"] == pytest.approx(7015420.07)
+    assert "execution_provenance" not in env
+
+
+def test_write_builtin_stays_sandboxed(monkeypatch):
+    tool = _package(tool_loader.SERVER_DIR / "write_tools.json", "delete-marked-panel")
+    monkeypatch.setattr(tool_loader, "_sandbox_tier", lambda: "microvm")
+
+    class SandboxReached(Exception):
+        pass
+
+    def sandbox(*_args, **_kwargs):
+        raise SandboxReached
+
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox_e2b", sandbox)
+
+    with pytest.raises(SandboxReached):
+        tool_loader.run_tool_dynamic(
+            tool, {}, {}, aps_live=False, tenant_id="wave0-tenant")
+
+
+def test_tenant_builtin_shadow_stays_sandboxed(monkeypatch, tmp_path):
+    repo = tmp_path / "tenant"
+    shadow = repo / "builtins" / "count_by_layer.py"
+    shadow.parent.mkdir(parents=True)
+    shadow.write_text(
+        "def run(intake, params):\n    return {'shadowed': True}, None\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(tool_loader, "_tenant_repo_root", lambda _tenant=None: repo)
+    monkeypatch.setattr(tool_loader, "_sandbox_tier", lambda: "microvm")
+    tool = {
+        "name": "shadow",
+        "entry": "builtins/count_by_layer.py",
+        "params": {"type": "object", "properties": {}},
+    }
+
+    class SandboxReached(Exception):
+        pass
+
+    def sandbox(*_args, **_kwargs):
+        raise SandboxReached
+
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox_e2b", sandbox)
+
+    with pytest.raises(SandboxReached):
+        tool_loader.run_tool_dynamic(
+            tool, {}, {}, aps_live=False, tenant_id="wave0-tenant")
+
+
+def test_tracked_read_builtin_resolves_once_with_microvm(monkeypatch):
+    monkeypatch.setenv("LEAF_RUNTIME_ENV", "production")
+    monkeypatch.setenv("LEAF_AUTHORED_EXECUTION", "1")
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "e2b")
+    monkeypatch.setenv("E2B_API_KEY", "test-key")
+    monkeypatch.delenv("LEAF_SANDBOX", raising=False)
+    original_resolve = tool_loader.resolve_local_file
+    calls = 0
+
+    def resolve(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original_resolve(*args, **kwargs)
+
+    def forbidden_sandbox(*_args, **_kwargs):
+        raise AssertionError("platform read built-in must run in-process")
+
+    monkeypatch.setattr(tool_loader, "resolve_local_file", resolve)
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox_e2b", forbidden_sandbox)
+    monkeypatch.setattr(tool_loader, "_run_in_sandbox", forbidden_sandbox)
+    tool = _package(
+        tool_loader.SERVER_DIR.parent / "engine" / "registry.json",
+        "measure-panel-area",
+    )
+    intake = json.loads(broker.DATA_FILE.read_text(encoding="utf-8"))
+    env = tool_loader.run_tool_dynamic(
+        tool, intake, {}, aps_live=False, tenant_id="wave0-tenant")
+
+    assert calls == 1
+    assert env["ok"] is True
+    assert env["result"]["total_area"] == pytest.approx(7015420.07)
+    assert "execution_provenance" not in env

@@ -633,7 +633,7 @@ def test_executor_suite_is_registered_with_its_measured_floor():
 # The 34 skips are all one reason, LEAF_OPERATOR_TEST_DATABASE_URL unset, which
 # no workflow in this repo sets -- so CI executes these same counts.
 _OPERATOR_FLOORS = {
-    "server-probe-staging-async-job": 16,
+    "server-probe-staging-async-job": 23,
     "server-operator-authority": 7,
     "server-operator-credential-rotate": 19,
     "server-operator-egress-boundary": 27,
@@ -1391,6 +1391,10 @@ def test_lab_run_store_gate_registration():
 def test_database_suites_take_the_gate_dsn_and_no_longer_allowlist_its_absence():
     g = _load_runner()
     suites = {suite.id: suite for suite in g.build_suites()}
+    # The managed browser stack reads PostgreSQL overlays in every case.
+    # DB-less release producers must report that prerequisite as a suite skip.
+    assert suites["web-link-service-flow"].db_gated
+    assert suites["web-link-service-flow"].uses_database
     for sid in _DATABASE_SUITE_IDS:
         suite = suites[sid]
         assert suite.uses_database, sid
