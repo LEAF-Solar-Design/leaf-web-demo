@@ -22,6 +22,7 @@ import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import { BrowserAssetGround } from './BrowserAssetGround.jsx'
 import { DeviceGround } from '../ios/DeviceGround.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from './groundWindow.js'
+import { isLabEmbedded, parseLabRoute } from '../lab/labRoute.js'
 import '../integrations/ops-workspace.css'
 
 const OpsWorkspaceGround = lazy(() => import('../integrations/OpsWorkspaceGround.jsx')
@@ -41,11 +42,43 @@ function withGroundToolsOccluder(occluders) {
   return groundOccluders
 }
 
+function LabLoadState({ active, studioShell, occluders, failed = false }) {
+  const boardRef = useRef(null)
+  const route = typeof window === 'undefined' ? null : parseLabRoute(window.location.pathname, window.location.search)
+  const embedded = isLabEmbedded(route)
+  const win = useGroundWindow(active && !embedded, true, boardRef, occluders)
+  return <section ref={boardRef} data-ground="lab" data-leaf-theme="dark" data-leaf-profile="studio"
+    hidden={!active} aria-label="Lab workspace"
+    data-studio-shell={studioShell ? 'cockpit' : undefined}
+    style={{ position: embedded ? 'fixed' : 'absolute', inset: 0, minWidth: 0, overflow: 'hidden' }}>
+    <div data-measured={Boolean(win)}
+      style={{ position: 'absolute', ...(embedded ? { inset: 0 } : win ? windowStyle(win) : { visibility: 'hidden' }) }}>
+      <p role={failed ? 'alert' : 'status'} style={{ color: 'var(--leaf-ink-muted)' }}>{failed ? 'Lab could not be loaded. Reload the page to try again.' : 'Loading Lab…'}</p>
+    </div>
+  </section>
+}
+
+class LabLoadBoundary extends Component {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    return this.state.failed ? <LabLoadState {...this.props.groundProps} failed /> : this.props.children
+  }
+}
+
 function LazyLabGround(props) {
   const [activated, setActivated] = useState(props.active)
   if (props.active && !activated) setActivated(true)
   if (!activated && !props.active) return null
-  return <Suspense fallback={null}><LabGround {...props} /></Suspense>
+  return <LabLoadBoundary groundProps={props}>
+    <Suspense fallback={<LabLoadState {...props} />}>
+      <LabGround {...props} />
+    </Suspense>
+  </LabLoadBoundary>
 }
 
 function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = false }) {
