@@ -124,6 +124,14 @@
   .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .center-col {
     top: calc(var(--drawer-top) + 1px);
   }
+  /* The narrow view strip was absolute inside viewer-wrap, above the dock's
+     live boundary. Use viewport coordinates and retain the separate Find row. */
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .cockpit-view {
+    position: fixed; top: calc(var(--ck-canvas-top-live) + 6px);
+  }
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .drawing-navigation {
+    top: calc(var(--ck-canvas-top-live) + 64px);
+  }
 }
 @media (max-width: 1023px) {
   /* Match the phone drawer layer: Find in drawing uses the header layer,
