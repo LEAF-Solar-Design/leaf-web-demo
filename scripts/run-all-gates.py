@@ -2575,6 +2575,8 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_mq_review_codebuild.py"), 40),
         Suite("scripts-native-release-producer", "scripts test_native_release_producer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
+        Suite("scripts-native-preview-worker", "scripts tests/test_native_preview_worker.py", "pytest",
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_worker.py"), 56),
         # Proves labelled sizing replay isolation; opens loopback sockets and short-lived child Pythons only.
         Suite("scripts-proof-string-sizer", "scripts test_proof_string_sizer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
