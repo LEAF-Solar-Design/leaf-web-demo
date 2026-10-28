@@ -422,9 +422,12 @@ authored + write tools included, internal/QA tools filtered exactly as
   (never a fake high score).
 - **Lane rules** — authoring verbs + a tool noun, or "a tool that/to …" →
   **build** (`tool:null`, `params:{description:<original text>}`); explicit
-  optimise/solve verbs → **solve** (`tool:null`; rationale states the Solve lane
-  is future and nothing runs); otherwise the best catalog match → **run** with
-  prefilled params. Precedence: build → solve → run.
+  optimise/solve verbs → **solve** (a matched solve-capable tool with extracted
+  params and a rationale to confirm before it runs; `tool:null` with up to three
+  solver alternatives when no solver matches; or `tool:null` with a rationale
+  stating that nothing runs when the catalog has no solve-capable tool);
+  otherwise the best catalog match → **run** with prefilled params. Precedence: build → solve → run.
+  The web app runs a bound solve as a confirmed run (`routedLane: 'solve'`).
 - **Param extraction** — numbers with/without units fill the matched tool's
   numeric params in schema order (e.g. `distance=200`); a hex-ish token fills a
   `handle` param as a **string** (e.g. `handle="9462"`), so DWG handles never get
