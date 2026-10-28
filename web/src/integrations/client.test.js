@@ -1,7 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { ReadableStream } from 'node:stream/web'
 import { TextEncoder, TextDecoder } from 'node:util'
-import { createIntegrationsClient, integrationOrigin, validateDatasetRegistration, validateWorkflowSchedulePreview, validateWebhookReceipt, validateWebhookReceiptInput } from './client.js'
+import { createIntegrationsClient, integrationOrigin, validateDatasetRegistration, validateWorkflowSchedulePreview, validateWebhookReceipt, validateWebhookReceiptInput, validateVercelDestinations } from './client.js'
 
 vi.mock('../api.js', () => ({ authHeaders: vi.fn(), noteUnauthorized: vi.fn() }))
 import { authHeaders, noteUnauthorized } from '../api.js'
@@ -388,6 +388,56 @@ function setup(value = scope) {
   return { client: createIntegrationsClient({ origin: 'https://ops.example', fetchImpl }), fetchImpl,
     options: { signal: new AbortController().signal } }
 }
+describe('scoped Vercel authorization HTTP contract', () => {
+  const state = 's'.repeat(43)
+  const issued = { state, expiresAt: '2026-10-28T12:00:00Z', authorizationUrl: `https://vercel.com/integrations/leaf/new?state=${state}`,
+    callbackUri: 'https://studio.example/vercel-callback.html' }
+  const input = { expectedRevision: 3, state, code: 'code_123', configurationId: 'icfg_123' }
+  const completed = { configurationId: 'icfg_123', integrationId: 'oac_123', userId: 'user_123', teamId: null,
+    ownerId: projectId, revision: 4, cleanup: 'complete' }
+  it('uses authenticated bounded POSTs with the existing project and connection routing', async () => {
+    const { client, fetchImpl, options } = setup(issued)
+    expect(await client.issueVercelConnection(projectId, 'vercel-account', { expectedRevision: 3 }, options)).toEqual(issued)
+    fetchImpl.mockResolvedValueOnce(response(completed))
+    expect(await client.completeVercelConnection(projectId, 'vercel-account', input, options)).toEqual(completed)
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual(['attempt', 'complete'].map((part) =>
+      `https://ops.example/api/v1/projects/${projectId}/integrations/connections/vercel-account/vercel/${part}`))
+    expect(fetchImpl.mock.calls.map(([, request]) => JSON.parse(request.body))).toEqual([{ expectedRevision: 3 }, input])
+    for (const [, request] of fetchImpl.mock.calls) expect(request).toMatchObject({ method: 'POST', credentials: 'omit', redirect: 'error',
+      cache: 'no-store', signal: options.signal, headers: { Authorization: 'Bearer first' } })
+  })
+  it.each([{ expectedRevision: 0 }, { ...input, state: 'short' }, { ...input, code: 'x'.repeat(2049) },
+    { ...input, configurationId: '../bad' }, { ...input, token: 'secret' }])('rejects malformed completion before dispatch', async (body) => {
+    const { client, fetchImpl, options } = setup(completed)
+    await expect(client.completeVercelConnection(projectId, 'vercel-account', body, options)).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([{ ...completed, revision: 3 }, { ...completed, configurationId: 'other' }, { ...completed, token: 'secret' },
+    { ...completed, teamId: undefined }, { ...completed, ownerId: 'provider-user' }])('rejects unsafe completion acknowledgements', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.completeVercelConnection(projectId, 'vercel-account', input, options)).rejects.toMatchObject({ dispatched: true })
+  })
+  it('fails closed on the older issue response', async () => {
+    const { client, options } = setup({ state, expiresAt: issued.expiresAt })
+    await expect(client.issueVercelConnection(projectId, 'vercel-account', { expectedRevision: 3 }, options)).rejects.toMatchObject({ dispatched: true })
+  })
+  it.each([
+    { authorizationUrl: `https://vercel.com.evil.test/integrations/leaf/new?state=${state}` },
+    { authorizationUrl: `http://vercel.com/integrations/leaf/new?state=${state}` },
+    { authorizationUrl: `${issued.authorizationUrl}&next=https://evil.test` },
+    { authorizationUrl: `${issued.authorizationUrl}&state=${state}` },
+    { authorizationUrl: `${issued.authorizationUrl}#fragment` },
+    { authorizationUrl: 'https://vercel.com/integrations/leaf/new?state=other' },
+    { callbackUri: 'https://other.example/vercel-callback.html' },
+    { callbackUri: 'https://studio.example/vercel-callback.html?next=evil' },
+    { callbackUri: 'https://studio.example/other' },
+  ])('rejects untrusted authorization destinations', (patch) => {
+    expect(() => validateVercelDestinations({ ...issued, ...patch }, 'https://studio.example')).toThrow('invalid')
+  })
+  it('accepts the exact host-issued destinations', () => {
+    expect(validateVercelDestinations(issued, 'https://studio.example')).toEqual(issued)
+  })
+})
 describe('manual workflow history HTTP contract', () => {
   it('uses a bounded, authenticated, uncached collection GET with the caller signal', async () => {
     const page = { items: [workflow.run], next_cursor: 'page_2' }

@@ -31,6 +31,7 @@ export default defineConfig({
       VITE_MOCK: '0',
       VITE_CAT_PROOF: '1',
       VITE_API_BASE: 'http://leaf-proof.invalid',
+      VITE_INTEGRATIONS_API_ORIGIN: 'https://ops-proof.invalid',
       VITE_TENANT_ID: 'cat-litmus-tenant',
     },
   },
