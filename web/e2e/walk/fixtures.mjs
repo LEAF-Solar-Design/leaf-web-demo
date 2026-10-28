@@ -1423,18 +1423,48 @@ export async function closeProjectPanelIfOpen(page) {
   await expect(project).toHaveAttribute('aria-expanded', 'false', { timeout: 15_000 })
 }
 
-export async function enterWorkspaceEnvironment(page) {
+export async function enterWorkspaceIfChooser(page, beforeClick = () => {}) {
   const environment = page.locator('section.workspace-environment')
-  if (!await environment.count() || await readLocatorAttribute(environment, 'data-entered') === 'true') return
+  if (!await environment.count() || await readLocatorAttribute(environment, 'data-entered') === 'true') return false
   const resume = environment.getByRole('button', { name: 'Continue workspace', exact: true })
   if (await resume.isVisible()) {
+    beforeClick()
     await walkClick(resume, 'Continue workspace')
   } else {
-    await walkClick(environment.getByRole('button', { name: 'Open project or material', exact: true }),
-      'Enter workspace')
+    const open = environment.getByRole('button', { name: 'Open project or material', exact: true })
+    if (!await open.isVisible()) return false
+    beforeClick()
+    await walkClick(open, 'Enter workspace')
     await closeProjectPanelIfOpen(page)
   }
-  await expect.poll(() => readLocatorAttribute(environment, 'data-entered'), { timeout: 15_000 }).toBe('true')
+  return true
+}
+
+export async function enterWorkspaceEnvironment(page, assertions = expect) {
+  const environment = page.locator('section.workspace-environment')
+  let attached = false, clicks = 0, entryLimitError
+  try {
+    await assertions.poll(async () => {
+      attached = !!await environment.count() || attached
+      try {
+        await enterWorkspaceIfChooser(page, () => {
+          if (clicks >= 3) {
+            entryLimitError = new Error('Workspace data-entered still requires entry after 3 clicks')
+            throw entryLimitError
+          }
+          clicks++
+        })
+      } catch (error) {
+        // Finish the poll before throwing: expect.poll retries predicate errors.
+        if (error === entryLimitError) return true
+        throw error
+      }
+      return !!await environment.count() && await readLocatorAttribute(environment, 'data-entered') === 'true'
+    }, { timeout: 20_000 }).toBe(true)
+  } catch (error) {
+    if (attached) throw error
+  }
+  if (entryLimitError) throw entryLimitError
 }
 
 export async function openSolarCadProfile(page) {
@@ -2630,9 +2660,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         return status.status
       }, { timeout: 60_000 }).toBe('ready')
       await page.goto(`/app?drawing=${receipt.drawing_id}&surface=${recipe.surface}`)
-      await enterWorkspaceEnvironment(page)
+      await enterWorkspaceEnvironment(page, assertions)
       if (recipe.surface === 'cad' || recipe.surface === 'solar') {
-        await expect.poll(async () => {
+        await assertions.poll(async () => {
+          await enterWorkspaceIfChooser(page)
           const box = await canvas(page).boundingBox().catch(() => null)
           return !!box && box.width > 0 && box.height > 0
         }, { timeout: 60_000 }).toBe(true)
