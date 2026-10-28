@@ -18,6 +18,10 @@
 .portfolio-editor { display: grid; gap: 14px; min-width: 0; }
 .portfolio-editor section { display: grid; gap: 14px; min-width: 0; padding-block: 12px; border-top: 1px solid #ddd; }
 .portfolio-editor h3, .portfolio-editor h4 { margin-bottom: 0; }
-.browser-asset-viewport:has(.portfolio) { top: 68px; height: calc(100% - 68px); overflow: auto; }
-.browser-asset-viewport .portfolio-viewer { top: 68px; }
+.browser-asset-viewport:has(.portfolio) { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); height: auto; overflow: auto; }
+.browser-asset-viewport .portfolio-viewer { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); display: flex; flex-direction: column; overscroll-behavior: contain; }
+.browser-asset-viewport .portfolio-viewer button { position: sticky; top: 0; z-index: 1; flex-shrink: 0; align-self: flex-start; background: white; }
+.browser-asset-viewport .portfolio-viewer .portfolio-photo { flex: 1 0 100px; min-height: 0; }
+.browser-asset-viewport .portfolio-viewer img { height: 100%; max-height: 100%; }
+.browser-asset-viewport .portfolio-viewer p { flex-shrink: 0; }
 @media(max-width:600px) { .portfolio-grid { grid-template-columns: minmax(0,1fr); } .portfolio nav { margin-bottom: 24px; } }
