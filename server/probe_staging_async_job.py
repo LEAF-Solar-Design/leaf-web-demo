@@ -20,6 +20,7 @@ import os
 from pathlib import Path
 import re
 import time
+from types import SimpleNamespace
 import uuid
 
 ORIGIN = "https://platform-staging.leafdesign.ai"
@@ -639,8 +640,11 @@ class LiveAdapters:
         rows = self.query("SELECT tier, disabled FROM broker_tenants WHERE tenant_id=%s", (tenant,))
         # Pure policy module, no broker/application startup.
         import entitlements
-        return (len(rows) == 1 and not rows[0]["disabled"]
-                and entitlements.entitlements_for(rows[0]["tier"]).get("run_read") is True)
+        if len(rows) > 1 or (rows and rows[0]["disabled"]):
+            return False
+        tier = (entitlements.DEFAULT_TIER if not rows or rows[0]["tier"] is None
+                else entitlements.resolve_tier(SimpleNamespace(tier=rows[0]["tier"])))
+        return entitlements.entitlements_for(tier).get("run_read") is True
 
     def check_origin(self):
         # Resolve redirect/authentication failures before loading the bearer.
