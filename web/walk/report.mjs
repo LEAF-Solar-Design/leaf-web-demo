@@ -22,7 +22,7 @@ const count = (value) => Array.isArray(value) ? value.length : 0
 
 // Bound structure before serialization as well as bytes afterwards. In particular,
 // deep evidence and circular input must fail explicitly, not exhaust the stack.
-function boundInput(value) {
+export function boundInput(value) {
   const pending = [{ value, depth: 0 }]
   const ancestors = new WeakSet()
   let bytes = 0
@@ -111,7 +111,7 @@ export function artifactReference(path) {
   return relative
 }
 
-function attachmentJson(attachment) {
+export function attachmentJson(attachment, rootDirectory = artifactsRoot) {
   let body
   if (typeof attachment.body === 'string') {
     if (attachment.body.length > MAX_INPUT_BYTES) throw new Error('Evidence attachment exceeds byte bound')
@@ -122,8 +122,8 @@ function attachmentJson(attachment) {
   } else if (attachment.path) {
     const reference = artifactReference(attachment.path)
     if (!reference) throw new Error('Evidence attachment path is outside artifacts')
-    const actual = realpathSync(resolve(artifactsRoot, reference))
-    const root = realpathSync(artifactsRoot) + sep
+    const actual = realpathSync(resolve(rootDirectory, reference))
+    const root = realpathSync(rootDirectory) + sep
     if (!actual.startsWith(root)) throw new Error('Evidence attachment escapes artifacts')
     body = readFileSync(actual)
   } else throw new Error('Evidence attachment has no body or artifact path')
@@ -135,10 +135,48 @@ function attachmentJson(attachment) {
   return data
 }
 
-function evidenceFor(result) {
+export function evidenceFor(result, rootDirectory = artifactsRoot) {
   const records = (result.attachments || []).filter((item) => item.name === 'walk-evidence')
   if (records.length > 1) throw new Error('Duplicate walk-evidence attachment')
-  return records.length ? attachmentJson(records[0]) : {}
+  return records.length ? attachmentJson(records[0], rootDirectory) : {}
+}
+
+// Decode in the caller so this projection has no filesystem dependencies.
+export function collectPersonaRuns({ playwrightReport, featureMap, identity, decodeEvidence }) {
+  boundInput(playwrightReport)
+  boundInput(featureMap)
+  boundInput(identity)
+  if (!Array.isArray(playwrightReport?.suites) || !Array.isArray(featureMap?.entries)) throw new Error('Report and feature map need suites and entries')
+  if (typeof decodeEvidence !== 'function') throw new TypeError('decodeEvidence must be a function')
+  const triples = new Map()
+  for (const entry of featureMap.entries) for (const state of entry.states) for (const viewport of entry.state_viewports?.[state] || entry.viewports) {
+    const key = JSON.stringify([entry.id, state, viewport])
+    if (triples.has(key)) throw new Error('Duplicate feature-map triple')
+    triples.set(key, { feature_id: entry.id, state, viewport })
+  }
+  const runs = []
+  for (const spec of specs(playwrightReport.suites)) {
+    if (/^first-run-open @(desktop|phone)$/.test(spec.title)
+      || /^control-census:[a-z0-9]+(?:-[a-z0-9]+)* \[([^\]]+)\] @(desktop|phone)$/.test(spec.title)) continue
+    const match = spec.title?.match(/^([^\s]+) \[([^\]]+)\] @(desktop|phone)$/)
+    if (!match) throw new Error('Unrecognized walk test title')
+    const triple = triples.get(JSON.stringify(match.slice(1)))
+    if (!triple) throw new Error('Test names a triple absent from the feature map')
+    for (const test of spec.tests || []) {
+      if (test.projectName && test.projectName !== triple.viewport) throw new Error('Test project does not match viewport')
+      for (const result of test.results || []) {
+        const attachments = (result.attachments || []).filter((item) => item.name === 'walk-evidence')
+        if (!attachments.length) continue
+        if (attachments.length > 1) throw new Error('Duplicate walk-evidence attachment')
+        const evidence = decodeEvidence(result)
+        // Inline decoders supply their deterministic reference on the returned object.
+        const evidence_ref = typeof attachments[0].body === 'string' ? evidence?.evidence_ref : artifactReference(attachments[0].path)
+        if (typeof evidence_ref !== 'string' || !evidence_ref) throw new Error('Missing or invalid walk-evidence reference')
+        runs.push({ ...triple, evidence, evidence_ref, identity: structuredClone(identity) })
+      }
+    }
+  }
+  return runs
 }
 
 function stackWitness(evidence, featureId) {
