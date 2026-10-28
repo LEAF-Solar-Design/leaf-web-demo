@@ -372,6 +372,7 @@
     "server-jobs-terminal-mirror-durable",
     "server-kit-stream-superset",
     "server-lab-contract",
+    "server-capture-lab-wave3",
     "server-lab-ops",
     "server-lab-evaluate",
     "server-lab-artifacts",
