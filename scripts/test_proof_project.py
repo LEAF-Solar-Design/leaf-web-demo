@@ -147,7 +147,8 @@ class TestProjectBoundary:
             "ALLOCATION", "TRANSPORT", "MIGRATION_ENTRY", "MIGRATION_CORPUS", "MIGRATION_TIMEOUT",
             "MIGRATION_EXIT", "MIGRATION_RESULT", "SCHEMA", "IDENTITY", "BINDING",
             "LAUNCH", "OWNERSHIP", "READINESS", "HEARTBEAT", "AUTH", "BROWSER_EXIT",
-            "BROWSER_EVIDENCE", "CANONICAL"}
+            "BROWSER_EVIDENCE", "CANONICAL", "CANCELLED", "GUARDIAN", "CLEANUP_PROCESS",
+            "CLEANUP_IDENTITY", "CLEANUP_POOL", "CLEANUP_AUTHORITY", "CLEANUP_PRIVATE"}
 
     def test_deployed_posture(self):
         for facts in ({"posture": "production"}, {"legacy_posture": "staging"}, {"synthetic": True}):
@@ -660,7 +661,7 @@ class TestProjectAuthority:
     def test_allocation_journal(self, monkeypatch):
         c = authority_case()
         prepared = prepare(c)
-        assert c.events.index("corpus") < c.events.index("acquire:authority") < c.events.index("authority-planned") < c.events.index("allocate")
+        assert c.events.index("corpus") < c.events.index("authority-planned") < c.events.index("allocate") < c.events.index("acquire:authority")
         assert c.events.index("allocate") < c.events.index("authority-observed") < c.events.index("launch:migration-child")
         assert prepared.database.authority_run_id == "run-test"
         assert prepared.database.ownership.containers == ("a" * 12, "b" * 12)
@@ -677,8 +678,8 @@ class TestProjectAuthority:
         c.effects = replace(c.effects, authority_factory=fail)
         error = authority_refused(c, p.FailureCode.ALLOCATION)
         assert "fakedb" not in str(error)
-        c.scope.cleanups[0][1]()
-        assert c.events[-1] == "emergency-cleanup" and c.launches == []
+        assert c.scope.cleanups == [] and c.launches == []
+        assert "emergency-cleanup" not in c.events
         c = authority_case()
         original_inventory = c.host.authority_inventory
         c.host.authority_inventory = lambda run_id: replace(original_inventory(run_id), run_id="run-else")
@@ -1464,3 +1465,1419 @@ def assert_redacted_mapping(mapping, values, capsys):
     assert dict(mapping) == values
     with pytest.raises(TypeError):
         mapping["TOKEN"] = "changed"
+
+# D's injected operation handles never spawn a thread, process or listener.
+class ImmediateOperation:
+    def __init__(self, callback):
+        self.value, self.error = None, None
+        try:
+            self.value = callback()
+        except BaseException as error:
+            self.error = error
+
+    def done(self):
+        return True
+
+    def result(self):
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+def lifetime_case():
+    c = authority_case()
+    c.teardown, c.leases = [], []
+    c.private = True
+    c.host.begin_operation = ImmediateOperation
+    def scrub(reservation, *, keep_safe):
+        c.teardown.append("private")
+        c.private = False
+        return True
+    def cleanup(run_id):
+        c.teardown.append("authority")
+        c.allocated = False
+    def close_identity(lease):
+        c.teardown.append("identity")
+        c.leases.append(lease)
+        object.__setattr__(lease, "issuer", None)
+        c.published.discard(lease.jwks_path)
+    c.host.scrub = scrub
+    c.host.private_absent = lambda reservation: not c.private
+    c.host.cleanup_authority = cleanup
+    c.host.cleanup_owned_authority = lambda run_id, ownership: cleanup(run_id)
+    c.host.close_identity = close_identity
+    c.scope = p.RunScope(effects=c.effects)
+    return c
+
+
+def cancelled_stage(stage):
+    c = lifetime_case()
+    c.scope.own_reservation(c.plan.reservation)
+    clock = c.effects.clock
+    # An outstanding external operation becomes ready only after cancellation.
+    task = SimpleNamespace(done=lambda: clock.now >= 0.1, result=lambda: "done")
+    original = c.host.begin_operation
+    c.host.begin_operation = lambda callback: task
+    c.scope.cancelled = lambda: clock.now >= 0.05
+    with pytest.raises(p.ProofRefused) as error:
+        c.scope.perform(stage, lambda: None, deadline=1.0)
+    assert error.value.failure == p.Failure(stage, p.FailureCode.CANCELLED)
+    assert clock.now == 0.05  # Refused while pending, not after it completed.
+    c.host.begin_operation = original
+    proof = c.scope.close()
+    assert proof.ok and c.teardown == ["private"]
+    assert c.scope.failure == error.value.failure
+    assert 0.1 <= clock.now < 0.2
+    with pytest.raises(p.ProofRefused):
+        c.scope.commit_guard(lambda: pytest.fail("cancelled publication"))
+
+
+def acquisition_child(monkeypatch, role, kind):
+    c = lifetime_case()
+    stops = []
+    def start():
+        raise RuntimeError("fakedb")
+    child = SimpleNamespace(start=start, stop=lambda deadline: (stops.append(deadline), True)[1])
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+    spec = p.ProcessSpec(role, ("fake",), ROOT, {}, 1)
+    with pytest.raises(RuntimeError):
+        p._launch_runtime(spec, scope=c.scope)
+    assert [name for name, _ in c.scope._actions] == [kind]
+    proof = c.scope.close()
+    assert proof.processes_stopped and len(stops) == 1
+    assert stops[0] == p.CLEANUP_TIMEOUT_S or stops[0] > 0
+    assert c.scope.close() is proof and len(stops) == 1
+
+
+def cleanup_failure(kind, expected):
+    c = lifetime_case()
+    def fail():
+        c.teardown.append("failed")
+        raise RuntimeError("faketok")
+    c.scope.acquire(kind, fail)
+    c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("pool")))
+    c.scope.acquire(p.ResourceKind.AUTHORITY, lambda: c.teardown.append("authority"))
+    c.scope.own_reservation(c.plan.reservation)
+    proof = c.scope.close()
+    assert c.teardown[-2:] == ["authority", "private"]
+    assert "pool" in c.teardown and "failed" in c.teardown
+    assert proof.failures == (p.Failure(p.Stage.TEARDOWN, expected),)
+    assert not proof.ok and proof.observed_rows == ()
+    assert "faketok" not in repr(proof)
+    return c, proof
+
+
+def owned_authority_case():
+    """Keep inventory and deletion independent, including replacement IDs."""
+    c = lifetime_case()
+    inventory = c.host.authority_inventory
+    c.inventory = inventory("run-test")
+    c.removed, c.snapshots, c.inventory_reads, c.run_id_deletions = [], [], [], []
+    allocate = c.effects.authority_factory
+    def factory(run_id):
+        authority = allocate(run_id)
+        c.inventory = inventory(run_id)
+        return authority
+    def observe(run_id):
+        c.inventory_reads.append(run_id)
+        return c.inventory
+    def cleanup(run_id, ownership):
+        assert run_id == "run-test"
+        c.snapshots.append(ownership)
+        c.removed.extend(value for value in c.inventory.containers + c.inventory.networks
+                         if value in ownership.containers + ownership.networks)
+        c.inventory = replace(c.inventory,
+            containers=tuple(value for value in c.inventory.containers if value not in ownership.containers),
+            networks=tuple(value for value in c.inventory.networks if value not in ownership.networks))
+    c.host.authority_inventory = observe
+    c.host.cleanup_owned_authority = cleanup
+    def cleanup_by_run_id(run_id):
+        c.run_id_deletions.append(run_id)
+        c.removed.extend(c.inventory.containers + c.inventory.networks)
+        c.inventory = replace(c.inventory, containers=(), networks=())
+    c.host.cleanup_authority = cleanup_by_run_id
+    c.effects = replace(c.effects, authority_factory=factory)
+    c.scope = p.RunScope(effects=c.effects)
+    return c
+
+
+def assert_own_refusal(scope, operation, primary):
+    with pytest.raises(p.ProofRefused) as error:
+        operation()
+    assert error.value.failure is primary
+    assert scope.failure is primary
+    scope.close()
+    committed = []
+    def commit():
+        committed.append(True)
+        return "COMMITTED"
+    with pytest.raises(p.ProofRefused):
+        scope.commit_guard(commit)
+    assert committed == [] and scope.failure is primary
+
+
+def closing_job_race(monkeypatch, *, kill_succeeds):
+    """Replay Popen return after close entered and startup recovery timed out."""
+    import threading
+    c = lifetime_case()
+    c.private = False
+    c.events, c.errors, c.stops = [], [], []
+    entered, release = threading.Event(), threading.Event()
+    closing, finish_close = threading.Event(), threading.Event()
+    class Child:
+        live = True
+        def poll(self):
+            return None if self.live else 1
+        def kill(self):
+            c.events.append("child-kill")
+            if kill_succeeds:
+                self.live = False
+        def wait(self, timeout):
+            assert 0 <= timeout <= p.CLEANUP_TIMEOUT_S
+            c.events.append("child-wait")
+            if self.live:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            return 1
+    c.child = Child()
+    class Job:
+        def close(self):
+            if not closing.is_set():
+                c.events.append("close-enter")
+                closing.set()
+                assert finish_close.wait(15), "job close was not released"
+                c.events.append("close-return")
+        def attach_and_resume(self, child):
+            assert child is c.child and closing.is_set()
+            c.events.append("attach-failed")
+            raise OSError("job closing")
+        def stop(self, deadline):
+            return False  # A closed job cannot verify its descendants.
+    def popen(*args, **kwargs):
+        entered.set()
+        assert release.wait(5), "Popen fake was not released"
+        c.events.append("popen-child")
+        return c.child
+    monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(p, "_WindowsJob", Job)
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    c.process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+    def start():
+        try:
+            c.process.start()
+        except BaseException as error:
+            c.errors.append(error)
+            c.events.append("start-failed")
+    worker = threading.Thread(target=start)
+    stopper = threading.Thread(target=lambda: c.stops.append(
+        c.process.stop(p.time.monotonic() + 1)))
+    channel = SimpleNamespace(receive=lambda timeout: "disarm",
+        acknowledge=lambda: c.events.append("ack-live" if c.child.live else "ack-stopped"))
+    c.request = p.GuardianRequest("run-test", c.plan.reservation,
+        c.host.authority_inventory("run-test"), channel, (c.process,), 1)
+    worker.start()
+    try:
+        assert entered.wait(5), "Popen fake was not entered"
+        stopper.start()
+        assert closing.wait(5), "stop did not enter job close"
+        release.set()
+        worker.join(timeout=8)  # Recovery must exhaust its real 5 s stop-lock budget.
+        assert not worker.is_alive() and not c.process._starting
+        assert c.process.process is c.child and c.child.live
+        assert [str(error) for error in c.errors] == ["runtime process start failed"]
+        assert c.stops == [] and "close-return" not in c.events
+        assert p.guardian_main(c.request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in c.events)
+    finally:
+        release.set()
+        finish_close.set()
+        worker.join(timeout=8)
+        if stopper.ident is not None:
+            stopper.join(timeout=5)
+    assert not worker.is_alive() and not stopper.is_alive()
+    assert c.events.index("close-enter") < c.events.index("popen-child")
+    assert c.events.index("attach-failed") < c.events.index("start-failed") < c.events.index("close-return")
+    return c
+
+
+def assert_entry_error(scope, operation, error, stage=p.Stage.TEARDOWN):
+    primary = scope.failure or p.Failure(stage, p.FailureCode.GUARDIAN)
+    with pytest.raises(type(error)) as caught:
+        operation()
+    assert caught.value is error and scope.failure == primary
+    remembered = scope.failure
+    scope.cancelled = lambda: False  # The remembered error alone must block commit.
+    scope.close()
+    assert scope.failure is remembered
+    committed = []
+    with pytest.raises(p.ProofRefused):
+        scope.commit_guard(lambda: (committed.append(True), "COMMITTED")[1])
+    assert committed == [] and scope.failure is remembered
+
+
+class TestProjectLifetime:
+    def test_d_d_perform_deadline_after_completion(self):
+        c = lifetime_case()
+        clock = c.effects.clock
+        task = SimpleNamespace(checks=0, result=lambda: "done")
+        def done():
+            task.checks += 1
+            if task.checks == 1:
+                return False
+            clock.now = 2.0
+            return True
+        task.done = done
+        c.host.begin_operation = lambda operation: task
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: "done", deadline=1)
+        assert task.checks == 2 and clock.now == 2.0
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert c.scope.failure is error.value.failure
+        assert c.scope.close().ok
+        committed = []
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: (committed.append(True), "COMMITTED")[1])
+        assert committed == [] and c.scope.failure is error.value.failure
+
+    def test_d_d_posix_exited_launcher_group_signalled(self, monkeypatch):
+        c = lifetime_case()
+        signals, checked = [], []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: signals.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), True)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is True
+        assert signals == [(7, p.signal.SIGKILL)]
+        assert checked == [(7, deadline)] and process._stopped
+
+    def test_d_d_posix_exited_launcher_group_lingers(self, monkeypatch):
+        c = lifetime_case()
+        signals, checked = [], []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: signals.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), False)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is False
+        assert signals == [(7, p.signal.SIGKILL)]
+        assert checked == [(7, deadline)] and not process._stopped
+        assert process.stop(deadline) is False
+        assert signals == [(7, p.signal.SIGKILL)] * 2
+        assert checked == [(7, deadline)] * 2 and not process._stopped
+
+    def test_d_c_disarm_stops_every_process(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledged = [], []
+        first = SimpleNamespace(stop=lambda deadline: (stops.append("first"), False)[1])
+        second = SimpleNamespace(stop=lambda deadline: (stops.append("second"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (first, second), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert stops == ["first", "second", "second", "first"]
+        assert acknowledged == []
+
+    def test_d_c_disarm_failure_falls_back(self):
+        c = lifetime_case()
+        events, acknowledged = [], []
+        inventory = c.host.authority_inventory
+        ownership = inventory("run-test")
+        def observe(run_id):
+            events.append("inventory")
+            return inventory(run_id)
+        def absent(reservation):
+            events.append("disarm-check")
+            return False
+        c.host.authority_inventory = observe
+        c.host.private_absent = absent
+        process = SimpleNamespace(stop=lambda deadline: (events.append("stop"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            ownership, channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        check = events.index("disarm-check")
+        assert events[:check].count("stop") == 1
+        assert events[check + 1:] == ["stop", "inventory", "inventory"]
+        assert c.teardown == ["authority", "private"] and not c.private
+        assert acknowledged == []
+
+    def test_d_c_disarm_success_acknowledges(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledged = [], []
+        first = SimpleNamespace(stop=lambda deadline: (stops.append("first"), True)[1])
+        second = SimpleNamespace(stop=lambda deadline: (stops.append("second"), True)[1])
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (first, second), 1)
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert stops == ["first", "second"] and acknowledged == [True]
+        assert c.teardown == []
+
+    def test_d_c_posix_group_kill(self, monkeypatch):
+        c = lifetime_case()
+        calls = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: None,
+            kill=lambda: calls.append("child-kill"))
+        def stop_owned(request, *, effects, deadline):
+            assert request.identity is process.identity and effects is c.effects
+            request.kill()
+            return True
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", stop_owned)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: calls.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty", lambda pgid, deadline: True)
+        assert process.stop(p.time.monotonic() + 1) is True
+        assert calls == [(7, p.signal.SIGKILL)] * 2
+
+    def test_d_c_posix_stop_group_empty(self, monkeypatch):
+        c = lifetime_case()
+        checked = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: None)
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), True)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is True
+        assert checked == [(7, deadline)] and process._stopped
+
+    def test_d_c_posix_stop_group_lingers(self, monkeypatch):
+        c = lifetime_case()
+        checked = []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: None)
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), False)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is False
+        assert not process._stopped and checked == [(7, deadline)]
+        assert process.stop(deadline) is False
+        assert not process._stopped and checked == [(7, deadline), (7, deadline)]
+
+    def test_d_b_c1_cancel_error(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError):
+            c.scope.cancel(unexpected=True)
+        primary = c.scope.failure
+        assert primary == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        c.scope.close()
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+        assert c.scope.failure is primary
+
+    def test_d_b_c1_remember_error(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError):
+            c.scope.remember()
+        primary = c.scope.failure
+        assert primary == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        c.scope.close()
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+        assert c.scope.failure is primary
+
+    def test_d_b_c1_stop_close_race(self, monkeypatch):
+        c = closing_job_race(monkeypatch, kill_succeeds=True)
+        assert c.stops == [False] and not c.process._stopped
+        assert not c.child.live
+        assert c.events.index("close-return") < c.events.index("child-kill") < c.events.index("child-wait")
+        assert p.guardian_main(c.request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in c.events)
+
+    def test_d_b_c1_stop_close_live(self, monkeypatch):
+        c = closing_job_race(monkeypatch, kill_succeeds=False)
+        assert c.child.live
+        assert p.guardian_main(c.request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in c.events)
+        assert c.stops == [False] and not c.process._stopped
+        assert "child-kill" in c.events and "child-wait" in c.events
+
+    def test_d_b_c1_stop_no_child(self, monkeypatch):
+        calls = []
+        def popen(*args, **kwargs):
+            calls.append("popen-failed")
+            raise OSError("no child created")
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(close=lambda: calls.append("close")))
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        with pytest.raises(RuntimeError, match="runtime process start failed"):
+            process.start()
+        assert process.process is None and not process._starting and not process._stopped
+        assert process.stop(p.time.monotonic() + 1) is True
+        assert process._stopped and calls == ["popen-failed", "close", "close"]
+
+    def test_d_b_c1_perform_after_close(self):
+        c = owned_authority_case()
+        first = c.scope.close()
+        assert first.authority_removed and first.ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)
+        assert "allocate" not in c.events and c.inventory_reads == []
+        assert c.inventory.containers == c.inventory.networks == ()
+        assert c.scope._pending == [] and c.scope.close() is first
+        assert first.authority_removed and first.ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("post-close work published"))
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_c1_checkpoint_closed(self):
+        c = lifetime_case()
+        c.scope.close()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.checkpoint(p.Stage.BINDING)
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.BINDING, p.FailureCode.GUARDIAN)
+        with pytest.raises(p.ProofRefused):
+            c.scope.checkpoint(p.Stage.ALLOCATION)
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_c1_closing_admission(self):
+        c = owned_authority_case()
+        registered, refused = [], []
+        def done():
+            if c.scope._closing and not registered:
+                assert c.scope._draining
+                with pytest.raises(p.ProofRefused) as error:
+                    c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+                refused.append(error.value.failure)
+                # This operation was pending before close: its late cleanup is owned.
+                c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("late-pool")))
+                registered.append(True)
+            return bool(registered)
+        c.scope._pending.append(SimpleNamespace(done=done))
+        proof = c.scope.close()
+        assert proof.ok and c.teardown == ["late-pool"]
+        assert refused == [p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)]
+        assert c.scope.failure is refused[0] and "allocate" not in c.events
+        assert c.inventory.containers == c.inventory.networks == ()
+
+    def test_d_b_c1_pool_invalid_cleanup(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError, match="invalid cleanup registration"):
+            c.scope.own_pool(SimpleNamespace(close=None))
+        primary = c.scope.failure
+        assert primary == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        c.scope.close()
+        assert c.scope.failure is primary
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+        assert c.scope.failure is primary
+
+    def test_d_b_c1_acquire_invalid_kind(self):
+        c = lifetime_case()
+        with pytest.raises(TypeError, match="invalid cleanup registration"):
+            c.scope.acquire("pool", lambda: None)
+        assert c.scope.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        assert c.scope._actions == []
+        c.scope.close()
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("COMMITTED"))
+
+    def test_d_b_c1_browser_getter_error(self):
+        c = lifetime_case()
+        error = AttributeError("stop getter")
+        class Browser:
+            @property
+            def stop(self):
+                raise error
+        assert_entry_error(c.scope, lambda: c.scope.own_browser(Browser()), error)
+
+    def test_d_b_c1_reservation_getter_error(self):
+        c = lifetime_case()
+        error = AttributeError("release getter")
+        class Reservation:
+            @property
+            def release_ports(self):
+                raise error
+        assert_entry_error(c.scope, lambda: c.scope.own_reservation(Reservation()), error)
+
+    def test_d_b_c1_checkpoint_error_stage(self):
+        c = lifetime_case()
+        error = AttributeError("cancel getter")
+        def cancelled():
+            raise error
+        c.scope.cancelled = cancelled
+        assert_entry_error(c.scope, lambda: c.scope.checkpoint(stage=p.Stage.BROWSER),
+                           error, p.Stage.BROWSER)
+
+    def test_d_b_c1_perform_error_stage(self):
+        c = lifetime_case()
+        error = OSError("operation error")
+        def operation():
+            raise error
+        assert_entry_error(c.scope, lambda: c.scope.perform(p.Stage.MIGRATION, operation, deadline=1),
+                           error, p.Stage.MIGRATION)
+
+    def test_d_b_c1_error_first_failure(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        c.scope.remember(primary)
+        error = AttributeError("pool getter")
+        class Pool:
+            @property
+            def close(self):
+                raise error
+        assert_entry_error(c.scope, lambda: c.scope.own_pool(Pool()), error)
+        assert c.scope.failure is primary
+
+    def test_d_b_owned_ids_only(self):
+        c = owned_authority_case()
+        prepared = prepare(c)
+        owned = prepared.database.ownership
+        assert owned.containers == ("a" * 12, "b" * 12) and owned.networks == ("c" * 12,)
+        foreign = replace(owned, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        c.inventory = foreign
+        proof = c.scope.close()
+        assert c.snapshots == [owned] and c.removed == [] and c.inventory == foreign
+        assert not proof.authority_removed and not proof.ok
+        assert c.events.count("stop-authority") == 1
+
+    def test_d_b_owned_ids_removed(self):
+        c = owned_authority_case()
+        prepared = prepare(c)
+        proof = c.scope.close()
+        assert c.snapshots == [prepared.database.ownership]
+        assert c.removed == ["a" * 12, "b" * 12, "c" * 12]
+        assert c.inventory.containers == c.inventory.networks == ()
+        assert proof.authority_removed and proof.ok
+        assert len(c.inventory_reads) == 3
+
+    def test_d_b_snapshot_read_failure(self):
+        c = owned_authority_case()
+        inventory = c.host.authority_inventory
+        def observe(run_id):
+            result = inventory(run_id)
+            if len(c.inventory_reads) == 2:
+                raise OSError("fake")
+            return result
+        c.host.authority_inventory = observe
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert c.events.count("stop-authority") == 1
+        assert c.snapshots == c.removed == c.run_id_deletions == []
+        assert c.inventory.containers == ("a" * 12, "b" * 12)
+        assert not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+
+    def test_d_b_failed_start_not_removed(self):
+        c = owned_authority_case()
+        allocate = c.effects.authority_factory
+        def fail(run_id):
+            allocate(run_id)
+            raise RuntimeError("fake")
+        c.effects = replace(c.effects, authority_factory=fail)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert c.inventory.containers and c.snapshots == c.removed == []
+        assert not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+
+    def test_d_b_concurrent_stop_during_start(self, monkeypatch):
+        import threading
+        c = lifetime_case()
+        c.private = False
+        events, errors = [], []
+        entered, release = threading.Event(), threading.Event()
+        class Child:
+            live = True
+            def poll(self):
+                return None if self.live else 1
+            def kill(self):
+                events.append("child-kill")
+                self.live = False
+            def wait(self, timeout):
+                assert 0 <= timeout <= p.CLEANUP_TIMEOUT_S
+                if self.live:
+                    raise subprocess.TimeoutExpired("fake", timeout)
+                events.append("child-stopped")
+                return 1
+        child = Child()
+        class Job:
+            closed = False
+            def close(self):
+                events.append("job-close")
+                self.closed = True
+            def attach_and_resume(self, process):
+                assert process is child and self.closed
+                events.append("attach-failed")
+                raise OSError("closed")
+            def stop(self, deadline):
+                events.append("job-unverified")
+                return False
+        job = Job()
+        def popen(*args, **kwargs):
+            entered.set()
+            assert release.wait(3), "Popen fake was not released"
+            return child
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: job)
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        def start():
+            try:
+                process.start()
+            except RuntimeError as error:
+                errors.append(str(error))
+                events.append("start-failed")
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+            acknowledge=lambda: events.append("ack-live" if child.live else "ack-stopped"))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (process,), 1)
+        worker = threading.Thread(target=start)
+        worker.start()
+        try:
+            assert entered.wait(3), "Popen fake was not entered"
+            assert process.stop(p.time.monotonic() + 1) is False
+            assert not process._stopped
+            assert p.guardian_main(request, effects=c.effects) == 1
+            assert not any(event.startswith("ack") for event in events)
+        finally:
+            release.set()
+            worker.join(timeout=3)
+        assert not worker.is_alive()
+        assert errors == ["runtime process start failed"]
+        assert not child.live
+        assert events.index("attach-failed") < events.index("child-kill") < events.index("child-stopped") < events.index("start-failed")
+        # An unverified closed job cannot authorize an acknowledgement either.
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert not any(event.startswith("ack") for event in events)
+
+    def test_d_b_stop_before_start(self):
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        assert process.stop(p.time.monotonic() + 1) is False
+        assert not process._stopped
+        with pytest.raises(RuntimeError, match="runtime process start refused"):
+            process.start()
+        assert process.process is None
+
+    def test_d_b_own_pool_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        class Pool:
+            @property
+            def close(self):
+                raise p.ProofRefused(primary)
+        assert_own_refusal(c.scope, lambda: c.scope.own_pool(Pool()), primary)
+
+    def test_d_b_own_browser_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        class Browser:
+            @property
+            def stop(self):
+                raise p.ProofRefused(primary)
+        assert_own_refusal(c.scope, lambda: c.scope.own_browser(Browser()), primary)
+
+    def test_d_b_own_reservation_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.BINDING, p.FailureCode.BINDING)
+        class Reservation:
+            @property
+            def release_ports(self):
+                raise p.ProofRefused(primary)
+        assert_own_refusal(c.scope, lambda: c.scope.own_reservation(Reservation()), primary)
+
+    def test_d_b_planned_journal_collision(self):
+        c = owned_authority_case()
+        foreign = replace(c.inventory, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        def journal(path, value):
+            assert path.name == "authority-planned.json"
+            assert value.authority.containers == value.authority.networks == ()
+            c.inventory = foreign
+            raise OSError("fake")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert c.inventory == foreign and c.removed == c.snapshots == c.teardown == []
+        assert "allocate" not in c.events
+        assert not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+        assert c.scope.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+
+    def test_d_b_post_cleanup_verification(self):
+        c = owned_authority_case()
+        prepare(c)
+        attempted = []
+        c.host.cleanup_owned_authority = lambda run_id, owned: attempted.append(owned)
+        proof = c.scope.close()
+        assert len(attempted) == 1 and c.inventory.containers and c.removed == []
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+
+    def test_d_b_never_entered(self):
+        c = lifetime_case()
+        reads = []
+        c.host.authority_inventory = lambda run_id: reads.append(run_id)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: pytest.fail("expired"), deadline=0)
+        proof = c.scope.close()
+        assert proof.authority_removed and proof.ok and reads == []
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_inventory_read_failure(self):
+        c = owned_authority_case()
+        prepare(c)
+        def fail(run_id):
+            raise OSError("fake")
+        c.host.authority_inventory = fail
+        proof = c.scope.close()
+        assert c.removed == ["a" * 12, "b" * 12, "c" * 12]
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert c.scope.failure == proof.failures[0]
+        # No cleanup callback exists when the first inventory read fails.
+        c = owned_authority_case()
+        c.host.authority_inventory = fail
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert "allocate" not in c.events and c.removed == c.snapshots == []
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_inventory_malformed(self):
+        c = owned_authority_case()
+        prepare(c)
+        c.host.authority_inventory = lambda run_id: {"containers": [], "networks": []}
+        proof = c.scope.close()
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        # The malformed read must also prevent absence proof before allocation.
+        c = owned_authority_case()
+        c.host.authority_inventory = lambda run_id: {"containers": [], "networks": []}
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert "allocate" not in c.events and c.removed == c.snapshots == []
+        assert not proof.authority_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_preexisting_collision(self):
+        c = owned_authority_case()
+        foreign = replace(c.inventory, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        c.inventory = foreign
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        proof = c.scope.close()
+        assert "allocate" not in c.events and c.removed == c.snapshots == []
+        assert c.inventory == foreign and not proof.authority_removed and not proof.ok
+        assert c.scope.failure is error.value.failure
+
+    def test_d_b_production_stop_owned_only(self, monkeypatch):
+        c = owned_authority_case()
+        raw_allocate = c.effects.authority_factory
+        def factory(run_id):
+            raw = raw_allocate(run_id)
+            raw._stop_transport = lambda: c.events.append("stop-transport")
+            raw.stop = lambda: pytest.fail("PP-2 stop deletes by run ID")
+            return raw
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(
+            PgAuthority=SimpleNamespace(start=factory)))
+        c.effects = replace(c.effects, authority_factory=p._authority_factory)
+        c.scope = p.RunScope(effects=c.effects)
+        prepared = prepare(c)
+        assert prepared.database.transport == "host-relay"
+        c.inventory = replace(c.inventory, containers=("d" * 12, "e" * 12), networks=("f" * 12,))
+        proof = c.scope.close()
+        assert c.events.count("stop-transport") == 1
+        assert c.removed == [] and not proof.authority_removed and not proof.ok
+
+    def test_d_b_inventory_after_all_cleanup(self):
+        c = owned_authority_case()
+        prepare(c)
+        owned = c.inventory
+        # Runs before the allocation's callback (reverse acquisition order).
+        c.scope.acquire(p.ResourceKind.AUTHORITY, lambda: c.events.append("earlier-cleanup"))
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None,
+            disarm=lambda: c.events.append("disarm")))
+        inventory = c.host.authority_inventory
+        def observe(run_id):
+            assert "earlier-cleanup" in c.events and c.snapshots == [owned]
+            assert c.removed == ["a" * 12, "b" * 12, "c" * 12]
+            assert "disarm" not in c.events
+            return inventory(run_id)
+        c.host.authority_inventory = observe
+        proof = c.scope.close()
+        assert proof.authority_removed and proof.ok
+        assert c.events[-1] == "disarm"
+        assert len(c.inventory_reads) == 3
+
+    def test_d_b_guardian_requires_verified_stop(self):
+        c = lifetime_case()
+        c.private = False
+        stops, acknowledgements = [], []
+        process = SimpleNamespace(stop=lambda deadline: stops.append(deadline))
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledgements.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert stops == [p.CLEANUP_TIMEOUT_S] * 2 and acknowledgements == []
+
+    def test_d_c1_disarm_live_job(self, monkeypatch):
+        c = lifetime_case()
+        c.private = False
+        child = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        child.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        child.process = SimpleNamespace(poll=lambda: 0)
+        checked, acknowledged = [], []
+        child.job = SimpleNamespace(
+            stop=lambda deadline: (checked.append(deadline), False)[1], close=lambda: None)
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (child,), 1)
+        assert child.poll() == 0
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert acknowledged == [] and checked == [p.CLEANUP_TIMEOUT_S] * 2
+        assert not child._stopped
+
+    def test_d_c1_disarm_stopped_job(self, monkeypatch):
+        c = lifetime_case()
+        c.private = False
+        child = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        child.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        child.process = SimpleNamespace(poll=lambda: 0)
+        checked, acknowledged = [], []
+        child.job = SimpleNamespace(
+            stop=lambda deadline: (checked.append(deadline), True)[1], close=lambda: None)
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        channel = SimpleNamespace(receive=lambda timeout: "disarm",
+                                  acknowledge=lambda: acknowledged.append(True))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, (child,), 1)
+        assert child.poll() == 0
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert acknowledged == [True] and checked == [p.CLEANUP_TIMEOUT_S]
+        assert child._stopped
+
+    def test_d_c1_deadline_before_pool(self):
+        c = lifetime_case()
+        calls = []
+        assert c.effects.clock.now == 0
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=0)
+        primary = p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert error.value.failure == primary
+        c.scope.own_pool(SimpleNamespace(close=lambda: False))
+        proof = c.scope.close()
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_POOL),)
+        assert c.scope.failure == primary and calls == []
+
+    def test_d_c1_deadline_blocks_commit(self):
+        c = lifetime_case()
+        calls = []
+        assert c.effects.clock.now == 0
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=0)
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: (calls.append("commit"), "COMMITTED")[1])
+        assert calls == [] and c.scope.failure == error.value.failure
+
+    def test_d_c1_begin_operation_error(self):
+        c = lifetime_case()
+        calls = []
+        failure = OSError("fake begin failure")
+        def begin(operation):
+            raise failure
+        c.host.begin_operation = begin
+        with pytest.raises(OSError) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: calls.append("operation"), deadline=1)
+        assert error.value is failure
+        assert c.scope.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert calls == [] and c.scope._pending == []
+        assert c.scope.close().ok
+
+    def test_d_c1_begin_operation_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        def begin(operation):
+            raise p.ProofRefused(primary)
+        c.host.begin_operation = begin
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: pytest.fail("operation ran"), deadline=1)
+        assert error.value.failure == primary and c.scope.failure == primary
+
+    def test_d_c1_acquire_refusal(self):
+        c = lifetime_case()
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.acquire(p.ResourceKind.POOL, lambda: None)
+        assert error.value.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_checkpoint_refusal(self):
+        c = lifetime_case()
+        c.scope.cancel()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.checkpoint(p.Stage.MIGRATION)
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.CANCELLED)
+        assert c.scope.failure == error.value.failure
+        with pytest.raises(p.ProofRefused):
+            c.scope.checkpoint(p.Stage.ALLOCATION)
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_close_refusal(self):
+        c = lifetime_case()
+        refused = []
+        def close_again():
+            with pytest.raises(p.ProofRefused) as error:
+                c.scope.close()
+            refused.append(error.value.failure)
+        c.scope.own_pool(SimpleNamespace(close=close_again))
+        assert c.scope.close().ok
+        assert refused == [p.Failure(p.Stage.TEARDOWN, p.FailureCode.GUARDIAN)]
+        assert c.scope.failure == refused[0]
+
+    def test_d_c1_commit_guard_refusal(self):
+        c = lifetime_case()
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(lambda: pytest.fail("commit before cleanup"))
+        assert error.value.failure == p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_PRIVATE)
+        assert c.scope.failure == error.value.failure
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("forgotten refusal"))
+
+    def test_d_c1_guardian_arm_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)
+        def arm():
+            raise p.ProofRefused(primary)
+        guardian = SimpleNamespace(arm=arm, disarm=lambda: c.teardown.append("disarm"))
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.own_guardian(guardian)
+        assert error.value.failure == primary and c.scope.failure == primary
+        assert c.scope.close().ok and c.teardown == ["disarm"]
+
+    def test_d_c1_commit_callback_refusal(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        def commit():
+            raise p.ProofRefused(primary)
+        assert c.scope.close().ok
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(commit)
+        assert error.value.failure == primary and c.scope.failure == primary
+
+    def test_d_c1_planned_journal_collision(self):
+        c = lifetime_case()
+        assert not c.allocated
+        def journal(path, value):
+            assert path.name == "authority-planned.json"
+            assert value.authority.containers == value.authority.networks == ()
+            c.allocated = True  # Another allocation wins after the empty inventory.
+            raise OSError("fake planned journal failure")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        c.scope.close()
+        assert c.allocated and "authority" not in c.teardown
+        assert "allocate" not in c.events
+        assert c.scope.failure == error.value.failure
+
+    def test_d_c1_owned_authority_cleanup(self):
+        c = lifetime_case()
+        journal = c.effects.receipt_writer.ownership
+        def fail_observed(path, value):
+            journal(path, value)
+            if path.name == "authority-observed.json":
+                assert c.allocated
+                raise OSError("fake observed journal failure")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=fail_observed))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.ALLOCATION, lambda: prepare(c), deadline=1)
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.ALLOCATION)
+        assert "allocate" in c.events
+        proof = c.scope.close()
+        assert proof.authority_removed and not c.allocated
+        assert c.teardown == ["authority"] and c.scope.failure == error.value.failure
+
+    def test_d_c1_migration_before_runtime(self, monkeypatch):
+        c = lifetime_case()
+        def child(spec):
+            return SimpleNamespace(start=lambda: None,
+                stop=lambda deadline: (c.teardown.append(spec.role), True)[1])
+        monkeypatch.setattr(p, "_RuntimeProcess", child)
+        for role in ("migration-child", "runtime-build"):
+            p._launch_runtime(p.ProcessSpec(role, ("fake",), ROOT, {}, 1), scope=c.scope)
+        assert c.scope.close().processes_stopped
+        assert c.teardown == ["migration-child", "runtime-build"]
+
+    def test_reverse_cleanup_order(self):
+        c = lifetime_case()
+        expected = ["browser_process", "stack_process", "seed_process", "migration_process",
+                    "runtime_process", "identity", "pool", "authority", "root", "guardian"]
+        # Scramble registration: order must follow dependencies, then LIFO.
+        for name in reversed(expected):
+            c.scope.acquire(p.ResourceKind(name), lambda name=name: c.teardown.append(name))
+        c.scope.acquire(p.ResourceKind.STACK_PROCESS, lambda: c.teardown.append("new-stack"))
+        proof = c.scope.close()
+        assert c.teardown == [expected[0], "new-stack", *expected[1:]]
+        assert proof.ok and proof.observed_rows == ("P10",) and proof.teardown_seconds == 0
+        assert c.scope.close() is proof
+        with pytest.raises(p.ProofRefused):
+            c.scope.acquire(p.ResourceKind.POOL, lambda: None)
+
+    def test_failure_after_root(self):
+        c = lifetime_case()
+        def journal(*args):
+            raise RuntimeError("fake")
+        c.effects = replace(c.effects, receipt_writer=SimpleNamespace(ownership=journal))
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            p.preflight(c.config, effects=c.scope.bind_effects())
+        assert c.scope.close().private_material_removed
+        assert c.teardown == ["private"] and not c.private
+
+    def test_failure_after_guardian(self):
+        c = lifetime_case()
+        def arm():
+            c.teardown.append("arm")
+            raise RuntimeError("fake")
+        guardian = SimpleNamespace(arm=arm, disarm=lambda: c.teardown.append("disarm"))
+        with pytest.raises(RuntimeError):
+            c.scope.own_guardian(guardian)
+        assert c.scope.close().guardian_disarmed
+        assert c.teardown == ["arm", "disarm"]
+
+    def test_partial_allocation_failure(self):
+        c = lifetime_case()
+        def allocate(run_id):
+            c.allocated = True
+            # Match PP-2: failed startup cleans only its own creation receipt.
+            created = c.host.authority_inventory(run_id)
+            try:
+                raise RuntimeError("fakedb")
+            finally:
+                c.host.cleanup_owned_authority(run_id, created)
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        c.scope.remember(error.value.failure)
+        proof = c.scope.close()
+        assert proof.authority_removed and not c.allocated
+        assert c.teardown == ["authority"]
+        assert c.scope.failure.fixed_code == p.FailureCode.ALLOCATION
+
+    def test_failure_after_migration_child(self, monkeypatch):
+        acquisition_child(monkeypatch, "migration-child", p.ResourceKind.MIGRATION_PROCESS)
+
+    def test_failure_after_issuer(self, monkeypatch):
+        c = lifetime_case()
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: None)
+        monkeypatch.setattr(p, "_path_absent", lambda path: True)
+        def close(lease):
+            c.leases.append(lease)
+            c.teardown.append("identity")
+            p._Host.close_identity(lease)
+        c.host.close_identity = close
+        c.issuer.thumbprint = ""
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        assert c.scope.close().identity_delivery_closed
+        assert len(c.leases) == 1 and c.leases[0].issuer is None
+        assert c.teardown == ["identity", "authority"]
+
+    def test_failure_after_jwks(self, monkeypatch):
+        c = lifetime_case()
+        lease = p.IdentityLease(c.issuer, "run-test", ROOT / "public-jwks.json", {})
+        exists = [True]
+        monkeypatch.setattr(Path, "unlink", lambda *args, **kw: exists.__setitem__(0, False))
+        monkeypatch.setattr(p, "_path_absent", lambda path: not exists[0])
+        c.scope.acquire(p.ResourceKind.IDENTITY, lambda: p._Host.close_identity(lease))
+        assert c.scope.close().identity_delivery_closed
+        assert lease.issuer is None and exists == [False]
+
+    def test_failure_after_seed_pool(self):
+        c = lifetime_case()
+        pool = SimpleNamespace(close=lambda: c.teardown.append("pool"))
+        c.scope.own_pool(pool)
+        c.scope.remember(p.Failure(p.Stage.BINDING, p.FailureCode.BINDING))
+        assert c.scope.close().pools_closed and c.teardown == ["pool"]
+
+    def test_failure_after_launcher(self, monkeypatch):
+        acquisition_child(monkeypatch, "stack-launcher", p.ResourceKind.STACK_PROCESS)
+
+    def test_failure_after_browser(self):
+        c = lifetime_case()
+        stops = []
+        browser = SimpleNamespace(stop=lambda deadline: (stops.append(deadline), True)[1])
+        c.scope.own_browser(browser)
+        c.scope.remember(p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT))
+        assert c.scope.close().processes_stopped
+        assert stops == [p.CLEANUP_TIMEOUT_S]
+
+    def test_cancel_allocation(self):
+        cancelled_stage(p.Stage.ALLOCATION)
+
+    def test_cancel_migration(self):
+        cancelled_stage(p.Stage.MIGRATION)
+
+    def test_cancel_identity(self):
+        cancelled_stage(p.Stage.IDENTITY)
+
+    def test_cancel_readiness(self):
+        cancelled_stage(p.Stage.READINESS)
+
+    def test_cancel_browser(self):
+        cancelled_stage(p.Stage.BROWSER)
+
+    def test_cancel_publication(self):
+        c = lifetime_case()
+        assert c.scope.close().ok
+        c.scope.cancel()
+        commits = []
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.commit_guard(lambda: commits.append("commit"))
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert commits == []
+        c = lifetime_case()
+        c.scope.close()
+        assert c.scope.commit_guard(lambda: "committed") == "committed"
+
+    def test_process_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.STACK_PROCESS, p.FailureCode.CLEANUP_PROCESS)
+        assert not proof.processes_stopped
+
+    def test_identity_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.IDENTITY, p.FailureCode.CLEANUP_IDENTITY)
+        assert not proof.identity_delivery_closed
+
+    def test_pool_cleanup_failure(self):
+        c, proof = cleanup_failure(p.ResourceKind.POOL, p.FailureCode.CLEANUP_POOL)
+        assert not proof.pools_closed
+
+    def test_authority_stop_failure(self):
+        c = lifetime_case()
+        original = c.effects.authority_factory
+        def allocate(run_id):
+            authority = original(run_id)
+            def stop():
+                raise RuntimeError("fakedb")
+            authority.stop = stop
+            return authority
+        c.effects = replace(c.effects, authority_factory=allocate)
+        c.scope = p.RunScope(effects=c.effects)
+        prepare(c)
+        proof = c.scope.close()
+        assert not c.allocated and "authority" in c.teardown
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_AUTHORITY),)
+        assert not proof.authority_removed and not proof.ok
+
+    def test_removal_verification(self, monkeypatch):
+        reservation = p.Reservation(ROOT, ROOT / "artifacts", root_identity=(1, 2))
+        removals = []
+        monkeypatch.setattr(p, "_path_safe", lambda path: True)
+        original_stat = Path.stat
+        monkeypatch.setattr(Path, "stat", lambda path, *args, **kw:
+            SimpleNamespace(st_dev=1, st_ino=2) if path == ROOT else original_stat(path, *args, **kw))
+        assert not p._path_absent(SimpleNamespace(lstat=lambda: SimpleNamespace()))
+        def denied():
+            raise PermissionError("fake")
+        assert not p._path_absent(SimpleNamespace(lstat=denied))
+        def missing():
+            raise FileNotFoundError("fake")
+        assert p._path_absent(SimpleNamespace(lstat=missing))
+        monkeypatch.setattr(p.os.path, "lexists", lambda path: True)
+        monkeypatch.setattr(p, "_path_absent", lambda path: False)
+        monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
+        assert p._Host.scrub(reservation, keep_safe=False) is False
+        assert removals == [ROOT]
+        # Identity replacement refuses before removal too.
+        assert p._Host.scrub(replace(reservation, root_identity=(1, 3)), keep_safe=False) is False
+        assert removals == [ROOT]
+
+    def test_scrub_failure(self):
+        c = lifetime_case()
+        c.host.scrub = lambda *args, **kw: False
+        c.scope.own_reservation(c.plan.reservation)
+        proof = c.scope.close()
+        assert not proof.private_material_removed and not proof.ok
+        assert proof.failures == (p.Failure(p.Stage.TEARDOWN, p.FailureCode.CLEANUP_PRIVATE),)
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: pytest.fail("success despite scrub failure"))
+
+    def test_primary_failure_preserved(self):
+        c = lifetime_case()
+        primary = p.Failure(p.Stage.MIGRATION, p.FailureCode.MIGRATION_EXIT)
+        c.scope.remember(primary)
+        for kind in (p.ResourceKind.ROOT, p.ResourceKind.POOL, p.ResourceKind.STACK_PROCESS):
+            c.scope.acquire(kind, lambda: False)
+        proof = c.scope.close()
+        assert c.scope.failure is primary
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PROCESS,
+            p.FailureCode.CLEANUP_POOL, p.FailureCode.CLEANUP_PRIVATE]
+
+    def test_reused_process_identity(self):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        signals = []
+        request = p.StopRequest(owner, lambda: replace(owner, start_id="new"),
+            lambda: signals.append("terminate"), lambda: signals.append("kill"), lambda timeout: True)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == []
+        identities = iter((owner, replace(owner, start_id="new")))
+        request = replace(request, observe=lambda: next(identities), wait=lambda timeout: False)
+        assert p.stop_owned(request, effects=c.effects, deadline=5)
+        assert signals == ["terminate"]
+
+    def test_guardian_parent_loss(self):
+        c = lifetime_case()
+        c.allocated = True
+        ownership = c.host.authority_inventory("run-test")
+        def receive(timeout):
+            assert 0 < timeout <= 0.1
+            raise EOFError
+        channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("EOF disarmed"))
+        process = SimpleNamespace(stop=lambda deadline: (c.teardown.append("process"), True)[1])
+        request = p.GuardianRequest("run-test", c.plan.reservation, ownership, channel, (process,), 1)
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert c.teardown == ["process", "authority", "private"] and not c.allocated
+        assert c.effects.clock.now == 0  # EOF triggers immediate emergency cleanup.
+        # A stale guardian may not remove resources belonging to a later run.
+        c.allocated, c.private = True, True
+        c.teardown.clear()
+        stale = replace(request, ownership=replace(ownership, containers=("d" * 12,)))
+        assert p.guardian_main(stale, effects=c.effects) == 1
+        assert c.allocated and "authority" not in c.teardown
+
+    def test_guardian_early_disarm(self):
+        c = lifetime_case()
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        c.scope.acquire(p.ResourceKind.ROOT, lambda: False)
+        proof = c.scope.close()
+        assert not proof.guardian_disarmed and c.teardown == []
+        assert [f.fixed_code for f in proof.failures] == [p.FailureCode.CLEANUP_PRIVATE, p.FailureCode.GUARDIAN]
+        c = lifetime_case()
+        channel = SimpleNamespace(receive=lambda timeout: "disarm", acknowledge=lambda: c.teardown.append("ack"))
+        request = p.GuardianRequest("run-test", c.plan.reservation,
+            c.host.authority_inventory("run-test"), channel, deadline=1)
+        assert p.guardian_main(request, effects=c.effects) == 1 and c.teardown == ["authority", "private"]
+        c.private = False
+        assert p.guardian_main(request, effects=c.effects) == 0 and c.teardown == ["authority", "private", "ack"]
+
+    def test_preexisting_run_collision(self, monkeypatch):
+        c = lifetime_case()
+        c.allocated = True
+        with pytest.raises(p.ProofRefused) as error:
+            prepare(c)
+        assert error.value.failure.fixed_code == p.FailureCode.ALLOCATION
+        c.scope.close()
+        assert c.allocated and c.teardown == [] and "allocate" not in c.events
+        # Collision after the empty inventory but inside PP-2's start lock.
+        c = lifetime_case()
+        def collide(run_id):
+            c.allocated = True
+            raise RuntimeError("run already exists")
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(
+            PgAuthority=SimpleNamespace(start=collide)))
+        c.effects = replace(c.effects, authority_factory=p._authority_factory)
+        c.scope = p.RunScope(effects=c.effects)
+        with pytest.raises(p.ProofRefused):
+            prepare(c)
+        c.scope.close()
+        assert c.allocated and c.teardown == []
+
+    def test_bounded_escalation(self, monkeypatch):
+        c = lifetime_case()
+        owner = p.ProcessIdentity("fake", 7, "old", 1)
+        calls = []
+        def wait(timeout):
+            assert timeout is not None and 0 < timeout <= 3
+            calls.append(("wait", timeout))
+            c.effects.clock.wait(timeout)
+            return len(calls) > 3
+        request = p.StopRequest(owner, lambda: owner, lambda: calls.append("terminate"),
+            lambda: calls.append("kill"), wait)
+        assert p.stop_owned(request, effects=c.effects, deadline=3)
+        assert calls == ["terminate", ("wait", 1.0), "kill", ("wait", 2.0)]
+        assert c.effects.clock.now == 3
+        # An uncooperative pending operation stays owned and prevents deletion.
+        c = lifetime_case()
+        c.scope._pending.append(SimpleNamespace(done=lambda: False))
+        c.scope.own_reservation(c.plan.reservation)
+        c.scope.own_guardian(SimpleNamespace(arm=lambda: None, disarm=lambda: c.teardown.append("disarm")))
+        proof = c.scope.close()
+        assert not proof.ok and not proof.guardian_disarmed and c.private
+        assert c.teardown == [] and c.effects.clock.now == p.CLEANUP_TIMEOUT_S
+        # A parent exit does not establish absence of its owned descendants.
+        spec = p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 5)
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs = []
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), False)[1],
+                                    close=lambda: jobs.append("close-job"))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        assert owned.stop(c.effects.clock.now + 3) is False
+        assert jobs == ["verify-job", "close-job"]
+        owned = p._RuntimeProcess(spec)
+        owned.identity = owner
+        owned.process = SimpleNamespace(poll=lambda: 0)
+        jobs.clear()
+        owned.job = SimpleNamespace(stop=lambda deadline: (jobs.append("verify-job"), True)[1],
+                                    close=lambda: jobs.append("close-job"))
+        assert owned.stop(c.effects.clock.now + 3)
+        assert owned.stop(c.effects.clock.now + 3)
+        assert jobs == ["verify-job", "close-job"]
+        # Acquisitions completed while settling a cancelled stage join teardown.
+        c = lifetime_case()
+        registered = []
+        def done():
+            if c.effects.clock.now >= 0.05 and not registered:
+                c.scope.own_pool(SimpleNamespace(close=lambda: c.teardown.append("late-pool")))
+                registered.append(True)
+            return c.effects.clock.now >= 0.1
+        c.scope._pending.append(SimpleNamespace(done=done))
+        assert c.scope.close().ok and c.teardown == ["late-pool"]

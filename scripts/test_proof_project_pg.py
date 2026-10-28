@@ -963,3 +963,30 @@ def test_pp2d_r11_child_environment_has_no_libpq_name():
                            env=pg.clean_libpq_environment(base), capture_output=True, text=True,
                            timeout=60, check=True)
     assert json.loads(child.stdout) == []
+
+
+def test_d_b_start_cleanup_after_transport_failure(monkeypatch):
+    authority = pg.PgAuthority(RUN, docker=FakeDocker())
+    events = []
+    def provision():
+        authority._created = {"containers": ["a" * 12, "b" * 12], "networks": ["c" * 12]}
+        events.append("provision")
+    def start_transport():
+        events.append("start-transport")
+        raise OSError("fake")
+    def stop_transport():
+        events.append("stop-transport")
+        raise OSError("fake")
+    def cleanup_created():
+        events.append("cleanup-created")
+        authority._created = {"containers": [], "networks": []}
+    monkeypatch.setattr(authority, "_provision", provision)
+    monkeypatch.setattr(authority, "_start_transport", start_transport)
+    monkeypatch.setattr(authority, "_stop_transport", stop_transport)
+    monkeypatch.setattr(authority, "_cleanup_created", cleanup_created)
+    with pytest.raises(RuntimeError) as error:
+        authority._start()
+    assert str(error.value) == "proof database start and cleanup failed"
+    assert error.value.__cause__ is None and error.value.__suppress_context__
+    assert events == ["provision", "start-transport", "stop-transport", "cleanup-created"]
+    assert authority._created == {"containers": [], "networks": []}

@@ -9,6 +9,7 @@ from dataclasses import dataclass, field, replace
 from contextlib import redirect_stdout
 from datetime import datetime, timezone
 from enum import Enum
+from functools import wraps
 import hashlib
 import importlib.util
 import json
@@ -17,6 +18,7 @@ import os
 from pathlib import Path
 import re
 import shutil
+import signal
 import socket
 import stat
 import subprocess
@@ -88,6 +90,13 @@ class FailureCode(str, Enum):
     BROWSER_EXIT = "BROWSER_EXIT"
     BROWSER_EVIDENCE = "BROWSER_EVIDENCE"
     CANONICAL = "CANONICAL"
+    CANCELLED = "CANCELLED"
+    GUARDIAN = "GUARDIAN"
+    CLEANUP_PROCESS = "CLEANUP_PROCESS"
+    CLEANUP_IDENTITY = "CLEANUP_IDENTITY"
+    CLEANUP_POOL = "CLEANUP_POOL"
+    CLEANUP_AUTHORITY = "CLEANUP_AUTHORITY"
+    CLEANUP_PRIVATE = "CLEANUP_PRIVATE"
 
 
 @dataclass(frozen=True)
@@ -230,6 +239,7 @@ class Reservation:
     run_root: Path
     artifact_root: Path
     port_handles: tuple[Any, ...] = field(default=(), repr=False)
+    root_identity: tuple[int, int] | None = field(default=None, repr=False)
 
     def release_ports(self):
         for handle in self.port_handles:
@@ -275,12 +285,377 @@ class ResourceKind(str, Enum):
     IDENTITY = "identity"
     STACK_PROCESS = "stack_process"
     BROWSER_PROCESS = "browser_process"
+    ROOT = "root"
+    POOL = "pool"
+    GUARDIAN = "guardian"
 
 
-class RunScope(Protocol):
-    """D supplies lifetime management; A/B/C synchronously register acquisitions."""
-    def acquire(self, name: ResourceKind, cleanup: Callable[[], None]) -> None: ...
-    def close(self) -> Any: ...
+# Within a dependency group, the newest acquisition is closed first.
+_CLEANUP_ORDER = (
+    ResourceKind.BROWSER_PROCESS, ResourceKind.STACK_PROCESS,
+    ResourceKind.SEED_PROCESS, ResourceKind.MIGRATION_PROCESS, ResourceKind.RUNTIME_PROCESS,
+    ResourceKind.IDENTITY, ResourceKind.POOL, ResourceKind.AUTHORITY,
+    ResourceKind.ROOT, ResourceKind.GUARDIAN)
+_CLEANUP_CODES = {
+    **{kind: FailureCode.CLEANUP_PROCESS for kind in _CLEANUP_ORDER[:5]},
+    ResourceKind.IDENTITY: FailureCode.CLEANUP_IDENTITY,
+    ResourceKind.POOL: FailureCode.CLEANUP_POOL,
+    ResourceKind.AUTHORITY: FailureCode.CLEANUP_AUTHORITY,
+    ResourceKind.ROOT: FailureCode.CLEANUP_PRIVATE,
+    ResourceKind.GUARDIAN: FailureCode.GUARDIAN}
+CLEANUP_TIMEOUT_S = 5.0  # Policy, not a host measurement.
+
+
+@dataclass(frozen=True)
+class CleanupProof:
+    processes_stopped: bool
+    identity_delivery_closed: bool
+    pools_closed: bool
+    authority_removed: bool
+    private_material_removed: bool
+    guardian_disarmed: bool
+    failures: tuple[Failure, ...]
+    teardown_seconds: float
+    observed_rows: tuple[str, ...]
+
+    @property
+    def ok(self):
+        return (self.processes_stopped and self.identity_delivery_closed and self.pools_closed
+                and self.authority_removed and self.private_material_removed
+                and self.guardian_disarmed and not self.failures)
+
+
+def _remember_refusal(method):
+    """Remember every escaping exception without changing what the caller sees."""
+    @wraps(method)
+    def recorded(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except ProofRefused as exc:
+            self.remember(exc.failure)
+            raise
+        except BaseException:
+            stage = Stage.TEARDOWN
+            if method.__name__ in {"checkpoint", "perform"}:
+                stage = args[0] if args else kwargs.get("stage", stage)
+                if not isinstance(stage, Stage):
+                    stage = Stage.TEARDOWN
+            self.remember(Failure(stage, FailureCode.GUARDIAN))
+            raise
+    return recorded
+
+
+class RunScope:
+    """D's lifetime owner. E supplies the stage driver and final atomic writer.
+
+    All callbacks, including a potentially blocked allocator, run through the
+    injected begin_operation seam. A timed-out callback is retained, never
+    described as stopped. Destructive cleanup refuses while such work is live.
+    """
+    def __init__(self, *, effects: Effects, cancelled: Callable[[], bool] = lambda: False):
+        self.effects = effects
+        self.cancelled = cancelled
+        self.failure = None
+        self._actions = []
+        self._pending = []
+        self._closed = None
+        self._closing = False
+        self._draining = False
+        self._lock = threading.RLock()
+        self._commit_lock = threading.RLock()
+        self._cancelled = False
+        self._authority_run_id = None
+
+    def __repr__(self):
+        return "<project run scope>"
+
+    @_remember_refusal
+    def acquire(self, name: ResourceKind, cleanup: Callable[[], None]) -> None:
+        if not isinstance(name, ResourceKind) or not callable(cleanup):
+            raise TypeError("invalid cleanup registration")
+        with self._lock:
+            if (self._closing and not self._draining) or self._closed is not None:
+                _refuse(FailureCode.GUARDIAN, Stage.TEARDOWN)
+            self._actions.append((name, cleanup))
+
+    @_remember_refusal
+    def remember(self, failure: Failure):
+        with self._lock:
+            if self.failure is None:
+                self.failure = failure
+
+    @_remember_refusal
+    def cancel(self):
+        # E's final atomic rename/link must run inside commit_guard. This lock
+        # defines ordering with an in-process cancellation request.
+        with self._commit_lock:
+            self._cancelled = True
+
+    @_remember_refusal
+    def checkpoint(self, stage: Stage):
+        with self._lock:
+            if self._closing or self._closed is not None:
+                _refuse(FailureCode.GUARDIAN, stage)
+            self._check_cancelled(stage)
+
+    def _check_cancelled(self, stage):
+        if self._cancelled or self.cancelled():
+            _refuse(FailureCode.CANCELLED, stage)
+
+    @_remember_refusal
+    def perform(self, stage: Stage, operation: Callable[[], Any], *, deadline: float):
+        """Run a stage through a pollable injected operation, including allocation.
+
+        A cancelled/overdue operation stays owned by this scope until close.
+        Production threads are not killable: unresolved work forbids success
+        and guardian disarm. Process-backed adapters retain their own handles.
+        """
+        # Admission and pending registration are atomic with close's drain start.
+        with self._lock:
+            self.checkpoint(stage)
+            if not math.isfinite(deadline) or deadline <= self.effects.clock.monotonic():
+                _refuse(FailureCode.GUARDIAN, stage)
+            task = self.effects.host.begin_operation(operation)
+            self._pending.append(task)
+        while not task.done():
+            self.checkpoint(stage)
+            remaining = deadline - self.effects.clock.monotonic()
+            if remaining <= 0:
+                _refuse(FailureCode.GUARDIAN, stage)
+            self.effects.clock.wait(min(0.05, remaining))
+        self.checkpoint(stage)
+        remaining = deadline - self.effects.clock.monotonic()
+        if remaining <= 0:
+            _refuse(FailureCode.GUARDIAN, stage)
+        return task.result()
+
+    @_remember_refusal
+    def bind_effects(self):
+        scope, host = self, self.effects.host
+        class ScopedHost:
+            def __getattr__(self, name):
+                return getattr(host, name)
+
+            def reserve(self, plan):
+                if isinstance(host, _Host):
+                    return host.reserve(plan, scope=scope)
+                reservation = host.reserve(plan)
+                scope.own_reservation(reservation, keep_safe=plan.config.keep_run_root)
+                return reservation
+        return replace(self.effects, host=ScopedHost())
+
+    @_remember_refusal
+    def own_reservation(self, reservation: Reservation, *, keep_safe=False):
+        release_ports = reservation.release_ports
+        def remove():
+            release_ports()
+            if not self._settled():
+                return False
+            return self.effects.host.scrub(reservation, keep_safe=keep_safe)
+        self.acquire(ResourceKind.ROOT, remove)
+
+    @_remember_refusal
+    def own_guardian(self, guardian):
+        # Register before arming so partial arming is recoverable too.
+        self.acquire(ResourceKind.GUARDIAN, guardian.disarm)
+        guardian.arm()
+
+    @_remember_refusal
+    def own_pool(self, pool):
+        self.acquire(ResourceKind.POOL, pool.close)
+
+    @_remember_refusal
+    def own_browser(self, browser):
+        stop = browser.stop
+        self.acquire(ResourceKind.BROWSER_PROCESS,
+                     lambda: stop(self.effects.clock.monotonic() + CLEANUP_TIMEOUT_S))
+
+    def _settled(self):
+        return all(task.done() for task in self._pending)
+
+    def _cleanup_call(self, callback):
+        task = self.effects.host.begin_operation(callback)
+        deadline = self.effects.clock.monotonic() + CLEANUP_TIMEOUT_S
+        while not task.done():
+            remaining = deadline - self.effects.clock.monotonic()
+            if remaining <= 0:
+                self._pending.append(task)
+                return False
+            self.effects.clock.wait(min(0.05, remaining))
+        return task.result() is not False
+
+    @_remember_refusal
+    def close(self) -> CleanupProof:
+        with self._lock:
+            if self._closed is not None:
+                return self._closed
+            if self._closing:
+                _refuse(FailureCode.GUARDIAN, Stage.TEARDOWN)
+            self._closing = True
+            self._draining = True
+        started = self.effects.clock.monotonic()
+        failures = []
+        failed = set()
+        # Settle pending stages before teardown. No unbounded joins, and no
+        # success claim if a producer could still allocate or write material.
+        deadline = started + CLEANUP_TIMEOUT_S
+        while not self._settled() and self.effects.clock.monotonic() < deadline:
+            self.effects.clock.wait(min(0.05, deadline - self.effects.clock.monotonic()))
+        with self._lock:
+            self._draining = False
+            actions = tuple(self._actions)
+        if not self._settled():
+            failed.add(ResourceKind.RUNTIME_PROCESS)
+            failures.append(Failure(Stage.TEARDOWN, FailureCode.CLEANUP_PROCESS))
+            self.remember(failures[0])
+        for kind in _CLEANUP_ORDER:
+            for name, callback in reversed(actions):
+                if name != kind:
+                    continue
+                try:
+                    # A guardian must stay armed if any teardown was unverified.
+                    if kind == ResourceKind.GUARDIAN and (failures or not self._settled()):
+                        raise RuntimeError("cleanup unverified")
+                    if not self._cleanup_call(callback):
+                        raise RuntimeError("cleanup unverified")
+                except BaseException:
+                    failed.add(kind)
+                    failure = Failure(Stage.TEARDOWN, _CLEANUP_CODES[kind])
+                    failures.append(failure)
+                    self.remember(failure)
+            if kind == ResourceKind.AUTHORITY and self._authority_run_id is not None:
+                # Observe only after every authority callback, including failed
+                # allocations that never returned a cleanup capability.
+                try:
+                    if not self._settled() or not self._cleanup_call(lambda: _validate_ownership(
+                            self.effects.host.authority_inventory(self._authority_run_id),
+                            self._authority_run_id, allocated=False)):
+                        raise RuntimeError("authority absence unverified")
+                except BaseException:
+                    failed.add(ResourceKind.AUTHORITY)
+                    failure = Failure(Stage.TEARDOWN, FailureCode.CLEANUP_AUTHORITY)
+                    failures.append(failure)
+                    self.remember(failure)
+        if failures:
+            self.remember(failures[0])
+        processes = not failed.intersection(_CLEANUP_ORDER[:5])
+        proof = CleanupProof(processes, ResourceKind.IDENTITY not in failed,
+            ResourceKind.POOL not in failed, ResourceKind.AUTHORITY not in failed,
+            ResourceKind.ROOT not in failed, ResourceKind.GUARDIAN not in failed,
+            tuple(failures), self.effects.clock.monotonic() - started,
+            () if failures else ("P10",))
+        self._closed = proof
+        self._actions.clear()  # Drop leases/callback closures after teardown.
+        self._pending = [task for task in self._pending if not task.done()]
+        return proof
+
+    @_remember_refusal
+    def commit_guard(self, atomic_commit: Callable[[], Any]):
+        """E calls this around only its final atomic receipt filesystem action."""
+        with self._commit_lock:
+            self._check_cancelled(Stage.VERIFICATION)
+            if self._closed is None or not self._closed.ok or self.failure is not None:
+                _refuse(FailureCode.CLEANUP_PRIVATE, Stage.TEARDOWN)
+            return atomic_commit()
+
+
+@dataclass(frozen=True, repr=False)
+class GuardianRequest:
+    run_id: str
+    reservation: Reservation
+    ownership: AuthorityOwnership
+    channel: Any = field(repr=False)
+    processes: tuple[OwnedProcess, ...] = field(default=(), repr=False)
+    deadline: float = 0.0
+
+
+def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
+    """Bounded liveness channel; EOF triggers cleanup, never a normal disarm.
+
+    The caller transfers retained owned handles, never bare PIDs. A public
+    journal alone is insufficient to authorize this request.
+    """
+    try:
+        # This is a capability transferred over the owned parent channel, not
+        # an inventory discovered after parent loss. Unknown/new IDs are refused.
+        _validate_ownership(replace(request.ownership, containers=(), networks=()),
+                            request.run_id, allocated=False)
+        ids = request.ownership.containers + request.ownership.networks
+        if (len(set(ids)) != len(ids)
+                or any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{12,64}", value) is None
+                       for value in ids)):
+            return 1
+        if (request.reservation.artifact_root != request.reservation.run_root / "artifacts"
+                or not math.isfinite(request.deadline)):
+            return 1
+        disarm_refused = False
+        while effects.clock.monotonic() < request.deadline:
+            remaining = request.deadline - effects.clock.monotonic()
+            try:
+                event = request.channel.receive(min(0.1, remaining))
+            except EOFError:
+                break
+            if event == "disarm":
+                # Independently observe absence; a sender's claim is not proof.
+                stopped = True
+                for process in request.processes:
+                    try:
+                        if process.stop(effects.clock.monotonic() + CLEANUP_TIMEOUT_S) is not True:
+                            stopped = False
+                    except BaseException:
+                        stopped = False
+                try:
+                    owned = effects.host.authority_inventory(request.run_id)
+                    _validate_ownership(owned, request.run_id, allocated=False)
+                    absent = effects.host.private_absent(request.reservation)
+                except BaseException:
+                    absent = False
+                if absent and stopped:
+                    request.channel.acknowledge()
+                    return 0
+                disarm_refused = True
+                break
+            if event not in (None, "alive"):
+                return 1
+            effects.clock.wait(min(0.05, max(0.0, request.deadline - effects.clock.monotonic())))
+        scope = RunScope(effects=effects)
+        scope.own_reservation(request.reservation)
+        def remove_authority():
+            observed = effects.host.authority_inventory(request.run_id)
+            if (observed.run_id != request.ownership.run_id
+                    or observed.names != request.ownership.names
+                    or observed.labels != request.ownership.labels
+                    or not set(observed.containers).issubset(request.ownership.containers)
+                    or not set(observed.networks).issubset(request.ownership.networks)):
+                return False
+            return _cleanup_authority(None, request.run_id, effects=effects, verify=True,
+                                      ownership=request.ownership)
+        scope.acquire(ResourceKind.AUTHORITY, remove_authority)
+        for process in request.processes:
+            scope.acquire(ResourceKind.STACK_PROCESS,
+                lambda process=process: process.stop(effects.clock.monotonic() + CLEANUP_TIMEOUT_S))
+        proof = scope.close()
+        return 0 if proof.ok and not disarm_refused else 1
+    except BaseException:
+        return 1
+
+
+def _cleanup_authority(authority, run_id, *, effects, verify=False, ownership=None):
+    failed = False
+    try:
+        if authority is not None:
+            authority.stop()
+    except BaseException:
+        failed = True
+    finally:
+        # Stop transport even if the ownership read failed. Only a validated
+        # snapshot authorizes deletion; the run ID alone never does.
+        if ownership is not None:
+            effects.host.cleanup_owned_authority(run_id, ownership)
+    if verify:
+        _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=False)
+    if failed:
+        raise RuntimeError("authority stop failed") from None
 
 
 @dataclass(frozen=True)
@@ -328,12 +703,15 @@ class Host(Protocol):
     def source_snapshot(self) -> SourceProof: ...
     def authority_inventory(self, run_id: str) -> Any: ...
     def scrub(self, reservation: Reservation, *, keep_safe: bool) -> bool: ...
+    def private_absent(self, reservation: Reservation) -> bool: ...
+    def begin_operation(self, callback: Callable[[], Any]) -> Any: ...
     # B's host operations keep imports, file reads and teardown behind a seam.
     def migration_entry_present(self) -> bool: ...
     def migration_corpus(self) -> tuple[tuple[FileProof, ...], tuple[str, ...]]: ...
     def database_module(self, environment: Mapping[str, str]) -> Any: ...
     def store_module(self) -> Any: ...
     def cleanup_authority(self, run_id: str) -> Any: ...
+    def cleanup_owned_authority(self, run_id: str, ownership: AuthorityOwnership) -> Any: ...
     def close_identity(self, lease: IdentityLease) -> None: ...
     def read_child_result(self, path: Path) -> Any: ...
     def read_stack_ready(self, path: Path) -> Any: ...
@@ -912,6 +1290,8 @@ def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> Prepa
     """Journal allocation, prove migration, then bootstrap one active owner."""
     stage, code = Stage.MIGRATION, FailureCode.MIGRATION_CORPUS
     try:
+        if isinstance(scope, RunScope):
+            scope._authority_run_id = plan.config.run_id
         if plan.reservation is None:
             _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
         _check_entry(effects)
@@ -919,14 +1299,21 @@ def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> Prepa
         run_id, root = plan.config.run_id, plan.config.run_root
         stage, code = Stage.ALLOCATION, FailureCode.ALLOCATION
         ownership = _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=False)
-        authority = None
-        scope.acquire(ResourceKind.AUTHORITY, lambda: authority.stop() if authority is not None
-                      else effects.host.cleanup_authority(run_id))
         effects.receipt_writer.ownership(root / "authority-planned.json", OwnershipJournal(
             run_id, root, plan.config.artifact_root, effects.clock.utc_now(), ownership))
         start = effects.clock.monotonic()
-        authority = effects.authority_factory(run_id)
+        try:
+            authority = effects.authority_factory(run_id)
+        except AllocationCollision:
+            _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
+        # Successful factory return establishes ownership after its collision check.
+        # Before return, PP-2 cleans partial startup using only its _created receipt.
+        captured = []
+        scope.acquire(ResourceKind.AUTHORITY, lambda: _cleanup_authority(
+            authority, run_id, effects=effects, ownership=captured[0] if captured else None)
+            if not isinstance(scope, RunScope) or scope._settled() else False)
         ownership = _validate_ownership(effects.host.authority_inventory(run_id), run_id, allocated=True)
+        captured.append(ownership)
         effects.receipt_writer.ownership(root / "authority-observed.json", OwnershipJournal(
             run_id, root, plan.config.artifact_root, effects.clock.utc_now(), ownership))
         allocated = effects.clock.monotonic()
@@ -1723,7 +2110,30 @@ class _Host:
         return _canonical_execution(CanonicalRequest("heartbeat", WORKER_TOOL, request.environment,
             deadline=min(request.deadline, time.monotonic() + 5.0), worker_id=request.worker_id))
 
-    scrub = staticmethod(_later("D"))
+    @staticmethod
+    def begin_operation(callback):
+        return _PendingCall(callback)
+
+    @staticmethod
+    def private_absent(reservation):
+        # lexists catches dangling links too. An unlink/rmtree return is not proof.
+        return _path_absent(reservation.run_root)
+
+    @staticmethod
+    def scrub(reservation, *, keep_safe):
+        root = reservation.run_root
+        if (not root.is_absolute() or root == Path(root.anchor)
+                or root.is_relative_to(REPO) or REPO.is_relative_to(root)
+                or reservation.artifact_root != root / "artifacts" or not _path_safe(root)):
+            return False
+        # No retained-file allowlist exists before E. Remove the owned private
+        # root even for keep_safe; E may later retain approved public evidence.
+        if os.path.lexists(root):
+            info = root.stat()
+            if reservation.root_identity != (info.st_dev, info.st_ino):
+                return False
+            shutil.rmtree(root)
+        return _Host.private_absent(reservation)
 
     @staticmethod
     def migration_entry_present():
@@ -1780,9 +2190,25 @@ class _Host:
         return _pg_module().cleanup(run_id)
 
     @staticmethod
+    def cleanup_owned_authority(run_id, ownership):
+        pg = _pg_module()
+        _validate_ownership(replace(ownership, containers=(), networks=()), run_id, allocated=False)
+        allowed = set(ownership.containers + ownership.networks)
+        def docker(args):
+            # PP-2 re-inventories immediately before deletion. Guard the actual
+            # destructive call as well, so replacement IDs cannot slip through.
+            if args[:2] == ["rm", "-f"] or args[:2] == ["network", "rm"]:
+                if len(args) != 3 or args[2] not in allowed:
+                    raise RuntimeError("unowned authority resource")
+            return pg._docker(args)
+        return pg.cleanup(run_id, docker=docker)
+
+    @staticmethod
     def close_identity(lease):
         object.__setattr__(lease, "issuer", None)
         lease.jwks_path.unlink(missing_ok=True)
+        if not _path_absent(lease.jwks_path):
+            raise RuntimeError("identity removal unverified")
 
     @staticmethod
     def read_child_result(path):
@@ -1861,11 +2287,16 @@ class _Host:
         return SourceProof(commit, hashlib.sha256(dirty).hexdigest(), hashlib.sha256(manifest).hexdigest(),
                            files, untracked, migrations)
 
-    def reserve(self, plan):
+    def reserve(self, plan, *, scope=None):
         config = plan.config
         if not _path_safe(config.run_root) or not _path_safe(config.artifact_root):
             raise RuntimeError("unsafe reservation")
         _private_directory(config.run_root)
+        root_stat = config.run_root.stat()
+        reservation = Reservation(config.run_root, config.artifact_root, (),
+                                  (root_stat.st_dev, root_stat.st_ino))
+        if scope is not None:
+            scope.own_reservation(reservation, keep_safe=config.keep_run_root)
         handles = []
         try:
             _private_directory(config.artifact_root)
@@ -1893,10 +2324,11 @@ class _Host:
             for port in config.ports.values():
                 handle = socket.socket()
                 handles.append(handle)
+                object.__setattr__(reservation, "port_handles", tuple(handles))
                 if os.name == "nt":
                     handle.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 handle.bind(("127.0.0.1", port))
-            return Reservation(config.run_root, config.artifact_root, tuple(handles))
+            return reservation
         except Exception:
             for handle in handles:
                 handle.close()
@@ -1975,10 +2407,61 @@ class _WindowsJob:
             raise RuntimeError("runtime resume failed")
         return str(times[0].value)
 
+    def stop(self, deadline):
+        # Query the owned job until every descendant is gone; closing a handle
+        # or observing only the launcher exit is not an absence proof.
+        from ctypes import wintypes
+        ctypes = self.ctypes
+        class Accounting(ctypes.Structure):
+            _fields_ = [(name, ctypes.c_int64) for name in
+                ("user", "kernel", "period_user", "period_kernel")] + [
+                (name, wintypes.DWORD) for name in
+                ("faults", "total", "active", "terminated")]
+        self.kernel.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        self.kernel.QueryInformationJobObject.argtypes = [wintypes.HANDLE, ctypes.c_int,
+            ctypes.c_void_p, wintypes.DWORD, ctypes.c_void_p]
+        if not self.handle:
+            return False  # A discarded handle cannot prove an empty job.
+        if not self.kernel.TerminateJobObject(self.handle, 1):
+            return False
+        while True:
+            counts = Accounting()
+            if not self.kernel.QueryInformationJobObject(self.handle, 1, ctypes.byref(counts),
+                                                         ctypes.sizeof(counts), None):
+                return False
+            if counts.active == 0:
+                return True
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return False
+            time.sleep(min(0.05, remaining))
+
     def close(self):
         if self.handle:
-            self.kernel.CloseHandle(self.handle)
+            if not self.kernel.CloseHandle(self.handle):
+                raise RuntimeError("owned job close failed")
             self.handle = None
+
+
+def _signal_group(pgid, sig):
+    try:
+        os.killpg(pgid, sig)
+    except ProcessLookupError:
+        pass  # An absent owned group needs no further signal.
+
+
+def _group_empty(pgid, deadline):
+    while True:
+        try:
+            os.killpg(pgid, 0)
+        except ProcessLookupError:
+            return True
+        except OSError:
+            return False
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return False
+        time.sleep(min(0.05, remaining))
 
 
 class _RuntimeProcess:
@@ -1988,6 +2471,12 @@ class _RuntimeProcess:
         self.job = None
         self.output = None
         self.identity = None
+        self._stopped = False
+        self._starting = False
+        self._start_attempted = False
+        self._stop_requested = False
+        self._lock = threading.RLock()
+        self._stop_lock = threading.Lock()
 
     def __repr__(self):
         return "<owned runtime process>"
@@ -1996,24 +2485,39 @@ class _RuntimeProcess:
         spec = self.spec
         if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child"}:
             raise RuntimeError("unknown process role")
+        with self._lock:
+            if self._start_attempted or self._stop_requested:
+                raise RuntimeError("runtime process start refused")
+            self._start_attempted = True
+            self._starting = True
         try:
             if spec.output_path is not None:
                 self.output = spec.output_path.open("xb")
             if os.name == "nt":
                 self.job = _WindowsJob()
-            self.process = subprocess.Popen(spec.argv, cwd=spec.cwd, env=dict(spec.environment),
+            process = subprocess.Popen(spec.argv, cwd=spec.cwd, env=dict(spec.environment),
                 stdin=subprocess.DEVNULL, stdout=self.output or subprocess.DEVNULL, stderr=subprocess.DEVNULL,
                 creationflags=(0x08000000 | 0x4) if os.name == "nt" else 0,
                 start_new_session=os.name != "nt")
+            with self._lock:
+                self.process = process
             if self.job is not None:
                 start_id = self.job.attach_and_resume(self.process)
             else:
                 # Linux's OS start tick; fail closed on unsupported POSIX hosts.
                 start_id = Path(f"/proc/{self.process.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
-            self.identity = ProcessIdentity(spec.role, self.process.pid, start_id, os.getpid())
-        except Exception:
+            with self._lock:
+                self.identity = ProcessIdentity(spec.role, self.process.pid, start_id, os.getpid())
+                if self._stop_requested:
+                    raise RuntimeError("runtime process start cancelled")
+        except BaseException:
+            # Even if stop ran before Popen returned, this acquired child must
+            # be stopped through its retained handle, never a cached verdict.
             self.stop(time.monotonic() + 5.0)
             raise RuntimeError("runtime process start failed") from None
+        finally:
+            with self._lock:
+                self._starting = False
 
     def poll(self):
         if self.output is not None and self.spec.output_path.stat().st_size > self.spec.max_output_bytes:
@@ -2025,21 +2529,86 @@ class _RuntimeProcess:
         return tuple(_process_child(self, role, pid) for role, pid in pids.items())
 
     def stop(self, deadline):
+        with self._lock:
+            self._stop_requested = True
+        # Serialize stop attempts without waiting beyond the caller's budget.
+        if not self._stop_lock.acquire(timeout=max(0.0, deadline - time.monotonic())):
+            return False
         try:
-            if self.job is not None:
-                self.job.close()
-            if self.process is not None:
-                if os.name != "nt":
-                    import signal
-                    try:
-                        os.killpg(self.process.pid, signal.SIGKILL)
-                    except ProcessLookupError:
-                        pass
-                elif self.process.poll() is None:
+            with self._lock:
+                if self._stopped and not self._starting:
+                    return True
+            stopped = self._stop(deadline)
+            with self._lock:
+                self._stopped = stopped and not self._starting
+                return self._stopped
+        finally:
+            self._stop_lock.release()
+
+    def _stop(self, deadline):
+        try:
+            if self.process is None:
+                if self.job is not None:
+                    self.job.close()
+                # Closing the job may overlap Popen returning an owned child.
+                # Recheck publication and startup together; a child falls through
+                # to retained-handle termination even if attachment failed.
+                with self._lock:
+                    if self.process is None:
+                        return self._start_attempted and not self._starting
+            def observe():
+                if self.process.poll() is not None:
+                    return None
+                if os.name == "nt":
+                    # Popen's retained kernel handle cannot target a reused PID.
+                    return self.identity
+                try:
+                    parts = Path(f"/proc/{self.process.pid}/stat").read_text().rsplit(")", 1)[1].split()
+                except FileNotFoundError:
+                    return None
+                return ProcessIdentity(self.spec.role, self.process.pid, parts[19], int(parts[1]))
+            def terminate():
+                self.process.terminate()  # Retained Popen owner, never a PID lookup.
+            def kill():
+                if self.job is not None:
+                    self.job.stop(deadline)
+                elif os.name == "nt":
                     self.process.kill()
-                self.process.wait(timeout=max(0.01, deadline - time.monotonic()))
-            return True
-        except Exception:
+                else:
+                    _signal_group(self.process.pid, signal.SIGKILL)
+            def wait(seconds):
+                try:
+                    self.process.wait(timeout=seconds)
+                    return True
+                except subprocess.TimeoutExpired:
+                    return False
+            if self.identity is None:
+                # A suspended child whose identity/assignment failed never ran.
+                if os.name == "nt":
+                    self.process.kill()
+                else:
+                    _signal_group(self.process.pid, signal.SIGKILL)
+                stopped = wait(max(0.0, deadline - time.monotonic()))
+                if self.job is not None:
+                    stopped = self.job.stop(deadline) and stopped
+                    self.job.close()
+                elif os.name != "nt":
+                    return stopped and _group_empty(self.process.pid, deadline)
+                return stopped
+            stopped = stop_owned(StopRequest(self.identity, observe, terminate, kill, wait),
+                                 effects=production_effects(), deadline=deadline)
+            # The launcher can exit while its descendants remain in our job.
+            if self.job is not None:
+                empty = self.job.stop(deadline)
+                self.job.close()
+                return stopped and empty
+            if os.name == "nt":
+                return False
+            # Residual pgid-reuse risk exists only after our owned group is empty;
+            # killpg on an empty group raises ProcessLookupError, absorbed above.
+            _signal_group(self.process.pid, signal.SIGKILL)
+            return stopped and _group_empty(self.process.pid, deadline)
+        except BaseException:
             return False
         finally:
             if self.output is not None:
@@ -2064,8 +2633,37 @@ def _pg_module():
         return sys.modules.get(name) or _load_file(name, REPO / "scripts/proof_project_pg.py")
 
 
+class AllocationCollision(RuntimeError):
+    """PP-2 rejected existing resources before provisioning anything."""
+
+
+class _ProjectAuthority:
+    """Project cleanup separates transport shutdown from captured-ID removal."""
+    def __init__(self, authority):
+        self._authority = authority
+
+    def __repr__(self):
+        return "<project database authority>"
+
+    def readiness(self):
+        return self._authority.readiness()
+
+    def dsn(self):
+        return self._authority.dsn()
+
+    def stop(self):
+        return self._authority._stop_transport()
+
+
 def _authority_factory(run_id):
-    return _pg_module().PgAuthority.start(run_id)
+    try:
+        return _ProjectAuthority(_pg_module().PgAuthority.start(run_id))
+    except RuntimeError as error:
+        # PP-2's closed refusal is emitted under its start lock, before provision.
+        # Do not classify arbitrary startup failures as collisions.
+        if str(error) == "run already exists":
+            raise AllocationCollision("allocation collision") from None
+        raise
 
 
 def _issuer_factory(run_id):
@@ -2211,3 +2809,80 @@ def production_effects() -> Effects:
         readiness_probe=lambda request: check_readiness(request, effects=effects),
         migration_runner=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope),
         seed_operation=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope))
+
+
+class _PendingCall:
+    """Bounded caller-facing completion for existing synchronous adapters.
+
+    A thread timeout is not termination. RunScope retains the handle, refuses
+    destructive cleanup while work is live, and keeps its guardian armed.
+    """
+    def __init__(self, callback):
+        self._done = threading.Event()
+        self._value = None
+        self._error = None
+        def run():
+            try:
+                self._value = callback()
+            except BaseException as error:
+                self._error = error
+            finally:
+                self._done.set()
+        self._thread = threading.Thread(target=run, daemon=True)
+        self._thread.start()
+
+    def __repr__(self):
+        return "<owned pending operation>"
+
+    def done(self):
+        return self._done.is_set()
+
+    def result(self):
+        if not self.done():
+            raise RuntimeError("operation pending")
+        if self._error is not None:
+            raise self._error
+        return self._value
+
+
+@dataclass(frozen=True, repr=False)
+class StopRequest:
+    identity: ProcessIdentity
+    observe: Callable[[], ProcessIdentity | None] = field(repr=False)
+    terminate: Callable[[], None] = field(repr=False)
+    kill: Callable[[], None] = field(repr=False)
+    wait: Callable[[float], bool] = field(repr=False)
+
+
+def stop_owned(request: StopRequest, *, effects: Effects, deadline: float) -> bool:
+    """Escalate only the retained owner, rechecking identity before each signal."""
+    try:
+        remaining = deadline - effects.clock.monotonic()
+        if not math.isfinite(remaining) or remaining <= 0:
+            return False
+        if request.observe() != request.identity:
+            return True  # Original owner is gone; the replacement is unrelated.
+        request.terminate()
+        if request.wait(min(1.0, remaining)):
+            return True
+        if request.observe() != request.identity:
+            return True
+        remaining = deadline - effects.clock.monotonic()
+        if remaining <= 0:
+            return False
+        request.kill()
+        remaining = max(0.0, deadline - effects.clock.monotonic())
+        return request.wait(remaining) is True
+    except BaseException:
+        return False
+
+
+def _path_absent(path):
+    """Only ENOENT proves absence; denied inspection and dangling links do not."""
+    try:
+        path.lstat()
+    except FileNotFoundError:
+        return True
+    except OSError:
+        return False
+    return False
