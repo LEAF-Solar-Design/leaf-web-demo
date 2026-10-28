@@ -216,7 +216,9 @@ export class ForgeRemoteAuthority {
     }
     Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: process.platform === "win32" ? "NUL" : "/dev/null" });
     await this.execute(["init", "--bare", "--template=", "--initial-branch=main", dir], dir, env);
-    await this.execute(["config", "--local", "remote.origin.url", sourceRef], dir, env);
+    const safeDir = (await realpath(dir)).replaceAll("\\", "/");
+    await this.execute(["-c", "safe.directory=", "-c", `safe.directory=${safeDir}`,
+      "config", "--local", "remote.origin.url", sourceRef], dir, env);
     await this.refresh(tenantId, dir, sourceRef);
   }
 
