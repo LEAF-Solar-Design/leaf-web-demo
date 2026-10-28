@@ -384,8 +384,8 @@ describe('console standalone upload', () => {
     const upload = { actions: { upload: (value) => events.push(['upload', value]) } }
     const intake = { begin: (value) => { events.push(['begin', value]); return true }, retry: vi.fn() }
     const code = compile(source.slice(source.indexOf('function LiveProjectMaterialIntake('), source.indexOf('function promoteStandaloneUpload(')))
-    const live = new Function('React', 'ProjectMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake', code + '\nreturn LiveProjectMaterialIntake')(
-      React, 'ProjectMaterialIntake', () => upload, (options) => { expect(options).toEqual({ upload, onAttached }); return intake },
+    const live = new Function('React', 'ProjectMaterialIntake', 'PhotoMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake', code + '\nreturn LiveProjectMaterialIntake')(
+      React, 'ProjectMaterialIntake', 'PhotoMaterialIntake', () => upload, (options) => { expect(options).toEqual({ upload, onAttached }); return intake },
     )({ project: { project_id: 'P', name: 'Project P' }, artifacts: [], onAttached })
     live.props.onStartUpload(file)
     expect(events).toEqual([['begin', { projectId: 'P', projectName: 'Project P', fileName: file.name }], ['upload', file]])

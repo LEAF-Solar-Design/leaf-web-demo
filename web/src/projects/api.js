@@ -30,6 +30,7 @@
 // caller will retry forever.
 import { config, noteUnauthorized } from '../api.js'
 import { WORKSPACE_ORG_KEY } from '../controllers/workspace/createWorkspaceController.js'
+import { readActiveScope } from '../auth/activeScope.js'
 
 const AUTH_KEY = 'leaf.jwt'
 // The actor's platform identity binding. platform/api.py has NO
@@ -117,8 +118,12 @@ function detailOf(body) {
 }
 
 async function request(path, opts = {}) {
-  const headers = { ...(opts.headers || {}), ...identityHeaders(opts.orgId) }
-  const { orgId: _ignored, ...init } = opts
+  const { responseType, expectedScope, ...options } = opts
+  if (expectedScope !== undefined && readActiveScope() !== expectedScope) {
+    throw new Error('Your account changed. Open the project again.')
+  }
+  const headers = { ...(options.headers || {}), ...identityHeaders(options.orgId) }
+  const { orgId: _ignored, ...init } = options
   const res = await fetch(`${config.apiBase}${path}`, { ...init, headers })
   if (res.status === 401) noteUnauthorized(res, path, headers.Authorization)
   if (!res.ok) {
@@ -137,7 +142,29 @@ async function request(path, opts = {}) {
     throw e
   }
   if (res.status === 204) return {}
+  if (responseType === 'blob') return res.blob()
   return res.json()
+}
+
+export function listProjectPhotos(projectId, { cursor, signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  return request(`/api/projects/${id}/materials${cursor ? `?cursor=${encodeURIComponent(cursor)}` : ''}`, { signal, expectedScope })
+}
+
+export function uploadProjectPhoto(projectId, file, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  if (!file || !file.size || file.size > 16 * 1024 * 1024) throw new Error('Choose a photo smaller than 16 MB.')
+  return request(`/api/projects/${id}/materials/images?filename=${encodeURIComponent(file.name)}`, {
+    method: 'POST', body: file, headers: { 'Content-Type': file.type || 'application/octet-stream' }, signal, expectedScope,
+  })
+}
+
+export function readProjectPhotoPreview(projectId, materialId, { signal, expectedScope } = {}) {
+  const id = requireUuid(projectId, 'project')
+  const material = requireUuid(materialId, 'photo')
+  return request(`/api/projects/${id}/materials/${material}/content?variant=preview`, {
+    signal, expectedScope, responseType: 'blob', cache: 'no-store',
+  })
 }
 
 function mutation(method, body) {

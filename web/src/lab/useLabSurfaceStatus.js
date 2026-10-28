@@ -54,6 +54,7 @@ function watchAuthority() {
   const current = readAuthority()
   if (authority !== undefined && authority !== current) refreshAuthority(!current)
   authority = current
+  // Same-frame popup sign-in writes the token without a browser storage event.
   const offStored = subscribeTokenStored(() => refreshAuthority())
   const offLogout = subscribeBeforeLogout(() => refreshAuthority(true))
   const offUnauthorized = subscribeUnauthorized(() => refreshAuthority(true))

@@ -33,6 +33,7 @@ import { humanizeError } from '../errorHumanize.js'
 const authorizationState = (server) => (
   server.state === 'connected' ? 'connected'
     : server.state === 'error' ? 'sign-in-failed'
+      : server.state === 'connecting' ? 'sign-in-pending'
       : 'sign-in-needed'
 )
 const reachabilityState = (result) => (result?.state === 'error' ? 'unreachable' : 'reachable')
@@ -347,6 +348,7 @@ export default function LinkServiceDrawer({
     state === 'connected' ? 'Connected'
       : state === 'unreachable' ? 'Unreachable'
         : state === 'sign-in-failed' ? 'Sign-in failed, try again'
+        : state === 'sign-in-pending' ? 'Sign-in pending'
         : 'Sign in needed'
   )
 
@@ -414,6 +416,7 @@ export default function LinkServiceDrawer({
                       {server.host && <span>{server.host}</span>}
                       {health && <span>Connection checked: {health === 'unreachable' ? 'Unreachable' : 'Reachable'}</span>}
                     </div>
+                    {server.state === 'connecting' && <p className="ca-copy">Finish sign-in in the service tab. Connect resumes the current attempt.</p>}
                     {connectErr && (
                       <div className="field-err" role="alert"><span className="dot red" />{connectErr}</div>
                     )}

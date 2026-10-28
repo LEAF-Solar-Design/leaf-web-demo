@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs'
 import { resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 import { SEED_SETTINGS } from './solarSettingsModel.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
 import { PROJECT_SOLAR_GRAPH_TOOLS, PROJECT_SOLAR_GRAPH_REASONS, projectSolarGraphReason,
   parseProjectSolarInsertionPoint, deriveProjectSolarGraphFormState, buildProjectSolarGraphRequest,
   exactProjectSolarGraphPreview, projectSolarGraphFeedback, panelGroupAngleKey, proposePanelGroups,
@@ -30,6 +31,62 @@ function row(changes = {}, flags = {}) {
 }
 const preview = (rows = [row()], changes = {}) => exactProjectSolarGraphPreview({ tool: 'solar-homeruns',
   catalogDigest: digest, outcome: { ok: true, data: { families: [{ capabilities: rows }] } }, ...changes })
+
+it('G17 graph feedback distinguishes refusal from uncertainty', () => {
+  const reason = 'SIP_R4_WORKER_UNAVAILABLE'
+  const wire = { ok: false, status: 503, reason, envelope: workerUnavailable }
+  const tool = 'solar-panels-from-drawing'
+  const text = 'No worker was available to start Import panels from drawing. Try again later: Refresh preview, then Review & run.'
+  for (const submission of [wire, { ok: false, status: 503, reason: reason.toLowerCase(), envelope: null },
+    { ok: false, status: 409, reason }]) {
+    expect(projectSolarGraphFeedback({ tool, submission })).toEqual({ state: 'refused',
+      reasonCode: reason.toLowerCase(), text, jobId: null, outputVersionId: null })
+  }
+  let reads = 0
+  const accessor = () => { reads += 1; return reason }
+  for (const submission of [
+    ...[500, 502, '503'].map(status => ({ ...wire, status })),
+    { ...wire, reason: 'SIP_R1_STORE_UNAVAILABLE' }, { ...wire, reason: reason + '_EXTRA' },
+    { ok: false, status: 503, envelope: null },
+    { ...wire, envelope: { ...workerUnavailable, ok: true } },
+    { ...wire, data: { status: 'submitted', job_id: binding.input_version_id } },
+    { ...wire, envelope: { ...workerUnavailable, error: { reason_code: 'OTHER' } } },
+    Object.defineProperty({ ...wire }, 'reason', { get: accessor }),
+    { ...wire, envelope: Object.defineProperty({ ...workerUnavailable }, 'error', { get: accessor }) },
+    { ...wire, envelope: { error: Object.defineProperty({}, 'reason_code', { get: accessor }) } },
+  ]) {
+    expect(projectSolarGraphFeedback({ tool, submission })).toMatchObject({ state: 'outcome_unknown',
+      reasonCode: null, jobId: null, outputVersionId: null })
+  }
+  expect(reads).toBe(0)
+  // Preserve ordinary bounded-code refusal handling when no HTTP status was
+  // supplied, but it cannot gain the guarded no-worker admission message.
+  expect(projectSolarGraphFeedback({ tool, submission: { ...wire, status: undefined } }).text).not.toBe(text)
+  expect(projectSolarGraphFeedback({ tool, completion: { state: 'refused', reasonCode: reason,
+    jobId: null, outputVersionId: null } }).state).toBe('outcome_unknown')
+  expect(projectSolarGraphFeedback({ tool, submission: { ok: true, status: 202,
+    data: { status: 'submitted', job_id: binding.input_version_id } } }).state).toBe('submitted')
+  for (const code of ['SIP_R4_WORKER_UNAVAILABLE', 'sip_r4_worker_unavailable']) {
+    const denied = row({}, { runnable: false, input_ready: false,
+      admission: { status_code: 503, error: workerUnavailable.error }, refusal_reasons: [code] })
+    expect(preview([denied])).toEqual({ accepted: false, reasonCode: reason.toLowerCase() })
+    for (const refusal_reasons of [[code, 'OTHER'], ['SIP_R1_STORE_UNAVAILABLE'], [null]]) {
+      expect(preview([{ ...denied, availability: { ...denied.availability, refusal_reasons } }]))
+        .toEqual({ accepted: false, reasonCode: null })
+    }
+    expect(preview([denied, row({}, { runnable: false, refusal_reasons: ['OTHER'] })]))
+      .toEqual({ accepted: false, reasonCode: null })
+    expect(preview([{ ...denied, availability: { ...denied.availability,
+      admission: { status_code: 503, error: { reason_code: 'bad code' } } } }]))
+      .toEqual({ accepted: false, reasonCode: null })
+    expect(preview([{ ...denied, availability: { ...denied.availability,
+      admission: Object.defineProperty({}, 'error', { get: accessor }) } }]))
+      .toEqual({ accepted: false, reasonCode: null })
+  }
+  expect(preview([], { outcome: { ...wire, reason: 'SIP_R1_STORE_UNAVAILABLE' } }))
+    .toEqual({ accepted: false, reasonCode: null })
+  expect(reads).toBe(0)
+})
 
 const panel = (id, angle = 0, changes = {}) => ({ id, angle, frame_ref: null,
   provenance: { source_handle: id }, ...changes })
@@ -334,12 +391,12 @@ it('R13C-14 freezes local and status sentences', () => {
     expect(expression).toMatch(new RegExp('^PROJECT_SOLAR_GRAPH_REASONS\\.[A-Za-z_][A-Za-z0-9_]*$'))
   }
 })
-it('R13C-42 keeps the form independent of R13-A, R13-B and storage', async () => {
+it('R13C-42 keeps the form independent of runtime controllers and storage', async () => {
   const modulePath = pathToFileURL(resolve(process.cwd(), 'scripts/check_user_facing_copy.mjs')).href
   const { scanSource } = await import(/* @vite-ignore */ modulePath)
   for (const file of ['solarProjectGraphFormModel.js', 'ProjectSolarGraphForm.jsx']) {
     const source = readFileSync(resolve(process.cwd(), 'src/solar/' + file), 'utf8')
-    expect(source).not.toMatch(new RegExp('import[^\\n]*(?:App\\.jsx|solarProjectAppModel|useProjectSolarScope|createProjectSolarRunController|solarProjectCompletion)'))
+    expect(source).not.toMatch(new RegExp('import[^\\n]*(?:App\\.jsx|solarProjectAppModel|useProjectSolarScope|createProjectSolarRunController)'))
     expect(source).not.toMatch(new RegExp('localStorage|sessionStorage'))
     expect(scanSource(source, 'src/solar/' + file, { strict: true })).toEqual([])
   }

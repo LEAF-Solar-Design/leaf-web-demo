@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react'
 import { getStoredOrgId, listProjects, openProject, requestBindingGrant } from '../api.js'
+import * as drawingApi from '../api.js'
+import { resolveDrawingStore, pull, publish } from './drawingSync.js'
 import { isSignedIn, login } from '../auth.js'
 import { getLeafHostBridge } from './hostBridge.js'
 import DiagnosticsDetails from './DiagnosticsDetails.jsx'
@@ -29,6 +31,7 @@ function StudioRecovery() {
 
 function commandMessage(outcome) {
   if (!outcome || outcome.status === 'superseded') return null
+  if (!['select', 'focus'].includes(outcome.action)) return null
   if (outcome.status === 'applied') return outcome.action === 'select'
     ? 'Selected in AutoCAD.' : 'Zoomed to the selection in AutoCAD.'
   if (outcome.status === 'stale') return 'This drawing changed in AutoCAD. Select the objects again.'
@@ -37,6 +40,66 @@ function commandMessage(outcome) {
     ? 'AutoCAD could not find those objects. Select them again in AutoCAD.'
     : `AutoCAD did not run that request (${(outcome.reason || 'unknown reason').replaceAll('_', ' ')}).`
   return null
+}
+
+function DrawingSyncRow({ project, ready, bridge, working }) {
+  const [sync, setSync] = useState(null)
+  const operation = useRef(null)
+  useEffect(() => {
+    let live = true
+    operation.current = null
+    try {
+      const { drawingStoreId } = resolveDrawingStore(project, ready)
+      const cursor = ready.syncCursor?.drawingStoreId === drawingStoreId ? ready.syncCursor.version : null
+      setSync({ drawingStoreId, cursor, head: null, busy: false, message: '' })
+      Promise.resolve().then(() => drawingApi.getDrawingVersions(false, drawingStoreId)).then(({ head }) => {
+        if (live) setSync((value) => ({ ...value, head }))
+      }).catch(() => { if (live) setSync((value) => ({ ...value, message: 'Head version could not be loaded.' })) })
+    } catch {
+      setSync({ message: 'drawing_store_unmapped' })
+    }
+    return () => { live = false; operation.current = null }
+  }, [project, ready])
+
+  async function run(kind) {
+    if (operation.current || !sync?.drawingStoreId || working) return
+    const token = {}
+    operation.current = token
+    setSync((value) => ({ ...value, busy: true, message: 'Syncing drawing.' }))
+    // A session change invalidates subsequent host commands, including a late export/save result.
+    const boundBridge = Object.fromEntries(['applyPlan', 'exportDxf', 'syncCursor'].map((name) => [name, (...args) => {
+      if (operation.current !== token) throw new Error('connection_changed')
+      return bridge[name](...args)
+    }]))
+    try {
+      const result = await (kind === 'pull' ? pull : publish)({ api: drawingApi, bridge: boundBridge,
+        drawingStoreId: sync.drawingStoreId, cursor: sync.cursor })
+      if (operation.current !== token) return
+      setSync((value) => ({ ...value, cursor: result.cursor ?? value.cursor,
+        message: result.reason || (kind === 'pull' ? `Pulled ${result.applied.length} versions.` : 'Drawing published.') }))
+      const { head } = await drawingApi.getDrawingVersions(false, sync.drawingStoreId)
+      if (operation.current === token) setSync((value) => ({ ...value, head }))
+    } catch {
+      if (operation.current === token) setSync((value) => ({ ...value, message: 'Drawing sync could not be completed.' }))
+    } finally {
+      if (operation.current === token) {
+        operation.current = null
+        setSync((value) => ({ ...value, busy: false }))
+      }
+    }
+  }
+
+  return <div className="leaf-platform-summary" aria-label="Drawing sync">
+    <h2>Drawing sync</h2>
+    {sync?.drawingStoreId && <>
+      <p>Drawing store: {sync.drawingStoreId}. Synced version: {sync.cursor ?? 'not synced'}. Head version: {sync.head ?? 'loading'}.</p>
+      <div className="leaf-platform-actions">
+        <button type="button" disabled={sync.cursor == null || sync.busy || !!working} onClick={() => run('pull')}>Pull</button>
+        <button type="button" disabled={sync.busy || !!working} onClick={() => run('publish')}>{sync.cursor == null ? 'Publish drawing' : 'Publish'}</button>
+      </div>
+    </>}
+    <p aria-live="polite">{sync?.message}</p>
+  </div>
 }
 
 export default function LeafPlatformScene() {
@@ -174,11 +237,11 @@ export default function LeafPlatformScene() {
         const version = Array.isArray(project?.drawing_versions) && project.drawing_versions.find((item) =>
           sameId(item?.version_id, boundVersionId) && sameId(item?.drawing_id, boundDrawingId) &&
           sameId(item?.project_id, boundProjectId) && sameId(item?.org_id, tenantId))
-        return version ? `${drawingName(version, Array.isArray(project.drawing_artifacts) ? project.drawing_artifacts : [])}, Version ${version.seq ?? '?'}` : null
+        return { project, label: version ? `${drawingName(version, Array.isArray(project.drawing_artifacts) ? project.drawing_artifacts : [])}, Version ${version.seq ?? '?'}` : null }
       }).catch(() => null))
     }
-    boundRequests.current.get(boundIdentity).then((label) => {
-      if (live) setBoundDetail({ identity: boundIdentity, label })
+    boundRequests.current.get(boundIdentity).then((detail) => {
+      if (live) setBoundDetail({ identity: boundIdentity, ...detail })
     })
     return () => { live = false }
   }, [boundIdentity])
@@ -412,6 +475,8 @@ export default function LeafPlatformScene() {
             <button type="button" disabled={!selectedTarget || !!working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'select'), 'select')}>{working === 'select' ? 'Selecting...' : 'Select'}</button>
             <button type="button" disabled={!selectedTarget || !!working} onClick={() => runAction(() => bridge.focusObject(selectedTarget, 'focus'), 'focus')}>{working === 'focus' ? 'Zooming...' : 'Zoom to'}</button>
           </div>
+          {boundDetail?.identity === boundIdentity && boundDetail.project &&
+            <DrawingSyncRow key={boundIdentity} project={boundDetail.project} ready={state.ready} bridge={bridge} working={working} />}
         </>}
       </section>}
       <DiagnosticsDetails />

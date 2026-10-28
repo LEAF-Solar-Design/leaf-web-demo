@@ -353,6 +353,14 @@ _REQUIRED_COLUMNS = {
         "content_sha256", "revision", "created_by_binding_id", "created_at",
         "updated_at",
     },
+    "project_web_page_revisions": {
+        "org_id", "project_id", "revision", "document", "digest", "actor_binding_id", "created_at",
+    },
+    "project_materials": {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "width", "height",
+        "preview_media_type", "preview_sha256", "created_at",
+    },
     "project_lifecycle_receipts": {
         "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
         "idempotency_key", "input_digest", "result_json", "created_at",
@@ -1082,6 +1090,44 @@ _REQUIRED_CONSTRAINTS = {
         "project_files", "CHECK (revision > 0)"),
     "project_files_scope_path_unique": _catalog_contract(
         "project_files", "UNIQUE (org_id, project_id, path)"),
+    "project_web_page_revisions_pkey": _catalog_contract(
+        "project_web_page_revisions", "PRIMARY KEY (org_id, project_id, revision)"),
+    "project_web_page_revisions_org_id_project_id_fkey": _catalog_contract(
+        "project_web_page_revisions", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_web_page_revisions_org_id_actor_binding_id_fkey": _catalog_contract(
+        "project_web_page_revisions", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_web_page_revisions_revision_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK (revision > 0)"),
+    "project_web_page_revisions_document_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK", "jsonb_typeof(document) = 'object'"),
+    "project_web_page_revisions_digest_check": _catalog_contract(
+        "project_web_page_revisions", "CHECK", "digest ~ '^[0-9a-f]{64}$'"),
+    "project_materials_pkey": _catalog_contract(
+        "project_materials", "PRIMARY KEY (material_id)"),
+    "project_materials_org_id_project_id_sha256_key": _catalog_contract(
+        "project_materials", "UNIQUE (org_id, project_id, sha256)"),
+    "project_materials_org_id_project_id_fkey": _catalog_contract(
+        "project_materials", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "project_materials_org_id_actor_binding_id_fkey": _catalog_contract(
+        "project_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_materials_name_check": _catalog_contract(
+        "project_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+    "project_materials_media_type_check": _catalog_contract(
+        "project_materials", "CHECK", "media_type", "'image/jpeg'", "'image/png'", "'image/heif'"),
+    "project_materials_byte_size_check": _catalog_contract(
+        "project_materials", "CHECK", "byte_size >= 1", "byte_size <= 16777216"),
+    "project_materials_sha256_check": _catalog_contract(
+        "project_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
+    "project_materials_width_check": _catalog_contract(
+        "project_materials", "CHECK (width > 0)"),
+    "project_materials_preview_media_type_check": _catalog_contract(
+        "project_materials", "CHECK", "preview_media_type = 'image/jpeg'"),
+    "project_materials_preview_sha256_check": _catalog_contract(
+        "project_materials", "CHECK", "preview_sha256 ~ '^[0-9a-f]{64}$'"),
     "project_lifecycle_receipts_pkey": _catalog_contract(
         "project_lifecycle_receipts", "PRIMARY KEY (receipt_id)"),
     "project_lifecycle_receipts_project_fk": _catalog_contract(
@@ -1140,6 +1186,8 @@ _REQUIRED_INDEXES = {
         "project_member_bindings", "(org_id, project_id, created_at, membership_id)"),
     "idx_project_files_scope": _catalog_contract(
         "project_files", "(org_id, project_id, path)"),
+    "project_materials_scope_page": _catalog_contract(
+        "project_materials", "(org_id, project_id, material_id)"),
     "idx_project_lifecycle_receipts_scope": _catalog_contract(
         "project_lifecycle_receipts", "(org_id, project_id, created_at, receipt_id)"),
     "project_lifecycle_receipts_create_idempotency": _catalog_contract(
@@ -1154,6 +1202,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "project_web_page_revisions_immutable": _catalog_contract(
+        "project_web_page_revisions", "BEFORE UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION leaf_web_page_revision_immutable()"),
     "tenant_cost_events_immutable": _catalog_contract(
         "tenant_cost_events", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_reject_tenant_cost_mutation()"),

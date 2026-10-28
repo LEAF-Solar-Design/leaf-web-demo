@@ -1140,7 +1140,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_repository_source.py"), 8),
         Suite("server-dependency-health", "server tests/test_dependency_health.py", "pytest",
               SERVER, _py_pytest("tests/test_dependency_health.py") +
-              ["tests/test_solar_worker_coverage.py", "tests/test_leaf_cloud_grants_m2m.py"], 20),
+              ["tests/test_solar_worker_coverage.py", "tests/test_solar_worker_refusal_wire.py",
+               "tests/test_leaf_cloud_grants_m2m.py"], 20),
         Suite("server-auth", "server test_auth.py", "pytest", SERVER,
               _py_pytest("test_auth.py"), 14),
         Suite("server-auth-envelope", "server tests/test_auth_envelope.py", "pytest", SERVER,
@@ -2540,7 +2541,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_org_self_provision_gate_static.py",  # SP2 invite-only org gate
                  f"{repo_name}/platform/tests/test_org_export_scope_static.py",  # P-153 export ownership scope
                  f"{repo_name}/platform/tests/test_campaign_plan_policy_static.py",
-                 ], 254,  # +15 versioned web/native planning policy cases
+                 f"{repo_name}/platform/tests/test_web_page_template_static.py",
+                 ], 265,  # +11 portable Next page template cases
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
@@ -3590,6 +3592,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_glug_routes.py"), 12),
         Suite("server-image-turns", "server tests/test_image_turns.py", "pytest", SERVER,
               _py_pytest("tests/test_image_turns.py"), 15),
+        Suite("server-project-material-images", "server tests/test_project_material_images.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_material_images.py"), 13),
         Suite("server-instant-artifact-registry", "server tests/test_instant_artifact_registry.py", "pytest", SERVER,
               _py_pytest("tests/test_instant_artifact_registry.py"), 5),
         Suite("server-instant-session-wiring", "server tests/test_instant_session_wiring.py", "pytest", SERVER,
@@ -3747,7 +3751,7 @@ def build_suites() -> List[Suite]:
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.config.mjs",
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
-               "e2e/studio-ux-regressions.spec.mjs",
+               "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
                "--workers=1"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
@@ -5213,7 +5217,8 @@ def conflict_resources(suite: Suite) -> frozenset[str]:
         return frozenset()
     override = _CONFLICT_RESOURCES_OVERRIDE.get(suite.id)
     if override is not None:
-        return override
+        # Explicit filesystem/port locks cannot drop a declared database lock.
+        return override | (frozenset({"postgres"}) if suite.db_gated or suite.uses_database else frozenset())
     table_reason = _SERIAL_SUITE_REASONS.get(suite.id, "")
     held = set()
     # server/authored_tools.json is reset in place before the suite runs.

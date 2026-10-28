@@ -129,7 +129,7 @@ def test_sip_r1_gate_registration():
         assert suite.db_gated is gated
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
-    assert suites["platform-static"].expected == 254  # +15 versioned planning policy cases.
+    assert suites["platform-static"].expected == 265  # +11 portable page template cases.
     assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
     assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
@@ -492,7 +492,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # Added test_acceptance_schema_readiness_contract on 2026-10-19: 211 -> 212.
     # Added +26 SP2 invite-only org gate on 2026-10-19: 212 -> 238.
     # Added demo inventory/migration contract regression: 238 -> 239.
-    assert static.expected == 254
+    assert static.expected == 265
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv
@@ -3618,7 +3618,7 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
         "web-vitest-2": "npm/npx",
         "web-vitest-3": "npm/npx",
         "web-build": "npm/npx",
-        "web-link-service-flow": "npm/npx",
+        "web-link-service-flow": "PostgreSQL",
         "web-demo-gate": "nested runner",
         "studio-walk-regressions": "nested stack",
         "server-sessions-e2e": "harness/dist",
@@ -3755,6 +3755,8 @@ def test_conflict_resources_maps_each_rule_to_its_lock(monkeypatch):
     # The override table wins over the generic rules.
     assert g.conflict_resources(stub("web-link-service-flow", g.WEB, ["npx", "playwright"])) \
         == {"web-tree", "harness-tree", "link-flow-ports"}
+    assert g.conflict_resources(stub("web-link-service-flow", g.WEB, ["npx", "playwright"], uses_database=True)) \
+        == {"web-tree", "harness-tree", "link-flow-ports", "postgres"}
     assert g.conflict_resources(stub("server-sessions-e2e", g.SERVER)) == {"harness-tree"}
     assert g.conflict_resources(stub("web-demo-gate", g.REPO, ["bash"])) == {"web-tree"}
     assert g.conflict_resources(stub("harness-container-smoke", g.REPO)) \
@@ -4500,3 +4502,4 @@ def test_lab_git_mirror_gate_registration():
         uses_database=True, database_skip_reasons=(r"platform DB unreachable: .+",))
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
+

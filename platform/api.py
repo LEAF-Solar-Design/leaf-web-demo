@@ -18,10 +18,12 @@ import uuid
 from datetime import datetime
 from typing import Any, Dict, Literal, NamedTuple, Optional
 
-from fastapi import APIRouter, Depends, Header, HTTPException, Query
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
+from fastapi.responses import JSONResponse, Response
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
+from starlette.concurrency import run_in_threadpool
 
-from . import (arlo_lab, arlo_review, billing, deps as platform_deps, entitlements, project_lifecycle,
+from . import (arlo_lab, arlo_review, billing, deps as platform_deps, entitlements, project_lifecycle, project_materials,
                store, unit_economics)
 from .deps import (get_org_id, get_review_binding_id, get_write_binding_id, get_write_org_id,
                    require_auth_when_live)
@@ -367,6 +369,127 @@ def _lifecycle_response(operation):
         raise HTTPException(status_code=409, detail=str(exc)) from None
     except ValueError as exc:
         raise HTTPException(status_code=422, detail=str(exc)) from None
+
+
+class SaveProjectPageBody(BaseModel):
+    model_config = ConfigDict(extra='forbid')
+    expected_revision: int = Field(strict=True, ge=0, lt=2147483647)
+    document: Dict[str, Any] = Field(max_length=6)
+
+
+@router.get('/projects/{project_id}/page')
+def get_project_page(project_id: uuid.UUID, actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    from . import project_web_page
+    page = _lifecycle_response(lambda: project_web_page.read(actor.org_id, project_id, actor.binding_id))
+    return JSONResponse({'page': page}, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.put('/projects/{project_id}/page')
+async def save_project_page(project_id: uuid.UUID, request: Request,
+                           actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    from . import project_web_page
+    # Bound input before JSON parsing. Escaped Unicode can use six bytes per
+    # character, so 16 KiB admits every valid document and its envelope.
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 16384:
+            raise HTTPException(status_code=413, detail='The page document is too large.')
+        raw.extend(chunk)
+    try:
+        body = SaveProjectPageBody.model_validate_json(bytes(raw))
+    except ValidationError:
+        raise HTTPException(status_code=422, detail='Invalid page document.') from None
+    page = await run_in_threadpool(_lifecycle_response, lambda: project_web_page.save(
+        actor.org_id, project_id, actor.binding_id, expected_revision=body.expected_revision, document=body.document))
+    return JSONResponse({'page': page}, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/page/source')
+def export_project_page(project_id: uuid.UUID, revision: int = Query(ge=1, le=2147483647),
+                        actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    from . import project_web_page, web_page_template
+    page = _lifecycle_response(lambda: project_web_page.read(
+        actor.org_id, project_id, actor.binding_id, revision=revision))
+    archive = web_page_template.source_archive(page['document'], page['revision'])
+    return Response(archive, media_type='application/zip', headers={
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': f'attachment; filename="page-revision-{revision}.zip"',
+        'X-Page-Revision': str(revision), 'X-Page-Digest': page['digest'],
+    })
+
+
+def _material_response(operation):
+    import project_material_images as images
+    try:
+        return _lifecycle_response(operation)
+    except images.MaterialStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from None
+
+
+@router.post('/projects/{project_id}/materials/images', status_code=201)
+async def import_project_image(
+    project_id: uuid.UUID, request: Request,
+    filename: str = Query(min_length=1, max_length=255),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    import project_material_images as images
+    # A raw Request, rather than File/Body, keeps authorization before all body
+    # reads, including requests without Content-Length.
+    await run_in_threadpool(_lifecycle_response, lambda: project_lifecycle.require_project_role(
+        actor.org_id, project_id, actor.binding_id, write=True))
+    _lifecycle_response(lambda: images.display_name(filename))
+    length = request.headers.get('content-length')
+    if length is not None:
+        try:
+            count = int(length)
+            if count < 0:
+                raise ValueError()
+        except ValueError:
+            raise HTTPException(status_code=400, detail='invalid Content-Length') from None
+        if count > images.MAX_BYTES:
+            raise HTTPException(status_code=413, detail='Photo exceeds the 16 MiB limit.')
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > images.MAX_BYTES:
+            raise HTTPException(status_code=413, detail='Photo exceeds the 16 MiB limit.')
+        data.extend(chunk)
+    prepared = await run_in_threadpool(_material_response, lambda: images.prepare_and_store(
+        actor.org_id, project_id, filename, bytes(data)))
+    material = await run_in_threadpool(_lifecycle_response, lambda: project_materials.commit(
+        actor.org_id, project_id, actor.binding_id, prepared))
+    return JSONResponse({'material': material}, status_code=201, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/materials')
+def list_project_materials(
+    project_id: uuid.UUID, cursor: uuid.UUID | None = None,
+    limit: int = Query(default=200, ge=1, le=200),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    result = _lifecycle_response(lambda: project_materials.list_materials(
+        actor.org_id, project_id, actor.binding_id, cursor=cursor, limit=limit))
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/materials/{material_id}/content')
+def get_project_material_content(
+    project_id: uuid.UUID, material_id: uuid.UUID,
+    variant: Literal['preview', 'original'] = 'preview',
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    from urllib.parse import quote
+    import project_material_images as images
+    material = _lifecycle_response(lambda: project_materials.get_material(
+        actor.org_id, project_id, actor.binding_id, material_id))
+    raw = _material_response(lambda: images.read_content(actor.org_id, project_id, material, variant))
+    _lifecycle_response(lambda: project_lifecycle.require_project_role(
+        actor.org_id, project_id, actor.binding_id, write=False))
+    name = material['name'] if variant == 'original' else 'preview.jpg'
+    disposition = 'attachment' if variant == 'original' else 'inline'
+    return Response(raw, media_type=material['media_type'] if variant == 'original' else 'image/jpeg', headers={
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': f'{disposition}; filename="photo"; filename*=UTF-8\'\'{quote(name, safe="")}',
+    })
 
 
 @router.put("/orgs/{org_id}/identities/{binding_id}/label")

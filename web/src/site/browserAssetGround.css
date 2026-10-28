@@ -1,6 +1,7 @@
 .browser-asset-ground { position: fixed; inset: 0; background: var(--leaf-ground); color: var(--leaf-ink); pointer-events: auto; }
 .browser-asset-ground[hidden], .browser-project-panel[hidden] { display: none !important; }
 .browser-asset-viewport, .browser-asset-viewport iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; }
+.browser-asset-viewport:has(.project-page) { overflow: auto; }
 .browser-asset-empty { height: 100%; display: flex; flex-direction: column; justify-content: center; align-items: center; text-align: center; padding: 24px; box-sizing: border-box; }
 .browser-panel-heading button { min-height: 44px; padding: 8px 16px; background: var(--leaf-surface); color: var(--leaf-ink); border: 1px solid var(--leaf-line); border-radius: 8px; cursor: pointer; }
 .browser-preview-label { position: absolute; bottom: 8px; left: 8px; z-index: 1; padding: 4px 8px; background: var(--leaf-surface); color: var(--leaf-ink); pointer-events: none; }

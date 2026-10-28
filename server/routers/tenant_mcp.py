@@ -385,9 +385,13 @@ def _exchange_code(pending: Dict[str, Any], code: str) -> Dict[str, Any]:
 
 def _start_connect(tenant_id: str, record: Dict[str, Any], redirect_uri: str) -> str:
     """Discovery (RFC 9728 + RFC 8414) -> DCR (RFC 7591) -> PKCE authorize URL
-    (RFC 8707 resource indicator). Persists ONE pending entry keyed by the
-    freshly minted `state`; never mutates the tenant record until the caller
+    (RFC 8707 resource indicator). Resumes an existing live flow before any
+    outbound request, otherwise persists a pending entry keyed by a fresh
+    `state`; never mutates the tenant record until the caller
     does so (state stays "registered" until this returns successfully)."""
+    pending_url = tenant_mcp_store.pending_authorize_url(tenant_id, record["id"], redirect_uri)
+    if pending_url is not None:
+        return pending_url
     parsed = urlsplit(record["url"])
     origin = f"{parsed.scheme}://{parsed.netloc}"
     if _fake_resource(record["url"]):
@@ -431,6 +435,7 @@ def _start_connect(tenant_id: str, record: Dict[str, Any], redirect_uri: str) ->
         "client_id": client["client_id"],
         "client_secret": client["client_secret"],
         "redirect_uri": redirect_uri,
+        "authorize_url": authorize_url,
         "authorization_server": as_issuer,
         "revocation_endpoint": as_meta.get("revocation_endpoint")
         if isinstance(as_meta.get("revocation_endpoint"), str) else None,

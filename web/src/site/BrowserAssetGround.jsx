@@ -1,6 +1,7 @@
 import { createContext, useEffect, useRef, useState } from 'react'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import WorkspaceEnvironment from './WorkspaceEnvironment.jsx'
+import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
 import './browserAssetGround.css'
@@ -18,6 +19,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
   const scope = useRef(null)
   const [asset, setAsset] = useState(null)
   const [activation, setActivation] = useState(0)
+  const [selectedField, setSelectedField] = useState(null)
   if (scope.current?.key !== scopeKey) scope.current = { key: scopeKey }
   const currentScope = scope.current
   if (asset && asset.scope !== currentScope) setAsset(null)
@@ -48,10 +50,26 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
     onSelect?.('browser')
     return true
   }
+  const previewPage = ({ document, name }) => {
+    if (!live.current || scope.current !== currentScope || !signedIn || !accountScope || accountScope === 'guest' || !projectId) return
+    const opening = shown?.kind !== 'page'
+    setAsset({ kind: 'page', document, name, scope: currentScope })
+    if (opening) {
+      onEnterWorkspace?.()
+      setActivation(value => value + 1)
+      onSelect?.('browser')
+    }
+  }
   return <BrowserArtifactContext.Provider value={acceptArtifact}>
     <section className="browser-asset-ground" data-ground="browser-asset" hidden={!browserActive} aria-label="Browser asset">
       <div className="browser-asset-viewport">
-        {shown ? <>
+        {shown?.kind === 'page' ? <>
+          <span className="browser-preview-label">Page draft · {shown.name}</span>
+          <PagePreview document={shown.document} onSelectField={field => {
+            setSelectedField({ field, request: Date.now() })
+            onBrowserPanel('project')
+          }} />
+        </> : shown ? <>
           <span className="browser-preview-label">Verified preview · {shown.name}</span>
           <iframe title={`Verified preview: ${shown.name}`} srcDoc={shown.html} sandbox="allow-scripts allow-downloads" />
         </> : <div className="browser-asset-empty">
@@ -66,6 +84,8 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
       chooseRequest={boardProps.startFocusRequest} onEnter={onEnterWorkspace}
       hasContent={profile === 'browser' ? Boolean(shown) : Boolean(boardProps.drawing
         || boardProps.workspace?.drawing_versions?.length || boardProps.workspace?.jobs?.length || boardProps.workspace?.built_tools?.length)}>
+      {signedIn && projectId && <ProjectPageEditor key={scopeKey} projectId={projectId} accountScope={accountScope}
+        selectedField={selectedField} onPreview={previewPage} />}
       <ProjectBoardGround {...boardProps} active={browserPanel === 'project'} occluders={undefined} />
     </WorkspaceEnvironment>
   </BrowserArtifactContext.Provider>

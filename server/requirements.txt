@@ -27,3 +27,5 @@ jsonschema
 pytest
 # Pin the compatible current TestClient transport explicitly.
 httpx==0.28.1
+Pillow==13.0.0
+pillow-heif==1.8.1
