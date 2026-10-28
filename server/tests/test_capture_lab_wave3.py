@@ -152,6 +152,10 @@ def activation_flags():
             "--observed-at", "2026-10-28T10:02:00Z", "--widget-rendered"]
 
 
+def reviewed_flags():
+    return [flag for key in c.IDS if key not in c.LIVE for flag in ("--reviewed", key)]
+
+
 def relay_flags():
     return ["--ops-sha", "e" * 40, "--list-ok", "--detail-ok", "--intent-by-id-ok",
             "--opaque-handles-only", "--caps-held", "--fallback-policy-ok"]
@@ -171,7 +175,8 @@ def test_projection_successes():
     assert active["activatedAt"] == "2026-10-28T10:00:00Z" and active["widgetSurface"] == "/mini"
     relay = c.relay_receipt(meta("relay"), "e" * 40, dict.fromkeys(c.RELAY, True))
     assert all(relay[k] is True for k in c.RELAY)
-    rollback = c.rollback_receipt(meta("rollback"), dict.fromkeys(c.LIVE, (True, True)))
+    # SEL-316e3 requires explicit review of every documented control.
+    rollback = c.rollback_receipt(meta("rollback"), dict.fromkeys(c.LIVE, (True, True)), set(c.IDS) - c.LIVE)
     assert [x["id"] for x in rollback["controls"]] == list(c.IDS)
     assert len(rollback["controls"]) == 10
     assert sum(x["method"] == "live" for x in rollback["controls"]) == 3
@@ -233,19 +238,47 @@ def test_rollback_projection_requires_recovery(control):
     observations = dict.fromkeys(c.LIVE, (True, True))
     observations[control] = (True, False)
     with pytest.raises(c.Refused, match=control):
-        c.rollback_receipt(meta("rollback"), observations)
+        # SEL-316e3 attestation allows this test to reach live recovery validation.
+        c.rollback_receipt(meta("rollback"), observations, set(c.IDS) - c.LIVE)
+
+
+@pytest.mark.parametrize("missing", [key for key in c.IDS if key not in c.LIVE])
+def test_rollback_requires_each_documented_review(tmp_path, capsys, missing):
+    reviewed = [key for key in c.IDS if key not in c.LIVE and key != missing]
+    flags = [flag for key in reviewed for flag in ("--reviewed", key)]
+    capture, http, db, _ = fake_capture()
+    assert c.main(argv("rollback", tmp_path, *flags), capture=capture) == 1
+    output = capsys.readouterr()
+    assert json.loads(output.out) == {"outcome": "refused", "reason": "documented_unreviewed"}
+    assert output.err == ""
+    assert not http.calls and not db.reads and not list(tmp_path.iterdir())
+    with pytest.raises(c.Refused, match="^documented_unreviewed$"):
+        c.rollback_receipt(meta("rollback"), dict.fromkeys(c.LIVE, (True, True)), reviewed)
+
+
+@pytest.mark.parametrize("unknown", ["worker-pause", "run-cancel", "activation-pause", "unknown"])
+def test_rollback_refuses_unknown_review(tmp_path, capsys, unknown):
+    capture, http, db, _ = fake_capture()
+    assert c.main(argv("rollback", tmp_path, *reviewed_flags(), "--reviewed", unknown), capture=capture) == 1
+    assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": "reviewed_unknown"}
+    assert not http.calls and not db.reads and not list(tmp_path.iterdir())
+    with pytest.raises(c.Refused, match="^reviewed_unknown$"):
+        c.rollback_receipt(meta("rollback"), dict.fromkeys(c.LIVE, (True, True)), (set(c.IDS) - c.LIVE) | {unknown})
 
 
 def test_live_rollback_and_resume_failure(tmp_path, capsys):
     capture, http, db, clock = fake_capture()
-    result = capture.capture(c.parser().parse_args(argv("rollback", tmp_path)))
+    # SEL-316e3 requires all seven reviews before any live exercise.
+    result = capture.capture(c.parser().parse_args(argv("rollback", tmp_path, *reviewed_flags())))
     assert [x["id"] for x in result["controls"]] == list(c.IDS)
+    assert result["controls"] == [dict(id=key, method="live" if key in c.LIVE else "documented",
+                                       exercised=key in c.LIVE, restored=key in c.LIVE) for key in c.IDS]
     assert clock.elapsed == 30
     assert not http.paused and http.activation["state"] == "active"
     assert len(http.rows) == 3
     capture, http, _, _ = fake_capture()
     http.fail_resume = True
-    assert c.main(argv("rollback", tmp_path), capture=capture) == 1
+    assert c.main(argv("rollback", tmp_path, *reviewed_flags()), capture=capture) == 1
     assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": "worker-pause"}
     assert any(path.endswith("/worker/resume") for _, path, _ in http.calls)
     assert not (tmp_path / "rollback.json").exists()
@@ -296,10 +329,45 @@ def test_poll_refuses_another_runs_observation():
 ])
 def test_activation_observations_required_before_creation(tmp_path, capsys, flags, code):
     capture, http, db, _ = fake_capture()
-    assert c.main(argv("activation", tmp_path, "--create", *flags), capture=capture) == 1
+    # SEL-316e3 requires observations only on the separate capture path.
+    assert c.main(argv("activation", tmp_path, *flags), capture=capture) == 1
     assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": code}
     assert not http.calls and not db.reads
     assert not list(tmp_path.iterdir())
+
+
+def test_activation_create_then_capture(tmp_path, capsys):
+    capture, http, db, clock = fake_capture()
+    created = clock.now().isoformat().replace("+00:00", "Z")
+    http.activation["created_at"] = created
+    http.activation["transitions"][0]["at"] = created
+    assert c.main(argv("activation", tmp_path, "--create"), capture=capture) == 0
+    assert json.loads(capsys.readouterr().out) == {"outcome": "activation_created"}
+    assert http.calls == [("POST", "/api/lab/activations", {"doc_id": DOC, "interval_s": 60})]
+    assert not db.reads and not list(tmp_path.iterdir())
+    http.calls.clear()
+    capture.now = lambda: datetime(2026, 10, 28, 12, 3, tzinfo=timezone.utc)
+    flags = ["--editor-closed-at", "2026-10-28T12:01:00Z",
+             "--observed-at", "2026-10-28T12:02:00Z", "--widget-rendered"]
+    assert c.main(argv("activation", tmp_path, *flags), capture=capture) == 0
+    assert json.loads(capsys.readouterr().out) == {"outcome": "captured", "receipt": "activation"}
+    assert http.calls == [("GET", "/api/lab/activations", None)]
+    receipt = json.loads((tmp_path / "activation.json").read_text())
+    assert receipt["activatedAt"] == created
+    assert receipt["editorClosedAt"] == "2026-10-28T12:01:00Z"
+    assert receipt["observedAt"] == "2026-10-28T12:02:00Z"
+
+
+@pytest.mark.parametrize("flags", [
+    ["--editor-closed-at", "2026-10-28T12:01:00Z"],
+    ["--observed-at", "2026-10-28T12:02:00Z"],
+    ["--widget-rendered"], activation_flags(),
+])
+def test_activation_create_refuses_observation_options(tmp_path, capsys, flags):
+    capture, http, db, _ = fake_capture()
+    assert c.main(argv("activation", tmp_path, "--create", *flags), capture=capture) == 1
+    assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": "usage"}
+    assert not http.calls and not db.reads and not list(tmp_path.iterdir())
 
 
 @pytest.mark.parametrize("sample", [DOC, "tenant-private", "subject", "nonce", "approval_id",
@@ -444,7 +512,8 @@ def test_failed_live_controls_refuse_and_attempt_recovery(tmp_path, capsys, cont
         return original(method, path, body)
 
     http.request = failing
-    assert c.main(argv("rollback", tmp_path), capture=capture) == 1
+    # SEL-316e3 reviews must precede the live failure under test.
+    assert c.main(argv("rollback", tmp_path, *reviewed_flags()), capture=capture) == 1
     output = capsys.readouterr()
     assert json.loads(output.out) == {"outcome": "refused", "reason": control}
     assert output.err == "" and PRIVATE not in output.out
@@ -469,8 +538,9 @@ def test_exact_fractional_activation_times_and_null_publication():
 
 def test_end_to_end_checker_and_privacy(tmp_path, capsys):
     capture, http, db, clock = fake_capture()
-    extra = {"ledger": ["--publish"], "activation": ["--create", *activation_flags()],
-             "relay": relay_flags()}
+    # SEL-316e3 captures an existing activation and attests to documented controls.
+    extra = {"ledger": ["--publish"], "activation": activation_flags(),
+             "relay": relay_flags(), "rollback": reviewed_flags()}
     for name in ("replay", "ledger", "run", "activation", "relay", "rollback"):
         assert c.main(argv(name, tmp_path, *extra.get(name, [])), capture=capture) == 0
         printed = capsys.readouterr()

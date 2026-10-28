@@ -6,10 +6,12 @@ Reuse the release sha and proof key for all six commands. Credentials come from
 LEAF_E2E_STAGING_JWT or --jwt-secret (Secrets Manager key jwt); DATABASE_URL
 must address the staging database. relay needs no credentials or database.
 ledger --publish and activation --create explicitly perform their named writes.
-activation requires --editor-closed-at, --observed-at and --widget-rendered,
-recorded by the operator after seeing the custom widget on /mini. relay requires
+First use activation --create, then close the editor, observe the custom widget
+on /mini, and capture with activation (without --create). Capture requires
+--editor-closed-at, --observed-at and --widget-rendered. relay requires
 --ops-sha and all six explicit observation flags. rollback performs live pause,
-resume and cancel exercises; use a disposable acceptance document. run --cancel
+resume and cancel exercises; use a disposable acceptance document and attest to
+each documented control with --reviewed <id> after reviewing its procedure. run --cancel
 performs only a disposable cancellation and emits no receipt. --timeout defaults
 to 600 seconds and cannot exceed 1800. No raw source values reach diagnostics.
 
@@ -156,7 +158,14 @@ def relay_receipt(meta, ops_sha, observations):
                 **{key: True for key in RELAY})
 
 
-def rollback_receipt(meta, observations):
+def require_reviewed(reviewed):
+    documented = set(IDS) - LIVE
+    require(not (set(reviewed) - documented), "reviewed_unknown")
+    require(documented <= set(reviewed), "documented_unreviewed")
+
+
+def rollback_receipt(meta, observations, reviewed):
+    require_reviewed(reviewed)
     for key in IDS:
         if key in LIVE:
             require(observations.get(key) == (True, True), key)
@@ -435,12 +444,13 @@ class Capture:
             jobs = self.db.jobs(self.scope, run_id)
             project = lambda meta: run_receipt(meta, run, revision, jobs)
         elif name == "activation":
-            # Browser measurements are mandatory even when creation is asked
-            # for. Refuse missing observations before performing that write.
+            if args.create:
+                require(args.editor_closed_at is None and args.observed_at is None
+                        and not args.widget_rendered, "usage")
+                self.request("POST", "/api/lab/activations", {"doc_id": doc, "interval_s": 60})
+                return None
             require(args.widget_rendered is True, "widget_unobserved")
             require(utc(args.editor_closed_at) < utc(args.observed_at), "time_order")
-            if args.create:
-                self.request("POST", "/api/lab/activations", {"doc_id": doc, "interval_s": 60})
             activation = self.active(doc)
             # The server stores +00:00, whereas receipts require UTC Z.
             transitions = []
@@ -461,8 +471,9 @@ class Capture:
             observations = {key: getattr(args, re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()) for key in RELAY}
             project = lambda meta: relay_receipt(meta, args.ops_sha, observations)
         else:
+            require_reviewed(args.reviewed)
             observations = self.rollback(doc, args.timeout)
-            project = lambda meta: rollback_receipt(meta, observations)
+            project = lambda meta: rollback_receipt(meta, observations, args.reviewed)
         completed = self.now().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
         result = project(common(name, args.sha, args.proof_key, completed))
         check_privacy(result)
@@ -487,6 +498,8 @@ def parser():
             sub.add_argument("--publish", action="store_true")
         if name == "run":
             sub.add_argument("--cancel", action="store_true")
+        if name == "rollback":
+            sub.add_argument("--reviewed", action="append", default=[])
         if name == "activation":
             sub.add_argument("--create", action="store_true")
             sub.add_argument("--editor-closed-at")
@@ -514,8 +527,8 @@ def main(argv=None, *, capture=None, env=None):
             receipt = capture.capture(args)
             if receipt is not None:
                 write_receipt(args.out_dir, args.command, receipt)
-        print(json.dumps({"outcome": "captured" if receipt is not None else "cancelled",
-                          "receipt": args.command} if receipt is not None else {"outcome": "cancelled"}))
+        print(json.dumps({"outcome": "captured", "receipt": args.command} if receipt is not None
+                         else {"outcome": "activation_created" if args.command == "activation" else "cancelled"}))
         return 0
     except (Exception, KeyboardInterrupt, SystemExit) as error:
         code = error.code if isinstance(error, Refused) else "capture_refused"
