@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { BINDING_FIELDS, FORMATS, PRESETS, RENDERER_VERSION } from './widgetCatalog.js'
 import { HEIGHT_BOUNDS } from './useWidgetEditor.js'
+import { LA_USABLE_HEIGHT } from './laFit.js'
 import { loadGraphOutputs } from './widgetsClient.js'
 
 const colors = ['auto', 'ink', 'leaf', 'slate', 'loss']
@@ -83,12 +84,13 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
   return <aside className="widgets-fields" aria-label="Inspector">
     {!element ? <>
       <h3>Surface</h3><p>{W} × {surface.h} points</p>
-      {HEIGHT_BOUNDS[format] && <NumberField label="Height" type="range" value={surface.h} min={HEIGHT_BOUNDS[format][0]} max={HEIGHT_BOUNDS[format][1]} onChange={(h) => surfaceEdit({ h })} />}
+      {HEIGHT_BOUNDS[format] && <NumberField label="Height" type="range" value={surface.h} min={HEIGHT_BOUNDS[format][0]} max={format === 'la' ? LA_USABLE_HEIGHT : HEIGHT_BOUNDS[format][1]} onChange={(h) => surfaceEdit({ h })} />}
       <NumberField label="Corners" type="range" value={surface.radius} min={0} max={Math.floor(Math.min(W, surface.h) / 2)} onChange={(radius) => surfaceEdit({ radius })} />
       <Select label="Background" value={surface.bg} options={['black', 'blur', 'none']} onChange={(bg) => surfaceEdit({ bg })} />
       {FORMATS[format].accessory && check('Preview one-color', surface.vibrant, (vibrant) => surfaceEdit({ vibrant }))}
       {check('Include this format', surface.ship, (ship) => surfaceEdit({ ship }))}
-      {['la', 'diExp'].includes(format) && surface.h > 160 && <p>iOS cuts off content below 160 points.</p>}
+      {format === 'la' && surface.h > LA_USABLE_HEIGHT && <p>Lock-screen canvas height must not exceed the 128 pt limit.</p>}
+      {format === 'diExp' && surface.h > 160 && <p>iOS cuts off content below 160 points.</p>}
       {format === 'lockInline' && <p>Inline widgets support one line of text.</p>}
       <button type="button" onClick={() => { if (resetAt !== null && Date.now() - resetAt < 3000) { dispatch({ type: 'reset' }); setResetAt(null) } else setResetAt(Date.now()) }}>{resetAt !== null ? 'Click again to reset' : 'Reset this format'}</button>
     </> : <>

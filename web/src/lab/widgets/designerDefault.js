@@ -14,7 +14,7 @@ export const DESIGNER_DEFAULT_DOC = freeze({
   "active": "la",
   "formats": {
     "la": {
-      "h": 160,
+      "h": 128,
       "radius": 22,
       "bg": "black",
       "vibrant": false,
@@ -100,45 +100,6 @@ export const DESIGNER_DEFAULT_DOC = freeze({
           "binding": {
             "source": "kashbot.board",
             "field": "pnl",
-            "min_renderer": "1.0.0",
-            "scale": "identity",
-            "tone": "auto"
-          }
-        },
-        {
-          "id": "divider",
-          "x": 14,
-          "y": 122,
-          "w": 333,
-          "h": 1,
-          "scale": 1,
-          "weight": 600,
-          "color": "slate",
-          "align": "left",
-          "visible": true,
-          "opacity": 0.35,
-          "kind": "box",
-          "preset": "divider",
-          "min_renderer": "1.0.0"
-        },
-        {
-          "id": "history",
-          "x": 14,
-          "y": 125,
-          "w": 333,
-          "h": 32,
-          "scale": 1,
-          "weight": 500,
-          "color": "auto",
-          "align": "left",
-          "visible": true,
-          "count": 4,
-          "kind": "text",
-          "preset": "history",
-          "min_renderer": "1.0.0",
-          "binding": {
-            "source": "kashbot.board",
-            "field": "history",
             "min_renderer": "1.0.0",
             "scale": "identity",
             "tone": "auto"

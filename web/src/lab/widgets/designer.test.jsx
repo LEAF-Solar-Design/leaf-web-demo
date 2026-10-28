@@ -7,6 +7,7 @@ import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { FORMAT_NAMES } from './WidgetDesigner.jsx'
 import { FORMATS, PRESETS } from './widgetCatalog.js'
 import { migrate, validateWidgetDoc } from './widgetDoc.js'
+import { laFitProblem } from './laFit.js'
 import { createEditorState, createWidgetDoc, HANDLES, snap1, snapTargets, supportsPreset, transformElement, useWidgetEditor, widgetEditorReducer as reduce } from './useWidgetEditor.js'
 import { loadGraphOutputs, loadWidget, resolveValues, saveWidget } from './widgetsClient.js'
 import { manifests } from '../canvas/registry.js'
@@ -74,6 +75,7 @@ describe('document editing and history', () => {
   it('pins the frozen default snapshot to the migrated designer fixture and returns independent copies', () => {
     const fixture = JSON.parse(readFileSync(`${process.cwd()}/../contract/fixtures/widget/designer-v2-default.json`, 'utf8'))
     expect(DESIGNER_DEFAULT_DOC).toEqual(migrate(fixture))
+    expect(laFitProblem(DESIGNER_DEFAULT_DOC)).toBeNull()
     expect(Object.values(createEditorState().doc.formats).every((f) => f.els.length === 0 && f.ship)).toBe(true)
     const doc = createWidgetDoc(DESIGNER_DEFAULT_DOC), other = createWidgetDoc(DESIGNER_DEFAULT_DOC)
     expect(doc).toEqual(DESIGNER_DEFAULT_DOC)
@@ -408,7 +410,10 @@ describe('designer interactions', () => {
     edit('Height', '80'); edit('Corners', '10'); edit('Background', 'blur')
     click('Add text'); click('Edit surface'); click('Reset this format')
     expect(screen.getByRole('button', { name: 'Click again to reset' })).toBeInTheDocument()
-    click('Click again to reset'); expect(screen.getByLabelText('Height')).toHaveValue('160')
+    // SEL-403c2 caps the reset la canvas at 128 pt.
+    click('Click again to reset'); expect(screen.getByLabelText('Height')).toHaveValue('128')
+    expect(screen.getByLabelText('Height')).toHaveAttribute('max', '128')
+    edit('Height', '220'); expect(screen.getByLabelText('Height')).toHaveValue('128')
     expect(screen.getByRole('region', { name: 'Preview' }).querySelectorAll('[data-element-id]')).toHaveLength(DESIGNER_DEFAULT_DOC.formats.la.els.length)
     vi.useFakeTimers(); click('Reset this format')
     // Date-based guard also prevents a delayed second click from resetting.
@@ -607,6 +612,23 @@ describe('SEL-207 critic regressions', () => {
 })
 
 describe('widget store client and states', () => {
+  it.each([128, 160])('loads and renders a %i pt la and explains publication refusal', async (height) => {
+    const doc = createWidgetDoc(DESIGNER_DEFAULT_DOC)
+    doc.formats.la.h = height
+    vi.stubGlobal('fetch', vi.fn(async () => response({ graph: doc, revision: 1, sha256: '0'.repeat(64), kind: 'widget' })))
+    const requestPublication = vi.fn(async () => height === 160 ? { ok: false, reason: 'la_too_tall' } : { ok: true })
+    render(<WidgetsView requestPublication={requestPublication} />)
+    edit('Document ID', 'widget'); click('Load')
+    const button = screen.getByRole('button', { name: 'Request publication' })
+    await waitFor(() => expect(button).toBeEnabled())
+    expect(screen.getByTestId('widget-surface').querySelectorAll('[data-element-id]')).toHaveLength(doc.formats.la.els.length)
+    const message = laFitProblem(doc)
+    if (message) expect(screen.getByText(message)).toBeInTheDocument()
+    else expect(screen.queryByText(/must fit in 128 pt/)).not.toBeInTheDocument()
+    click('Request publication')
+    await waitFor(() => expect(screen.getByLabelText('Publication request')).toHaveTextContent(message ?? 'Publication requested'))
+    expect(requestPublication).toHaveBeenCalledWith({ doc, source: { artifact_id: 'widget', revision: 1, digest: '0'.repeat(64) } })
+  })
   it.each(['widget', 'other-widget'])('reloads %s mid-drag and permits Add, inspector edits and undo', async (id) => {
     vi.stubGlobal('PointerEvent', class extends MouseEvent {
       constructor(type, options) { super(type, options); this.pointerId = options.pointerId ?? 1 }
@@ -651,7 +673,8 @@ describe('widget store client and states', () => {
     const doc = JSON.parse(fetchImpl.mock.calls[0][1].body).graph
     expect(doc).toEqual(DESIGNER_DEFAULT_DOC)
     expect(Object.fromEntries(Object.entries(doc.formats).map(([id, f]) => [id, f.els.length]))).toEqual({
-      la: 6, diExp: 6, diCompact: 2, diMin: 1, standby: 6, lockRect: 3, lockCirc: 1, lockInline: 2,
+      // SEL-403c2 removes the la divider/history footer.
+      la: 4, diExp: 6, diCompact: 2, diMin: 1, standby: 6, lockRect: 3, lockCirc: 1, lockInline: 2,
       homeS: 5, homeM: 7, homeL: 11, watchStack: 4, watchCorner: 1,
     })
     expect(Object.keys(doc.formats).filter((id) => !doc.formats[id].ship)).toEqual(['homeL', 'watchStack', 'watchCorner'])
