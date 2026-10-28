@@ -394,7 +394,12 @@ describe('scoped Vercel authorization HTTP contract', () => {
     callbackUri: 'https://studio.example/vercel-callback.html' }
   const input = { expectedRevision: 3, state, code: 'code_123', configurationId: 'icfg_123' }
   const completed = { configurationId: 'icfg_123', integrationId: 'oac_123', userId: 'user_123', teamId: null,
-    ownerId: projectId, revision: 4, cleanup: 'complete' }
+    ownerId: 'user_123', revision: 4, cleanup: 'complete' }
+  it.each([null, 'team_123'])('accepts the producer provider owner for team %s independently of Studio ownership', async (teamId) => {
+    const value = { ...completed, teamId, ownerId: teamId ?? completed.userId }
+    const { client, options } = setup(value)
+    expect(await client.completeVercelConnection(projectId, 'vercel-account', input, options)).toEqual(value)
+  })
   it('uses authenticated bounded POSTs with the existing project and connection routing', async () => {
     const { client, fetchImpl, options } = setup(issued)
     expect(await client.issueVercelConnection(projectId, 'vercel-account', { expectedRevision: 3 }, options)).toEqual(issued)
@@ -413,7 +418,8 @@ describe('scoped Vercel authorization HTTP contract', () => {
     expect(fetchImpl).not.toHaveBeenCalled()
   })
   it.each([{ ...completed, revision: 3 }, { ...completed, configurationId: 'other' }, { ...completed, token: 'secret' },
-    { ...completed, teamId: undefined }, { ...completed, ownerId: 'provider-user' }])('rejects unsafe completion acknowledgements', async (value) => {
+    { ...completed, teamId: undefined }, { ...completed, ownerId: 'provider-user' },
+    { ...completed, ownerId: projectId }, { ...completed, teamId: 'team_123' }])('rejects unsafe completion acknowledgements', async (value) => {
     const { client, options } = setup(value)
     await expect(client.completeVercelConnection(projectId, 'vercel-account', input, options)).rejects.toMatchObject({ dispatched: true })
   })

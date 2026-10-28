@@ -115,7 +115,7 @@ async function installBackend(context, baseURL) {
         expect(backend.completions).toBe(1)
         backend.connection = { ...backend.connection, revision: 2, credential_purposes: ['access_token'] }
         reply = json({ configurationId, integrationId: 'oac_fixture', userId: 'user_fixture', teamId: null,
-          ownerId: OWNER_ID, revision: 2, cleanup: 'complete' })
+          ownerId: 'user_fixture', revision: 2, cleanup: 'complete' })
       } else if (path === `${INTEGRATIONS}/connections/${backend.connection?.id}` && method === 'GET') {
         const summary = structuredClone(backend.connection)
         if (backend.completions) {

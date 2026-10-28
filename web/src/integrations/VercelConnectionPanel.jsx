@@ -77,7 +77,7 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
   }
   function verifyLinked(ctx, value) {
     const result = ctx.completed
-    if (!result || !matchesConnection(ctx, value) || value.revision !== result.revision || result.ownerId !== scope.platformUserId ||
+    if (!result || !matchesConnection(ctx, value) || value.revision !== result.revision || result.ownerId !== (result.teamId ?? result.userId) ||
         !value.credential_purposes.includes('access_token') || value.cleanup !== result.cleanup) throw new Error('readback')
     ctx.connection = value
     ctx.phase = 'linked'; ctx.unknown = false

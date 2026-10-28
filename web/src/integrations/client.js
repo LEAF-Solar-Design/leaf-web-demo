@@ -36,8 +36,9 @@ const vercelCode = z.string().regex(/^[A-Za-z0-9_-]{1,2048}(?![\s\S])/)
 const vercelIssue = z.strictObject({ state: vercelState, expiresAt: z.string().datetime().max(64),
   authorizationUrl: z.string().min(1).max(2048), callbackUri: z.string().min(1).max(2048) })
 const vercelCompletion = z.strictObject({ configurationId: vercelId, integrationId: vercelId, userId: vercelId,
-  teamId: vercelId.nullable(), ownerId: z.string().uuid(), revision,
+  teamId: vercelId.nullable(), ownerId: vercelId, revision,
   cleanup: z.enum(['complete', 'needs-attention']) })
+  .refine((value) => value.ownerId === (value.teamId ?? value.userId))
 export function validateVercelDestinations(value, studioOrigin) {
   const result = parse(vercelIssue, value)
   try {

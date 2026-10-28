@@ -39,7 +39,7 @@ function setup(config = {}) {
     pagination: { kind: 'none', records_pointer: config.recordsPointer ?? '' }, limits: { timeout_ms: 1000, max_response_bytes: 131072, max_records: 250, max_pages: 1 }, idempotency: { kind: 'read' } }
   let ref, draft, published, connection, issueSequence = 0
   const completion = { configurationId: 'icfg_123', integrationId: 'oac_123', userId: 'user_123', teamId: config.teamId ?? null,
-    ownerId: projectId, revision: 2, cleanup: config.cleanup || 'complete' }
+    ownerId: config.teamId ?? 'user_123', revision: 2, cleanup: config.cleanup || 'complete' }
   const fetchImpl = vi.fn(async (url, request) => {
     const body = request.body ? JSON.parse(request.body) : null
     if (url.endsWith('/connectors/import')) {
@@ -74,7 +74,8 @@ function setup(config = {}) {
         callbackUri: config.callbackUri || `${window.location.origin}/vercel-callback.html` })
     }
     if (url.endsWith('/vercel/complete')) {
-      connection = { ...connection, revision: 2, credential_purposes: config.noCustody ? [] : ['access_token'], cleanup: completion.cleanup }
+      connection = { ...connection, revision: 2, credential_purposes: config.noCustody ? [] : ['access_token'], cleanup: completion.cleanup,
+        owner_id: config.wrongStudioOwner ? '6a1f0c3e-2b7d-4c8a-9e61-0d4f7b2a9c12' : connection.owner_id }
       if (config.loseCompletion) throw new Error('transport lost')
       if (config.failCompletion) return response({ error: 'secret provider payload' }, 422)
       return response(completion)
@@ -254,7 +255,7 @@ describe('Vercel connection flow', () => {
     expect(mutations(fetchImpl)).toHaveLength(3)
     expect(popup.location.replace).not.toHaveBeenCalled()
   })
-  it.each([{ loseCompletion: true }, { noCustody: true }, { failCompletion: true }])('does not report linked from an uncertain or failed completion', async (config) => {
+  it.each([{ loseCompletion: true }, { noCustody: true }, { failCompletion: true }, { wrongStudioOwner: true }])('does not report linked from an uncertain or failed completion', async (config) => {
     const { props, fetchImpl } = setup(config)
     render(<VercelConnectionPanel {...props} />)
     await prepare(); await authorize(); await callback()
