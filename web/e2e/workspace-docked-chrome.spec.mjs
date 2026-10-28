@@ -18,6 +18,81 @@ async function backend(page) {
   })
 }
 
+async function expectCenterHit(control) {
+  await expect(control).toBeVisible()
+  await expect.poll(() => control.evaluate(el => {
+    const b = el.getBoundingClientRect()
+    const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)
+    return b.width > 0 && b.height > 0 && b.x >= 0 && b.y >= 0
+      && b.right <= innerWidth && b.bottom <= innerHeight && (hit === el || el.contains(hit))
+  })).toBe(true)
+}
+
+async function expectNaturalPanelFit(ribbon, info) {
+  const measure = () => ribbon.evaluate(el => {
+    const band = el.getBoundingClientRect()
+    const host = el.querySelector('.ribbon-panels')
+    return { tab:el.dataset.tab, left:band.left, right:band.right, top:band.top, bottom:band.bottom,
+      clientWidth:host.clientWidth, scrollWidth:host.scrollWidth,
+      panels:[...host.querySelectorAll('.ribbon-cluster')].map(panel => {
+        const b = panel.getBoundingClientRect()
+        return { name:panel.getAttribute('aria-label'), hidden:panel.hidden,
+          left:b.left, right:b.right, top:b.top, bottom:b.bottom, width:b.width }
+      }) }
+  })
+  await expect(ribbon.getByRole('button', { name:'More panels', exact:true })).toBeHidden()
+  await expect.poll(async () => {
+    const g = await measure()
+    return g.panels.length > 0 && g.scrollWidth <= g.clientWidth + 1
+      && g.panels.every(p => !p.hidden && p.width > 0 && p.left >= g.left
+        && p.right <= g.right + 1 && p.top >= g.top && p.bottom <= g.bottom + 1)
+  }).toBe(true)
+  const geometry = await measure()
+  await info.attach(`cad-${geometry.tab}-natural-fit`, { body:JSON.stringify(geometry, null, 2), contentType:'application/json' })
+}
+
+async function expectDraftingBands(page, info, phase) {
+  const measure = () => page.evaluate(() => {
+    const rect = selector => {
+      const el = document.querySelector(selector)
+      if (!el) throw new Error(`Missing geometry target: ${selector}`)
+      const b = el.getBoundingClientRect()
+      return { x:b.x, y:b.y, width:b.width, height:b.height, right:b.right, bottom:b.bottom }
+    }
+    return { width:innerWidth, height:innerHeight, scroll:document.documentElement.scrollWidth,
+      header:rect('header.top'), ribbon:rect('#drafting-ribbon'), toolbar:rect('.viewer-toolbar'),
+      controls:rect('.environment-strip'), command:rect('.bar-dock') }
+  })
+  // The ribbon and toolbar flow below the measured, potentially wrapped header.
+  // Navigation clearing the toolbar alone does not prove those bands are usable.
+  await info.attach(`${phase}-initial-geometry`, { body:JSON.stringify(await measure(), null, 2), contentType:'application/json' })
+  // Wait for the existing ResizeObservers to publish the active profile's band.
+  await expect.poll(async () => {
+    const g = await measure()
+    return g.ribbon.y >= g.header.bottom && g.toolbar.y >= g.ribbon.bottom
+      && g.controls.y >= Math.max(g.header.bottom, g.ribbon.bottom, g.toolbar.bottom)
+      && g.controls.bottom <= g.command.y
+  }).toBe(true)
+  const geometry = await measure()
+  await info.attach(`${phase}-geometry`, { body:JSON.stringify(geometry, null, 2), contentType:'application/json' })
+  expect(geometry.scroll).toBeLessThanOrEqual(geometry.width)
+  expect(geometry.controls.x).toBe(0)
+  expect(geometry.controls.width).toBe(geometry.width)
+  expect(geometry.ribbon.y).toBeGreaterThanOrEqual(geometry.header.bottom)
+  expect(geometry.toolbar.y).toBeGreaterThanOrEqual(geometry.ribbon.bottom)
+  for (const b of [geometry.header, geometry.ribbon, geometry.toolbar, geometry.controls, geometry.command]) {
+    expect(b.width).toBeGreaterThan(0)
+    expect(b.height).toBeGreaterThan(0)
+    expect(b.x).toBeGreaterThanOrEqual(0)
+    expect(b.y).toBeGreaterThanOrEqual(0)
+    expect(b.right).toBeLessThanOrEqual(geometry.width + 1)
+    expect(b.bottom).toBeLessThanOrEqual(geometry.height + 1)
+  }
+  const controls = page.getByRole('navigation', { name:'Workspace controls', exact:true }).locator('button, select')
+  for (const control of await controls.all()) await expectCenterHit(control)
+  await expectCenterHit(page.locator('.bar-command-line .bar-field'))
+}
+
 for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wide-desktop', { width: 1600, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`docked workspace chrome remains usable at ${size}`, async ({ page }, info) => {
     test.setTimeout(120_000)
@@ -69,9 +144,86 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
     await expect(page.locator('.app[data-studio-shell]')).toHaveAttribute('data-surface', 'solar')
     await expect(page.locator('nav.tc-product-nav')).toBeHidden()
     await page.screenshot({ path:info.outputPath(`docked-${size}-solar.png`) })
+    if (await rail.isVisible()) {
+      const close = rail.getByRole('button', { name:'Close Studio', exact:true })
+      await expectCenterHit(close)
+      await close.click()
+    }
+    await expectDraftingBands(page, info, 'solar')
     await controls.getByRole('combobox', { name:'Workspace profile', exact:true }).selectOption('cad')
     await controls.getByRole('button', { name:'Studio', exact:true }).click()
-    await expect(page.locator('#drafting-ribbon')).toBeVisible()
+    const environment = page.locator('.workspace-environment')
+    await expect(environment).toHaveAttribute('data-profile', 'cad')
+    await expect(environment).toHaveAttribute('data-entered', 'true')
+    if (await rail.isVisible()) {
+      const close = rail.getByRole('button', { name:'Close Studio', exact:true })
+      await expectCenterHit(close)
+      await close.click()
+    }
+    await expect(rail).toBeHidden()
+    const ribbon = page.locator('#drafting-ribbon')
+    await expect(ribbon).toBeVisible()
+    const manage = page.getByRole('tablist', { name:'Ribbon', exact:true }).getByRole('tab', { name:'Manage', exact:true })
+    await manage.click()
+    await expectCenterHit(manage)
+    await expect(manage).toHaveAttribute('aria-selected', 'true')
+    await expect(environment).toHaveAttribute('data-entered', 'true')
+    await expectDraftingBands(page, info, 'cad-manage')
+    await page.screenshot({ path:info.outputPath(`docked-${size}-cad-manage.png`) })
+    const more = ribbon.getByRole('button', { name:'More panels', exact:true })
+    const hiddenPanels = ribbon.locator('.ribbon-cluster[hidden]')
+    // Manage can fit naturally on desktop. Probe the other real, enabled
+    // drafting tabs for overflow without resizing or changing their contents.
+    if (size === 'phone') await expect(more).toBeVisible()
+    if (!(await more.isVisible())) {
+      await expectNaturalPanelFit(ribbon, info)
+      const tabs = page.getByRole('tablist', { name:'Ribbon', exact:true }).getByRole('tab')
+      for (const tab of await tabs.all()) {
+        if (await tab.isDisabled() || await tab.getAttribute('aria-selected') === 'true') continue
+        await tab.click()
+        await expectCenterHit(tab)
+        await expect(tab).toHaveAttribute('aria-selected', 'true')
+        await expect(environment).toHaveAttribute('data-entered', 'true')
+        await expectDraftingBands(page, info, `cad-${await ribbon.getAttribute('data-tab')}`)
+        if (await more.isVisible()) break
+        await expectNaturalPanelFit(ribbon, info)
+      }
+    }
+    if (await more.isVisible()) {
+      await expect(more).toHaveAttribute('aria-expanded', 'false')
+      await expect.poll(() => hiddenPanels.count()).toBeGreaterThan(0)
+      await expectCenterHit(more)
+      await more.click()
+      await expect(more).toHaveAttribute('aria-expanded', 'true')
+      await expect(ribbon).toHaveAttribute('data-overflow-open', 'true')
+      await expect(hiddenPanels).toHaveCount(0)
+      const panels = page.locator('#drafting-ribbon-panels')
+      await expect(panels.locator('.ribbon-cluster').first()).toBeVisible()
+      await expectDraftingBands(page, info, 'cad-expanded')
+      const expandedGeometry = await panels.evaluate(el => {
+        const b = el.getBoundingClientRect()
+        const controls = document.querySelector('.environment-strip').getBoundingClientRect()
+        const command = document.querySelector('.bar-dock').getBoundingClientRect()
+        return { x:b.x, y:b.y, width:b.width, height:b.height, right:b.right, bottom:b.bottom,
+          controlsBottom:controls.bottom, commandTop:command.top }
+      })
+      await info.attach('cad-expanded-panels-geometry', { body:JSON.stringify(expandedGeometry, null, 2), contentType:'application/json' })
+      expect(expandedGeometry.height).toBeGreaterThan(0)
+      expect(expandedGeometry.y).toBeGreaterThanOrEqual(expandedGeometry.controlsBottom)
+      expect(expandedGeometry.bottom).toBeLessThanOrEqual(expandedGeometry.commandTop + 1)
+      await page.screenshot({ path:info.outputPath(`docked-${size}-cad-expanded.png`) })
+      await expectCenterHit(more)
+      await more.click()
+      await expect(more).toHaveAttribute('aria-expanded', 'false')
+      await expect(ribbon).not.toHaveAttribute('data-overflow-open', 'true')
+      await expect.poll(() => hiddenPanels.count()).toBeGreaterThan(0)
+      await expectCenterHit(more)
+    }
+    await manage.click()
+    await expect(manage).toHaveAttribute('aria-selected', 'true')
+    await expectCenterHit(manage)
+    await expect(environment).toHaveAttribute('data-entered', 'true')
+    await expectDraftingBands(page, info, 'cad-collapsed')
     await page.screenshot({ path:info.outputPath(`docked-${size}-cad.png`) })
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width)
   })

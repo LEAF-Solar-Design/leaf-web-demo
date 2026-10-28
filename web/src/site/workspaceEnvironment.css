@@ -84,7 +84,53 @@
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity aside.nav { display: block; padding: 12px; overflow: visible; min-height: 0; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity,
 .studio-shell:has(.workspace-environment) .browser-project-panel { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); }
+/* Drafting profiles publish the toolbar edge on the shared shell. Keep the
+   navigation below that assembly, including when the phone header wraps.
+   One pixel clears the desktop producer's rounded-down measurement. */
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) {
+  --environment-strip-top: calc(max(var(--drawer-top, 44px), var(--cockpit-band-bottom, 0px), var(--cockpit-stack-top, 0px)) + 1px);
+  --environment-strip-height: 50px; /* 44px controls + 4px padding + 2px border */
+  --environment-strip-bottom: calc(var(--environment-strip-top) + var(--environment-strip-height));
+}
+.workspace-environment:is([data-profile="cad"], [data-profile="solar"]) .environment-strip {
+  top: var(--environment-strip-top); height: var(--environment-strip-height);
+}
+/* Drawing instruments share the canvas edge. The dock occupies that edge too;
+   moving the shared boundary keeps zoom and search in their existing rows. */
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] {
+  --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px), var(--environment-strip-bottom));
+}
+@media (min-width: 1024px) {
+  /* Find used the static edge; keep its existing row below the live view strip. */
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] .drawing-navigation {
+    top: calc(var(--ck-canvas-top-live) + 26px);
+  }
+}
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity,
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .browser-project-panel {
+  top: var(--environment-strip-bottom);
+}
+/* The expanded tools occupy the drawing area below navigation, leaving the
+   disclosure and workspace controls available for independent clicks. */
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface] .drafting-ribbon[data-overflow-open="true"] .ribbon-panels {
+  top: max(var(--ck-canvas-top-live), var(--environment-strip-bottom));
+  max-height: max(0px, calc(100dvh - max(var(--ck-canvas-top-live), var(--environment-strip-bottom)) - var(--environment-controls-bottom, 190px)));
+}
+@media (max-width: 599px), (max-width: 1023px) and (min-height: 500px) {
+  /* App measures the wrapping header into --drawer-top. Move the flow host,
+     not individual bands: ribbon then toolbar retain their natural heights,
+     and useBandHeight publishes the resulting toolbar edge for navigation.
+     Clear the header measurement's nearest-pixel rounding by one pixel. */
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .center-col {
+    top: calc(var(--drawer-top) + 1px);
+  }
+}
 @media (max-width: 1023px) {
+  /* Match the phone drawer layer: Find in drawing uses the header layer,
+     so the open activity panel must paint above it, including its close. */
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity {
+    z-index: calc(var(--leaf-layer-header) + 4);
+  }
   .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar-dock { height: auto; }
   .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] .bar.bar-command-line {
     flex: 0 0 auto; height: auto; min-height: 116px; flex-direction: column; align-items: stretch;
