@@ -2,6 +2,7 @@ import { expect, test } from '@playwright/test'
 import { mkdir, writeFile } from 'node:fs/promises'
 import { createActionRecorder, classifyStagingOutcome, stagingActionRecorder } from '../walk/stagingEvidence.mjs'
 import { stagingDelivery } from '../walk/stagingDelivery.mjs'
+import { readHarnessCommit, walkProvenance } from '../walk/stagingProvenance.mjs'
 import {
   allowedStagingOrigins, assertAllowedStagingHost, assertPageOnAllowedOrigin,
   assertResponseOnAllowedOrigin, assertStagingTokenIdentity, collectBearerLeaks,
@@ -139,7 +140,13 @@ async function persistStagingEvidence(evidence, title) {
 
 export async function stagingEvidenceStep(runtime, testInfo, action, persist = persistStagingEvidence, deliveryOptions = {}) {
   if (runtime.stack?.baseURL) {
-    const delivery = runtime.evidence.projectSolar.delivery = await stagingDelivery(runtime.stack.baseURL, deliveryOptions)
+    const collectProvenance = deliveryOptions.collectProvenance === true
+      || (deliveryOptions.env ?? process.env).LEAF_E2E_WALK_PROVENANCE === '1'
+    const delivery = runtime.evidence.projectSolar.delivery = await stagingDelivery(runtime.stack.baseURL,
+      collectProvenance ? { ...deliveryOptions, collectProvenance: true } : deliveryOptions)
+    if (collectProvenance) {
+      runtime.evidence.projectSolar.provenance = walkProvenance(delivery, await readHarnessCommit(deliveryOptions))
+    }
     if (delivery.decision === 'stale') {
       runtime.evidence.projectSolar.skipReason = 'infra_stale_delivery'
       runtime.evidence.projectSolar.classification = classifyStagingOutcome({ skipped: 'infra_stale_delivery', delivery })
