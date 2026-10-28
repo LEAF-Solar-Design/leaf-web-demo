@@ -82,6 +82,10 @@ def _record(row: Dict[str, Any]) -> Dict[str, Any]:
     completion = completion_record_context(_json(row.get("execution_json")) or {}, rec)
     if completion is not None:
         rec["completion_provenance"] = completion
+    from native_preview_job import record_context as native_record_context
+    native = native_record_context(_json(row.get("execution_json")) or {}, rec)
+    if native is not None:
+        rec["native_preview"] = native
     return rec
 
 

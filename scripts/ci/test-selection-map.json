@@ -233,6 +233,7 @@
     "server-campaign-acquisition",
     "server-campaign-capability-api",
     "server-campaign-capability-job",
+    "server-native-preview-job",
     "server-campaign-capability-job-access",
     "server-campaign-capability-resolver",
     "server-campaign-conversation",
