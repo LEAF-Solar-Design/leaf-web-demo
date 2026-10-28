@@ -605,9 +605,11 @@ class LiveAdapters:
     def connect(self):
         import psycopg
         from psycopg.rows import dict_row
-        return psycopg.connect(self.env["DATABASE_URL"], autocommit=True,
-                               connect_timeout=5, row_factory=dict_row,
-                               options="-c statement_timeout=5000 -c lock_timeout=3000")
+        conn = psycopg.connect(self.env["DATABASE_URL"], autocommit=True,
+                               connect_timeout=5, row_factory=dict_row)
+        conn.execute("SELECT set_config('statement_timeout', '5000', false), "
+                     "set_config('lock_timeout', '3000', false)")
+        return conn
 
     def query(self, sql, params=(), connection=None):
         if connection is not None:

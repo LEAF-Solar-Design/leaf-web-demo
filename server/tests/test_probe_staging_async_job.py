@@ -29,6 +29,7 @@ JWT = ".".join([
     "SENTINEL_SIGNATURE",
 ])
 LIVE_HTTP = p.LiveAdapters.http
+LIVE_CONNECT = p.LiveAdapters.connect
 ENV = {"DATABASE_URL": DATABASE, "LEAF_RUNTIME_ENV": "staging",
        "LEAF_JOBS_STORE": "postgres", "LEAF_BROKER_STORE": "postgres",
        "LEAF_DRAWING_STORE": "postgres", "LEAF_BLOB_STORE": "filesystem",
@@ -391,6 +392,31 @@ def time_module():
 
 def run(fake):
     return p.Probe(fake).run(args(), fake.env)
+
+
+def test_live_connect_sets_session_timeouts_without_startup_options(monkeypatch):
+    calls = []
+    connection = SimpleNamespace(execute=lambda sql: calls.append(("execute", sql)))
+    dict_row = object()
+
+    def connect(dsn, **kwargs):
+        calls.append(("connect", dsn, kwargs))
+        return connection
+
+    monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(connect=connect))
+    monkeypatch.setitem(sys.modules, "psycopg.rows", SimpleNamespace(dict_row=dict_row))
+
+    result = LIVE_CONNECT(p.LiveAdapters(ENV))
+    calls.append(("returned", result))
+    assert result is connection
+    assert "options" not in calls[0][2]
+    assert calls == [
+        ("connect", DATABASE, {"autocommit": True, "connect_timeout": 5,
+                               "row_factory": dict_row}),
+        ("execute", "SELECT set_config('statement_timeout', '5000', false), "
+                    "set_config('lock_timeout', '3000', false)"),
+        ("returned", connection),
+    ]
 
 
 def test_fixture_geometry_has_independent_expected_area():
@@ -845,13 +871,13 @@ def test_evidence_is_sanitized_offline_and_gate_registered(monkeypatch, capsys):
         p.validate_receipt(tainted)
     registration = (ROOT / "scripts/run-all-gates.py").read_text()
     assert 'Suite("server-probe-staging-async-job"' in registration
-    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 20)' in registration
+    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 21)' in registration
     selection = json.loads((ROOT / "scripts/ci/test-selection-map.json").read_text())
     assert "server-probe-staging-async-job" in selection["mandatory_suite_ids"]
     floors = (ROOT / "scripts/test_gate_runner.py").read_text()
-    assert '"server-probe-staging-async-job": 20' in floors
+    assert '"server-probe-staging-async-job": 21' in floors
     no_skip = floors.split("_OPERATOR_NO_SKIP_FILES = frozenset({", 1)[1].split("})", 1)[0]
     assert '"server-probe-staging-async-job"' in no_skip
     source = Path(__file__).read_text()
-    assert source.count("\ndef test_") == 20
+    assert source.count("\ndef test_") == 21
     assert not any(name in sys.modules for name in ("probe_staging_async_job_live",))
