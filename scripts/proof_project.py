@@ -1,12 +1,13 @@
-"""Managed project proof, records A through C: preparation and execution evidence.
+"""Managed project proof, records A through E: lifecycle and sanitized receipts.
 
-There is intentionally no CLI or success-receipt path. Later records implement
-the lifecycle against these seams. Importing this module performs no host work.
+Importing this module performs no host work. Production project execution
+remains fail-closed until the PP-3B browser implementation is available.
 """
 from __future__ import annotations
 
 from dataclasses import dataclass, field, replace
 from contextlib import redirect_stdout
+from contextvars import ContextVar
 from datetime import datetime, timezone
 from enum import Enum
 from functools import wraps
@@ -97,6 +98,9 @@ class FailureCode(str, Enum):
     CLEANUP_POOL = "CLEANUP_POOL"
     CLEANUP_AUTHORITY = "CLEANUP_AUTHORITY"
     CLEANUP_PRIVATE = "CLEANUP_PRIVATE"
+    RECEIPT = "RECEIPT"
+    INTERNAL = "INTERNAL"
+    USAGE = "USAGE"
 
 
 @dataclass(frozen=True)
@@ -705,6 +709,12 @@ class Host(Protocol):
     def scrub(self, reservation: Reservation, *, keep_safe: bool) -> bool: ...
     def private_absent(self, reservation: Reservation) -> bool: ...
     def begin_operation(self, callback: Callable[[], Any]) -> Any: ...
+    # E's command/lifecycle adapters; all remain replaceable host effects.
+    def cancellation(self, scope: RunScope) -> Any: ...
+    def guardian(self, plan: Plan) -> Any: ...
+    def receipt_binding(self, run_id: str, path: Path, writer: ReceiptWriter) -> ReceiptBinding: ...
+    def recovery(self, run_id: str, root: Path) -> tuple[Reservation, AuthorityOwnership]: ...
+    def recovery_processes_absent(self, run_id: str, root: Path) -> bool: ...
     # B's host operations keep imports, file reads and teardown behind a seam.
     def migration_entry_present(self) -> bool: ...
     def migration_corpus(self) -> tuple[tuple[FileProof, ...], tuple[str, ...]]: ...
@@ -721,7 +731,7 @@ class Host(Protocol):
 
 
 class ReceiptWriter(Protocol):
-    def ownership(self, path: Path, value: OwnershipJournal) -> None: ...
+    def ownership(self, path: Path, value: OwnershipJournal | PublicationIntent) -> None: ...
     def publish(self, path: Path, value: Any) -> None: ...
     def read(self, path: Path) -> Any: ...
 
@@ -1986,6 +1996,7 @@ def _later(record):
 
 
 def _browser_unavailable(request, *, scope):
+    """PP-3B has not landed; production browser execution remains unavailable."""
     _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
 
 
@@ -2343,11 +2354,17 @@ class _Host:
 
 
 class _ReceiptWriter:
-    publish = staticmethod(_later("E"))
-    read = staticmethod(_later("E"))
+    def __init__(self):
+        self._intents = {}
 
-    @staticmethod
-    def ownership(path, value):
+    def publish(self, path, value):
+        return _publish_receipt(self, path, value)
+
+    read = staticmethod(lambda path: _read_receipt(path))
+
+    def ownership(self, path, value):
+        if isinstance(value, PublicationIntent):
+            return _record_publication(self, path, value)
         public = {"run_id": value.run_id, "run_root": str(value.run_root),
                   "artifact_root": str(value.artifact_root), "created_at": value.created_at.isoformat()}
         if value.authority is not None:
@@ -2803,8 +2820,8 @@ def _run_database_child(request, *, effects, scope):
 def production_effects() -> Effects:
     """Adapters are lazy: construction imports no worker and acquires nothing."""
     effects = Effects(_authority_factory, _issuer_factory, None, None,
-                   _launch_runtime, None, _browser_unavailable, _canonical_reader,
-                   _Clock(), _Host(), _ReceiptWriter())
+                   _launch_supervised, None, _browser_unavailable, _canonical_reader,
+                   _Clock(), _SupervisorHost(), _ReceiptWriter())
     return replace(effects,
         readiness_probe=lambda request: check_readiness(request, effects=effects),
         migration_runner=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope),
@@ -2886,3 +2903,1370 @@ def _path_absent(path):
     except OSError:
         return False
     return False
+
+
+# Record E. A-D's stage implementations remain the producers of evidence.
+MIGRATION_SCHEMA = "leaf.project-migration.v1"
+RECEIPT_NAME = "project-proof-receipt.json"
+MIGRATION_RECEIPT_NAME = "project-migration-receipt.json"
+RECEIPT_LIMIT = 256 * 1024
+REQUIRED_ROWS = ("P01", "P04", "P08", "P09", "P10", "P11")
+_CLEANUP_FIELDS = ("processes_stopped", "identity_delivery_closed", "pools_closed",
+    "authority_removed", "private_material_removed", "guardian_disarmed")
+_RECEIPT_FIELDS = frozenset(("schema", "run_id", "profile", "source", "runtime", "identity",
+    "database", "stack", "worker", "playwright", "rows", "canonical", "timings", "cleanup", "failure", "ok"))
+_SOURCE_FIELDS = ("commit", "dirty_tree_sha256", "tested_source_manifest_sha256")
+_IDENTITY_FIELDS = ("public_key_thumbprint", "issuer", "audience", "organization_id", "binding_id", "subject", "tier")
+_CANONICAL_FIELDS = ("project_id", "drawing_id", "input_version_id", "output_version_id",
+    "job_id", "checkout_fence", "settings_readback_sha256")
+_TIMING_FIELDS = ("allocation", "relay_ready", "migration", "stack_ready", "browser", "teardown")
+
+
+@dataclass(frozen=True, repr=False)
+class ReceiptBinding:
+    run_id: str
+    source: SourceProof
+    public_key_thumbprint: str
+    profile: str = PROFILE
+    schema: str = SCHEMA
+
+
+@dataclass(frozen=True)
+class Verification:
+    ok: bool
+    failure: Failure | None
+
+
+@dataclass(frozen=True, repr=False)
+class PublicationIntent:
+    journal: OwnershipJournal
+    reservation: Reservation
+    binding: ReceiptBinding
+    filename: str
+
+
+@dataclass(frozen=True, repr=False)
+class _Publication:
+    document: Mapping[str, Any]
+    commit: Callable[[Callable[[], Any]], Any] = field(repr=False)
+    check_cancelled: Callable[[], None] = field(default=lambda: None, repr=False)
+    private_values: Any = field(default=None, repr=False)
+
+
+def _receipt_refused():
+    _refuse(FailureCode.RECEIPT, Stage.VERIFICATION)
+
+
+_RUN_PRIVATE = ContextVar("project_run_private", default=None)
+
+
+class _PrivateValues:
+    """Run-local denylist, retained through cleanup; never render private values."""
+    def __init__(self):
+        self._values = set()
+        self._lock = threading.RLock()
+        self.rejected = False
+
+    def __repr__(self):
+        return "<private run values>"
+
+    def add(self, value):
+        from urllib.parse import quote, quote_plus, unquote
+        if isinstance(value, _SecretToken):
+            value = value.reveal()
+        if isinstance(value, bytes):
+            value = value.decode("utf-8", errors="ignore")
+        if type(value) is str and value:
+            with self._lock:
+                for raw in (value, unquote(value)):
+                    if raw:
+                        self._values.update((raw, quote(raw, safe=""), quote_plus(raw, safe="")))
+
+    def dsn(self, value):
+        from urllib.parse import urlsplit, unquote
+        self.add(value)
+        try:
+            password = urlsplit(value).password
+        except ValueError:
+            _receipt_refused()
+        if password:
+            self.add(unquote(password))
+
+    def environment(self, environment):
+        for name, value in environment.items():
+            name = name.upper()
+            if name.endswith("DATABASE_URL") or name in {"DSN", "DATABASE_DSN"}:
+                self.dsn(value)
+            elif (re.search(r"PASSWORD|SECRET|TOKEN|BEARER|CAPABILITY|CHECKOUT", name)
+                    or name in {"KEY", "PRIVATE_KEY", "SIGNING_KEY"}):
+                self.add(value)
+
+    def issuer(self, issuer):
+        for name in ("private_key", "_private_key"):
+            key = getattr(issuer, name, None)
+            if key is None:
+                continue
+            if isinstance(key, (str, bytes)):
+                self.add(key)
+            else:
+                from cryptography.hazmat.primitives import serialization
+                for form in (serialization.PrivateFormat.PKCS8, serialization.PrivateFormat.TraditionalOpenSSL):
+                    pem = key.private_bytes(serialization.Encoding.PEM, form, serialization.NoEncryption())
+                    self.add(pem)
+                    self.add(b"".join(pem.splitlines()[1:-1]))
+
+    def capabilities(self, owner):
+        for name in ("checkout_capability", "checkout_token", "capability"):
+            self.add(getattr(owner, name, None))
+
+    def check(self, value):
+        from urllib.parse import unquote, unquote_plus
+        if self.rejected:
+            _receipt_refused()
+        if type(value) is str:
+            with self._lock:
+                secrets = tuple(self._values)
+            if any(secret in candidate for candidate in (value, unquote(value), unquote_plus(value))
+                   for secret in secrets):
+                self.rejected = True
+                _receipt_refused()
+        elif isinstance(value, Mapping):
+            for key, item in value.items():
+                self.check(key)
+                self.check(item)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                self.check(item)
+
+
+def _private_effects(effects, private):
+    class Authority:
+        def __init__(self, authority):
+            self.authority = authority
+        def __getattr__(self, name):
+            return getattr(self.authority, name)
+        def dsn(self):
+            value = self.authority.dsn()
+            private.dsn(value)
+            return value
+    class Issuer:
+        def __init__(self, issuer):
+            self.issuer_object = issuer
+            private.issuer(issuer)
+        def __getattr__(self, name):
+            return getattr(self.issuer_object, name)
+        def mint(self, *args, **kwargs):
+            value = self.issuer_object.mint(*args, **kwargs)
+            private.add(value)
+            return value
+    def browser(request, *, scope):
+        private.environment(request.environment)
+        handle = effects.browser_runner(request, scope=scope)
+        private.capabilities(handle)
+        class Browser:
+            def __getattr__(self, name):
+                return getattr(handle, name)
+            def poll(self):
+                result = handle.poll()
+                private.capabilities(handle)
+                return result
+        return Browser()
+    return replace(effects,
+        authority_factory=lambda run_id: Authority(effects.authority_factory(run_id)),
+        issuer_factory=lambda run_id: Issuer(effects.issuer_factory(run_id)),
+        browser_runner=browser if effects.browser_runner not in (None, _browser_unavailable) else effects.browser_runner)
+
+
+def _exact(value, fields):
+    if type(value) is not dict or set(value) != set(fields):
+        _receipt_refused()
+    return value
+
+
+def _public_id(value):
+    return type(value) is str and re.fullmatch(r"[A-Za-z0-9:|_-]{1,128}", value) is not None
+
+
+def _source_public(source):
+    return {name: getattr(source, name) for name in _SOURCE_FIELDS}
+
+
+def _file_rows(files):
+    return [{"path": f.path, "sha256": f.sha256, "size": f.size} for f in files]
+
+
+def _owned_public(owned):
+    return {"run_id": owned.run_id, "names": list(owned.names), "labels": dict(owned.labels),
+        "containers": list(owned.containers), "networks": list(owned.networks)}
+
+
+def _heartbeat_public(heartbeat):
+    return {"worker_id": heartbeat.worker_id, "tool_name": heartbeat.tool_name,
+        "runtime": heartbeat.runtime, "source_revision": heartbeat.source_revision,
+        "source_sha256": heartbeat.source_sha256, "observed_at": heartbeat.observed_at.isoformat()}
+
+
+def _failure_public(failure):
+    return None if failure is None else {"stage": failure.stage.value, "fixed_code": failure.fixed_code.value}
+
+
+def _receipt_document(plan, runtime, prepared, execution, cleanup_proof, failure, *, migration=False):
+    """Only named public evidence enters the wire format; never copy __dict__."""
+    database = prepared if type(prepared) is DatabaseProof else prepared.database if prepared is not None else None
+    identity = prepared.identity if type(prepared) is PreparedAuthority else None
+    document = dict(schema=MIGRATION_SCHEMA if migration else SCHEMA, run_id=plan.config.run_id,
+        profile=PROFILE, source=_source_public(plan.source), runtime=None, identity=None,
+        database=None, stack=None, worker=None, playwright=None, rows=dict.fromkeys(REQUIRED_ROWS, False),
+        canonical=None, timings=dict.fromkeys(_TIMING_FIELDS, 0.0),
+        cleanup={name: getattr(cleanup_proof, name) for name in _CLEANUP_FIELDS},
+        failure=_failure_public(failure), ok=False)
+    document["cleanup"]["failures"] = [_failure_public(item) for item in cleanup_proof.failures]
+    document["timings"]["teardown"] = cleanup_proof.teardown_seconds
+    document["rows"]["P10"] = cleanup_proof.ok and "P10" in cleanup_proof.observed_rows
+    if runtime is not None:
+        document["runtime"] = {"requirements": _file_rows(runtime.requirements), "python": runtime.python,
+            "toolchain": dict(runtime.toolchain), "vendor_source": _file_rows(runtime.vendor_source),
+            "engine_outputs": _file_rows(runtime.engine_outputs)}
+    if identity is not None:
+        document["identity"] = {name: getattr(identity, name) for name in _IDENTITY_FIELDS}
+    if database is not None:
+        document["database"] = {"authority_run_id": database.authority_run_id,
+            "ownership": _owned_public(database.ownership), "transport": "docker-exec-relay",
+            "readiness": {"ok": database.readiness.ok, "server_version": database.readiness.server_version,
+                "round_trip_bytes": database.readiness.round_trip_bytes},
+            "migration_manifest": _file_rows(database.migration_manifest),
+            "migration_manifest_sha256": database.migration_manifest_sha256,
+            "schema_status": _proof_public(database.schema_status)}
+        document["timings"].update(allocation=database.allocation_seconds, relay_ready=database.relay_seconds,
+            migration=database.migration_seconds)
+        document["rows"]["P04"] = database.schema_status.ok is True
+    if execution is not None:
+        ready, browser, canonical = execution.stack, execution.playwright, execution.canonical
+        document["stack"] = {"owned_process_identities": [
+            {"role": item.role, "pid": item.pid, "start_id": item.start_id, "parent_pid": item.parent_pid}
+            for item in ready.owned_process_identities], "source_revision": ready.source_revision,
+            "app_readiness": {"source_revision": ready.app_readiness.source_revision,
+                "dependencies": {name: {"state": state, "required": required}
+                                 for name, state, required in ready.app_readiness.dependencies}}}
+        document["worker"] = {"identity": execution.worker_identity, "tool": plan.descriptor.tool,
+            "source_revision": plan.descriptor.source_revision, "source_sha256": plan.descriptor.source_sha256,
+            "source_manifest": list(plan.descriptor.source_manifest),
+            "initial_heartbeat": _heartbeat_public(execution.initial_heartbeat),
+            "final_heartbeat": _heartbeat_public(execution.final_heartbeat)}
+        document["playwright"] = {"selected_test_ids": list(browser.selected_test_ids),
+            "started_test_ids": list(browser.started_test_ids), "completed_test_ids": list(browser.completed_test_ids),
+            "outcomes": [{"test_id": item.test_id, "status": item.status, "retry": item.retry} for item in browser.outcomes],
+            "annotation_types": list(browser.annotation_types)}
+        document["canonical"] = {name: getattr(canonical.evidence, name) for name in _CANONICAL_FIELDS[:-1]}
+        document["canonical"]["settings_readback_sha256"] = canonical.stored_settings_sha256
+        document["timings"].update(stack_ready=execution.stack_seconds, browser=execution.browser_seconds)
+        for row in execution.observed_rows:
+            if row in REQUIRED_ROWS:
+                document["rows"][row] = True
+    complete = database is not None if migration else execution is not None and runtime is not None and identity is not None
+    document["ok"] = failure is None and cleanup_proof.ok and complete
+    return document
+
+
+def _validate_files(rows, *, names=None):
+    if type(rows) is not list or not rows:
+        _receipt_refused()
+    paths = []
+    for item in rows:
+        _exact(item, ("path", "sha256", "size"))
+        path = item["path"]
+        if (type(path) is not str or re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", path) is None
+                or path.startswith("/") or ".." in path.split("/") or not _hash_ok(item["sha256"])
+                or type(item["size"]) is not int or item["size"] <= 0):
+            _receipt_refused()
+        paths.append(path)
+    if len(set(paths)) != len(paths) or (names is not None and set(paths) != set(names)):
+        _receipt_refused()
+
+
+def _validate_receipt_structure(document, *, project=True):
+    _exact(document, _RECEIPT_FIELDS)
+    if (document["schema"] != (SCHEMA if project else MIGRATION_SCHEMA) or document["profile"] != PROFILE
+            or type(document["run_id"]) is not str
+            or re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", document["run_id"]) is None
+            or type(document["ok"]) is not bool):
+        _receipt_refused()
+    source = _exact(document["source"], _SOURCE_FIELDS)
+    if (type(source["commit"]) is not str or re.fullmatch(r"[a-f0-9]{40}", source["commit"]) is None
+            or not all(_hash_ok(source[key]) for key in _SOURCE_FIELDS[1:])):
+        _receipt_refused()
+    rows = _exact(document["rows"], REQUIRED_ROWS)
+    if any(type(value) is not bool for value in rows.values()):
+        _receipt_refused()
+    cleanup_row = _exact(document["cleanup"], (*_CLEANUP_FIELDS, "failures"))
+    if any(type(cleanup_row[key]) is not bool for key in _CLEANUP_FIELDS) or type(cleanup_row["failures"]) is not list:
+        _receipt_refused()
+    for failure in [document["failure"], *cleanup_row["failures"]]:
+        if failure is not None:
+            _exact(failure, ("stage", "fixed_code"))
+            if failure["stage"] not in {s.value for s in Stage} or failure["fixed_code"] not in {c.value for c in FailureCode}:
+                _receipt_refused()
+    timings = _exact(document["timings"], _TIMING_FIELDS)
+    if any(type(value) not in (float, int) or not math.isfinite(value) or value < 0 for value in timings.values()):
+        _receipt_refused()
+    runtime = document["runtime"]
+    if runtime is not None:
+        _exact(runtime, ("requirements", "python", "toolchain", "vendor_source", "engine_outputs"))
+        _validate_files(runtime["requirements"], names=REQUIREMENTS)
+        _validate_files(runtime["vendor_source"])
+        _validate_files(runtime["engine_outputs"], names=ENGINE_OUTPUTS)
+        _exact(runtime["toolchain"], TOOLS)
+        if any(type(value) is not str or re.fullmatch(r"[A-Za-z0-9 .+()_:/-]{1,256}", value) is None
+               for value in [runtime["python"], *runtime["toolchain"].values()]):
+            _receipt_refused()
+    identity = document["identity"]
+    if identity is not None:
+        _exact(identity, _IDENTITY_FIELDS)
+        if (not all(_public_id(identity[key]) for key in ("public_key_thumbprint", "organization_id", "binding_id"))
+                or identity["issuer"] != "https://proof-project.leaf.invalid/" + document["run_id"] + "/"
+                or identity["audience"] != "leaf-proof-project:" + document["run_id"]
+                or identity["subject"] != "leaf-proof-project|" + document["run_id"] or identity["tier"] != TIER):
+            _receipt_refused()
+    database = document["database"]
+    if database is not None:
+        _exact(database, ("authority_run_id", "ownership", "transport", "readiness", "migration_manifest",
+            "migration_manifest_sha256", "schema_status"))
+        if database["authority_run_id"] != document["run_id"] or database["transport"] != "docker-exec-relay":
+            _receipt_refused()
+        owned = _exact(database["ownership"], ("run_id", "names", "labels", "containers", "networks"))
+        if any(type(owned[key]) is not list for key in ("names", "containers", "networks")) or type(owned["labels"]) is not dict:
+            _receipt_refused()
+        _exact(owned["labels"], ("leaf.proof-project.run", "leaf.proof-project.owner"))
+        labels = tuple((key, owned["labels"][key]) for key in ("leaf.proof-project.run", "leaf.proof-project.owner"))
+        _validate_ownership(AuthorityOwnership(owned["run_id"], tuple(owned["names"]), labels,
+            tuple(owned["containers"]), tuple(owned["networks"])), document["run_id"], allocated=True)
+        ready = _exact(database["readiness"], ("ok", "server_version", "round_trip_bytes"))
+        if (ready["ok"] is not True or type(ready["round_trip_bytes"]) is not int or ready["round_trip_bytes"] != 256
+                or type(ready["server_version"]) is not str
+                or re.fullmatch(r"[0-9][A-Za-z0-9 .()+_-]{0,127}", ready["server_version"]) is None):
+            _receipt_refused()
+        _validate_files(database["migration_manifest"])
+        manifest = tuple(FileProof(**item) for item in database["migration_manifest"])
+        if database["migration_manifest_sha256"] != _manifest_hash(manifest):
+            _receipt_refused()
+        status = _exact(database["schema_status"], ("run_id", "manifest_sha256", "ok", "database", "schema",
+            "migration_count", "applied_migration_count"))
+        _validate_migration(MigrationProof(**status), MigrationRequest(document["run_id"], REPO / "platform/migrations",
+            manifest, {}, 0, Path("unused")))
+    stack = document["stack"]
+    if stack is not None:
+        _exact(stack, ("owned_process_identities", "source_revision", "app_readiness"))
+        if stack["source_revision"] != source["commit"] or type(stack["owned_process_identities"]) is not list:
+            _receipt_refused()
+        roles, pids = [], []
+        for item in stack["owned_process_identities"]:
+            _exact(item, ("role", "pid", "start_id", "parent_pid"))
+            if (type(item["pid"]) is not int or item["pid"] <= 0 or type(item["parent_pid"]) is not int
+                    or item["parent_pid"] <= 0 or not _public_id(item["start_id"])):
+                _receipt_refused()
+            roles.append(item["role"])
+            pids.append(item["pid"])
+        if len(set(pids)) != 6 or len(roles) != 6 or set(roles) != {"stack-launcher", *STACK_ROLES}:
+            _receipt_refused()
+        launcher = next(item for item in stack["owned_process_identities"] if item["role"] == "stack-launcher")
+        if any(item["parent_pid"] != launcher["pid"] for item in stack["owned_process_identities"]
+               if item["role"] != "stack-launcher"):
+            _receipt_refused()
+        app = _exact(stack["app_readiness"], ("source_revision", "dependencies"))
+        if app["source_revision"] != source["commit"]:
+            _receipt_refused()
+        _exact(app["dependencies"], APP_DEPENDENCIES)
+        for item in app["dependencies"].values():
+            _exact(item, ("state", "required"))
+            if item["state"] != "ready" or item["required"] is not True:
+                _receipt_refused()
+    worker = document["worker"]
+    if worker is not None:
+        _exact(worker, ("identity", "tool", "source_revision", "source_sha256", "source_manifest",
+            "initial_heartbeat", "final_heartbeat"))
+        if (worker["identity"] != "project:" + document["run_id"] or worker["tool"] != WORKER_TOOL
+                or not _hash_ok(worker["source_sha256"]) or worker["source_revision"] != "sha256:" + worker["source_sha256"]
+                or type(worker["source_manifest"]) is not list or not worker["source_manifest"]
+                or len(set(worker["source_manifest"])) != len(worker["source_manifest"])
+                or any(type(item) is not str or re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", item) is None
+                       or ".." in item.split("/") for item in worker["source_manifest"])):
+            _receipt_refused()
+        stamps = []
+        for key in ("initial_heartbeat", "final_heartbeat"):
+            beat = _exact(worker[key], ("worker_id", "tool_name", "runtime", "source_revision", "source_sha256", "observed_at"))
+            if (beat["worker_id"] != worker["identity"] or beat["tool_name"] != WORKER_TOOL
+                    or beat["source_revision"] != worker["source_revision"] or beat["source_sha256"] != worker["source_sha256"]
+                    or type(beat["runtime"]) is not str or re.fullmatch(r"[A-Za-z0-9 .+()_-]{1,128}", beat["runtime"]) is None):
+                _receipt_refused()
+            stamp = datetime.fromisoformat(beat["observed_at"])
+            if stamp.tzinfo is None:
+                _receipt_refused()
+            stamps.append(stamp)
+        if stamps[1] < stamps[0] or worker["initial_heartbeat"]["runtime"] != worker["final_heartbeat"]["runtime"]:
+            _receipt_refused()
+    playwright = document["playwright"]
+    if playwright is not None:
+        _exact(playwright, ("selected_test_ids", "started_test_ids", "completed_test_ids", "outcomes", "annotation_types"))
+        for key in ("selected_test_ids", "started_test_ids", "completed_test_ids"):
+            ids = playwright[key]
+            if type(ids) is not list or len(ids) != 3 or set(ids) != set(REQUIRED_TEST_IDS):
+                _receipt_refused()
+        if playwright["annotation_types"] != [] or type(playwright["outcomes"]) is not list or len(playwright["outcomes"]) != 3:
+            _receipt_refused()
+        ids = []
+        for item in playwright["outcomes"]:
+            _exact(item, ("test_id", "status", "retry"))
+            if item["status"] != "passed" or type(item["retry"]) is not int or item["retry"] != 0:
+                _receipt_refused()
+            ids.append(item["test_id"])
+        if set(ids) != set(REQUIRED_TEST_IDS):
+            _receipt_refused()
+    canonical = document["canonical"]
+    if canonical is not None:
+        _exact(canonical, _CANONICAL_FIELDS)
+        if (any(not _public_id(canonical[key]) for key in _CANONICAL_FIELDS[:5])
+                or canonical["input_version_id"] == canonical["output_version_id"]
+                or type(canonical["checkout_fence"]) is not int or not 1 <= canonical["checkout_fence"] <= 9223372036854775807
+                or not _hash_ok(canonical["settings_readback_sha256"])):
+            _receipt_refused()
+    if not project and any(document[key] is not None for key in ("identity", "stack", "worker", "playwright", "canonical")):
+        _receipt_refused()
+
+
+def _verify_document(document, expected):
+    _validate_receipt_structure(document)
+    if (type(expected) is not ReceiptBinding or expected.schema != SCHEMA or document["schema"] != expected.schema
+            or document["run_id"] != expected.run_id or document["profile"] != expected.profile
+            or document["source"] != _source_public(expected.source) or document["identity"] is None
+            or document["identity"]["public_key_thumbprint"] != expected.public_key_thumbprint):
+        _receipt_refused()
+    if (document["ok"] is not True or document["failure"] is not None
+            or any(document[key] is None for key in ("runtime", "identity", "database", "stack", "worker", "playwright", "canonical"))
+            or any(document["rows"][key] is not True for key in REQUIRED_ROWS)
+            or any(document["cleanup"][key] is not True for key in _CLEANUP_FIELDS) or document["cleanup"]["failures"]):
+        _receipt_refused()
+
+
+def verify_receipt(path: Path, *, expected: ReceiptBinding, effects: Effects | None = None) -> Verification:
+    try:
+        effects = effects if effects is not None else production_effects()
+        document = effects.receipt_writer.read(path)
+        _verify_document(document, expected)
+        return Verification(True, None)
+    except BaseException:
+        return Verification(False, Failure(Stage.VERIFICATION, FailureCode.RECEIPT))
+
+
+def _read_receipt(path):
+    if not _path_safe(path):
+        _receipt_refused()
+    with path.open("rb") as stream:
+        raw = stream.read(RECEIPT_LIMIT + 1)
+    if len(raw) > RECEIPT_LIMIT:
+        _receipt_refused()
+    return _decode_public(raw)
+
+
+def _decode_public(raw):
+    def unique(pairs):
+        value = {}
+        for key, item in pairs:
+            if key in value:
+                _receipt_refused()
+            value[key] = item
+        return value
+    return json.loads(raw, object_pairs_hook=unique, parse_constant=lambda value: _receipt_refused())
+
+
+def _intent_public(intent):
+    journal, binding = intent.journal, intent.binding
+    return {"run_id": journal.run_id, "run_root": str(journal.run_root),
+        "artifact_root": str(journal.artifact_root), "created_at": journal.created_at.isoformat(),
+        "publication": intent.filename, "source": _source_public(binding.source),
+        "profile": binding.profile, "schema": binding.schema,
+        "public_key_thumbprint": binding.public_key_thumbprint,
+        "authority": None if journal.authority is None else _owned_public(journal.authority),
+        "root_identity": list(intent.reservation.root_identity or ())}
+
+
+def _write_synced(path, payload):
+    with path.open("xb") as stream:
+        stream.write(payload)
+        stream.flush()
+        os.fsync(stream.fileno())
+
+
+def _record_publication(writer, path, intent):
+    journal, reservation = intent.journal, intent.reservation
+    if (path != journal.run_root / "publication-intent.json" or reservation.run_root != journal.run_root
+            or reservation.artifact_root != journal.artifact_root or journal.artifact_root != journal.run_root / "artifacts"
+            or intent.filename not in (RECEIPT_NAME, MIGRATION_RECEIPT_NAME)
+            or intent.binding.run_id != journal.run_id or not _path_safe(path)
+            or not _path_safe(journal.artifact_root) or reservation.root_identity is None):
+        _receipt_refused()
+    current = journal.run_root.stat()
+    if reservation.root_identity != (current.st_dev, current.st_ino):
+        _receipt_refused()
+    public = _intent_public(intent)
+    raw = (json.dumps(public, sort_keys=True, separators=(",", ":")) + "\n").encode()
+    _write_synced(path, raw)
+    writer._intents[journal.artifact_root / intent.filename] = (intent, raw)
+
+
+def _rename_noreplace(source, target):
+    # Windows rename is atomically no-replace. POSIX os.rename overwrites, so
+    # use the kernel's no-replace rename rather than a check-then-rename race.
+    if os.name == "nt":
+        os.rename(source, target)
+        return
+    import ctypes
+    library = ctypes.CDLL(None, use_errno=True)
+    rename = getattr(library, "renameat2", None)
+    if rename is None:
+        _receipt_refused()
+    rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+    rename.restype = ctypes.c_int
+    if rename(-100, os.fsencode(source), -100, os.fsencode(target), 1) != 0:
+        _receipt_refused()
+
+
+def _commit_receipt(temporary, path, root_identity, artifact_identity, check_cancelled):
+    root = path.parent.parent
+    if not all(_path_safe(item) for item in (root, path.parent, temporary, path)):
+        _receipt_refused()
+    root_info, artifact_info = root.stat(), path.parent.stat()
+    if ((root_info.st_dev, root_info.st_ino) != root_identity
+            or (artifact_info.st_dev, artifact_info.st_ino) != artifact_identity):
+        _receipt_refused()
+    check_cancelled()
+    _rename_noreplace(temporary, path)
+
+
+def _publish_receipt(writer, path, publication):
+    """Prepare outside the commit guard; the guard encloses only the rename."""
+    if type(publication) is not _Publication or path not in writer._intents:
+        _receipt_refused()
+    intent, intent_bytes = writer._intents[path]
+    document = publication.document
+    if publication.private_values is not None:
+        publication.private_values.check(document)
+    project = intent.binding.schema == SCHEMA
+    _validate_receipt_structure(document, project=project)
+    if (document["run_id"] != intent.binding.run_id or document["source"] != _source_public(intent.binding.source)
+            or document["schema"] != intent.binding.schema or document["profile"] != intent.binding.profile):
+        _receipt_refused()
+    if document["ok"] and project:
+        _verify_document(document, intent.binding)
+    if document["ok"] and not project and (document["database"] is None or document["failure"] is not None
+            or not document["rows"]["P04"] or not document["rows"]["P10"]):
+        _receipt_refused()
+    if any(document["cleanup"][name] is not True for name in _CLEANUP_FIELDS) or document["cleanup"]["failures"]:
+        _receipt_refused()
+    root = intent.reservation.run_root
+    if (path != intent.reservation.artifact_root / intent.filename or not _path_safe(root)
+            or not _path_safe(path) or not _path_absent(root)):
+        _receipt_refused()
+    # D verified complete removal. Exclusively create a fresh evidence-only
+    # directory; a replacement root is never adopted, even for keep_run_root.
+    _private_directory(root)
+    _private_directory(path.parent)
+    current = root.stat()
+    artifact = path.parent.stat()
+    renewed = dict(json.loads(intent_bytes), root_identity=[current.st_dev, current.st_ino])
+    _write_synced(root / "publication-intent.json", (json.dumps(renewed, sort_keys=True) + "\n").encode())
+    _write_synced(root / "guardian-clean.json", (json.dumps({"run_id": intent.binding.run_id,
+        "processes_stopped": True, "guardian_disarmed": True}, sort_keys=True) + "\n").encode())
+    payload = (json.dumps(document, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
+    if len(payload) > RECEIPT_LIMIT:
+        _receipt_refused()
+    temporary = path.with_name(path.name + ".pending")
+    try:
+        _write_synced(temporary, payload)
+        publication.commit(lambda: _commit_receipt(temporary, path,
+            (current.st_dev, current.st_ino), (artifact.st_dev, artifact.st_ino), publication.check_cancelled))
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+_STAGE_CODES = {Stage.PREFLIGHT: FailureCode.PREFLIGHT, Stage.RUNTIME: FailureCode.RUNTIME,
+    Stage.ALLOCATION: FailureCode.ALLOCATION, Stage.TRANSPORT: FailureCode.TRANSPORT,
+    Stage.MIGRATION: FailureCode.MIGRATION_EXIT, Stage.IDENTITY: FailureCode.IDENTITY,
+    Stage.BINDING: FailureCode.BINDING, Stage.STACK: FailureCode.LAUNCH,
+    Stage.READINESS: FailureCode.READINESS, Stage.BROWSER: FailureCode.BROWSER_EXIT,
+    Stage.VERIFICATION: FailureCode.RECEIPT, Stage.TEARDOWN: FailureCode.CLEANUP_PRIVATE,
+    Stage.DISPATCH: FailureCode.USAGE}
+
+
+def _stage_call(scope, stage, operation, seconds):
+    def normalize(call, code):
+        try:
+            return call()
+        except ProofRefused:
+            raise
+        except (KeyboardInterrupt, SystemExit):
+            _refuse(FailureCode.CANCELLED, stage)
+        except BaseException:
+            _refuse(code, stage)
+    def invoke():
+        token = _RUN_PRIVATE.set(getattr(scope, "private_values", None))
+        try:
+            return normalize(operation, _STAGE_CODES[stage])
+        finally:
+            _RUN_PRIVATE.reset(token)
+    # Normalize the operation transport before D remembers an escaping error.
+    # Its own deadline/cancellation refusals keep their original fixed codes.
+    original = scope.effects
+    class Host:
+        def __getattr__(self, name):
+            return getattr(original.host, name)
+        def begin_operation(self, callback):
+            task = normalize(lambda: original.host.begin_operation(callback), FailureCode.INTERNAL)
+            class Task:
+                def done(self):
+                    return normalize(task.done, FailureCode.INTERNAL)
+                def result(self):
+                    return normalize(task.result, FailureCode.INTERNAL)
+            return Task()
+    scope.effects = replace(original, host=Host())
+    try:
+        return scope.perform(stage, invoke, deadline=scope.effects.clock.monotonic() + seconds)
+    finally:
+        scope.effects = original
+
+
+class _MigrationBoundary(BaseException):
+    """Internal successful stop at B's first identity effect, before any issuer."""
+
+
+def _measure_prepared(plan, *, effects, scope):
+    # Reuse B's allocation/readiness/migration barriers byte-for-byte. Observe
+    # their injected results and stop at the identity boundary; never seed.
+    observed = {}
+    original_writer = effects.receipt_writer
+    class Writer:
+        def ownership(self, path, value):
+            original_writer.ownership(path, value)
+            if value.authority is not None and value.authority.containers:
+                observed["ownership"] = value.authority
+        def __getattr__(self, name):
+            return getattr(original_writer, name)
+    def allocate(run_id):
+        start = effects.clock.monotonic()
+        authority = effects.authority_factory(run_id)
+        observed["allocation"] = effects.clock.monotonic() - start
+        class Authority:
+            def __repr__(self):
+                return "<migration authority>"
+            def readiness(self):
+                start = effects.clock.monotonic()
+                result = authority.readiness()
+                observed["relay"] = effects.clock.monotonic() - start
+                observed["readiness"] = result
+                return result
+            def dsn(self):
+                return authority.dsn()
+            def stop(self):
+                return authority.stop()
+        return Authority()
+    def migrate(request, *, scope):
+        start = effects.clock.monotonic()
+        result = effects.migration_runner(request, scope=scope)
+        observed["migration"] = effects.clock.monotonic() - start
+        observed["proof"] = result
+        return result
+    def boundary(run_id):
+        raise _MigrationBoundary()
+    measured = replace(effects, authority_factory=allocate, migration_runner=migrate,
+        issuer_factory=boundary, receipt_writer=Writer())
+    try:
+        prepare_authority(plan, effects=measured, scope=scope)
+    except _MigrationBoundary:
+        return DatabaseProof(plan.config.run_id, observed["ownership"], "host-relay",
+            TransportProof(**observed["readiness"]), plan.migrations, _manifest_hash(plan.migrations),
+            observed["proof"], observed["allocation"], observed["relay"], observed["migration"])
+    _refuse(FailureCode.INTERNAL, Stage.MIGRATION)
+
+
+class _RunWriter:
+    def __init__(self, writer, guardian):
+        self.writer, self.guardian = writer, guardian
+    def ownership(self, path, value):
+        self.writer.ownership(path, value)
+        if isinstance(value, OwnershipJournal) and value.authority is not None and value.authority.containers:
+            self.guardian.observe(value.authority)
+    def __getattr__(self, name):
+        return getattr(self.writer, name)
+
+
+def _lifecycle(config, *, effects, migration):
+    effects = effects if effects is not None else production_effects()
+    scope = RunScope(effects=effects)
+    scope.private_values = private = _PrivateValues()
+    plan = runtime = prepared = execution = cleanup_proof = receipt_path = None
+    cancellation = None
+    try:
+        cancellation = effects.host.cancellation(scope)
+        cancellation.__enter__()
+        bound = _private_effects(scope.bind_effects(), private)
+        plan = _stage_call(scope, Stage.PREFLIGHT, lambda: preflight(config, effects=bound), 120.0)
+        private.environment(plan.host.environment)
+        guardian = _stage_call(scope, Stage.ALLOCATION, lambda: effects.host.guardian(plan), CLEANUP_TIMEOUT_S)
+        scope.guardian = guardian
+        _stage_call(scope, Stage.ALLOCATION, lambda: scope.own_guardian(guardian), CLEANUP_TIMEOUT_S)
+        def launch(spec, *, scope):
+            private.environment(spec.environment)
+            child = effects.process_launcher(spec, scope=scope)
+            guardian.own_process(child)
+            return child
+        bound = replace(bound, process_launcher=launch, receipt_writer=_RunWriter(effects.receipt_writer, guardian))
+        if not migration:
+            runtime = _stage_call(scope, Stage.RUNTIME,
+                lambda: prepare_runtime(plan, effects=bound, scope=scope), BUILD_TIMEOUT_S + 4 * VERSION_TIMEOUT_S + 5)
+        prepared = _stage_call(scope, Stage.ALLOCATION,
+            lambda: (_measure_prepared(plan, effects=bound, scope=scope) if migration
+                     else prepare_authority(plan, effects=bound, scope=scope)), 2 * MIGRATION_TIMEOUT_S + 120)
+        if not migration:
+            execution = _stage_call(scope, Stage.BROWSER,
+                lambda: run_project_pipeline(prepared, effects=bound, scope=scope), STACK_TIMEOUT_S + BROWSER_TIMEOUT_S + 5)
+    except ProofRefused as error:
+        scope.remember(error.failure)
+    except (KeyboardInterrupt, SystemExit):
+        scope.remember(Failure(Stage.VERIFICATION, FailureCode.CANCELLED))
+    except BaseException:
+        scope.remember(Failure(Stage.VERIFICATION, FailureCode.INTERNAL))
+    try:
+        if plan is not None:
+            key = prepared.identity.public_key_thumbprint if type(prepared) is PreparedAuthority else ""
+            database = prepared.database if type(prepared) is PreparedAuthority else prepared
+            binding = ReceiptBinding(config.run_id, plan.source, key, schema=MIGRATION_SCHEMA if migration else SCHEMA)
+            filename = MIGRATION_RECEIPT_NAME if migration else RECEIPT_NAME
+            intent = PublicationIntent(OwnershipJournal(config.run_id, config.run_root, config.artifact_root,
+                effects.clock.utc_now(), database.ownership if database is not None else None),
+                plan.reservation, binding, filename)
+            private.check(_intent_public(intent))
+            _stage_call(scope, Stage.VERIFICATION,
+                lambda: effects.receipt_writer.ownership(config.run_root / "publication-intent.json", intent), CLEANUP_TIMEOUT_S)
+    except ProofRefused as error:
+        scope.remember(error.failure)
+        plan = None  # No publication authorization was durably recorded.
+    except BaseException:
+        scope.remember(Failure(Stage.VERIFICATION, FailureCode.RECEIPT))
+        plan = None
+    try:
+        cleanup_proof = scope.close()
+        if plan is not None and cleanup_proof.ok:
+            document = _receipt_document(plan, runtime, prepared, execution, cleanup_proof, scope.failure, migration=migration)
+            private.check(document)
+            _validate_receipt_structure(document, project=not migration)
+            if document["ok"] and not migration:
+                _verify_document(document, binding)
+            def check_cancelled():
+                scope._check_cancelled(Stage.VERIFICATION)
+            def commit(action):
+                with scope._commit_lock:
+                    check_cancelled()
+                    scope._receipt_committing = True
+                    try:
+                        if document["ok"]:
+                            return scope.commit_guard(action)
+                        return action()
+                    finally:
+                        scope._receipt_committing = False
+            candidate = config.artifact_root / filename
+            effects.receipt_writer.publish(candidate, _Publication(document, commit, check_cancelled, private))
+            receipt_path = candidate
+    except ProofRefused as error:
+        scope.remember(error.failure)
+    except BaseException:
+        scope.remember(Failure(Stage.VERIFICATION, FailureCode.RECEIPT))
+    finally:
+        if cancellation is not None:
+            try:
+                cancellation.__exit__(None, None, None)
+            except BaseException:
+                scope.remember(Failure(Stage.VERIFICATION, FailureCode.INTERNAL))
+    return Outcome(0 if scope.failure is None and receipt_path is not None else _exit_code(scope.failure),
+        receipt_path, scope.failure, cleanup_proof.failures if cleanup_proof is not None else ())
+
+
+def supervise(config: Config, *, effects: Effects | None = None) -> Outcome:
+    return _lifecycle(config, effects=effects, migration=False)
+
+
+def measure_migration(config: Config, *, effects: Effects | None = None) -> Outcome:
+    return _lifecycle(config, effects=effects, migration=True)
+
+
+def cleanup(run_id: str, *, run_root: Path, effects: Effects | None = None) -> CleanupProof:
+    effects = effects if effects is not None else production_effects()
+    scope = RunScope(effects=effects)
+    try:
+        if type(run_id) is not str or re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", run_id) is None:
+            _refuse(FailureCode.USAGE, Stage.TEARDOWN)
+        # Recovery never obtains process-kill authority from bare journal PIDs.
+        reservation, ownership = effects.host.recovery(run_id, run_root)
+        if not effects.host.recovery_processes_absent(run_id, run_root):
+            _refuse(FailureCode.CLEANUP_PROCESS, Stage.TEARDOWN)
+        scope.own_reservation(reservation)
+        scope.acquire(ResourceKind.AUTHORITY, lambda: _cleanup_authority(None, run_id,
+            effects=effects, verify=True, ownership=ownership))
+    except ProofRefused as error:
+        scope.remember(error.failure)
+    except BaseException:
+        scope.remember(Failure(Stage.TEARDOWN, FailureCode.CLEANUP_PRIVATE))
+    if scope.failure is not None and not scope._actions:
+        return CleanupProof(False, False, False, False, False, False, (scope.failure,), 0.0, ())
+    return scope.close()
+
+
+def _exit_code(failure):
+    # Stable nonzero values; only E's USAGE has a dedicated parser exit.
+    return 2 if failure is not None and failure.fixed_code == FailureCode.USAGE else 1
+
+
+def main(argv=None, *, effects: Effects | None = None) -> int:
+    import argparse
+    class SafeParser(argparse.ArgumentParser):
+        def error(self, message):
+            self.exit(2, "USAGE: Invalid project proof command.\n")
+        def print_help(self, file=None):
+            self._print_message("USAGE: Commands are supervise, measure-migrations, cleanup and verify-receipt.\n", file)
+    parser = SafeParser(prog="proof_project", allow_abbrev=False)
+    sub = parser.add_subparsers(dest="command", required=True, parser_class=SafeParser)
+    for name in ("supervise", "measure-migrations", "cleanup", "verify-receipt"):
+        command = sub.add_parser(name, allow_abbrev=False)
+        command.add_argument("--run-id", required=True)
+        command.add_argument("--receipt" if name == "verify-receipt" else "--run-root", required=True)
+    try:
+        args = parser.parse_args(argv)
+    except SystemExit as error:
+        return int(error.code)
+    try:
+        if re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", args.run_id) is None:
+            _refuse(FailureCode.USAGE, Stage.DISPATCH)
+        effects = effects if effects is not None else production_effects()
+        if args.command == "verify-receipt":
+            path = Path(args.receipt)
+            try:
+                binding = effects.host.receipt_binding(args.run_id, path, effects.receipt_writer)
+            except BaseException:
+                _receipt_refused()
+            result = verify_receipt(path, expected=binding, effects=effects)
+            failure = result.failure
+        elif args.command == "cleanup":
+            result = cleanup(args.run_id, run_root=Path(args.run_root), effects=effects)
+            failure = None if result.ok else result.failures[0] if result.failures else Failure(Stage.TEARDOWN, FailureCode.CLEANUP_PRIVATE)
+        else:
+            root = Path(args.run_root)
+            config = Config(args.run_id, root, root / "artifacts", Ports(5275, 8230, 8240, 8250))
+            operation = supervise if args.command == "supervise" else measure_migration
+            failure = operation(config, effects=effects).failure
+        if failure is None:
+            print("OK: Project proof command completed.")
+            return 0
+    except ProofRefused as error:
+        failure = error.failure
+    except (KeyboardInterrupt, SystemExit):
+        failure = Failure(Stage.DISPATCH, FailureCode.CANCELLED)
+    except BaseException:
+        failure = Failure(Stage.DISPATCH, FailureCode.INTERNAL)
+    print(failure.fixed_code.value + ": Project proof command failed.")
+    return _exit_code(failure)
+
+
+class _RetainedOutput:
+    """Bounded private framing; retention is rebuilt from a closed event schema.
+
+    No prefix is emitted while a frame is incomplete. Overflow discards the
+    complete frame, including its prefix, and never grows a second buffer.
+    """
+    def __init__(self, project, limit=MAX_OUTPUT_BYTES):
+        self._raw = bytearray()
+        self._project = project
+        self._private = _RUN_PRIVATE.get()
+        self.limit = min(limit, MAX_OUTPUT_BYTES)
+        self.overflow = False
+        self.failure = None
+
+    def __repr__(self):
+        return "<bounded private child output>"
+
+    def feed(self, chunk):
+        if not isinstance(chunk, bytes):
+            self.overflow = True
+        if self.overflow or len(self._raw) + len(chunk) > self.limit:
+            self.overflow = True
+            self._raw.clear()
+            return
+        self._raw.extend(chunk)
+
+    def finish(self):
+        try:
+            if self.overflow:
+                return b""
+            event = self._project(bytes(self._raw))
+            if event is None:
+                return b""
+            # Encoding a new approved event is the only retention operation.
+            if self._private is not None:
+                self._private.check(event)
+            return (json.dumps(event, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode()
+        except ProofRefused as error:
+            self.failure = error.failure
+            return b""
+        except BaseException:
+            return b""
+        finally:
+            self._raw.clear()
+
+
+def _approved_event(raw):
+    """Optional child diagnostics: two closed enums, no arbitrary message."""
+    value = _decode_public(raw)
+    if type(value) is not dict or set(value) != {"stage", "fixed_code"}:
+        return None
+    stage = Stage(value["stage"])
+    code = FailureCode(value["fixed_code"])
+    return {"stage": stage.value, "fixed_code": code.value}
+
+
+def _child_public(spec, raw):
+    private = _RUN_PRIVATE.get() or _PrivateValues()
+    private.environment(spec.environment)
+    if spec.role == "runtime-version":
+        name = spec.output_path.name.removesuffix("-version.txt")
+        value = raw.decode("ascii").strip()
+        private.check(value)
+        patterns = {"node": r"v([0-9]+\.[0-9]+\.[0-9]+)",
+            "cargo": r"cargo ([0-9]+\.[0-9]+\.[0-9]+)(?: \([a-f0-9]+ [0-9-]+\))?",
+            "rustc": r"rustc ([0-9]+\.[0-9]+\.[0-9]+)(?: \([a-f0-9]+ [0-9-]+\))?",
+            "wasm-pack": r"wasm-pack ([0-9]+\.[0-9]+\.[0-9]+)"}
+        match = re.fullmatch(patterns[name], value)
+        if match is None:
+            return None
+        return {"tool": name, "version": match.group(1)}
+    value = _decode_public(raw)
+    private.check(value)
+    if type(value) is dict and set(value) == {"failure"}:
+        return {"failure": FailureCode(value["failure"]).value}
+    if spec.role in {"migration-child", "seed-child"}:
+        request = json.loads(spec.environment["LEAF_PROJECT_CHILD_REQUEST"])
+        if spec.role == "migration-child":
+            _exact(value, ("run_id", "manifest_sha256", "ok", "database", "schema", "migration_count", "applied_migration_count"))
+            expected = MigrationRequest(request["run_id"], Path(request["migration_root"]),
+                tuple(FileProof(**item) for item in request["expected_manifest"]), {}, request["deadline"], Path(request["result_path"]))
+            proof = _validate_migration(MigrationProof(**value), expected)
+        else:
+            _exact(value, ("organization_id", "binding_id", "subject", "tier", "authority", "role", "status"))
+            expected = SeedRequest(request["run_id"], request["subject"], {}, request["deadline"], Path(request["result_path"]))
+            proof = _validate_binding(BindingProof(**value), expected)
+        return _proof_public(proof)
+    if spec.role == "canonical-child":
+        request = json.loads(spec.environment["LEAF_PROJECT_CANONICAL_REQUEST"])
+        if request["purpose"] == "heartbeat":
+            if value is None:
+                return None
+            _exact(value, ("worker_id", "tool_name", "runtime", "source_revision", "source_sha256", "observed_at"))
+            if (value["worker_id"] != request["worker_id"] or value["tool_name"] != WORKER_TOOL
+                    or not _hash_ok(value["source_sha256"]) or value["source_revision"] != "sha256:" + value["source_sha256"]
+                    or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["runtime"]) is None):
+                return None
+            beat = HeartbeatProof(**dict(value, observed_at=datetime.fromisoformat(value["observed_at"])))
+            return _heartbeat_public(beat)
+        _exact(value, ("stored_settings_sha256", "reopened_settings_sha256"))
+        if not all(_hash_ok(item) for item in value.values()):
+            return None
+        return {"stored_settings_sha256": value["stored_settings_sha256"],
+            "reopened_settings_sha256": value["reopened_settings_sha256"]}
+    return _approved_event(raw)
+
+
+class _OutputPipe:
+    def __init__(self, spec):
+        self.spec = spec
+        private = _RUN_PRIVATE.get()
+        def project(raw):
+            token = _RUN_PRIVATE.set(private)
+            try:
+                return _child_public(spec, raw)
+            finally:
+                _RUN_PRIVATE.reset(token)
+        self.capture = _RetainedOutput(project, spec.max_output_bytes)
+        self.reader, self.writer = os.pipe()
+        self.done = threading.Event()
+        self.closed = False
+        def drain():
+            try:
+                while True:
+                    chunk = os.read(self.reader, 1024)
+                    if not chunk:
+                        break
+                    self.capture.feed(chunk)
+            except BaseException:
+                self.capture.overflow = True
+            finally:
+                os.close(self.reader)
+                self.done.set()
+        self.thread = threading.Thread(target=drain, daemon=True)
+        self.thread.start()
+
+    def __repr__(self):
+        return "<private output pipe>"
+
+    def fileno(self):
+        return self.writer
+
+    def launched(self):
+        if self.writer is not None:
+            os.close(self.writer)
+            self.writer = None
+
+    def close(self):
+        if self.closed:
+            return
+        self.launched()
+        if not self.done.wait(CLEANUP_TIMEOUT_S):
+            self.capture.overflow = True
+            raise RuntimeError("child output unavailable")
+        payload = self.capture.finish()
+        if self.capture.failure is not None:
+            raise ProofRefused(self.capture.failure)
+        if self.spec.role == "runtime-version" and payload:
+            event = json.loads(payload)
+            payload = (event["tool"] + " " + event["version"] + "\n").encode()
+        # Empty/invalid output fails the consumer's existing result validation.
+        _write_synced(self.spec.output_path, payload)
+        self.closed = True
+
+
+class _OutputDestination:
+    def __init__(self, spec):
+        self.spec, self.pipe = spec, None
+    def __repr__(self):
+        return "<private output destination>"
+    def open(self, mode):
+        if mode != "xb" or self.pipe is not None:
+            raise RuntimeError("child output unavailable")
+        self.pipe = _OutputPipe(self.spec)
+        return self.pipe
+    def stat(self):
+        from types import SimpleNamespace
+        return SimpleNamespace(st_size=MAX_OUTPUT_BYTES + 1 if self.pipe.capture.overflow else 0)
+
+
+class _CapturedRuntimeProcess(_RuntimeProcess):
+    """Reuse A/D's launch, identity and stop implementation with a pipe target."""
+    def __init__(self, spec):
+        self.destination = _OutputDestination(spec) if spec.output_path is not None else None
+        super().__init__(replace(spec, output_path=self.destination) if self.destination is not None else spec)
+
+    def start(self):
+        super().start()
+        if self.output is not None:
+            self.output.launched()
+
+    def poll(self):
+        result = super().poll()
+        if result is not None and self.output is not None:
+            self.output.close()
+        return result
+
+
+# All existing child launch sites (including canonical readback) now consume
+# bounded pipes. A/D's retained ownership and stop methods are inherited.
+_RuntimeProcess = _CapturedRuntimeProcess
+
+
+def _launch_supervised(spec, *, scope):
+    child = _launch_runtime(spec, scope=scope)
+    guardian = getattr(scope, "guardian", None)
+    if guardian is not None:
+        guardian.own_process(child)
+    return child
+
+
+class _Cancellation:
+    def __init__(self, scope):
+        self.scope, self.previous = scope, {}
+    def __enter__(self):
+        import signal
+        if threading.current_thread() is threading.main_thread():
+            for name in (signal.SIGINT, signal.SIGTERM):
+                self.previous[name] = signal.getsignal(name)
+                signal.signal(name, self._signal)
+        return self
+    def _signal(self, signum, frame):
+        self.scope.cancel()
+        # Python signal handlers can reenter the commit RLock. Abort even in
+        # the bytecode window between the last cancellation check and rename.
+        if getattr(self.scope, "_receipt_committing", False):
+            _refuse(FailureCode.CANCELLED, Stage.VERIFICATION)
+    def __exit__(self, *args):
+        import signal
+        for name, handler in self.previous.items():
+            signal.signal(name, handler)
+
+
+class _SupervisorHost(_Host):
+    def cancellation(self, scope):
+        self.scope = scope
+        return _Cancellation(scope)
+
+    def guardian(self, plan):
+        self.lease = _GuardianLease(plan)
+        return self.lease
+
+    def scrub(self, reservation, *, keep_safe):
+        # Preserve a public absence observation only when every retained owner
+        # has stopped and no stage can still allocate. Recovery can then finish
+        # a failed filesystem scrub without inventing process-kill authority.
+        scope, lease = getattr(self, "scope", None), getattr(self, "lease", None)
+        if scope is not None and lease is not None and scope._settled():
+            if all(child.stop(time.monotonic() + CLEANUP_TIMEOUT_S) is True for child in lease.children):
+                root = reservation.run_root
+                if _path_safe(root) and not _path_absent(root):
+                    info = root.stat()
+                    if reservation.root_identity == (info.st_dev, info.st_ino):
+                        marker = root / "guardian-clean.json"
+                        public = {"run_id": lease.plan.config.run_id, "processes_stopped": True, "guardian_disarmed": False}
+                        if _path_absent(marker):
+                            _write_synced(marker, (json.dumps(public, sort_keys=True) + "\n").encode())
+        return _Host.scrub(reservation, keep_safe=keep_safe)
+
+    def receipt_binding(self, run_id, path, writer):
+        if path.name != RECEIPT_NAME or path.parent.name != "artifacts" or not _path_safe(path):
+            _receipt_refused()
+        journal = writer.read(path.parent.parent / "publication-intent.json")
+        source = self.source_snapshot()
+        if (type(journal) is not dict or journal.get("run_id") != run_id or journal.get("publication") != RECEIPT_NAME
+                or journal.get("run_root") != str(path.parent.parent) or journal.get("artifact_root") != str(path.parent)
+                or journal.get("source") != _source_public(source) or journal.get("schema") != SCHEMA
+                or journal.get("profile") != PROFILE or not _public_id(journal.get("public_key_thumbprint"))):
+            _receipt_refused()
+        return ReceiptBinding(run_id, source, journal["public_key_thumbprint"])
+
+    def recovery(self, run_id, root):
+        if (not root.is_absolute() or root == Path(root.anchor) or root.is_relative_to(REPO)
+                or REPO.is_relative_to(root) or not _path_safe(root)):
+            _refuse(FailureCode.CLEANUP_PRIVATE, Stage.TEARDOWN)
+        journal = _read_receipt(root / "publication-intent.json")
+        info = root.stat()
+        if (journal.get("run_id") != run_id or journal.get("run_root") != str(root)
+                or journal.get("artifact_root") != str(root / "artifacts")
+                or journal.get("root_identity") != [info.st_dev, info.st_ino]):
+            _refuse(FailureCode.CLEANUP_PRIVATE, Stage.TEARDOWN)
+        value = journal["authority"]
+        if value is None:
+            ownership = self.authority_inventory(run_id)
+            _validate_ownership(ownership, run_id, allocated=False)
+        else:
+            _exact(value, ("run_id", "names", "labels", "containers", "networks"))
+            ownership = AuthorityOwnership(value["run_id"], tuple(value["names"]),
+                tuple((key, value["labels"][key]) for key in ("leaf.proof-project.run", "leaf.proof-project.owner")),
+                tuple(value["containers"]), tuple(value["networks"]))
+            _validate_ownership(ownership, run_id, allocated=True)
+        return Reservation(root, root / "artifacts", (), (info.st_dev, info.st_ino)), ownership
+
+    @staticmethod
+    def recovery_processes_absent(run_id, root):
+        # A run interrupted before final cleanup can still have owned children.
+        # Without the guardian's transferred handles, refuse to infer absence.
+        marker = root / "guardian-clean.json"
+        try:
+            return _read_receipt(marker) == {"run_id": run_id, "processes_stopped": True, "guardian_disarmed": True}
+        except BaseException:
+            return False
+
+
+class _GuardianLease:
+    """Private inherited pipes and duplicated Windows job handles, never PIDs.
+
+    No listener or network endpoint is used. The host fault experiment remains
+    separate from fake-only receipt tests.
+    """
+    def __init__(self, plan):
+        self.plan, self.process = plan, None
+        self.sent_jobs = set()
+        self.responses = None
+        self.children = []
+
+    def __repr__(self):
+        return "<project guardian lease>"
+
+    def _send(self, value):
+        if self.process is None or self.process.poll() is not None:
+            _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
+        raw = (json.dumps(value, separators=(",", ":")) + "\n").encode()
+        if len(raw) > 16384:
+            _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
+        self.process.stdin.write(raw)
+        self.process.stdin.flush()
+
+    def _response(self):
+        import queue
+        try:
+            return self.responses.get(timeout=CLEANUP_TIMEOUT_S) == b"OK\n"
+        except queue.Empty:
+            return False
+
+    def arm(self):
+        if os.name != "nt":
+            _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
+        import queue
+        self.responses = queue.Queue(maxsize=4)
+        code = "import runpy,sys; m=runpy.run_path(sys.argv[1]); sys.exit(m['_guardian_entry']())"
+        environment = _PrivateEnvironment(_clean_libpq(_essential_environment(self.plan.host.environment)))
+        environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        self.process = subprocess.Popen((sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")),
+            cwd=REPO.parent, env=dict(environment), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, creationflags=0x08000000)
+        def read():
+            try:
+                while True:
+                    line = self.process.stdout.readline(8)
+                    self.responses.put(line if line == b"OK\n" else b"FAILED\n", timeout=CLEANUP_TIMEOUT_S)
+                    if not line or line != b"OK\n":
+                        break
+            except BaseException:
+                pass
+        threading.Thread(target=read, daemon=True).start()
+        root = self.plan.reservation
+        self._send({"event": "init", "run_id": self.plan.config.run_id, "run_root": str(root.run_root),
+            "root_identity": list(root.root_identity), "deadline": time.monotonic() + 3600.0})
+        if not self._response():
+            _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
+
+    def observe(self, ownership):
+        _validate_ownership(ownership, self.plan.config.run_id, allocated=True)
+        self._send({"event": "authority", "ownership": _owned_public(ownership)})
+        if not self._response():
+            _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
+
+    def own_process(self, child):
+        job = getattr(child, "job", None)
+        if job is None or not job.handle:
+            _refuse(FailureCode.GUARDIAN, Stage.STACK)
+        if id(job) in self.sent_jobs:
+            return
+        import ctypes
+        from ctypes import wintypes
+        kernel = job.kernel
+        kernel.GetCurrentProcess.restype = wintypes.HANDLE
+        kernel.DuplicateHandle.argtypes = [wintypes.HANDLE, wintypes.HANDLE, wintypes.HANDLE,
+            ctypes.POINTER(wintypes.HANDLE), wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+        duplicate = wintypes.HANDLE()
+        if not kernel.DuplicateHandle(kernel.GetCurrentProcess(), job.handle, int(self.process._handle),
+                ctypes.byref(duplicate), 0, False, 2):
+            _refuse(FailureCode.GUARDIAN, Stage.STACK)
+        self._send({"event": "job", "handle": duplicate.value})
+        if not self._response():
+            _refuse(FailureCode.GUARDIAN, Stage.STACK)
+        self.sent_jobs.add(id(job))
+        self.children.append(child)
+
+    def disarm(self):
+        if self.process is None:
+            return True
+        try:
+            self._send({"event": "disarm"})
+            if not self._response():
+                return False
+            self.process.stdin.close()
+            return self.process.wait(timeout=CLEANUP_TIMEOUT_S) == 0
+        except BaseException:
+            return False
+
+
+class _TransferredJob:
+    def __init__(self, handle):
+        self.job = _WindowsJob()
+        self.job.close()
+        self.job.handle = handle
+        self.stopped = False
+    def __repr__(self):
+        return "<transferred owned job>"
+    def stop(self, deadline):
+        if not self.stopped:
+            self.stopped = self.job.stop(deadline)
+            if self.stopped:
+                self.job.close()
+        return self.stopped
+
+
+def _guardian_entry():
+    """Fixed private child entry, deliberately absent from the public parser."""
+    import queue
+    messages = queue.Queue(maxsize=64)
+    def read():
+        try:
+            while True:
+                raw = sys.stdin.buffer.readline(16385)
+                if not raw:
+                    break
+                if len(raw) > 16384:
+                    break
+                messages.put_nowait(json.loads(raw))
+        except BaseException:
+            pass
+        finally:
+            try:
+                messages.put_nowait(None)
+            except queue.Full:
+                pass
+    def acknowledge():
+        sys.stdout.write("OK\n")
+        sys.stdout.flush()
+    try:
+        threading.Thread(target=read, daemon=True).start()
+        initial = messages.get(timeout=CLEANUP_TIMEOUT_S)
+        _exact(initial, ("event", "run_id", "run_root", "root_identity", "deadline"))
+        run_id, root = initial["run_id"], Path(initial["run_root"])
+        if (initial["event"] != "init" or not _path_safe(root) or not root.is_absolute()
+                or root.is_relative_to(REPO) or REPO.is_relative_to(root)):
+            return 1
+        info = root.stat()
+        if initial["root_identity"] != [info.st_dev, info.st_ino]:
+            return 1
+        name = "leafproof-" + run_id
+        owned = AuthorityOwnership(run_id, (name, name + "-pg", name + "-relay"),
+            (("leaf.proof-project.run", run_id), ("leaf.proof-project.owner", "proof_project_pg")))
+        _validate_ownership(owned, run_id, allocated=False)
+        jobs = []
+        class Channel:
+            def receive(self, timeout):
+                try:
+                    item = messages.get(timeout=timeout)
+                except queue.Empty:
+                    return None
+                if item is None:
+                    raise EOFError
+                if item == {"event": "disarm"}:
+                    return "disarm"
+                if type(item) is not dict:
+                    return "invalid"
+                if set(item) == {"event", "ownership"} and item["event"] == "authority":
+                    row = _exact(item["ownership"], ("run_id", "names", "labels", "containers", "networks"))
+                    ownership = AuthorityOwnership(row["run_id"], tuple(row["names"]),
+                        tuple((key, row["labels"][key]) for key in ("leaf.proof-project.run", "leaf.proof-project.owner")),
+                        tuple(row["containers"]), tuple(row["networks"]))
+                    _validate_ownership(ownership, run_id, allocated=True)
+                    object.__setattr__(request, "ownership", ownership)
+                elif (set(item) == {"event", "handle"} and item["event"] == "job"
+                        and type(item["handle"]) is int and item["handle"] > 0):
+                    jobs.append(_TransferredJob(item["handle"]))
+                else:
+                    return "invalid"
+                acknowledge()
+                return "alive"
+            def acknowledge(self):
+                acknowledge()
+        request = GuardianRequest(run_id, Reservation(root, root / "artifacts", (), (info.st_dev, info.st_ino)),
+            owned, Channel(), jobs, initial["deadline"])
+        acknowledge()
+        return guardian_main(request, effects=production_effects())
+    except BaseException:
+        return 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
