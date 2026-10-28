@@ -41,11 +41,41 @@ function withGroundToolsOccluder(occluders) {
   return groundOccluders
 }
 
+function LabLoadState({ active, studioShell, occluders, failed = false }) {
+  const boardRef = useRef(null)
+  const win = useGroundWindow(active, studioShell, boardRef, occluders)
+  return <section ref={boardRef} data-ground="lab" data-leaf-theme="dark" data-leaf-profile="studio"
+    hidden={!active} aria-label="Lab workspace"
+    data-studio-shell={studioShell ? 'cockpit' : undefined}
+    style={{ position: 'absolute', inset: 0, minWidth: 0, overflow: 'hidden' }}>
+    <div data-measured={Boolean(win)}
+      style={{ position: 'absolute', ...(win ? windowStyle(win) : { visibility: 'hidden' }) }}>
+      <p role={failed ? 'alert' : 'status'} style={{ color: 'var(--leaf-ink-muted)' }}>{failed ? 'Lab could not be loaded. Reload the page to try again.' : 'Loading Lab…'}</p>
+    </div>
+  </section>
+}
+
+class LabLoadBoundary extends Component {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    return this.state.failed ? <LabLoadState {...this.props.groundProps} failed /> : this.props.children
+  }
+}
+
 function LazyLabGround(props) {
   const [activated, setActivated] = useState(props.active)
   if (props.active && !activated) setActivated(true)
   if (!activated && !props.active) return null
-  return <Suspense fallback={null}><LabGround {...props} /></Suspense>
+  return <LabLoadBoundary groundProps={props}>
+    <Suspense fallback={<LabLoadState {...props} />}>
+      <LabGround {...props} />
+    </Suspense>
+  </LabLoadBoundary>
 }
 
 function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = false }) {
