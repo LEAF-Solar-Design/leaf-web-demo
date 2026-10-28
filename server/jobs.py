@@ -760,8 +760,9 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     """Shared durable insert and executor hand-off for tool and data-plan jobs."""
     if native_preview is not None:
         import native_preview_job as native
-        native.require_executor()
         native_preview = native.validate_context(native_preview)
+        if native_preview['schema'] == native.SCHEMA:
+            native.require_executor()
         if (job_store_mode() != "postgres" or tool != {} or params != {} or dwg != ""
                 or aps_live is not False or dwg_version is not None
                 or any(value is not None for value in (
@@ -1002,6 +1003,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
     if not created:
         return job_id
     if native_preview is not None:
+        if native_preview['schema'] == native.REMOTE_SCHEMA:
+            return job_id
         executor = _executors.get(LANE_FAST)
         assert executor is not None
         executor.submit(_run_native_preview, job_id)
@@ -1420,7 +1423,11 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         execution_path = provenance.get("execution_path")
         if not isinstance(attempt, int) or isinstance(attempt, bool) or attempt < 1:
             raise ValueError("successful terminal provenance requires a positive attempt")
-        if execution_path not in {"cloud", "local"}:
+        if execution_path == 'native-worker':
+            import native_preview_remote as remote_adapter
+            if _native_owner is not remote_adapter._OWNER:
+                raise ValueError('native worker provenance requires the owning job adapter')
+        elif execution_path not in {"cloud", "local"}:
             raise ValueError("successful terminal provenance requires cloud or local execution_path")
         if "fallback" in provenance and not isinstance(provenance["fallback"], bool):
             raise ValueError("successful terminal fallback flag must be boolean")
@@ -1438,7 +1445,18 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         import native_preview_job as native_adapter
         native_record_context = native_adapter.record_context
         native = native_record_context(durable["execution"], durable)
-        if native is not None and status == "complete":
+        remote = native is not None and native['schema'] == native_adapter.REMOTE_SCHEMA
+        if remote and (status == 'complete' or _native_owner is not None):
+            import native_preview_remote as remote_adapter
+            if (_native_owner is not remote_adapter._OWNER or _allow_closed
+                    or provenance != {'attempt': durable_attempt, 'execution_path': 'native-worker'}):
+                raise ValueError('native success requires the owning job adapter')
+            if status == 'complete':
+                remote_adapter.verify_terminal(job_id, worker_id, durable_attempt, result_env.get('result'))
+            else:
+                remote_adapter.live(native['org_id'], native['project_id'],
+                    native['worker_binding']['actor_id'], job_id, worker_id, durable_attempt)
+        elif native is not None and status == "complete":
             if (_native_owner is not native_adapter._OWNER or not worker_id or _allow_closed
                     or _native_deadline is None):
                 raise ValueError("native success requires the owning job adapter")
@@ -1456,17 +1474,24 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         if (status == "complete" and "completion_provenance" in durable["execution"]
                 and (not _completion_owner or worker_id is None or _allow_closed)):
             raise ValueError("completion success requires the owning job adapter")
-        _validate_terminal_context(
-            status, result_env, provenance, durable_attempt, durable["execution"], job_id=job_id,
-            durable_params=durable.get("params"))
+        if not (remote and status == 'complete'):
+            _validate_terminal_context(
+                status, result_env, provenance, durable_attempt, durable["execution"], job_id=job_id,
+                durable_params=durable.get("params"))
+        if status == 'complete' and execution_path == 'native-worker' and not remote:
+            raise ValueError('native worker provenance requires remote context')
         if "completion_provenance" in durable["execution"] or native is not None:
             # Authority/publication reads above can wait on the database. Do not
             # validate lease expiry against the timestamp from before those reads.
             now = time.time()
+        remote_fence = {}
+        if remote and (status == 'complete' or _native_owner is not None):
+            rec = get_job(job_id)
+            remote_fence['deadline'] = remote_adapter.deadline(rec, native)
         fingerprint = _terminal_fingerprint(status, result_env, error, provenance)
         outcome = _pg_store.complete(
             job_id, durable_attempt, status, result_env, error, provenance,
-            fingerprint, worker_id, now, allow_closed=_allow_closed,
+            fingerprint, worker_id, now, allow_closed=_allow_closed, **remote_fence,
         )
         if outcome == "applied":
             # The platform mirror already landed inside _pg_store.complete()'s own
@@ -1679,6 +1704,9 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
 def _run_native_preview(job_id: str, *, _worker_id=None, _attempt=None) -> None:
     """Synchronous native execution inside the existing authoritative lease."""
     import native_preview_job as native
+    rec = get_job(job_id)
+    if rec and (rec.get('native_preview') or {}).get('schema') == native.REMOTE_SCHEMA:
+        return
     worker_id = _worker_id or str(uuid.uuid4())
     attempt = _attempt if _attempt is not None else claim_lease(job_id, worker_id)
     if attempt is None:
@@ -1721,6 +1749,10 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
              plan: Optional[Dict[str, Any]] = None) -> None:
     # NOTE: `holder` below is the thread-result box, unrelated to the checkout
     # holder — hence the qualified `checkout_holder` name on this lane.
+    if job_store_mode() == 'postgres':
+        rec = get_job(job_id)
+        if rec and (rec.get('native_preview') or {}).get('schema') == 'leaf.native-preview-job.v2':
+            return
     worker_id = str(uuid.uuid4())
     attempt = claim_lease(job_id, worker_id)
     if attempt is None:
@@ -2454,6 +2486,8 @@ def _redispatch_record(job_id: str) -> bool:
         if native is not None:
             if job_store_mode() != "postgres":
                 raise ValueError("native recovery requires PostgreSQL")
+            if native['schema'] == 'leaf.native-preview-job.v2':
+                return True
             executor = _executors.get(LANE_FAST)
             if executor is None:
                 return False

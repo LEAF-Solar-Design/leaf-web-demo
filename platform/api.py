@@ -377,6 +377,107 @@ class SaveProjectPageBody(BaseModel):
     document: Dict[str, Any] = Field(max_length=9)
 
 
+def _native_response(operation):
+    import native_preview_remote as remote
+    try:
+        return operation()
+    except remote.ProtocolError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc)) from None
+    except project_lifecycle.LifecycleUnavailable:
+        raise HTTPException(status_code=404, detail='Native preview not found.') from None
+    except project_lifecycle.LifecycleForbidden:
+        raise HTTPException(status_code=403, detail='Project access denied.') from None
+    except project_lifecycle.LifecycleConflict:
+        raise HTTPException(status_code=409, detail='Native preview conflicts with current project state.') from None
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid native preview request.') from None
+    except Exception:
+        raise HTTPException(status_code=503, detail='Native preview storage is unavailable.') from None
+
+
+async def _native_body(request, limit):
+    import native_preview_remote as remote
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > limit:
+            raise HTTPException(status_code=413, detail='Native preview request is too large.')
+        raw.extend(chunk)
+    return _native_response(lambda: remote.parse(bytes(raw)))
+
+
+@router.post('/projects/{project_id}/native-previews')
+async def submit_native_preview(project_id: uuid.UUID, request: Request,
+                                idempotency_key: str = Header(alias='Idempotency-Key'),
+                                actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    import native_preview_remote as remote
+    body = await _native_body(request, 1024)
+    result = await run_in_threadpool(_native_response, lambda: remote.submit(
+        str(actor.org_id), str(project_id), str(actor.binding_id), body, idempotency_key))
+    return JSONResponse(result, status_code=202, headers={'Cache-Control': 'private, no-store'})
+
+
+# Worker literals precede the dynamic job route. Identity always uses the same
+# verified lifecycle dependency as project writes, including in live Auth0 mode.
+@router.post('/projects/{project_id}/native-previews/worker/claim')
+async def claim_native_preview(project_id: uuid.UUID, request: Request,
+                               actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    import native_preview_remote as remote
+    body = await _native_body(request, 1024)
+    result = await run_in_threadpool(_native_response, lambda: remote.claim(
+        str(actor.org_id), str(project_id), str(actor.binding_id), body))
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/native-previews/worker/{job_id}/source')
+def native_preview_source(project_id: uuid.UUID, job_id: uuid.UUID,
+                          lease_owner: uuid.UUID = Query(), attempt: int = Query(ge=1, le=2147483647),
+                          actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    import native_preview_remote as remote
+    raw = _native_response(lambda: remote.source_bytes(str(actor.org_id), str(project_id),
+        str(actor.binding_id), str(job_id), {'lease_owner': str(lease_owner), 'attempt': attempt}))
+    return Response(raw, media_type='application/zip', headers={
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+
+
+@router.post('/projects/{project_id}/native-previews/worker/{job_id}/heartbeat')
+async def heartbeat_native_preview(project_id: uuid.UUID, job_id: uuid.UUID, request: Request,
+                                   actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    import native_preview_remote as remote
+    body = await _native_body(request, 1024)
+    result = await run_in_threadpool(_native_response, lambda: remote.heartbeat(
+        str(actor.org_id), str(project_id), str(actor.binding_id), str(job_id), body))
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.post('/projects/{project_id}/native-previews/worker/{job_id}/complete')
+async def complete_native_preview(project_id: uuid.UUID, job_id: uuid.UUID, request: Request,
+                                  actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    import native_preview_remote as remote
+    body = await _native_body(request, remote.MAX_ENVELOPE)
+    result = await run_in_threadpool(_native_response, lambda: remote.complete(
+        str(actor.org_id), str(project_id), str(actor.binding_id), str(job_id), body))
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/native-previews/{job_id}')
+def get_native_preview(project_id: uuid.UUID, job_id: uuid.UUID,
+                       actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    import native_preview_remote as remote
+    result = _native_response(lambda: remote.status(
+        str(actor.org_id), str(project_id), str(actor.binding_id), str(job_id)))
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/native-previews/{job_id}/screenshot')
+def get_native_preview_screenshot(project_id: uuid.UUID, job_id: uuid.UUID,
+                                  actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
+    import native_preview_remote as remote
+    raw = _native_response(lambda: remote.screenshot(
+        str(actor.org_id), str(project_id), str(actor.binding_id), str(job_id)))
+    return Response(raw, media_type='image/png', headers={
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff'})
+
+
 @router.get('/projects/{project_id}/page')
 def get_project_page(project_id: uuid.UUID, actor: _LifecycleActor = Depends(_get_lifecycle_actor)):
     from . import project_web_page

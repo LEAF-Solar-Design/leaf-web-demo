@@ -234,6 +234,7 @@
     "server-campaign-capability-api",
     "server-campaign-capability-job",
     "server-native-preview-job",
+    "server-native-preview-remote",
     "server-campaign-capability-job-access",
     "server-campaign-capability-resolver",
     "server-campaign-conversation",

@@ -311,6 +311,26 @@ class PostgresJobStore:
             rows = cur.fetchall()
         return [_record(row) for row in rows]
 
+    def native_remote_candidates(self, binding: Dict[str, str], now: float,
+                                 max_attempts: int) -> List[Dict[str, Any]]:
+        """Bounded exact-scope discovery only; claim() remains the atomic owner."""
+        with _db().cursor() as cur:
+            cur.execute(
+                "SELECT * FROM async_jobs WHERE tenant_id = %s AND org_id = %s "
+                "AND project_id = %s AND tool = 'internal.native-preview' "
+                "AND execution_json->'native_preview'->>'schema' = 'leaf.native-preview-job.v2' "
+                "AND execution_json->'native_preview'->>'dispatch_kind' = 'remote-worker' "
+                "AND execution_json->'native_preview'->'worker_binding' = %s::jsonb "
+                "AND attempt < %s AND (started_at IS NULL OR started_at + "
+                "(execution_json->'native_preview'->>'budget_s')::double precision > %s) "
+                "AND progress <> 'closed' AND (status = 'submitted' OR "
+                "(status = 'running' AND lease_expires_at <= %s)) "
+                "ORDER BY created_at, job_id LIMIT 32",
+                (binding['org_id'], binding['org_id'], binding['project_id'], json.dumps(binding),
+                 max_attempts, now, now),
+            )
+            return [_record(row) for row in cur.fetchall()]
+
     def claim(
         self, job_id: str, worker_id: str, stamp: float, expires: float,
         max_attempts: int,
@@ -338,7 +358,7 @@ class PostgresJobStore:
 
     def heartbeat(
         self, job_id: str, worker_id: str, now: float, expires: float,
-        progress: Optional[str],
+        progress: Optional[str], *, attempt: Optional[int] = None,
     ) -> bool:
         db = _db()
         with db.transaction() as conn:
@@ -349,9 +369,13 @@ class PostgresJobStore:
                     progress = COALESCE(%s, progress)
                 WHERE job_id = %s AND status = 'running'
                   AND lease_owner = %s AND lease_expires_at >= %s
+                  AND (%s::integer IS NULL OR
+                       (progress <> 'closed' AND attempt = %s
+                        AND lease_expires_at > EXTRACT(EPOCH FROM clock_timestamp())
+                        AND %s > EXTRACT(EPOCH FROM clock_timestamp())))
                 RETURNING job_id
                 """,
-                (now, expires, now, progress, job_id, worker_id, now),
+                (now, expires, now, progress, job_id, worker_id, now, attempt, attempt, expires),
             ).fetchone()
         return row is not None
 
@@ -417,7 +441,7 @@ class PostgresJobStore:
     def complete(
         self, job_id: str, durable_attempt: int, status: str, result: Any,
         error: Any, provenance: Any, fingerprint: str, worker_id: Optional[str],
-        now: float, *, allow_closed: bool = False,
+        now: float, *, allow_closed: bool = False, deadline: Optional[float] = None,
     ) -> str:
         db = _db()
         with db.transaction() as conn:
@@ -435,6 +459,9 @@ class PostgresJobStore:
                 WHERE job_id = %(job_id)s AND attempt = %(attempt)s
                   AND status NOT IN ('complete', 'failed')
                   AND (%(allow_closed)s OR progress <> 'closed')
+                  AND (%(deadline)s::double precision IS NULL OR
+                       (EXTRACT(EPOCH FROM clock_timestamp()) < %(deadline)s AND
+                        lease_expires_at > EXTRACT(EPOCH FROM clock_timestamp())))
                   AND (%(worker_id)s::text IS NULL OR
                        (lease_owner = %(worker_id)s AND lease_expires_at >= %(now)s))
                 RETURNING job_id
@@ -448,6 +475,7 @@ class PostgresJobStore:
                     "fingerprint": fingerprint, "job_id": job_id,
                     "attempt": durable_attempt, "worker_id": worker_id,
                     "allow_closed": allow_closed,
+                    "deadline": deadline,
                 },
             ).fetchone()
             if row is not None:

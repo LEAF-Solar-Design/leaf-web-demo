@@ -15,6 +15,7 @@ platform_link._ensure_platform_package()
 import project_preview_source as source
 
 SCHEMA = 'leaf.native-preview-job.v1'
+REMOTE_SCHEMA = 'leaf.native-preview-job.v2'
 OPERATION = 'internal.native-preview'
 RESULT_SCHEMA = 'leaf.native-preview-result.v1'
 _executor = None
@@ -36,10 +37,13 @@ def require_executor():
 
 
 def validate_context(value):
-    if type(value) is not dict or set(value) != {
-            'schema', 'tenant_id', 'org_id', 'project_id', 'actor_id', 'source'}:
+    remote = type(value) is dict and value.get('schema') == REMOTE_SCHEMA
+    fields = {'schema', 'tenant_id', 'org_id', 'project_id', 'actor_id', 'source'}
+    if remote:
+        fields |= {'dispatch_kind', 'worker_binding', 'budget_s'}
+    if type(value) is not dict or set(value) != fields:
         raise ValueError('Invalid native context.')
-    if type(value['schema']) is not str or value['schema'] != SCHEMA:
+    if type(value['schema']) is not str or value['schema'] not in (SCHEMA, REMOTE_SCHEMA):
         raise ValueError('Invalid native schema.')
     for key in ('tenant_id', 'org_id', 'project_id', 'actor_id'):
         if type(value[key]) is not str:
@@ -49,6 +53,14 @@ def validate_context(value):
     # not an actor subject, a workspace slug, or an inferred user equivalence.
     if value['tenant_id'] != value['org_id']:
         raise ValueError('Native tenant and organization conflict.')
+    if remote:
+        from native_preview_remote import validate_binding
+        binding = validate_binding(value['worker_binding'])
+        if (value['dispatch_kind'] != 'remote-worker'
+                or any(binding[k] != value[k] for k in ('org_id', 'project_id'))
+                or type(value['budget_s']) not in (int, float)
+                or not math.isfinite(value['budget_s']) or not 0 < value['budget_s'] <= 3600):
+            raise ValueError('Invalid remote native context.')
     return {**value, 'source': source._descriptor(
         value['source'], value['org_id'], value['project_id'])}
 
@@ -99,6 +111,8 @@ def validate_result(context, job_id, worker_id, attempt, value):
         raise ValueError('Invalid native receipt.')
     if type(receipt['kind']) is not str or receipt['kind'] not in ('synthetic', 'simulator'):
         raise ValueError('Invalid native evidence kind.')
+    if context['schema'] == REMOTE_SCHEMA and receipt['kind'] != 'simulator':
+        raise ValueError('Remote preview requires worker-reported simulator evidence.')
     if type(receipt['receipt_id']) is not str:
         raise ValueError('Invalid native receipt identity.')
     source._uuid(receipt['receipt_id'])
@@ -117,6 +131,8 @@ def guard(heartbeat, cancelled, deadline):
 def run(job_id, worker_id, attempt, context, heartbeat, cancelled, deadline):
     executor = require_executor()
     context = validate_context(context)
+    if context['schema'] == REMOTE_SCHEMA:
+        raise ValueError('Remote native jobs cannot use a local executor.')
     guard(heartbeat, cancelled, deadline)
     raw = read_source(context)
     guard(heartbeat, cancelled, deadline)
