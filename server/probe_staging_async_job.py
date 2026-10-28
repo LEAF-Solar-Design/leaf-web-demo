@@ -354,7 +354,8 @@ class Probe:
                         and fetched.get("result") == row.get("result_json")):
                     return "failed"
                 self.receipt["database_http_agree"] = True
-                return ("passed" if {"submitted", "running", "complete"} <= seen
+                return ("passed" if {"running", "complete"} <= seen
+                        and ("submitted" in seen or self.receipt["acknowledged_202"] is True)
                         else "completed_transition_evidence_incomplete")
             self.a.sleep(0.25)
         if not seen:

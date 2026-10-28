@@ -828,6 +828,32 @@ def test_missing_transition_is_reported_incomplete(monkeypatch):
     assert len(f.posts) == 1  # Durable started_at never invents a running sample.
 
 
+def test_acknowledged_submission_proves_submitted_before_first_row_poll(monkeypatch):
+    for response, expected in [
+        ((202, {"status": "submitted", "job_id": JOB}), "passed"),
+        ((200, {"status": "complete"}), "completed_transition_evidence_incomplete"),
+        ((202, {"status": "submitted", "job_id": "e" * 8 + JOB[8:]}), "failed"),
+    ]:
+        f = Fake(monkeypatch)
+        f.states = ["running", "complete"]
+        original_http = f.http
+
+        def http(method, path, token, body=None, correlation=None):
+            result = original_http(method, path, token, body, correlation)
+            if method == "POST" and path == "/api/run":
+                return response
+            return result
+
+        monkeypatch.setattr(f, "http", http)
+        assert run(f) == ("cleanup_pending" if expected == "failed" else expected)
+        receipt = f.saved[-1]
+        assert receipt["execution_outcome"] == expected
+        assert len(f.posts) == 1
+        if expected != "failed":
+            assert [sample["status"] for sample in receipt["samples"]] == ["running", "complete"]
+            assert receipt["cleanup_complete"]
+
+
 def test_retry_failure_or_result_mismatch_never_passes(monkeypatch):
     for defect in ("retry", "retrying", "degraded", "fallback", "failure", "conflict", "result", "fetch", "admission", "paid", "ledger", "provenance", "timestamp", "admission-status", "ledger-status"):
         f = Fake(monkeypatch, "failed" if defect == "failure" else "happy")
@@ -936,13 +962,13 @@ def test_evidence_is_sanitized_offline_and_gate_registered(monkeypatch, capsys):
         p.validate_receipt(tainted)
     registration = (ROOT / "scripts/run-all-gates.py").read_text()
     assert 'Suite("server-probe-staging-async-job"' in registration
-    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 23)' in registration
+    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 24)' in registration
     selection = json.loads((ROOT / "scripts/ci/test-selection-map.json").read_text())
     assert "server-probe-staging-async-job" in selection["mandatory_suite_ids"]
     floors = (ROOT / "scripts/test_gate_runner.py").read_text()
-    assert '"server-probe-staging-async-job": 23' in floors
+    assert '"server-probe-staging-async-job": 24' in floors
     no_skip = floors.split("_OPERATOR_NO_SKIP_FILES = frozenset({", 1)[1].split("})", 1)[0]
     assert '"server-probe-staging-async-job"' in no_skip
     source = Path(__file__).read_text()
-    assert source.count("\ndef test_") == 23
+    assert source.count("\ndef test_") == 24
     assert not any(name in sys.modules for name in ("probe_staging_async_job_live",))
