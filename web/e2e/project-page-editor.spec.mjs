@@ -16,8 +16,9 @@ const PAGE_PATH = `/api/projects/${PROJECT_ID}/page`
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }
 const canonical = document => JSON.stringify(Object.fromEntries(Object.entries(document).sort(([a], [b]) => a.localeCompare(b))))
 const digest = document => createHash('sha256').update(canonical(document)).digest('hex')
-// In-memory image fixture; no public photo endpoint is used by the preview.
-const PREVIEW = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aXioAAAAASUVORK5CYII=', 'base64')
+// Synthetic portrait with a visible border and color bands exposes clipping in proof screenshots.
+// No user photo or public photo endpoint is used by this fixture.
+const PREVIEW = Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAHgAAAC0CAIAAADQLH9KAAABcElEQVR4nO3QMQ3CUAAA0SqpCGbmikAJS0Uwo4m5StiR0OVDm+MlJ+Dypvly1Q+aDj/4k0CDbgX6IOjXfdGQQINuBRp0K9CgW4EG3Qo06FagQbcCDboVaNCtQINuBRp0K9CgW4EG3Qo06FagQbcCDboVaNCtQINuBRp0K9CgW4EG3Qo06FagQbcCDboVaNCtQINuBRp0K9CgW+1Av7enhgQadCvQoFuBBt0KNOhWoEG3Ag26FWjQrUCDbgUadCvQoFuBBt0KNOhWoEG3Ag26FWjQrUCDbgUadCvQoFuBBt0KNOhWoEG3Ag26FWjQrUCDbgUadCvQoFuBBt0KNOhWoEG3An0O6Ntj1ZBAg24FGnQr0KBbgQbdCjToVqBBtwINuhVo0K1Ag24FGnQr0KBbgQbdCjToVqBBtwINuhVo0K1Ag24FGnQr0KBbgQbdCjToVqBBtwINuhVo0K1Ag24FGnQr0KBb7UDrS4EG3Qo06FYfk1jcNsQZ95cAAAAASUVORK5CYII=', 'base64')
 const PHOTOS = ['33333333-3333-4333-8333-333333333333', '44444444-4444-4444-8444-444444444444'].map((material_id, index) => ({
   material_id, name: index ? 'Bread.jpg' : 'Cake.jpg', sha256: createHash('sha256').update(`original-${index}`).digest('hex'),
   preview_sha256: createHash('sha256').update(PREVIEW).digest('hex'),
@@ -153,9 +154,46 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await preview.getByRole('button', { name: 'Cakes', exact: true }).click()
     const imageTrigger = preview.getByRole('button', { name: 'View Cake.jpg', exact: true })
     await imageTrigger.click()
-    await expect(preview.getByRole('dialog')).toBeVisible()
+    const viewer = preview.getByRole('dialog')
+    const closeImage = viewer.getByRole('button', { name: 'Close image', exact: true })
+    const viewerPhoto = viewer.locator('img')
+    await expect(viewer).toBeVisible()
+    await expect(closeImage).toBeFocused()
+    await expect.poll(() => viewerPhoto.evaluateAll(images => images.length === 1 && images[0].complete && images[0].naturalWidth > 0 && images[0].naturalHeight > 0)).toBe(true)
+    await expect(viewerPhoto).toHaveCSS('object-fit', 'contain')
+    // Measure the rendered chrome rather than assuming header or dock heights.
+    await expect.poll(() => viewer.evaluate(node => {
+      const bounds = node.getBoundingClientRect()
+      const controls = document.querySelector('.environment-strip').getBoundingClientRect()
+      const dock = document.querySelector('.bar-dock').getBoundingClientRect()
+      const image = node.querySelector('img').getBoundingClientRect()
+      const close = node.querySelector('button').getBoundingClientRect()
+      return bounds.top >= controls.bottom - 1 && bounds.bottom <= dock.top + 1
+        && bounds.left >= 0 && bounds.right <= document.documentElement.clientWidth
+        && close.top >= bounds.top && close.bottom <= image.top
+        && image.left >= bounds.left && image.right <= bounds.right
+        && image.top >= bounds.top && image.bottom <= bounds.bottom
+        && image.width > 0 && image.height > 0
+    })).toBe(true)
+    expect(await closeImage.evaluate(button => {
+      const bounds = button.getBoundingClientRect()
+      return button.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2))
+    })).toBe(true)
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+    await page.screenshot({ path: testInfo.outputPath(`portfolio-viewer-${size}.png`) })
+    // Scrolling the bounded viewer must leave its close control usable.
+    await viewer.evaluate(node => { node.scrollTop = node.scrollHeight })
+    expect(await closeImage.evaluate(button => {
+      const bounds = button.getBoundingClientRect()
+      return button.contains(document.elementFromPoint(bounds.x + bounds.width / 2, bounds.y + bounds.height / 2))
+    })).toBe(true)
+    await closeImage.click()
+    await expect(viewer).toHaveCount(0)
+    await expect(imageTrigger).toBeFocused()
+    await imageTrigger.click()
+    await expect(viewer).toBeVisible()
     await page.keyboard.press('Escape')
-    await expect(preview.getByRole('dialog')).toHaveCount(0)
+    await expect(viewer).toHaveCount(0)
     await expect(imageTrigger).toBeFocused()
     await preview.getByRole('button', { name: 'About / Contact', exact: true }).click()
     await expect(preview.getByText('Pastry chef. Cakes, breads and chocolates.', { exact: true })).toBeVisible()
