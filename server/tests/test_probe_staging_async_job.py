@@ -419,6 +419,27 @@ def test_live_connect_sets_session_timeouts_without_startup_options(monkeypatch)
     ]
 
 
+def test_live_broker_entitled_matches_broker_tier_defaults(monkeypatch):
+    import entitlements
+
+    adapter = p.LiveAdapters(ENV)
+    assert entitlements.entitlements_for("guest").get("run_read") is not True
+    for rows, expected in [
+        ([], True),
+        ([{"tier": None, "disabled": False}], True),
+        ([{"tier": None, "disabled": True}], False),
+        ([{"tier": None, "disabled": False}] * 2, False),
+        ([{"tier": "guest", "disabled": False}], False),
+    ]:
+        def query(sql, params):
+            assert sql == "SELECT tier, disabled FROM broker_tenants WHERE tenant_id=%s"
+            assert params == (TENANT,)
+            return rows
+
+        monkeypatch.setattr(adapter, "query", query)
+        assert adapter.broker_entitled(TENANT) is expected
+
+
 def test_fixture_geometry_has_independent_expected_area():
     assert set(FIXTURE["intake"]) == {"polylines"}
     polygons = FIXTURE["intake"]["polylines"]
@@ -871,13 +892,13 @@ def test_evidence_is_sanitized_offline_and_gate_registered(monkeypatch, capsys):
         p.validate_receipt(tainted)
     registration = (ROOT / "scripts/run-all-gates.py").read_text()
     assert 'Suite("server-probe-staging-async-job"' in registration
-    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 21)' in registration
+    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 22)' in registration
     selection = json.loads((ROOT / "scripts/ci/test-selection-map.json").read_text())
     assert "server-probe-staging-async-job" in selection["mandatory_suite_ids"]
     floors = (ROOT / "scripts/test_gate_runner.py").read_text()
-    assert '"server-probe-staging-async-job": 21' in floors
+    assert '"server-probe-staging-async-job": 22' in floors
     no_skip = floors.split("_OPERATOR_NO_SKIP_FILES = frozenset({", 1)[1].split("})", 1)[0]
     assert '"server-probe-staging-async-job"' in no_skip
     source = Path(__file__).read_text()
-    assert source.count("\ndef test_") == 21
+    assert source.count("\ndef test_") == 22
     assert not any(name in sys.modules for name in ("probe_staging_async_job_live",))

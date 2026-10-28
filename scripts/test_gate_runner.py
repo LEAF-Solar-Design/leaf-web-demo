@@ -633,7 +633,7 @@ def test_executor_suite_is_registered_with_its_measured_floor():
 # The 34 skips are all one reason, LEAF_OPERATOR_TEST_DATABASE_URL unset, which
 # no workflow in this repo sets -- so CI executes these same counts.
 _OPERATOR_FLOORS = {
-    "server-probe-staging-async-job": 21,
+    "server-probe-staging-async-job": 22,
     "server-operator-authority": 7,
     "server-operator-credential-rotate": 19,
     "server-operator-egress-boundary": 27,
