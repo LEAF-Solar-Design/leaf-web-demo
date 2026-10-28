@@ -72,6 +72,23 @@ afterEach(() => {
 })
 
 describe('After save read model', () => {
+  it('reports dashboard-only Practice for standalone providers before and after a save', async () => {
+    const client = fakeArtifactsClient()
+    const standalone = createHostProvider({ framed: false })
+    const embedded = createHostProvider({ framed: true })
+    const afterSave = createAfterSaveClient({ provider: standalone, artifacts: client, now: () => at + 7000 })
+    const framedAfterSave = createAfterSaveClient({ provider: embedded, artifacts: client, now: () => at + 7000 })
+    expect(afterSave.read()).toMatchObject({ status: 'dashboard_only', saved: null, match: null, elapsed_ms: 0 })
+    expect(framedAfterSave.read().status).toBe('none')
+    client.update({ lastSaved: saved })
+    expect(afterSave.read()).toMatchObject({ status: 'dashboard_only', saved, match: null, elapsed_ms: 0 })
+    expect(framedAfterSave.read()).toMatchObject({ status: 'pending', saved, match: null, elapsed_ms: 7000 })
+    standalone.announce([{ source: 'practice', data: row(), as_of: at }])
+    await act(async () => {})
+    expect(afterSave.read()).toMatchObject({ status: 'dashboard_only', saved, match: null, elapsed_ms: 0,
+      changed: { revision: 2, blockIds: [draft.blocks[0].id] }, savedDocument: draft })
+  })
+
   it('has no result before a save, then reports elapsed pending time and notifies subscribers', () => {
     const { client, afterSave } = fixture(null)
     expect(afterSave.read()).toMatchObject({ saved: null, match: null, status: 'none', elapsed_ms: 0 })
@@ -119,6 +136,20 @@ describe('After save read model', () => {
 })
 
 describe('After save comparison', () => {
+  it('explains dashboard-only Practice without a pending status or seconds counter', () => {
+    render(<AfterSavePanel view={{ status: 'dashboard_only', saved, match: { data: row() }, elapsed_ms: 7000 }} document={draft} />)
+    const panel = screen.getByRole('region', { name: 'After save' })
+    const message = within(panel).getByText('Practice runs from the ops dashboard (Practice this draft).')
+    expect(message).toBeVisible()
+    expect(message.tagName).toBe('P')
+    expect(within(panel).queryByRole('status')).toBeNull()
+    expect(within(panel).queryByText(/\d+ s/)).toBeNull()
+    expect(within(panel).queryByRole('heading', { name: 'Candidate (simulated)' })).toBeNull()
+    expect(within(panel).queryByText(/Simulated replay, not a verdict/)).toBeNull()
+    expect(within(panel).getByRole('heading', { name: 'After save · r2' })).toBeVisible()
+    expect(within(panel).getByText('Simulated, not a verdict.')).toBeVisible()
+  })
+
   it('outlines a saved block when its registry version changes', async () => {
     const { announce, afterSave, client } = fixture()
     const graph = addBlock(first, registry['adjust-none@1.0.0'])
@@ -360,6 +391,23 @@ describe('After save comparison', () => {
 })
 
 describe('Strategy mounts', () => {
+  it('keeps standalone Practice dashboard-only after a save as time passes', async () => {
+    vi.useFakeTimers()
+    vi.setSystemTime(at)
+    const client = fakeArtifactsClient()
+    render(<GraphView initialDocument={draft} client={client} />)
+    await act(async () => { await vi.dynamicImportSettled() })
+    act(() => client.update({ lastSaved: saved }))
+    const panel = screen.getByRole('region', { name: 'After save' })
+    expect(within(panel).getByText('Practice runs from the ops dashboard (Practice this draft).')).toBeVisible()
+    expect(within(panel).queryByText(/Practice pending/)).toBeNull()
+    act(() => vi.advanceTimersByTime(3000))
+    expect(within(panel).getByText('Practice runs from the ops dashboard (Practice this draft).')).toBeVisible()
+    expect(within(panel).queryByText(/Practice pending/)).toBeNull()
+    expect(within(panel).queryByRole('status')).toBeNull()
+    expect(within(panel).queryByText(/\d+ s/)).toBeNull()
+  })
+
   it('ticks pending time after a save and refreshes on a provider revision without leaking results into canvas drafts', async () => {
     vi.useFakeTimers()
     vi.setSystemTime(at)
