@@ -1,17 +1,21 @@
 import { createHash } from 'node:crypto'
 import { lstatSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs'
-import { basename, dirname, resolve, sep } from 'node:path'
+import { basename, dirname, isAbsolute, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { artifactReference, boundInput, collectPersonaRuns, evidenceFor, MAX_INPUT_BYTES, MAX_RECEIPT_BYTES, redact } from './report.mjs'
 import { buildPersonaReport } from './personaReport.mjs'
 
 const usage = 'Usage: --manifest <json> --receipt <json> --out <json>'
 
-function checkedPath(value, base, output = false, origin = base) {
-  if (typeof value !== 'string' || !value || /[\x00-\x1f\\%?#]/.test(value)
-    || value.split('/').includes('..')) throw new Error('Invalid path: traversal is forbidden')
-  const path = resolve(origin, value)
-  const root = realpathSync(base)
+function pathSyntax(value) {
+  if (typeof value !== 'string' || !value || /[\x00-\x1f%?#]/.test(value)
+    || value.split(/[\\/]/).includes('..')) throw new Error('Invalid path: traversal is forbidden')
+  return value.replace(/\\/g, '/')
+}
+
+function checkedPath(value, base, output = false, origin = base, roots = []) {
+  const path = resolve(origin, pathSyntax(value))
+  const allowedRoots = [realpathSync(base), ...roots]
   let missing = false
   if (output) {
     try { lstatSync(path) } catch (error) {
@@ -21,7 +25,9 @@ function checkedPath(value, base, output = false, origin = base) {
   }
   // lstat distinguishes a new output from a dangling symlink, which must fail.
   const actual = missing ? resolve(realpathSync(dirname(path)), basename(path)) : realpathSync(path)
-  if (actual !== root && !actual.startsWith(root + sep)) throw new Error('Path escapes input root')
+  if (!allowedRoots.some((root) => actual === root || actual.startsWith(root.endsWith(sep) ? root : root + sep))) {
+    throw new Error('Path escapes input root')
+  }
   return actual
 }
 
@@ -46,23 +52,34 @@ export function personaReportCli(args) {
   const manifestArgument = flags.get('--manifest')
   // An absolute manifest can locate a portable input bundle outside the checkout.
   // Its lexical parent is the trust boundary; symlinks cannot relocate the file.
-  const base = dirname(resolve(manifestArgument))
+  const base = dirname(resolve(pathSyntax(manifestArgument)))
   const manifest = readJson(checkedPath(manifestArgument, base, false, process.cwd()))
   if (!manifest || manifest.schema !== 'leaf.persona-inputs.v1' || !Array.isArray(manifest.inputs)
     || manifest.inputs.length < 1 || manifest.inputs.length > 16) throw new Error('Invalid persona inputs manifest')
+  if (manifest.roots !== undefined && (!Array.isArray(manifest.roots) || manifest.roots.length > 17)) {
+    throw new Error('Invalid persona input roots')
+  }
+  const roots = (manifest.roots ?? []).map((value) => {
+    const path = pathSyntax(value)
+    if (!isAbsolute(path)) throw new Error('Input root must be absolute')
+    const root = realpathSync(path)
+    if (!statSync(root).isDirectory()) throw new Error('Input root must be a directory')
+    return root
+  })
+  const inputPath = (value) => checkedPath(value, base, false, base, roots)
   const ids = new Set()
   for (const input of manifest.inputs) {
     if (!input || typeof input.id !== 'string' || !/^[a-z0-9-]{1,64}$/.test(input.id) || ids.has(input.id)) throw new Error('Invalid or duplicate input id')
     ids.add(input.id)
   }
-  const featureMap = readJson(checkedPath(manifest.feature_map, base), 8 * MAX_RECEIPT_BYTES)
+  const featureMap = readJson(inputPath(manifest.feature_map), 8 * MAX_RECEIPT_BYTES)
   const walkReceipt = readJson(checkedPath(flags.get('--receipt'), base, false, process.cwd()))
   const outputPath = checkedPath(flags.get('--out'), base, true, process.cwd())
   const runs = []
   let evidenceBytes = 0
   for (const input of manifest.inputs) {
-    const playwrightReport = readJson(checkedPath(input.report, base))
-    const artifactsRoot = checkedPath(input.artifacts_root, base)
+    const playwrightReport = readJson(inputPath(input.report))
+    const artifactsRoot = inputPath(input.artifacts_root)
     if (!statSync(artifactsRoot).isDirectory()) throw new Error('artifacts_root must be a directory')
     const decodeEvidence = (result) => {
       const attachment = result.attachments.find((item) => item.name === 'walk-evidence')

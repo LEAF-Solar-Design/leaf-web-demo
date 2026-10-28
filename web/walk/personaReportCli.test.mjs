@@ -71,6 +71,103 @@ test('inline attachments get deterministic shard-specific references', (t) => {
   assert.equal(readFileSync(join(directory, 'out.json'), 'utf8'), first)
 })
 
+test('native joined paths and backslash separators are accepted, but backslash traversal is refused', (t) => {
+  const { directory, manifest, save, run } = fixture(t)
+  manifest.inputs[0].report = 'one\\report.json'
+  manifest.inputs[0].artifacts_root = 'one\\walk\\'
+  const reportPath = join(directory, 'one', 'report.json')
+  const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+  report.suites[0].specs[0].tests[0].results[0].attachments = [{ name: 'walk-evidence', body:
+    Buffer.from(JSON.stringify({ schema: 'leaf.walk-evidence.v1' })).toString('base64') }]
+  writeJson(reportPath, report)
+  save()
+  const args = ['--manifest', join(directory, 'manifest.json'), '--receipt', join(directory, 'receipt.json'),
+    '--out', join(directory, 'out.json')]
+  const result = run(args)
+  assert.equal(result.status, 0, result.stderr)
+  manifest.inputs[0].report = 'a\\..\\b'
+  save()
+  assert.match(run(args).stderr, /traversal/)
+  assert.match(run(['--manifest', 'a\\..\\b', '--receipt', 'receipt.json', '--out', 'out.json']).stderr, /traversal/)
+})
+
+test('declared roots allow external shard inputs and feature maps but not receipts or output', (t) => {
+  const { directory, manifest, save, run } = fixture(t)
+  const outside = mkdtempSync(join(tmpdir(), 'persona-shards-'))
+  t.after(() => rmSync(outside, { recursive: true, force: true }))
+  mkdirSync(join(outside, 'shard', 'walk'), { recursive: true })
+  writeFileSync(join(outside, 'shard', 'report.json'), readFileSync(join(directory, 'one', 'report.json')))
+  writeFileSync(join(outside, 'shard', 'walk', 'evidence.json'), readFileSync(join(directory, 'one', 'walk', 'evidence.json')))
+  writeFileSync(join(outside, 'feature-map.json'), readFileSync(join(directory, 'feature-map.json')))
+  writeFileSync(join(outside, 'receipt.json'), readFileSync(join(directory, 'receipt.json')))
+  manifest.inputs[0].report = join(outside, 'shard', 'report.json')
+  manifest.inputs[0].artifacts_root = join(outside, 'shard')
+  save()
+  assert.match(run().stderr, /escapes input root/)
+  manifest.roots = [outside]
+  save()
+  assert.equal(run().status, 0)
+  manifest.feature_map = join(outside, 'feature-map.json')
+  save()
+  const accepted = run()
+  assert.equal(accepted.status, 0, accepted.stderr)
+  symlinkSync(outside, join(directory, 'shard-root'), 'dir')
+  manifest.roots = [join(directory, 'shard-root')]
+  save()
+  const canonicalized = run()
+  assert.equal(canonicalized.status, 0, canonicalized.stderr)
+  const args = ['--manifest', 'manifest.json', '--receipt', 'receipt.json', '--out', join(outside, 'out.json')]
+  assert.match(run(args).stderr, /escapes input root/)
+  assert.match(run(['--manifest', 'manifest.json', '--receipt', join(outside, 'receipt.json'),
+    '--out', 'out.json']).stderr, /escapes input root/)
+  delete manifest.roots
+  save()
+  assert.match(run().stderr, /escapes input root/)
+  manifest.feature_map = 'feature-map.json'
+  manifest.inputs[0].report = 'one/report.json'
+  save()
+  assert.match(run().stderr, /escapes input root/)
+})
+
+test('roots must be an array of at most 17 existing absolute directories', (t) => {
+  const { directory, manifest, save, run } = fixture(t)
+  for (const roots of [['one'], [join(directory, 'missing')], [join(directory, 'receipt.json')],
+    Array(18).fill(directory), null, directory]) {
+    manifest.roots = roots
+    save()
+    const result = run()
+    assert.notEqual(result.status, 0)
+    assert.ok(result.stderr.trim())
+  }
+  for (const roots of [[], Array(17).fill(directory)]) {
+    manifest.roots = roots
+    save()
+    const result = run()
+    assert.equal(result.status, 0, result.stderr)
+  }
+})
+
+test('live-style inline base64 evidence without paths leaves every lens unknown', (t) => {
+  const { directory, run } = fixture(t)
+  for (const id of ['one', 'two']) {
+    const reportPath = join(directory, id, 'report.json')
+    const report = JSON.parse(readFileSync(reportPath, 'utf8'))
+    const evidence = readFileSync(join(directory, id, 'walk', 'evidence.json'))
+    report.suites[0].specs[0].tests[0].results[0].attachments = [
+      { name: 'walk-evidence', contentType: 'application/json', body: evidence.toString('base64') },
+    ]
+    writeJson(reportPath, report)
+  }
+  const result = run()
+  assert.equal(result.status, 0, result.stderr)
+  const report = JSON.parse(readFileSync(join(directory, 'out.json'), 'utf8'))
+  assert.deepEqual(report.totals, { PASS: 0, FAIL: 0, UNKNOWN: 20, UNAVAILABLE: 0 })
+  assert.ok(report.rows.every((row) => row.persona_verdict === 'UNKNOWN'))
+  assert.equal(report.evidence_bundles[0].sources.length, 2)
+  assert.ok(report.evidence_bundles[0].sources.every((source) =>
+    /^persona-sources\/(one|two)\/inline\/[a-f0-9]{64}\.json$/.test(source)))
+})
+
 test('unknown, missing and duplicate flags fail closed', (t) => {
   const { run } = fixture(t)
   for (const args of [[], ['--manifest', 'manifest.json'],
