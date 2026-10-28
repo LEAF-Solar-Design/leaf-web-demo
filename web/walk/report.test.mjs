@@ -1,11 +1,13 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { readFileSync, existsSync } from 'node:fs'
+import { readFileSync, existsSync, mkdtempSync, mkdirSync, writeFileSync, symlinkSync, rmSync } from 'node:fs'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 import { createHash } from 'node:crypto'
 import { buildFeatureMap } from './featureMap.mjs'
 import { stateRecipe, SOLAR_TOOL_SETUP } from '../e2e/walk/probes.mjs'
 import { uxObservation } from '../e2e/walk/uxEvidence.mjs'
-import { buildReceipt, validateReceipt, redact, artifactReference, MAX_INPUT_BYTES, MAX_RECEIPT_BYTES } from './report.mjs'
+import { buildReceipt, validateReceipt, redact, artifactReference, attachmentJson, evidenceFor, collectPersonaRuns, MAX_INPUT_BYTES, MAX_RECEIPT_BYTES } from './report.mjs'
 
 const sample = JSON.parse(readFileSync(new URL('./fixtures/walk-report.sample.json', import.meta.url), 'utf8'))
 const schema = JSON.parse(readFileSync(new URL('./fixtures/leaf.studio-walk.v1.schema.json', import.meta.url), 'utf8'))
@@ -22,6 +24,56 @@ const setErrorMessage = (result, message) => {
   result.errors = [result.error]
 }
 const attach = (data) => ({ name: 'walk-evidence', contentType: 'application/json', body: Buffer.from(JSON.stringify(data)).toString('base64') })
+
+test('explicit evidence roots resolve shard attachments and refuse traversal and symlink escapes', (t) => {
+  const directory = mkdtempSync(join(tmpdir(), 'walk-evidence-'))
+  t.after(() => rmSync(directory, { recursive: true, force: true }))
+  const root = join(directory, 'shard')
+  mkdirSync(join(root, 'walk'), { recursive: true })
+  const evidence = { schema: 'leaf.walk-evidence.v1', steps: [] }
+  writeFileSync(join(root, 'walk/evidence.json'), JSON.stringify(evidence))
+  const attachment = { name: 'walk-evidence', path: 'walk/evidence.json' }
+  assert.deepEqual(attachmentJson(attachment, root), evidence)
+  assert.deepEqual(evidenceFor({ attachments: [attachment] }, root), evidence)
+  assert.deepEqual(attachmentJson(attach(evidence)), evidence)
+  assert.deepEqual(evidenceFor({ attachments: [attach(evidence)] }), evidence)
+  assert.deepEqual(evidenceFor({}), {})
+  writeFileSync(join(directory, 'outside.json'), JSON.stringify(evidence))
+  symlinkSync(join(directory, 'outside.json'), join(root, 'walk/escape.json'))
+  assert.throws(() => attachmentJson({ path: 'walk/escape.json' }, root), /escapes artifacts/)
+  assert.throws(() => attachmentJson({ path: 'walk/../../outside.json' }, root), /outside artifacts/)
+})
+
+test('persona projection keeps inventory retries in report order without changing inputs or evidence', () => {
+  const featureMap = { entries: [{ id: 'action:open', states: ['ready', 'other'], viewports: ['desktop'],
+    state_viewports: { ready: ['phone'] } }] }
+  const pathResult = (path) => ({ attachments: [{ name: 'walk-evidence', path }] })
+  const first = pathResult('walk/first.json'), second = pathResult('web/artifacts/walk/second.json')
+  const inline = { attachments: [attach({})] }
+  const report = { suites: [{ specs: [
+    { title: 'first-run-open @phone', tests: [{ results: [first] }] },
+    { title: 'control-census:studio [ready] @phone', tests: [{ results: [first] }] },
+    { title: 'action:open [ready] @phone', tests: [{ projectName: 'phone', results: [first, {}, second, inline] }] },
+  ], suites: [{ specs: [{ title: 'action:open [other] @desktop', tests: [{ projectName: 'desktop', results: [first] }] }] }] }] }
+  const decoded = { schema: 'leaf.walk-evidence.v1', evidence_ref: 'inline/stable.json' }
+  const snapshot = structuredClone({ report, featureMap, identity })
+  const seen = []
+  const runs = collectPersonaRuns({ playwrightReport: report, featureMap, identity,
+    decodeEvidence: (result) => { seen.push(result); return decoded } })
+  assert.deepEqual(seen, [first, second, inline, first])
+  assert.deepEqual(runs.map((run) => run.evidence_ref), ['walk/first.json', 'walk/second.json', 'inline/stable.json', 'walk/first.json'])
+  assert.deepEqual(runs.map((run) => [run.state, run.viewport]), [['ready', 'phone'], ['ready', 'phone'], ['ready', 'phone'], ['other', 'desktop']])
+  assert.ok(runs.every((run) => run.evidence === decoded))
+  assert.deepEqual({ report, featureMap, identity }, snapshot)
+  runs[0].identity.deployment_identity.commit = 'changed'
+  assert.deepEqual(identity, snapshot.identity)
+  assert.deepEqual(runs[1].identity, snapshot.identity)
+  report.suites[0].specs[2].tests[0].projectName = 'desktop'
+  assert.throws(() => collectPersonaRuns({ playwrightReport: report, featureMap, identity, decodeEvidence: () => decoded }), /project does not match/)
+  report.suites[0].specs[2].tests[0].projectName = 'phone'
+  report.suites[0].specs[2].title = 'action:open [ready] @desktop'
+  assert.throws(() => collectPersonaRuns({ playwrightReport: report, featureMap, identity, decodeEvidence: () => decoded }), /absent from the feature map/)
+})
 test('control-census titles produce desktop and phone verdicts and a trusted failure oracle', () => {
   const report = { suites: [{ specs: [
     { title: 'control-census:studio [ready] @desktop', tests: [{ projectName: 'desktop', results: [{ status: 'passed' }] }] },
