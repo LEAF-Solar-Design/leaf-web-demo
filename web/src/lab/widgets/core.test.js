@@ -95,6 +95,41 @@ describe('frozen designer migration', () => {
 })
 
 describe('closed bounded document', () => {
+  it('ignores drafts without a usable la format', () => {
+    for (const doc of [
+      undefined, null, false, 42, 'draft', [], {},
+      ...[null, false, 42, 'draft', []].map((formats) => ({ formats })),
+      ...[undefined, null, false, 42, 'draft', []].map((la) => ({ formats: { la } })),
+    ]) {
+      expect(() => laFitProblem(doc)).not.toThrow()
+      expect(laFitProblem(doc)).toBeNull()
+    }
+  })
+  it('judges partial la drafts using only finite geometry', () => {
+    const message = 'The lock screen layout must fit in 128 pt. Lower its height or move elements up.'
+    for (const els of [undefined, null, false, 42, 'draft', {}, { every: true }]) {
+      for (const h of [undefined, null, '160', NaN, Infinity, -Infinity, 128, 160]) {
+        const doc = { formats: { la: { h, els } } }
+        expect(() => laFitProblem(doc)).not.toThrow()
+        expect(laFitProblem(doc)).toBe(h === 160 ? message : null)
+      }
+    }
+    const unmeasurable = [
+      null, undefined, false, 42, 'draft', {}, { y: 129 }, { h: 129 },
+      { y: '129', h: 1 }, { y: 129, h: '1' }, { y: null, h: 129 },
+      { y: NaN, h: 129 }, { y: Infinity, h: 1 }, { y: 129, h: -Infinity },
+    ]
+    for (const h of [undefined, null, '160', {}, NaN, Infinity, -Infinity, 100, 128, 160]) {
+      const height = Number.isFinite(h) ? h : LA_USABLE_HEIGHT
+      const la = { h, els: [...unmeasurable, { y: height - 1, h: 1 }] }
+      const doc = { formats: { la } }
+      expect(() => laFitProblem(doc)).not.toThrow()
+      expect(laFitProblem(doc)).toBe(h === 160 ? message : null)
+      la.els.push({ y: height, h: 1 })
+      expect(() => laFitProblem(doc)).not.toThrow()
+      expect(laFitProblem(doc)).toBe(message)
+    }
+  })
   it('caps Studio la publication without changing the renderer frame or validation', () => {
     expect(FORMATS.la).toMatchObject({ w: 361, h: 160 })
     expect(LA_USABLE_HEIGHT).toBe(128)
