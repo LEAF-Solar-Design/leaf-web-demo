@@ -5,6 +5,8 @@ import declaration from '../../../server/solar_tools/solar_string_conductors.jso
 import SolarConductorForm from './SolarConductorForm.jsx'
 import { PROJECT_SIZING_CONDUCTOR_REASONS, projectSizingConductorReason } from './solarSizingModel.js'
 import { createSolarProjectClient } from './solarProjectClient.js'
+import workerUnavailable from './__fixtures__/workerUnavailable.json'
+import { projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 
 afterEach(() => { cleanup(); vi.useRealTimers() })
 const row = declaration.record
@@ -139,6 +141,32 @@ const r9Sentences = {
 }
 
 describe('SolarConductorForm', () => {
+  it.each([true, false])('G20b conductor worker refusal classification: %s', async (worker) => {
+    const h = r9Harness()
+    h.props.onProjectSubmit.mockResolvedValue({ ok: false, status: 503,
+      reason: worker ? 'SIP_R4_WORKER_UNAVAILABLE' : 'HTTP_ERROR', envelope: worker ? workerUnavailable : null })
+    render(<SolarConductorForm {...h.props} />)
+    await waitFor(() => expect(stringRow('A1')).toBeTruthy())
+    choose()
+    await r9Ready()
+    fireEvent.click(apply())
+    const refusal = projectSolarWorkerRefusal('solar-string-conductors')
+    await waitFor(() => expect(screen.getByTestId('project-solar-conductor-feedback').textContent).toBe(worker
+      ? `${refusal.message} (${refusal.reasonCode})` : `${PROJECT_SIZING_CONDUCTOR_REASONS.service_unavailable} (HTTP_ERROR)`))
+    expect(screen.getByLabelText('Conductor').disabled).toBe(false)
+    if (worker) {
+      expect(screen.queryByRole('button', { name: 'Retry' })).toBeNull()
+      expect(screen.queryByText(/uncertain|outcome is unknown|retry the same request/i)).toBeNull()
+      const intent = h.props.onProjectSubmit.mock.calls[0][0]
+      fireEvent.click(screen.getByRole('button', { name: 'Refresh preview' }))
+      await r9Ready()
+      expect(h.props.newProjectIntentKey).toHaveBeenCalledTimes(2)
+      fireEvent.click(apply())
+      await waitFor(() => expect(h.props.onProjectSubmit).toHaveBeenCalledTimes(2))
+      expect(h.props.onProjectSubmit.mock.calls[1][0]).not.toBe(intent)
+    }
+  })
+
   it('R9-47 a conflicting project id refuses before context preview or handoff', async () => {
     const h = r9Harness()
     render(<SolarConductorForm {...h.props} projectId="99999999-9999-9999-9999-999999999999" />)

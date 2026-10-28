@@ -1,4 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
+import { readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js';
 import {
   SETTINGS_FIELDS, DRAWING_UNITS, SOLAR_SETTINGS_REASONS, L2_COLLECTORS_NOTE,
   parseField, deriveFormState, buildSettingsParams, pyStrip,
@@ -308,7 +309,13 @@ function ProjectSettingsForContext(props) {
         { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent })
         || { ok: false, reason: 'SIP_R7_WORKSPACE_NO_RESULT' };
       if (!pending.isCurrent()) { traceExit('superseded_result'); return; }
-      if (result?.ok && result.status === 202 && result.data?.status === 'submitted'
+      if (readProjectSolarWorkerRefusal(result)) {
+        const refusal = projectSolarWorkerRefusal('solar-settings');
+        scope.candidate = null;
+        scope.armed = null;
+        setFeedback({ scope, generation: scope.generation, outcome: result, text: refusal.message, code: refusal.reasonCode });
+        traceExit('refused');
+      } else if (result?.ok && result.status === 202 && result.data?.status === 'submitted'
           && typeof result.data.job_id === 'string' && projectJobId.test(result.data.job_id)) {
         setFeedback({ scope, generation: scope.generation, outcome: result, text: 'Solar settings submitted.', code: null });
         traceExit('submitted');

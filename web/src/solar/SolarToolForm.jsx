@@ -1,4 +1,5 @@
 import { useEffect, useRef, useState } from 'react'
+import { readProjectSolarWorkerRefusal, projectSolarWorkerRefusal } from './solarProjectCompletion.js'
 import SchemaForm, { defaultsOf } from '../components/SchemaForm.jsx'
 import { solarFormKeys, solarView } from './solarView.js'
 import { solarFlowPrefill, solarFlowStepId, PROJECT_EQUIPMENT_TOOL, deriveProjectEquipmentState,
@@ -270,7 +271,13 @@ export function ProjectSolarEquipmentForm(props) {
       const result = await latest.current.onProjectSubmit(accepted.candidate.intent,
         { binding, authorityKey, signal: pending.signal, isCurrent: pending.isCurrent });
       if (!pending.isCurrent()) return;
-      if (result?.ok && result.status === 202 && result.data?.status === 'submitted'
+      if (readProjectSolarWorkerRefusal(result)) {
+        const refusal = projectSolarWorkerRefusal(PROJECT_EQUIPMENT_TOOL);
+        scope.retry = null;
+        scope.candidate = null;
+        scope.armed = null;
+        setFeedback({ scope, generation: scope.generation, outcome: result, text: refusal.message, code: refusal.reasonCode });
+      } else if (result?.ok && result.status === 202 && result.data?.status === 'submitted'
           && typeof result.data.job_id === 'string' && equipmentJobId.test(result.data.job_id)) {
         scope.retry = null;
         setFeedback({ scope, generation: scope.generation, outcome: result, text: 'Equipment request submitted.', code: null });
@@ -333,7 +340,7 @@ export function ProjectSolarEquipmentForm(props) {
             onChange={(next) => change(setDraft, { scope, values: next })} onValidityChange={validity} />
         </div>
         <button type="button" className="chip-act" disabled={Boolean(reason)} onClick={submit}>Review &amp; run</button>
-        {runMessage && runMessage.outcome?.ok !== true && <button type="button" className="chip-act"
+        {runMessage && runMessage.code !== 'sip_r4_worker_unavailable' && runMessage.outcome?.ok !== true && <button type="button" className="chip-act"
           disabled={Boolean(reason)} onClick={submit}>Retry</button>}
         <button type="button" className="chip-act" disabled={submitting} onClick={() => {
           invalidate();
