@@ -48,6 +48,16 @@ if name == 'aws':
     if fault == 'aws': sys.exit(1)
     print('secret-password')
 elif args[:2] == ['buildx', 'build']:
+    phrases = {
+        'build-ratelimit': 'toomanyrequests: You have reached your pull rate limit',
+        'build-nobuildx': "docker: 'buildx' is not a docker command.",
+        'build-daemon': 'Cannot connect to the Docker daemon at unix:///var/run/docker.sock',
+        'build-context': 'failed to compute cache key: "/executor/x.py": not found',
+    }
+    if fault in phrases:
+        print(phrases[fault], file=sys.stderr)
+        print(str(root) + '/secret-password', file=sys.stderr)
+        sys.exit(1)
     if fault == 'build':
         print(str(root) + '/secret-password', file=sys.stderr)
         sys.exit(1)
@@ -327,10 +337,55 @@ def test_refusal_names_stage_without_leaking_details(tmp_path, fault, stage):
     assert completed.returncode == 1
     assert re.fullmatch(
         r'Instant execution producer refused publication or evidence '
-        r'\(stage=' + stage + r', error=[A-Za-z_][A-Za-z0-9_]*\)\n', completed.stderr)
+        r'\(stage=' + stage + r', error=[A-Za-z_][A-Za-z0-9_]*, cause=[a-z_]+, status=(?:none|[0-9]+)\)\n', completed.stderr)
     for private in (str(tmp_path), str(source), env['LEAF_FORGE_REQUEST_FILE'],
                     '/tmp/leaf-instant-producer.', 'secret-password'):
         assert private not in completed.stderr
+    no_publication(output, calls)
+
+
+@POSIX
+@pytest.mark.parametrize('fault, cause', [
+    ('build', 'unclassified'), ('build-ratelimit', 'registry_rate_limited'),
+    ('build-nobuildx', 'buildx_missing'), ('build-daemon', 'docker_daemon_unavailable'),
+    ('build-context', 'build_context_missing')])
+def test_build_failure_names_cause_without_leaking(tmp_path, fault, cause):
+    source, output, request, env = case(tmp_path)
+    env['FAKE_FAULT'] = fault
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=build, error=[A-Za-z_][A-Za-z0-9_]*, cause=' + cause + r', status=1\)\n',
+        completed.stderr)
+    for private in ('secret-password', str(tmp_path), 'toomanyrequests'):
+        assert private not in completed.stdout + completed.stderr
+    no_publication(output, calls)
+
+
+@POSIX
+def test_scan_timeout_names_timeout_cause(tmp_path):
+    source, output, request, env = case(tmp_path)
+    env['FAKE_FAULT'] = 'timeout'
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=scan, error=[A-Za-z_][A-Za-z0-9_]*, cause=timeout, status=124\)\n',
+        completed.stderr)
+    no_publication(output, calls)
+
+
+@POSIX
+def test_input_refusal_has_no_cause(tmp_path):
+    source, output, request, env = case(tmp_path)
+    request['executor_package']['extra'] = 'unexpected'
+    completed, calls = drive(request, env)
+    assert completed.returncode == 1
+    assert re.fullmatch(
+        r'Instant execution producer refused publication or evidence '
+        r'\(stage=inputs, error=[A-Za-z_][A-Za-z0-9_]*, cause=none, status=none\)\n',
+        completed.stderr)
     no_publication(output, calls)
 
 

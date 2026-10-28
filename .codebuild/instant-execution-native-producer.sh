@@ -74,6 +74,8 @@ import subprocess
 import sys
 
 stage = 'inputs'
+cause = 'none'
+status = 'none'
 scratch, version, scanner = sys.argv[1:]
 work = Path(scratch)
 registry = '807034087062.dkr.ecr.us-east-1.amazonaws.com'
@@ -105,11 +107,40 @@ def bounded(path, limit):
     require(0 < len(value) <= limit)
     return value
 
+# The producer prints a cause code from a fixed table, never tool output.
+def classify(data: bytes) -> str:
+    text = data.decode('utf-8', errors='replace').lower()
+    for code, phrases in (
+        ('registry_rate_limited', ('toomanyrequests', 'rate limit')),
+        ('buildx_missing', ('is not a docker command', 'unknown command "buildx"', "docker: 'buildx'")),
+        ('docker_daemon_unavailable', ('cannot connect to the docker daemon', 'is the docker daemon running')),
+        ('base_image_unavailable', ('pull access denied', 'manifest unknown', 'not found: manifest',
+                                    'failed to resolve source metadata')),
+        ('build_context_missing', ('failed to compute cache key', 'no such file or directory',
+                                   'not found in build context')),
+        ('network_unreachable', ('i/o timeout', 'no such host', 'connection refused',
+                                 'network is unreachable', 'tls handshake timeout')),
+        ('disk_full', ('no space left on device',)),
+    ):
+        if any(phrase in text for phrase in phrases):
+            return code
+    return 'unclassified'
+
 def run(args, seconds, *, capture=False):
+    global cause, status
     path = work / 'command.log'
     with path.open('wb') as stream:
         proc = subprocess.run(['timeout', '--kill-after=30s', str(seconds) + 's', *args],
                               stdout=stream, stderr=subprocess.STDOUT, check=False)
+    if proc.returncode != 0:
+        status = str(proc.returncode)
+        if proc.returncode in (124, 137):
+            cause = 'timeout'
+        else:
+            with path.open('rb') as stream:
+                stream.seek(0, os.SEEK_END)
+                stream.seek(max(0, stream.tell() - 65536))
+                cause = classify(stream.read(65536))
     require(proc.returncode == 0)
     require(path.stat().st_size <= 16777216)
     return bounded(path, 1048576).decode('utf-8') if capture else None
@@ -224,6 +255,6 @@ try:
         destination.unlink(missing_ok=True)
         raise
 except Exception as error:
-    print(f'Instant execution producer refused publication or evidence (stage={stage}, error={type(error).__name__})', file=sys.stderr)
+    print(f'Instant execution producer refused publication or evidence (stage={stage}, error={type(error).__name__}, cause={cause}, status={status})', file=sys.stderr)
     sys.exit(1)
 PY
