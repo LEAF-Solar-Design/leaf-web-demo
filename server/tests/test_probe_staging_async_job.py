@@ -742,6 +742,50 @@ def test_happy_path_creates_exactly_one_job_and_fetches_result(monkeypatch):
     assert not f.paths(TENANT, receipt["drawing"])[0].exists()
 
 
+def test_submission_response_is_recorded_and_validated(monkeypatch):
+    keys = ("submit_http_status", "submit_body_status", "submit_error_code")
+    for response, expected in [
+        ((202, {"status": "submitted", "job_id": JOB}), (202, "submitted", None)),
+        ((409, {"ok": False, "error": {"error_code": "IDEMPOTENCY_CONFLICT"}}),
+         (409, None, "IDEMPOTENCY_CONFLICT")),
+        (None, (None, None, None)),
+        ((True, {"status": ["unexpected"], "error_code": "lowercase"}),
+         (None, "other", None)),
+        ((599, {"status": "queued", "error": {"error_code": "NESTED"},
+                 "error_code": "TOP_LEVEL"}), (599, "queued", "NESTED")),
+        ((100, {"error": {"error_code": "invalid"}, "error_code": "TOP_LEVEL"}),
+         (100, None, "TOP_LEVEL")),
+        (("202", []), (None, None, None)),
+    ]:
+        f = Fake(monkeypatch)
+        original_http = f.http
+
+        def http(method, path, token, body=None, correlation=None):
+            result = original_http(method, path, token, body, correlation)
+            if method == "POST" and path == "/api/run":
+                if response is None:
+                    raise OSError("SENTINEL_RAW_EXCEPTION")
+                return response
+            return result
+
+        monkeypatch.setattr(f, "http", http)
+        assert run(f) == "passed"
+        receipt = f.saved[-1]
+        assert tuple(receipt[key] for key in keys) == expected
+        assert len(f.posts) == 1
+        assert all(saved[key] is None for saved in f.saved
+                   if not saved["submission_started"] for key in keys)
+        p.validate_receipt(receipt)
+        for key, value in [
+            ("submit_http_status", 99), ("submit_http_status", True),
+            ("submit_http_status", "202"), ("submit_body_status", "weird"),
+            ("submit_error_code", "lowercase"),
+        ]:
+            tainted = {**receipt, key: value}
+            with pytest.raises(p.Refusal, match="receipt_refused"):
+                p.validate_receipt(tainted)
+
+
 def test_ambiguous_submit_recovers_by_read_without_reposting(monkeypatch):
     f = Fake(monkeypatch, "lost_ack")
     assert run(f) == "passed"
@@ -892,13 +936,13 @@ def test_evidence_is_sanitized_offline_and_gate_registered(monkeypatch, capsys):
         p.validate_receipt(tainted)
     registration = (ROOT / "scripts/run-all-gates.py").read_text()
     assert 'Suite("server-probe-staging-async-job"' in registration
-    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 22)' in registration
+    assert '_py_pytest("tests/test_probe_staging_async_job.py"), 23)' in registration
     selection = json.loads((ROOT / "scripts/ci/test-selection-map.json").read_text())
     assert "server-probe-staging-async-job" in selection["mandatory_suite_ids"]
     floors = (ROOT / "scripts/test_gate_runner.py").read_text()
-    assert '"server-probe-staging-async-job": 22' in floors
+    assert '"server-probe-staging-async-job": 23' in floors
     no_skip = floors.split("_OPERATOR_NO_SKIP_FILES = frozenset({", 1)[1].split("})", 1)[0]
     assert '"server-probe-staging-async-job"' in no_skip
     source = Path(__file__).read_text()
-    assert source.count("\ndef test_") == 22
+    assert source.count("\ndef test_") == 23
     assert not any(name in sys.modules for name in ("probe_staging_async_job_live",))

@@ -220,6 +220,8 @@ class Probe:
                 "submission_started": False, "setup_started": False,
                 "job_id": None, "close_started": False,
                 "samples": [], "acknowledged_202": False,
+                "submit_http_status": None, "submit_body_status": None,
+                "submit_error_code": None,
                 "outcome": "failed", "cleanup_complete": False,
                 "removal_started": False,
                 "result_match": False, "database_http_agree": False,
@@ -240,6 +242,19 @@ class Probe:
                     "tool": TOOL, "params": {"layer": "p080_r3"}, "dwg": drawing,
                     "dwg_version": 1, "catalog_digest": digest,
                 }, "p080-r3:" + args.run_id)
+                self.receipt["submit_http_status"] = (
+                    status if type(status) is int and 100 <= status <= 599 else None)
+                if isinstance(body, dict):
+                    if "status" in body:
+                        self.receipt["submit_body_status"] = (
+                            body["status"] if body["status"] in
+                            ("submitted", "queued", "running", "complete", "failed") else "other")
+                    error = body.get("error")
+                    for code in (error.get("error_code") if isinstance(error, dict) else None,
+                                 body.get("error_code")):
+                        if isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code):
+                            self.receipt["submit_error_code"] = code
+                            break
                 if status == 202 and body.get("status") == "submitted":
                     candidate = body.get("job_id")
                     if isinstance(candidate, str) and re.fullmatch(r"[0-9a-f-]{36}", candidate):
@@ -439,6 +454,7 @@ def validate_receipt(r):
     keys = {"schema", "drawing", "fixture_sha256", "tenant_sha256", "run_id", "source",
             "submission_started", "setup_started", "job_id", "close_started", "samples",
             "acknowledged_202", "outcome", "cleanup_complete", "removal_started",
+            "submit_http_status", "submit_body_status", "submit_error_code",
             "execution_outcome", "reason"}
     keys.update({"result_match", "database_http_agree", "broker_non_aps"})
     outcomes = {"passed", "failed", "submission_unknown", "cleanup_pending",
@@ -459,6 +475,15 @@ def validate_receipt(r):
         require(type(r.get(key)) is bool, "receipt_refused")
     for key in ("result_match", "database_http_agree", "broker_non_aps"):
         require(type(r.get(key)) is bool, "receipt_refused")
+    status = r.get("submit_http_status")
+    require(status is None or type(status) is int and 100 <= status <= 599,
+            "receipt_refused")
+    require(r.get("submit_body_status") in
+            (None, "submitted", "queued", "running", "complete", "failed", "other"),
+            "receipt_refused")
+    code = r.get("submit_error_code")
+    require(code is None or isinstance(code, str) and re.fullmatch(r"[A-Z][A-Z0-9_]{0,63}", code),
+            "receipt_refused")
     require(r.get("job_id") is None or str(uuid.UUID(r["job_id"])) == r["job_id"],
             "receipt_refused")
     require(isinstance(r.get("samples"), list) and len(r["samples"]) <= 8, "receipt_refused")
