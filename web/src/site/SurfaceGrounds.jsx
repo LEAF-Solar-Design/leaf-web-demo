@@ -22,6 +22,7 @@ import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import { BrowserAssetGround } from './BrowserAssetGround.jsx'
 import { DeviceGround } from '../ios/DeviceGround.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from './groundWindow.js'
+import { isLabEmbedded, parseLabRoute } from '../lab/labRoute.js'
 import '../integrations/ops-workspace.css'
 
 const OpsWorkspaceGround = lazy(() => import('../integrations/OpsWorkspaceGround.jsx')
@@ -43,13 +44,15 @@ function withGroundToolsOccluder(occluders) {
 
 function LabLoadState({ active, studioShell, occluders, failed = false }) {
   const boardRef = useRef(null)
-  const win = useGroundWindow(active, studioShell, boardRef, occluders)
+  const route = typeof window === 'undefined' ? null : parseLabRoute(window.location.pathname, window.location.search)
+  const embedded = isLabEmbedded(route)
+  const win = useGroundWindow(active && !embedded, true, boardRef, occluders)
   return <section ref={boardRef} data-ground="lab" data-leaf-theme="dark" data-leaf-profile="studio"
     hidden={!active} aria-label="Lab workspace"
     data-studio-shell={studioShell ? 'cockpit' : undefined}
-    style={{ position: 'absolute', inset: 0, minWidth: 0, overflow: 'hidden' }}>
+    style={{ position: embedded ? 'fixed' : 'absolute', inset: 0, minWidth: 0, overflow: 'hidden' }}>
     <div data-measured={Boolean(win)}
-      style={{ position: 'absolute', ...(win ? windowStyle(win) : { visibility: 'hidden' }) }}>
+      style={{ position: 'absolute', ...(embedded ? { inset: 0 } : win ? windowStyle(win) : { visibility: 'hidden' }) }}>
       <p role={failed ? 'alert' : 'status'} style={{ color: 'var(--leaf-ink-muted)' }}>{failed ? 'Lab could not be loaded. Reload the page to try again.' : 'Loading Lab…'}</p>
     </div>
   </section>
