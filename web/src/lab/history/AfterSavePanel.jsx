@@ -37,6 +37,7 @@ export default function AfterSavePanel({ view, document }) {
   const attribution = Array.isArray(data.attribution) ? data.attribution : []
   return <section aria-label="After save">
     <h2>After save{view.saved ? ` · r${view.saved.revision}` : ''}</h2>
+    {view.status === 'dashboard_only' && <p>Practice runs from the ops dashboard (Practice this draft).</p>}
     {view.status === 'none' && <p>Save to run a Practice of the last 4 hours.</p>}
     {['pending', 'running'].includes(view.status) && <p role="status">Practice pending · {Math.floor(view.elapsed_ms / 1000)} s</p>}
     {finished && <>
