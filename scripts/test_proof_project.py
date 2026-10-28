@@ -1715,6 +1715,66 @@ def assert_entry_error(scope, operation, error, stage=p.Stage.TEARDOWN):
 
 
 class TestProjectLifetime:
+    def test_d_d_perform_deadline_after_completion(self):
+        c = lifetime_case()
+        clock = c.effects.clock
+        task = SimpleNamespace(checks=0, result=lambda: "done")
+        def done():
+            task.checks += 1
+            if task.checks == 1:
+                return False
+            clock.now = 2.0
+            return True
+        task.done = done
+        c.host.begin_operation = lambda operation: task
+        with pytest.raises(p.ProofRefused) as error:
+            c.scope.perform(p.Stage.MIGRATION, lambda: "done", deadline=1)
+        assert task.checks == 2 and clock.now == 2.0
+        assert error.value.failure == p.Failure(p.Stage.MIGRATION, p.FailureCode.GUARDIAN)
+        assert c.scope.failure is error.value.failure
+        assert c.scope.close().ok
+        committed = []
+        with pytest.raises(p.ProofRefused):
+            c.scope.commit_guard(lambda: (committed.append(True), "COMMITTED")[1])
+        assert committed == [] and c.scope.failure is error.value.failure
+
+    def test_d_d_posix_exited_launcher_group_signalled(self, monkeypatch):
+        c = lifetime_case()
+        signals, checked = [], []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: signals.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), True)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is True
+        assert signals == [(7, p.signal.SIGKILL)]
+        assert checked == [(7, deadline)] and process._stopped
+
+    def test_d_d_posix_exited_launcher_group_lingers(self, monkeypatch):
+        c = lifetime_case()
+        signals, checked = [], []
+        process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+        process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
+        process.process = SimpleNamespace(pid=7, poll=lambda: 0)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: signals.append((pgid, sig)))
+        monkeypatch.setattr(p, "_group_empty",
+            lambda pgid, deadline: (checked.append((pgid, deadline)), False)[1])
+        deadline = p.time.monotonic() + 1
+        assert process.stop(deadline) is False
+        assert signals == [(7, p.signal.SIGKILL)]
+        assert checked == [(7, deadline)] and not process._stopped
+        assert process.stop(deadline) is False
+        assert signals == [(7, p.signal.SIGKILL)] * 2
+        assert checked == [(7, deadline)] * 2 and not process._stopped
+
     def test_d_c_disarm_stops_every_process(self):
         c = lifetime_case()
         c.private = False
@@ -1786,7 +1846,7 @@ class TestProjectLifetime:
         monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: calls.append((pgid, sig)))
         monkeypatch.setattr(p, "_group_empty", lambda pgid, deadline: True)
         assert process.stop(p.time.monotonic() + 1) is True
-        assert calls == [(7, p.signal.SIGKILL)]
+        assert calls == [(7, p.signal.SIGKILL)] * 2
 
     def test_d_c_posix_stop_group_empty(self, monkeypatch):
         c = lifetime_case()
@@ -1795,8 +1855,10 @@ class TestProjectLifetime:
         process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
         process.process = SimpleNamespace(pid=7, poll=lambda: 0)
         monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
         monkeypatch.setattr(p, "production_effects", lambda: c.effects)
         monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: None)
         monkeypatch.setattr(p, "_group_empty",
             lambda pgid, deadline: (checked.append((pgid, deadline)), True)[1])
         deadline = p.time.monotonic() + 1
@@ -1810,8 +1872,10 @@ class TestProjectLifetime:
         process.identity = p.ProcessIdentity("stack-launcher", 7, "old", 1)
         process.process = SimpleNamespace(pid=7, poll=lambda: 0)
         monkeypatch.setattr(p, "os", SimpleNamespace(name="posix"))
+        monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
         monkeypatch.setattr(p, "production_effects", lambda: c.effects)
         monkeypatch.setattr(p, "stop_owned", lambda *args, **kwargs: True)
+        monkeypatch.setattr(p, "_signal_group", lambda pgid, sig: None)
         monkeypatch.setattr(p, "_group_empty",
             lambda pgid, deadline: (checked.append((pgid, deadline)), False)[1])
         deadline = p.time.monotonic() + 1

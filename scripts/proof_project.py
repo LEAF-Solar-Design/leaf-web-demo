@@ -424,6 +424,9 @@ class RunScope:
                 _refuse(FailureCode.GUARDIAN, stage)
             self.effects.clock.wait(min(0.05, remaining))
         self.checkpoint(stage)
+        remaining = deadline - self.effects.clock.monotonic()
+        if remaining <= 0:
+            _refuse(FailureCode.GUARDIAN, stage)
         return task.result()
 
     @_remember_refusal
@@ -2601,6 +2604,9 @@ class _RuntimeProcess:
                 return stopped and empty
             if os.name == "nt":
                 return False
+            # Residual pgid-reuse risk exists only after our owned group is empty;
+            # killpg on an empty group raises ProcessLookupError, absorbed above.
+            _signal_group(self.process.pid, signal.SIGKILL)
             return stopped and _group_empty(self.process.pid, deadline)
         except BaseException:
             return False
