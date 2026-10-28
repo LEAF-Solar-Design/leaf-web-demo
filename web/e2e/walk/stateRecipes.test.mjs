@@ -21,7 +21,8 @@ import { canonicalProjectVersion, proposalCatalogState, proposalFormValues, refu
 import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErrorCode,
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
-import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled } from './fixtures.mjs'
+import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled,
+  enterWorkspaceEnvironment, openSolarCadProfile } from './fixtures.mjs'
 import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
@@ -917,6 +918,117 @@ const stagingAssertions = value => ({
 })
 stagingAssertions.poll = callback => ({ toBe: async expected => assert.equal(await callback(), expected) })
 
+function workspaceEnvironmentFake({ present = true, entered = 'false', resume = true, controlsPresent = true } = {}) {
+  const events = []
+  let expanded = 'false', profile = 'cad', entryClicked = false
+  // Project's locator assertion delegates to _expect; environment polls read
+  // attributes directly and record the state observed after the action.
+  class Locator {
+    constructor(attributes) { this.attributes = attributes; this._apiName = 'Locator' }
+    async _expect(expression, options) {
+      assert.ok(['to.have.attribute', 'to.have.attribute.value'].includes(expression))
+      assert.equal(options.timeout, 15_000)
+      const name = options.expressionArg, expected = options.expectedText[0].string
+      const received = await this.getAttribute(name)
+      assert.equal(received, expected)
+      events.push(`assert:${name}=${expected}`)
+      return { matches: true, received, log: [] }
+    }
+    async getAttribute(name) {
+      const value = this.attributes()[name] ?? null
+      if ((name === 'data-entered' && entryClicked) || (name === 'data-profile' && profile === 'solar')) {
+        events.push(`assert:${name}=${value}`)
+      }
+      return value
+    }
+  }
+  const project = Object.assign(new Locator(() => ({ 'aria-expanded': expanded })), {
+    count: async () => 1,
+    click: async options => {
+      assert.deepEqual(options, { timeout: 15_000 })
+      events.push('Close Project panel'); expanded = 'false'
+    },
+  })
+  const environment = Object.assign(new Locator(() => ({ 'data-entered': entered, 'data-profile': profile })), {
+    count: async () => present ? 1 : 0,
+    getByRole: (role, { name, exact }) => {
+      assert.equal(role, 'button')
+      assert.equal(exact, true)
+      assert.ok(['Continue workspace', 'Open project or material'].includes(name))
+      return { isVisible: async () => resume, click: async options => {
+        assert.deepEqual(options, { timeout: 15_000 })
+        assert.equal(name, resume ? 'Continue workspace' : 'Open project or material')
+        events.push(name); entered = 'true'; entryClicked = true
+        if (!resume) expanded = 'true'
+      } }
+    },
+  })
+  const controls = { count: async () => controlsPresent ? 1 : 0, getByRole: (role, { name, exact }) => {
+    assert.equal(exact, true)
+    if (role === 'button' && name === 'Project') return project
+    assert.equal(role, 'combobox')
+    assert.equal(name, 'Workspace profile')
+    return { count: async () => 1, selectOption: async option => {
+      assert.deepEqual(option, { label: 'Solar CAD' }); profile = 'solar'; events.push('Select Solar CAD')
+    } }
+  } }
+  const page = {
+    locator: selector => { assert.equal(selector, 'section.workspace-environment'); return environment },
+    getByRole: (role, options) => {
+      if (role === 'navigation') {
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true }); return controls
+      }
+      assert.equal(role, 'tab')
+      assert.deepEqual(options, { name: 'Solar CAD', exact: true })
+      return { click: async options => {
+        assert.deepEqual(options, { timeout: 15_000 }); events.push('Solar CAD')
+      } }
+    },
+  }
+  return { page, events }
+}
+
+test('workspace entry continues an existing workspace and waits for entry', async () => {
+  const { page, events } = workspaceEnvironmentFake()
+  await enterWorkspaceEnvironment(page)
+  assert.deepEqual(events, ['Continue workspace', 'assert:data-entered=true'])
+})
+
+test('workspace entry opens project intake, closes Project and waits for entry', async () => {
+  const { page, events } = workspaceEnvironmentFake({ resume: false })
+  await enterWorkspaceEnvironment(page)
+  assert.deepEqual(events, ['Open project or material', 'Close Project panel',
+    'assert:aria-expanded=false', 'assert:data-entered=true'])
+})
+
+test('workspace entry leaves absent and already entered environments alone', async () => {
+  for (const options of [{ present: false }, { entered: 'true' }]) {
+    const { page, events } = workspaceEnvironmentFake(options)
+    await enterWorkspaceEnvironment(page)
+    assert.deepEqual(events, [])
+  }
+})
+
+test('Solar profile selection proves the environment profile and reuses workspace entry', async () => {
+  for (const resume of [true, false]) {
+    const { page, events } = workspaceEnvironmentFake({ resume })
+    await openSolarCadProfile(page)
+    assert.deepEqual(events, ['Select Solar CAD', 'assert:data-profile=solar',
+      ...(resume ? ['Continue workspace'] : ['Open project or material', 'Close Project panel', 'assert:aria-expanded=false']),
+      'assert:data-entered=true'])
+  }
+  const { page, events } = workspaceEnvironmentFake({ controlsPresent: false })
+  await openSolarCadProfile(page)
+  assert.deepEqual(events, ['Solar CAD'])
+})
+
+test('empty workspace setup enters immediately after navigation', async () => {
+  const { page, events } = workspaceEnvironmentFake()
+  page.goto = async url => { assert.equal(url, '/try?surface=cad'); events.push('navigate') }
+  await setupStep({}, { page, evidence: {} }, { kind: 'open-empty-workspace', surface: 'cad' })
+  assert.deepEqual(events, ['navigate', 'Continue workspace', 'assert:data-entered=true'])
+})
+
 function stagingVersionSelectionFake({ loads = true } = {}) {
   const events = [], canvas = { visible: true, count: 1, evaluate: async () => true }
   let loaded = false, polls = 0
@@ -1209,11 +1321,16 @@ test('WL16n project recipe uploads and extraction reads use setup headers, loadi
   probes.push(resolveProbe(map.entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open'))
   for (const probe of probes) for (const authLive of [false, true]) {
     const calls = []
+    const environment = workspaceEnvironmentFake()
     let currentURL = 'about:blank'
     const runtime = { stack: { baseURL: 'http://walk' }, workerFacts: { authLive }, evidence: {}, cleanup: [],
       ...(probe.setup.context.projectSolar ? { projectSolar: {} } : {}), page: {
         url: () => currentURL,
-        goto: async (path) => { calls.push(['navigate', path]); currentURL = new URL(path, 'http://walk').href },
+        goto: async (path) => {
+          assert.deepEqual(environment.events, [])
+          calls.push(['navigate', path]); currentURL = new URL(path, 'http://walk').href
+        },
+        locator: environment.page.locator,
         evaluate: async () => {
           assert.equal(new URL(currentURL).origin, 'http://walk')
           return 'upload-page-token'
@@ -1236,7 +1353,10 @@ test('WL16n project recipe uploads and extraction reads use setup headers, loadi
             return { ok: () => true, json: async () => ({ status: 'ready' }) }
           },
         },
-        getByRole: () => ({ locator: () => ({ boundingBox: async () => ({ width: 100, height: 100 }) }) }),
+        getByRole: () => ({ locator: () => ({ boundingBox: async () => {
+          assert.deepEqual(environment.events, ['Continue workspace', 'assert:data-entered=true'])
+          return { width: 100, height: 100 }
+        } }) }),
       } }
     await setupStep(probe, runtime, probe.setup.steps[0])
     assert.deepEqual(calls, [
@@ -2553,16 +2673,19 @@ const expect = (value) => ({
 test('failed drawing setup accepts an empty canvas and requires the product no-drawing signal on each surface', async () => {
   for (const surface of ['cad', 'solar', 'browser', 'ios']) for (const status of [400, 404]) {
     const undo = { visible: true, disabled: true }
+    const environment = workspaceEnvironmentFake()
     const page = Object.assign(new EventEmitter(), {
       goto: async (url) => {
+        assert.deepEqual(environment.events, [])
         assert.equal(url, `/app?surface=${surface}&drawing=missing.invalid`)
         const response = { url: () => 'http://walk/api/session?dwg=missing.invalid',
           status: () => status, json: async () => ({ error: 'missing drawing' }) }
         page.emit('response', response)
         page.emit('requestfailed', timedRequest('/api/session?dwg=missing.invalid', { failure: 'late failure' }))
       },
-      locator: () => assert.fail('canvas count cannot establish drawing readiness'),
+      locator: environment.page.locator,
       getByRole: (role, options) => {
+        assert.deepEqual(environment.events, ['Continue workspace', 'assert:data-entered=true'])
         if (role === 'alert') return { filter: () => ({ visible: true }) }
         assert.equal(role, 'toolbar')
         assert.deepEqual(options, { name: 'Quick access', exact: true })
