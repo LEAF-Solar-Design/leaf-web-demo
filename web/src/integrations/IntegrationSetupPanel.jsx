@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react'
 import { boundedIntegrationBody, validateDatasetRegistration } from './client.js'
 import { ConnectorDefinitionV1 } from '../../../vendor/assistant-contract/src/integration'
 import { humanizeError } from '../errorHumanize.js'
+import { VercelConnectionPanel } from './VercelConnectionPanel.jsx'
 
 const kinds = ['text', 'boolean', 'identifier', 'count', 'instant', 'date', 'number', 'ratio', 'money', 'duration']
 const newField = () => ({ id: '', label: '', kind: '', nullable: false, sensitivity: 'internal', pointer: '', conversion: 'identity',
@@ -356,7 +357,8 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
   function updateField(index, patch) { setForm((old) => ({ ...old, fields: old.fields.map((field, i) => i === index ? { ...field, ...patch } : field) })) }
   if (scope.projectRole !== 'owner' || signal.aborted) return null
   const locked = Boolean(pending || unknown)
-  return <section className="integration-setup" aria-labelledby="integration-setup-title">
+  return <><VercelConnectionPanel client={client} projectId={projectId} scope={scope} signal={signal} guard={guard} onForbidden={onForbidden} />
+  <section className="integration-setup" aria-labelledby="integration-setup-title">
     <h2 id="integration-setup-title">Set up an HTTP dataset</h2>
     <p>OpenAPI 3.0 / 3.1 JSON · one static GET · top-level JSON array · no authentication, bearer token, or header API key.</p>
     <ol className="integration-setup-progress" aria-label="Setup progress">
@@ -497,5 +499,5 @@ export function IntegrationSetupPanel({ client, projectId, scope, signal, guard,
       </>}
       {!['sync', 'retirement'].includes(unknown.kind) && <button disabled={Boolean(pending)} onClick={chooseNewId}>Choose a new resource ID</button>}
     </section>}
-  </section>
+  </section></>
 }

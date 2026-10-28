@@ -30,6 +30,30 @@ export function validateWebhookReceipt(value, input) {
 }
 const slug = z.string().regex(/^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\s\S])/).min(1).max(128)
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
+const vercelState = z.string().regex(/^[A-Za-z0-9_-]{43}(?![\s\S])/)
+const vercelId = z.string().regex(/^[A-Za-z0-9_-]{1,256}(?![\s\S])/)
+const vercelCode = z.string().regex(/^[A-Za-z0-9_-]{1,2048}(?![\s\S])/)
+const vercelIssue = z.strictObject({ state: vercelState, expiresAt: z.string().datetime().max(64),
+  authorizationUrl: z.string().min(1).max(2048), callbackUri: z.string().min(1).max(2048) })
+const vercelCompletion = z.strictObject({ configurationId: vercelId, integrationId: vercelId, userId: vercelId,
+  teamId: vercelId.nullable(), ownerId: vercelId, revision,
+  cleanup: z.enum(['complete', 'needs-attention']) })
+  .refine((value) => value.ownerId === (value.teamId ?? value.userId))
+export function validateVercelDestinations(value, studioOrigin) {
+  const result = parse(vercelIssue, value)
+  try {
+    const auth = new URL(result.authorizationUrl)
+    const callback = new URL(result.callbackUri)
+    if (auth.protocol !== 'https:' || auth.host !== 'vercel.com' || auth.username || auth.password || auth.hash ||
+        result.authorizationUrl.includes('#') || auth.href !== result.authorizationUrl ||
+        !/^\/integrations\/[a-z0-9]+(?:-[a-z0-9]+)*\/new$/.test(auth.pathname) ||
+        [...auth.searchParams.keys()].length !== 1 || auth.searchParams.get('state') !== result.state ||
+        result.callbackUri !== `${studioOrigin}/vercel-callback.html` ||
+        callback.origin !== studioOrigin || callback.pathname !== '/vercel-callback.html' || callback.search ||
+        callback.hash || callback.username || callback.password) throw invalid()
+  } catch { throw invalid() }
+  return result
+}
 const scopeSchema = z.object({
   tenantId: z.string().uuid(), projectId: z.string().uuid(), platformUserId: z.string().uuid(),
   bindingId: z.string().uuid(), projectRole: z.enum(['owner', 'editor', 'reviewer', 'read_only']),
@@ -423,6 +447,19 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     async getConnectionSummary(id, connectionId, options) {
       parse(slug, connectionId)
       return setupResponse(ownerConnection, id, `connections/${connectionId}`, options, (value) => value.id === connectionId)
+    },
+    async issueVercelConnection(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedRevision: revision }), input)
+      return setupResponse(vercelIssue, id, `connections/${connectionId}/vercel/attempt`,
+        { ...options, method: 'POST', body, bodyLimit: 4096 })
+    },
+    async completeVercelConnection(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedRevision: revision, state: vercelState, code: vercelCode, configurationId: vercelId }), input)
+      return setupResponse(vercelCompletion, id, `connections/${connectionId}/vercel/complete`,
+        { ...options, method: 'POST', body, bodyLimit: 4096 },
+        (value) => value.configurationId === body.configurationId && value.revision > body.expectedRevision)
     },
     async revokeConnection(id, connectionId, expectedRevision, options) {
       parse(slug, connectionId); parse(revision, expectedRevision)
