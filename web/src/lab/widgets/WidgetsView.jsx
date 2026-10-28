@@ -4,6 +4,7 @@ import WidgetPreview from './WidgetPreview.jsx'
 import { createEditorState, createWidgetDoc, sameDocument, widgetEditorReducer } from './useWidgetEditor.js'
 import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 import { validateWidgetDoc } from './widgetDoc.js'
+import { laFitProblem } from './laFit.js'
 import { loadWidget, saveWidget } from './widgetsClient.js'
 import './widgets.css'
 
@@ -95,6 +96,7 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
   }
   const displayedStatus = invalid ? 'invalid' : status
   const problem = invalid ?? failure
+  const laProblem = state ? laFitProblem(state.doc) : null
   return <section className="widgets-view" hidden={hidden} aria-label={local ? 'Text widget editor' : 'Widget designer'}>
     <h2>Widget designer</h2>
     {!local && <>
@@ -106,9 +108,10 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
         {requestPublication && <button type="button" disabled={!loadedId || !head || !sha256 || status !== 'saved' || Boolean(invalid) || Boolean(state?.transaction) || docId !== loadedId}
           onClick={async () => {
             const result = await requestPublication({ doc: state.doc, source: { artifact_id: loadedId, revision: head, digest: sha256 } })
-            setPublication(result.ok ? 'Publication requested' : result.reason)
+            setPublication(result.ok ? 'Publication requested' : result.reason === 'la_too_tall' ? laFitProblem(state.doc) : result.reason)
           }}>Request publication</button>}
       </div>
+      {requestPublication && laProblem && <p>{laProblem}</p>}
       {publication && <p role="status" aria-label="Publication request">{publication}</p>}
       <p role="status">{({ empty: 'Enter a Document ID, then choose New or Load.', loading: 'Loading widget…', saving: 'Saving widget…', saved: `Saved revision ${head ?? ''}.`, editing: 'Local edits. Save when ready.', invalid: 'Invalid widget. Correct the indicated field before saving.', conflict: 'Conflict: the document changed. Your local edits are kept. Reload to use the stored revision.', error: 'The document request failed. Your local edits are kept.' })[displayedStatus]}</p>
       {problem && <p role="alert">{typeof problem.detail === 'string' ? problem.detail : JSON.stringify(problem.detail)}{problem.pointer ? ` (${problem.pointer})` : ''}</p>}
