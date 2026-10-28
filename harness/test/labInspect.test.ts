@@ -1,6 +1,6 @@
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
@@ -39,16 +39,16 @@ describe("Lab inspect", () => {
     ], { cwd: dir, input, encoding: "utf8", windowsHide: true, maxBuffer: 4 * 1024 * 1024 }).trim();
   }
 
-  function fixture() {
+  function fixture(initializeCache = true) {
     const root = mkdtempSync(join(tmpdir(), "harness-lab-inspect-"));
     directories.push(root);
     const remote = join(root, "remote.git");
-    const cache = join(root, "cache.git");
+    const cache = join(root, `${TENANT}.git`);
     git(root, ["init", "--bare", remote]);
     const tree = git(remote, ["mktree"], "");
     const main = git(remote, ["commit-tree", tree], "Main\n");
     git(remote, ["update-ref", "refs/heads/main", main]);
-    git(root, ["clone", "--bare", remote, cache]);
+    if (initializeCache) git(root, ["clone", "--bare", remote, cache]);
     const authority = new ForgeRemoteAuthority({
       locate: async () => remote,
       credentials: async (tenantId, remoteUrl) => ({ tenantId, remoteUrl }),
@@ -61,7 +61,7 @@ describe("Lab inspect", () => {
       async runFenced(_lease, action) { return action(); },
     };
     const port = new TenantDocumentRepo({ locate: async () => ({ dir: cache, sourceRef: remote }), lease, authority, identity: HARNESS_IDENTITY });
-    return { port, cache, remote, tree, lease };
+    return { port, cache, remote, tree, main, lease, authority };
   }
 
   function fakePort(): LabDocumentPort {
@@ -108,6 +108,46 @@ describe("Lab inspect", () => {
     expect(runFenced).toHaveBeenCalledTimes(1);
     expect(git(cache, ["show-ref"])).toBe(refs);
     expect(git(cache, ["cat-file", "--batch-all-objects", "--batch-check"])).toBe(objects);
+  });
+
+  it("initializes an absent tenant bare cache once before inspecting the empty Lab ref", async () => {
+    const { port, cache, remote, main, authority } = fixture(false);
+    const initialize = vi.spyOn(authority, "initialize");
+    expect(existsSync(cache)).toBe(false);
+    const url = listen(port);
+    const result = await post(url);
+    expect(result.status).toBe(200);
+    expect(result.body).toEqual(empty);
+    expect(initialize).toHaveBeenCalledExactlyOnceWith(TENANT, cache, remote);
+    expect(git(cache, ["rev-parse", "--is-bare-repository"])).toBe("true");
+    expect(git(cache, ["config", "--local", "--get", "remote.origin.url"])).toBe(remote);
+    expect(git(cache, ["rev-parse", "refs/heads/main"])).toBe(main);
+    const second = await post(url);
+    expect(second.status).toBe(200);
+    expect(second.body).toEqual(empty);
+    expect(initialize).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["non-bare", "wrong-origin"])("refuses an existing %s cache without initializing it", async (kind) => {
+    const { port, cache, authority } = fixture();
+    const initialize = vi.spyOn(authority, "initialize");
+    if (kind === "non-bare") git(cache, ["config", "core.bare", "false"]);
+    else git(cache, ["config", "remote.origin.url", "refused"]);
+    expect(existsSync(join(cache, "HEAD"))).toBe(true);
+    expect(await handleLabInspect(port, TENANT, { limit: 1 })).toEqual({
+      status: 403, body: { error: { code: "lab_repository_refused" } },
+    });
+    expect(initialize).not.toHaveBeenCalled();
+  });
+
+  it("scrubs cache initialization failures as inspect failures", async () => {
+    const { port, cache, remote, authority } = fixture(false);
+    const initialize = vi.spyOn(authority, "initialize").mockRejectedValue(new Error("private repository path"));
+    expect(await handleLabInspect(port, TENANT, { limit: 1 })).toEqual({
+      status: 500, body: { error: { code: "lab_inspect_failed", message: "Lab inspect failed" } },
+    });
+    expect(initialize).toHaveBeenCalledExactlyOnceWith(TENANT, cache, remote);
+    expect(existsSync(cache)).toBe(false);
   });
 
   it("returns newest first history, full messages, and exact head blob digests without writing", async () => {
