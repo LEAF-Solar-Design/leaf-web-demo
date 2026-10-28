@@ -326,7 +326,7 @@ test('proposal review uses named bounded helpers for every fill, select and enab
   const body = reviewStagingProposal.toString()
   assert.doesNotMatch(body, /\.(?:fill|selectOption|isEnabled)\s*\(/)
   for (const call of ["walkEnabled(frame, 'Frame')", "walkEnabled(start, 'Run solve')",
-    "walkFill(form.getByLabel('Grant ref', { exact: true }), 'w1-staging', 'Grant ref')",
+    "walkFill(form.getByLabel('Grant ref', { exact: true }), process.env.LEAF_WALK_STAGING_GRANT_REF || 'staging-solver', 'Grant ref')",
     "walkFill(form.getByLabel('Request', { exact: true }), JSON.stringify(values.request), 'Request')",
     "walkFill(frame, values.frame, 'Frame')",
     "walkSelect(form.getByRole('combobox', { name: 'Phase', exact: true }), '0', 'Phase')"]) {
