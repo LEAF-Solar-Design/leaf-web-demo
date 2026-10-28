@@ -95,6 +95,17 @@
 .workspace-environment:is([data-profile="cad"], [data-profile="solar"]) .environment-strip {
   top: var(--environment-strip-top); height: var(--environment-strip-height);
 }
+/* Drawing instruments share the canvas edge. The dock occupies that edge too;
+   moving the shared boundary keeps zoom and search in their existing rows. */
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] {
+  --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px), var(--environment-strip-bottom));
+}
+@media (min-width: 1024px) {
+  /* Find used the static edge; keep its existing row below the live view strip. */
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] .drawing-navigation {
+    top: calc(var(--ck-canvas-top-live) + 26px);
+  }
+}
 .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity,
 .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .browser-project-panel {
   top: var(--environment-strip-bottom);
