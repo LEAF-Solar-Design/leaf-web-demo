@@ -1423,29 +1423,29 @@ export async function closeProjectPanelIfOpen(page) {
   await expect(project).toHaveAttribute('aria-expanded', 'false', { timeout: 15_000 })
 }
 
+export async function enterWorkspaceEnvironment(page) {
+  const environment = page.locator('section.workspace-environment')
+  if (!await environment.count() || await readLocatorAttribute(environment, 'data-entered') === 'true') return
+  const resume = environment.getByRole('button', { name: 'Continue workspace', exact: true })
+  if (await resume.isVisible()) {
+    await walkClick(resume, 'Continue workspace')
+  } else {
+    await walkClick(environment.getByRole('button', { name: 'Open project or material', exact: true }),
+      'Enter workspace')
+    await closeProjectPanelIfOpen(page)
+  }
+  await expect.poll(() => readLocatorAttribute(environment, 'data-entered'), { timeout: 15_000 }).toBe('true')
+}
+
 export async function openSolarCadProfile(page) {
   const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
   if (await controls.count?.()) {
     const profile = controls.getByRole('combobox', { name: 'Workspace profile', exact: true })
     if (await profile.count()) {
       await profile.selectOption({ label: 'Solar CAD' })
-      await expect(page.getByRole('tablist', { name: 'Workspace profile', exact: true })
-        .getByRole('tab', { name: 'Solar CAD', exact: true }))
-        .toHaveAttribute('aria-selected', 'true', { timeout: 15_000 })
       const environment = page.locator('section.workspace-environment')
-      const entered = await environment.count() ? await readLocatorAttribute(environment, 'data-entered') : null
-      if (entered !== null && entered !== 'true') {
-        const resume = environment.getByRole('button', { name: 'Continue workspace', exact: true })
-        const openProject = !await resume.isVisible()
-        if (openProject) {
-          await walkClick(environment.getByRole('button', { name: 'Open project or material', exact: true }),
-            'Enter Solar workspace')
-        } else {
-          await walkClick(resume, 'Continue Solar workspace')
-        }
-        await expect(environment).toHaveAttribute('data-entered', 'true', { timeout: 15_000 })
-        if (openProject) await closeProjectPanelIfOpen(page)
-      }
+      await expect.poll(() => readLocatorAttribute(environment, 'data-profile'), { timeout: 15_000 }).toBe('solar')
+      await enterWorkspaceEnvironment(page)
       return
     }
   }
@@ -2567,6 +2567,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         page.off('response', onResponse)
         page.off('requestfailed', onFailed)
       }
+      await enterWorkspaceEnvironment(page)
       assertions([400, 404]).toContain(response.status())
       evidence.failedDrawing = { drawingId: 'missing.invalid', status: response.status(), response: await response.json() }
       await assertions(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
@@ -2589,6 +2590,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     case 'open-empty-workspace':
       if (recipe.signedOut) await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
       await page.goto(`/try?surface=${recipe.surface}`)
+      await enterWorkspaceEnvironment(page)
       return
     case 'open-private-drawing': {
       const selected = probe.setup.steps.find((step) => step.kind === 'select-entity')
@@ -2628,6 +2630,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         return status.status
       }, { timeout: 60_000 }).toBe('ready')
       await page.goto(`/app?drawing=${receipt.drawing_id}&surface=${recipe.surface}`)
+      await enterWorkspaceEnvironment(page)
       if (recipe.surface === 'cad' || recipe.surface === 'solar') {
         await expect.poll(async () => {
           const box = await canvas(page).boundingBox().catch(() => null)
