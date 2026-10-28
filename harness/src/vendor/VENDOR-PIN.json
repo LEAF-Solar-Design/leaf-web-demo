@@ -25,6 +25,10 @@
       "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted inert action composition from 01c436437255ed81d30b2319552847395076d748; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0",
       "sha256": "6fef3d952bbe7709a5579240a41149c1dc361c360a7fa95f8a8f07d602ea75b7"
     },
+    "ports/impl/forgeRemoteAuthority.ts": {
+      "reason": "SEL-316d: initialize passes safe.directory for the bare cache when it sets the tenant origin (root-owned EFS cache under the harness uid); retire when upstream includes equivalent behavior.",
+      "sha256": "e6dfbced8cd35c6398edde1482405e9e4c1d710c05010279bf723ee5f357e3ee"
+    },
     "ports/impl/harnessSchema.ts": {
       "reason": "Held at mushy-code 52e8a36 bytes: ad209705 asserts harness_confirmations.consumed_at, consumed_by and a status CHECK including 'consumed', which no platform migration adds yet. Retired by slice AD4b (platform migration plus consumeApproved adoption).",
       "sha256": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4"
@@ -48,6 +52,10 @@
     "ports/impl/tenantChangeRepo.ts": {
       "reason": "leaf-web-demo downstream patch not present upstream (upstream unchanged since 52e8a36; carried unchanged by AD4)",
       "sha256": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f"
+    },
+    "ports/impl/tenantDocumentRepo.ts": {
+      "reason": "SEL-316c: Lab document operations provision an absent tenant bare cache under the caller's lease, as first authoring does; retire when upstream includes equivalent behavior.",
+      "sha256": "6a14af5fe958159b0dbf5594d1cb020481726c8128e4c88209be22af2527308a"
     },
     "ports/impl/tenantRepoProvider.ts": {
       "reason": "Selective PR93 Forge publication with consumer leases and the durable effective catalog checkout (rebased onto mushy-code ad209705 by AD4; upstream candidate); P05: exact local transport trust in a temporary protected config plus no-local cloning for foreign-owned source repositories; retire when upstream includes equivalent behavior.",
@@ -93,7 +101,7 @@
     "ports/impl/e2bAgentRunner.ts": "3d89898c95e45e366107a10faa4ea1396f6aaa74242c3c2bacf55cd1add53a94",
     "ports/impl/envScrub.ts": "fc9640a4940a4cb4756714f91144a9dd54fc188f7333aa8618c2fa8f15212f5c",
     "ports/impl/escalationOutbox.ts": "f5b33fd43b776574d1a90fdccc4adbc9dfc2d1e3f540f4f9ae07c2ba7eb4ec5b",
-    "ports/impl/forgeRemoteAuthority.ts": "315ee3599be23f3640bfef07e855ae41f81ee097edf0663bb9aa66df315ead21",
+    "ports/impl/forgeRemoteAuthority.ts": "e6dfbced8cd35c6398edde1482405e9e4c1d710c05010279bf723ee5f357e3ee",
     "ports/impl/gitWorker.ts": "efc5cdd3e199857fa6f40673091f6b56d1c398259c39f48270f03955867893e0",
     "ports/impl/harnessSchema.ts": "3c42381eee5aaee016ceb8c5d3d0f74d164dd2022e32610dc2fd5aea35c9cfb4",
     "ports/impl/httpUpstreamSink.ts": "ec12e8d499bbe9968f8df4cab181d752dad220e4f0e7a78c87c70dade4e5624e",
@@ -113,7 +121,7 @@
     "ports/impl/standardServicesRuntime.ts": "74925259f354b874d5ad5318701f4bc727d4a043939dfe8c995711daa7300e95",
     "ports/impl/tenantBrokerStandardServiceProvider.ts": "32740d32b3dce694ec1c7f35a4191517da9d91cea6b23906438ba1a8624b5888",
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
-    "ports/impl/tenantDocumentRepo.ts": "3a3b0e32086fc936617006b601f43d40e808b56643be32eea34105c51148428b",
+    "ports/impl/tenantDocumentRepo.ts": "6a14af5fe958159b0dbf5594d1cb020481726c8128e4c88209be22af2527308a",
     "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
     "ports/index.ts": "6f4c53818e22245bfb7ed5b15188bce33daa009a23874ef2f23b4e95fda56e48",
     "ports/integrationTools.ts": "5dd38008c3abeae5b84235c84fa5f2465f85a78110f8ef79814251e0b6dc7735",
