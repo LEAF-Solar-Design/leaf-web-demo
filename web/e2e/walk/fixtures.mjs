@@ -496,6 +496,63 @@ export async function discloseControlPanel(page, recipe) {
   }
 }
 
+export function studioDrawerLocator(page, drawer) {
+  if (!['jobs', 'nav'].includes(drawer)) throw new Error(`Unknown Studio drawer: ${drawer}`)
+  return page.locator(drawer === 'jobs' ? 'aside.rail .rail-ledger' : 'aside.nav')
+}
+
+export async function assertStudioDrawer(page, drawer, open, assertions = expect) {
+  const content = studioDrawerLocator(page, drawer)
+  const sidebar = page.getByRole('region', { name: 'Studio sidebar', exact: true })
+  if (open) {
+    await assertions(studioRailButton(page)).toHaveAttribute('aria-expanded', 'true')
+    await assertions(sidebar).toBeVisible()
+    if (drawer === 'jobs') await assertions(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
+    await assertions(content).toBeVisible()
+  } else {
+    await assertions(sidebar).toBeHidden()
+    if (drawer === 'nav') await assertions(content).toBeHidden()
+  }
+}
+
+export async function setStudioDrawer(page, drawer, open, assertions = expect) {
+  if (open) await revealStudioRail(page)
+  else if (await page.getByRole('region', { name: 'Studio sidebar', exact: true }).isVisible()) {
+    await page.getByRole('button', { name: 'Close Studio', exact: true }).click()
+  }
+  await assertStudioDrawer(page, drawer, open, assertions)
+}
+
+export async function studioDrawerProbeLocator(page, probe) {
+  const drawer = probe.locator.studioDrawer
+  if (!drawer || !await studioRailButton(page).isVisible()) return null
+  return probe.state === 'open' || probe.state === 'drawer-open'
+    ? page.getByRole('button', { name: 'Close Studio', exact: true }) : studioRailButton(page)
+}
+
+export async function railExpandLauncher(probe, runtime, locator) {
+  if (probe.featureId !== 'action:rail-expand' || probe.state !== 'ready'
+    || runtime.testInfo.project.name === 'phone' || await locator.isVisible()) return null
+  const launchers = runtime.page.getByRole('button', { name: /^Open .+ in the tool rail \([0-9]+ tools\)$/ })
+  for (let index = 0; index < await launchers.count(); index++) {
+    const launcher = launchers.nth(index)
+    if (!await launcher.isVisible()) continue
+    const name = await launcher.getAttribute('aria-label') || await launcher.getAttribute('title')
+    const family = name?.match(/^Open (.+) in the tool rail \([0-9]+ tools\)$/)?.[1]
+    if (!family) throw new Error('Tool rail launcher must identify its family')
+    runtime.railExpandFamily = family
+    return launcher
+  }
+  return null
+}
+
+export async function assertRailExpandFamily(page, family, assertions = expect) {
+  await assertStudioDrawer(page, 'nav', true, assertions)
+  const name = new RegExp('^' + family.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*·')
+  const section = page.locator('aside.nav .section').filter({ has: page.getByRole('button', { name }) })
+  await assertions(section.locator('.section-body')).toBeVisible()
+}
+
 export function addPersonaFragment(evidence, { persona, measurements, bundleReference }) {
   try {
     const fragments = (evidence.personaFragments || []).filter(fragment => fragment.persona !== persona)
@@ -638,8 +695,7 @@ export async function setPhonePanel(page, panel, open, assertions = expect) {
     await assertions(button).toBeVisible()
     if ((await button.getAttribute('aria-expanded') === 'true') !== open) await button.click()
   } else if (panel === 'Jobs') {
-    if (open) await revealStudioRail(page)
-    else if (await studio.getAttribute('aria-expanded') === 'true') await studio.click()
+    await setStudioDrawer(page, 'jobs', open, assertions)
   } else if ((await page.locator('.app').getAttribute('data-drawer') === 'plan') !== open) {
     await disclosePhonePlan(page)
     await page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
@@ -964,7 +1020,8 @@ async function setDrawer(page, name, open) {
   if ((await button.getAttribute('aria-expanded') === 'true') !== open) await button.click()
   await expect(button).toHaveAttribute('aria-expanded', String(open))
 }
-export async function setJobRail(page, open, phone = false, assertions = expect) {
+export async function setJobRail(page, open, phone = false, assertions = expect, detectStudio = true) {
+  if (detectStudio && await studioRailButton(page).isVisible()) { await setStudioDrawer(page, 'jobs', open, assertions); return }
   if (phone) { await setPhonePanel(page, 'Jobs', open, assertions); return }
   const expand = page.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })
   const collapse = page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })
@@ -972,7 +1029,9 @@ export async function setJobRail(page, open, phone = false, assertions = expect)
   await assertions(open ? collapse : expand).toBeVisible()
   await assertions(page.locator('aside.rail .rail-ledger')).toHaveCount(open ? 1 : 0)
 }
-async function setToolRail(page, open, phone) {
+export async function setToolRail(page, open, phone, assertions = expect, detectStudio = true) {
+  if (detectStudio && await studioRailButton(page).isVisible()) { await setStudioDrawer(page, 'nav', open, assertions); return }
+  const expect = assertions
   const expand = page.getByRole('button', { name: 'Tool rail', exact: true })
   const collapse = page.getByRole('button', { name: 'Collapse the tool rail to a spine', exact: true })
   if (phone) {
@@ -3004,7 +3063,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         .getByRole('button', { name: ACTIONS.find((action) => action.op === 'copyClip').label, exact: true }).click()
       return
     case 'drawer-state':
-      if (runtime.testInfo?.project.name === 'phone' && (probe.featureId === 'drawer:none'
+      if (probe.featureId === 'drawer:jobs' && recipe.name === 'Jobs' && await studioRailButton(page).isVisible()) {
+        await setStudioDrawer(page, 'jobs', recipe.open, assertions)
+      } else if (runtime.testInfo?.project.name === 'phone' && (probe.featureId === 'drawer:none'
         || probe.featureId === 'action:bar-escape' && probe.state === 'drawer-open') && await studioRailButton(page).isVisible()) {
         await setPhonePanel(page, 'Plan', false, assertions)
         await setPhonePanel(page, 'Jobs', recipe.open, assertions)
@@ -3012,8 +3073,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         await setPhonePanel(page, recipe.name, recipe.open, assertions)
       } else await setDrawer(page, recipe.name, recipe.open)
       return
-    case 'job-rail-state': await setJobRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions); return
-    case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone'); return
+    case 'job-rail-state': await setJobRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions,
+      probe.featureId === 'drawer:jobs'); return
+    case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions,
+      probe.featureId === 'drawer:nav'); return
     case 'properties-state': {
       if (runtime.testInfo?.project.name === 'phone') {
         await setPhonePanel(page, 'Plan', recipe.open, assertions)
@@ -3507,6 +3570,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (probe.featureId === 'action:rail-expand' && probe.state === 'ready'
+    && runtime.testInfo.project.name !== 'phone' && runtime.railExpandFamily) {
+    await assertRailExpandFamily(page, runtime.railExpandFamily, assertions)
+    return
+  }
   if (probe.locator?.keyboardAction === 'engine:repeat' && typeof assertEngineRepeat === 'function') {
     await assertEngineRepeat(probe, runtime, before, assertions)
     return
@@ -3803,6 +3871,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target.startsWith('drawer:')) {
+    if (['drawer:jobs', 'drawer:nav'].includes(probe.featureId)
+      && ['drawer:jobs', 'drawer:nav'].includes(target) && await studioRailButton(page).isVisible()) {
+      await assertStudioDrawer(page, target.slice(7), effect.value !== 'none', assertions)
+      return
+    }
     if (runtime.testInfo.project.name === 'phone' && ['drawer:plan', 'drawer:jobs'].includes(target)) {
       await assertPhonePanel(page, target === 'drawer:plan' ? 'Plan' : 'Jobs', effect.value !== 'none', assertions)
       return
@@ -3860,7 +3933,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       const body = await reply.json()
       const jobs = Array.isArray(body) ? body : body.jobs
       expect(jobs.some((job) => job.job_id === runtime.evidence.pendingRun.jobId)).toBe(true)
-      await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions)
+      await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions, false)
       await expect(page.locator('aside.rail').getByText('count-by-layer', { exact: true }).first()).toBeVisible()
       runtime.evidence.pendingRun.detached = true
     }
@@ -4083,9 +4156,18 @@ export async function runProbe(probe, runtime) {
     if (typeof phoneRailAvailability === 'function') await phoneRailAvailability(probe, runtime)
     const phoneRecipe = runtime.testInfo.project.name === 'phone' && typeof phoneProbeLocator === 'function'
       ? await phoneProbeLocator(page, probe) : null
-    const locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
+    let locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
       ? (await resolveSurfaceControl(page, probe)).locator
       : control(page, phoneRecipe || (runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe))
+    if (typeof studioDrawerProbeLocator === 'function'
+      && (['drawer:jobs', 'drawer:nav'].includes(probe.featureId)
+        || probe.featureId === 'drawer:none' && probe.state === 'drawer-open' && runtime.testInfo.project.name === 'phone')) {
+      locator = await studioDrawerProbeLocator(page, probe) || locator
+    }
+    if (typeof railExpandLauncher === 'function' && probe.featureId === 'action:rail-expand'
+      && probe.state === 'ready' && runtime.testInfo.project.name !== 'phone') {
+      locator = await railExpandLauncher(probe, runtime, locator) || locator
+    }
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
       if (observations.length) Object.assign(evidence, packUxEvidence([...(evidence.ux_observations || []), ...observations]))
