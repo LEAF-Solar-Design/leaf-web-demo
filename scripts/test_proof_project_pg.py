@@ -990,3 +990,487 @@ def test_d_b_start_cleanup_after_transport_failure(monkeypatch):
     assert error.value.__cause__ is None and error.value.__suppress_context__
     assert events == ["provision", "start-transport", "stop-transport", "cleanup-created"]
     assert authority._created == {"containers": [], "networks": []}
+
+
+def _native_case(tmp_path, monkeypatch):
+    """No PG executables, sockets, processes or platform-specific paths required."""
+    c = SimpleNamespace(root=tmp_path, calls=[], alive=False, fail_stop=False, keep_alive=False,
+        fail_init=False, fail_start=False, epoch=1700000000, password_seen=None, configs=[], server_version=160006)
+    c.binaries = {name: str(tmp_path / "fake-bin" / name) for name in ("initdb", "pg_ctl", "postgres")}
+    c.data = tmp_path / "postgres/data"
+    c.pidfile = c.data / "postmaster.pid"
+    c.identity = {"start_id": "ps:1700000000", "started_at": c.epoch}
+    c.table = lambda pid: dict(c.identity) if c.alive and pid == 12345 else None
+    def runner(argv, **kwargs):
+        c.calls.append((list(argv), kwargs))
+        if argv[-1] == "--version":
+            return SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n")
+        if argv[0] == c.binaries["initdb"]:
+            c.password_path = Path(argv[argv.index("--pwfile") + 1])
+            c.password_seen = c.password_path.read_text().strip()
+            c.password_mode = c.password_path.stat().st_mode & 0o777
+            if c.fail_init:
+                raise OSError(c.password_seen)
+            (c.data / "postgresql.conf").write_bytes(b"# fake initdb\n")
+        elif "start" in argv:
+            c.configs.append((c.data / "postgresql.conf").read_text())
+            c.alive = True
+            c.pidfile.write_text("\n".join(("12345", str(c.data), str(c.epoch), "55432",
+                str(c.root / "postgres/socket"), "127.0.0.1", "fake-shmem", "ready")) + "\n", encoding="utf-8")
+            if c.fail_start:
+                raise OSError("fake start timed out")
+        elif "stop" in argv:
+            if c.fail_stop:
+                return SimpleNamespace(returncode=1, stdout="fake stop refused")
+            if not c.keep_alive:
+                c.alive = False
+            c.pidfile.unlink()
+        else:
+            pytest.fail("unexpected native argv")
+        return SimpleNamespace(returncode=0, stdout="discarded diagnostics")
+    c.runner = runner
+    def resolver(**kwargs):
+        return pg.resolve_native_binaries(environ={"LEAF_PG_BIN": str(tmp_path / "fake-bin")},
+            executable=lambda path: path in c.binaries.values(), runner=runner)
+    c.authority = pg.NativePgAuthority(RUN, run_root=tmp_path, port=55432,
+        resolver=resolver, runner=runner, process_table=c.table,
+        environ={"PATH": "fake", "PGPASSWORD": "ambient", "PGFUTURE": "ambient", "TOKEN": "ambient"})
+    class Connection:
+        autocommit = False
+        @property
+        def info(self):
+            return SimpleNamespace(server_version=c.server_version)
+        def __enter__(self):
+            return self
+        def __exit__(self, *args):
+            pass
+        def transaction(self):
+            return self
+        def execute(self, sql, args=None):
+            if sql == "CREATE DATABASE leaf":
+                assert self.autocommit
+                return None
+            assert args == (bytes(range(256)),)
+            return SimpleNamespace(fetchone=lambda: (args[0], "16.fake"))
+    monkeypatch.setattr(c.authority, "_connect_database", lambda database: Connection())
+    monkeypatch.setattr(pg.subprocess, "run", lambda *args, **kwargs: pytest.fail("real subprocess forbidden"))
+    c.start = c.authority._start
+    c.inventory = c.authority._inventory
+    return c
+
+
+def test_h_binary_override(tmp_path):
+    override, path = str(tmp_path / "override"), str(tmp_path / "path")
+    seen = []
+    bins = pg.resolve_native_binaries(environ={"LEAF_PG_BIN": override, "PATH": path},
+        executable=lambda name: seen.append(name) or True,
+        runner=lambda argv, **k: SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n"))
+    assert bins == {name: str(Path(override) / name) for name in ("initdb", "pg_ctl", "postgres")}
+
+
+def test_h_binary_path(tmp_path):
+    first, second = str(tmp_path / "missing"), str(tmp_path / "path")
+    seen = []
+    def executable(path):
+        seen.append(path)
+        return Path(path).parent == Path(second)
+    bins = pg.resolve_native_binaries(environ={"LEAF_PG_BIN": first, "PATH": second}, executable=executable,
+        runner=lambda argv, **k: SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n"))
+    assert all(Path(value).parent == Path(second) for value in bins.values())
+    assert seen[:2] == [str(Path(first) / "initdb"), str(Path(second) / "initdb")]
+
+
+def test_h_binary_fallbacks():
+    seen = []
+    def executable(path):
+        seen.append(Path(path).as_posix())
+        return Path(path).as_posix().startswith("/usr/lib/postgresql/16/bin/")
+    bins = pg.resolve_native_binaries(environ={}, executable=executable,
+        runner=lambda argv, **k: SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n"))
+    assert seen[:3] == [prefix + "/initdb" for prefix in ("/opt/homebrew/opt/postgresql@16/bin",
+        "/usr/local/opt/postgresql@16/bin", "/usr/lib/postgresql/16/bin")]
+    assert set(bins) == {"initdb", "pg_ctl", "postgres"}
+
+
+def test_h_binary_version():
+    with pytest.raises(RuntimeError, match="requires PostgreSQL 16"):
+        pg.resolve_native_binaries(environ={"PATH": "fake"}, executable=lambda path: True,
+            runner=lambda *a, **k: SimpleNamespace(returncode=0, stdout="pg_ctl (PostgreSQL) 17.1\n"))
+
+
+def test_h_binary_missing():
+    with pytest.raises(RuntimeError, match="binaries unavailable"):
+        pg.resolve_native_binaries(environ={}, executable=lambda path: False,
+            runner=lambda *a, **k: pytest.fail("version called without binaries"))
+
+
+def test_h_bounded_argv(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    assert c.authority.stop() is True
+    assert all(type(argv) is list and 0 < kw["timeout"] <= 65 and not kw.get("shell") for argv, kw in c.calls)
+    start = next(argv for argv, kw in c.calls if "start" in argv)
+    assert start[start.index("-t") + 1] == "60" and "-w" in start
+    assert start[start.index("-p") + 1] == c.binaries["postgres"]
+
+
+def test_h_minimal_environment():
+    calls = []
+    pg._native_command(["fake"], environ={"PATH": "ok", "HOME": "home", "PGPASSWORD": "x",
+        "pgfuture": "x", "TOKEN": "x", "LD_PRELOAD": "x"},
+        runner=lambda argv, **kw: calls.append(kw) or SimpleNamespace(returncode=0, stdout=""))
+    assert calls[0]["env"] == {"PATH": "ok", "HOME": "home", "LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
+
+
+def test_h_initdb_password_file(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    assert c.password_seen == c.authority._password
+    assert not c.password_path.exists()
+    assert c.authority._password not in repr(c.calls)
+    if os.name != "nt":
+        assert c.password_mode == 0o600
+        assert (tmp_path / "postgres").stat().st_mode & 0o777 == 0o700
+        assert c.data.stat().st_mode & 0o777 == 0o700
+        assert (tmp_path / "postgres/socket").stat().st_mode & 0o777 == 0o700
+
+
+def test_h_initdb_failure_secret(tmp_path, monkeypatch, capsys):
+    c = _native_case(tmp_path, monkeypatch)
+    c.fail_init = True
+    with pytest.raises(RuntimeError) as error:
+        c.start()
+    assert str(error.value) == "proof native database start failed"
+    assert not (tmp_path / "postgres").exists()
+    assert not c.password_path.exists()
+    assert c.authority._password not in str(error.value) + repr(c.calls) + str(capsys.readouterr())
+
+
+def test_h_password_auth(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    argv = next(argv for argv, kw in c.calls if argv[0] == c.binaries["initdb"] and "--version" not in argv)
+    assert "--auth-local=scram-sha-256" in argv and "--auth-host=scram-sha-256" in argv
+    assert all("trust" not in item for item in argv)
+
+
+def test_h_loopback_config(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    assert "listen_addresses = '127.0.0.1'\n" in c.configs[0]
+    assert "port = 55432\n" in c.configs[0]
+    assert "unix_socket_permissions = 0700\n" in c.configs[0]
+    assert str(tmp_path / "postgres/socket").replace("\\", "\\\\") in c.configs[0]
+
+
+def test_h_marker_written(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    assert json.loads((tmp_path / "postgres/owner.json").read_text()) == {
+        "run_id": RUN, "kind": "native", "data_dir": "postgres/data", "port": 55432}
+    assert c.inventory() == dict(run_id=RUN, kind="native", data_dir="postgres/data", port=55432,
+        pid=12345, start_id="ps:1700000000", started_at=1700000000)
+
+
+def test_h_marker_missing(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    (tmp_path / "postgres/owner.json").unlink()
+    with pytest.raises(RuntimeError, match="ownership refused"):
+        c.inventory()
+    assert c.authority.stop() is False and c.data.exists()
+
+
+def test_h_marker_foreign(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    marker = tmp_path / "postgres/owner.json"
+    value = json.loads(marker.read_text())
+    value["run_id"] = "foreign-run"
+    marker.write_text(json.dumps(value))
+    with pytest.raises(RuntimeError, match="ownership refused"):
+        c.inventory()
+    assert c.authority.stop() is False and c.data.exists()
+    assert not any("stop" in argv for argv, kw in c.calls)
+
+
+def test_h_identity_mismatch(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    c.identity["started_at"] += 100
+    with pytest.raises(RuntimeError, match="identity refused"):
+        c.inventory()
+    assert c.authority.stop() is False and c.data.exists()
+
+
+def test_h_pidfile_port(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    c.pidfile.write_text(c.pidfile.read_text().replace("55432", "55433"))
+    with pytest.raises(RuntimeError, match="identity refused"):
+        c.inventory()
+
+
+def test_h_cleanup_order(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    foreign = tmp_path / "other-run"
+    foreign.mkdir()
+    (foreign / "keep").write_bytes(b"foreign")
+    remove = pg.shutil.rmtree
+    def checked(path):
+        assert c.alive is False
+        assert path.parent == tmp_path and path.name.startswith("postgres.removing-")
+        argv = c.calls[-1][0]
+        assert argv == [c.binaries["pg_ctl"], "stop", "-D", str(c.data), "-m", "fast", "-w", "-t", "60"]
+        remove(path)
+    monkeypatch.setattr(pg.shutil, "rmtree", checked)
+    assert c.authority.stop() is True and c.inventory() is None
+    assert (foreign / "keep").read_bytes() == b"foreign"
+
+
+def test_h_cleanup_reinventory(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    monkeypatch.setattr(pg.shutil, "rmtree", lambda path: None)
+    assert c.authority.stop() is False
+    assert c.inventory() is None
+    tombstones = list(tmp_path.glob("postgres.removing-*"))
+    assert len(tombstones) == 1 and (tombstones[0] / "data").exists()
+    assert c.authority.stop() is False
+
+
+def test_h_cleanup_failed_stop(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    c.fail_stop = True
+    assert c.authority.stop() is False and c.data.exists() and c.alive
+
+
+def test_h_cleanup_live_postmaster(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    c.keep_alive = True
+    assert c.authority.stop() is False and c.data.exists()
+    assert any("stop" in argv for argv, kw in c.calls)
+
+
+def test_h_cleanup_replaced_identity(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    c.identity["start_id"] = "ps:1700000001"
+    assert c.authority.stop() is False and c.data.exists()
+    assert not any("stop" in argv for argv, kw in c.calls)
+
+
+def test_h_cleanup_last_identity_check(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    original = pg.native_inventory
+    reads = []
+    def inventory(*args, **kwargs):
+        reads.append(True)
+        if len(reads) == 2:
+            c.identity["start_id"] = "ps:1700000001"
+        return original(*args, **kwargs)
+    monkeypatch.setattr(pg, "native_inventory", inventory)
+    assert c.authority.stop() is False and c.data.exists()
+    assert not any("stop" in argv for argv, kw in c.calls)
+
+
+def test_h_collision_preserved(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    (tmp_path / "postgres").mkdir()
+    keep = tmp_path / "postgres/foreign"
+    keep.write_bytes(b"untouched")
+    with pytest.raises(RuntimeError, match="run already exists"):
+        c.start()
+    assert keep.read_bytes() == b"untouched"
+    assert c.authority._created is False
+    assert c.authority.stop() is False
+    assert all(argv[-1] == "--version" for argv, kw in c.calls)
+
+
+def test_h_partial_start_cleanup(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.fail_start = True
+    with pytest.raises(RuntimeError, match="^proof native database start failed$"):
+        c.start()
+    assert c.inventory() is None and c.alive is False
+
+
+def test_h_dsn_private(tmp_path, monkeypatch, capsys):
+    c = _native_case(tmp_path, monkeypatch)
+    c.authority._password = "secret/@: canary"
+    c.start()
+    dsn = c.authority.dsn()
+    assert dsn == "postgresql://postgres:secret%2F%40%3A%20canary@127.0.0.1:55432/leaf"
+    retained = repr(c.calls) + repr(c.authority) + str(capsys.readouterr())
+    assert dsn not in retained and c.authority._password not in retained
+    assert c.authority.stop() is True
+    assert not any(path.is_file() for path in tmp_path.rglob("*"))
+
+
+def test_h_process_table(monkeypatch):
+    calls = []
+    def runner(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return SimpleNamespace(returncode=0, stdout="Tue Nov 14 22:13:20 2023 /fake/bin/postgres\n")
+    assert pg.native_process_identity(12345, runner=runner) == {"start_id": "ps:1700000000", "started_at": 1700000000}
+    assert calls[0][0] == ["/bin/ps", "-p", "12345", "-o", "lstart=", "-o", "comm="]
+    assert calls[0][1]["timeout"] == 5
+    def gone(pid, sig):
+        assert (pid, sig) == (12345, 0)
+        raise ProcessLookupError
+    monkeypatch.setattr(pg.os, "kill", gone)
+    assert pg.native_process_identity(12345,
+        runner=lambda *a, **kw: SimpleNamespace(returncode=1, stdout="", stderr="")) is None
+
+
+def test_h_process_table_foreign():
+    with pytest.raises(RuntimeError, match="identity unavailable"):
+        pg.native_process_identity(12345,
+            runner=lambda *a, **kw: SimpleNamespace(returncode=0, stdout="Tue Nov 14 22:13:20 2023 /fake/python\n"))
+
+
+def test_h_connect_environment(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    seen = []
+    def connect(**kwargs):
+        seen.append((dict(os.environ), kwargs))
+        return "connection"
+    monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(connect=connect))
+    monkeypatch.setenv("PGFUTURE", "ambient")
+    monkeypatch.setenv("pgpassword", "ambient")
+    original = dict(os.environ)
+    assert pg.NativePgAuthority._connect_database(c.authority, "leaf") == "connection"
+    assert not any(key.upper().startswith("PG") for key in seen[0][0])
+    assert seen[0][1]["host"] == seen[0][1]["hostaddr"] == "127.0.0.1"
+    assert seen[0][1]["password"] == c.authority._password and seen[0][1]["dbname"] == "leaf"
+    assert dict(os.environ) == original
+
+
+# C1: adversarial inputs and positive controls; all process/database effects fake.
+def test_h_c1_replaced_directory(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    original = pg._native_marker
+    reads = []
+    displaced = tmp_path / "displaced-owned"
+    def replace_after_validation(*args, **kwargs):
+        value = original(*args, **kwargs)
+        reads.append(True)
+        if len(reads) == 4:
+            owned = tmp_path / "postgres"
+            owned.rename(displaced)
+            owned.mkdir()
+            (owned / "owner.json").write_bytes(json.dumps(dict(value, run_id="foreign-run")).encode())
+            (owned / "foreign.txt").write_bytes(b"foreign")
+        return value
+    monkeypatch.setattr(pg, "_native_marker", replace_after_validation)
+    assert c.authority.stop() is False
+    assert len(reads) >= 4 and not c.alive
+    survivors = list(tmp_path.rglob("foreign.txt"))
+    assert len(survivors) == 1 and survivors[0].read_bytes() == b"foreign"
+    assert json.loads(survivors[0].with_name("owner.json").read_bytes())["run_id"] == "foreign-run"
+    assert (displaced / "data").is_dir()
+
+
+def test_h_c1_validated_tombstone(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    before = (tmp_path / "postgres").stat()
+    removed = []
+    remove = pg.shutil.rmtree
+    def checked(path):
+        moved = path.stat()
+        assert path.parent == tmp_path and path.name.startswith("postgres.removing-")
+        assert (moved.st_dev, moved.st_ino) == (before.st_dev, before.st_ino)
+        assert json.loads((path / "owner.json").read_bytes())["run_id"] == RUN
+        assert not c.alive and not (tmp_path / "postgres").exists()
+        removed.append(path)
+        remove(path)
+    monkeypatch.setattr(pg.shutil, "rmtree", checked)
+    assert c.authority.stop() is True
+    assert len(removed) == 1 and not removed[0].exists() and c.inventory() is None
+
+
+def test_h_c1_failed_ps(tmp_path, monkeypatch):
+    calls = []
+    def probe(pid, sig):
+        calls.append((pid, sig))  # The captured process is still alive.
+    def failed_ps(*args, **kwargs):
+        return SimpleNamespace(returncode=1, stdout="", stderr="ps: process table access denied")
+    monkeypatch.setattr(pg.os, "kill", probe)
+    monkeypatch.setattr(pg.subprocess, "run", failed_ps)
+    owned = dict(run_id=RUN, kind="native", data_dir="postgres/data", port=55432,
+        pid=12345, start_id="ps:1700000000", started_at=1700000000)
+    with pytest.raises(RuntimeError, match="identity unavailable"):
+        pg.native_process_identity(12345)
+    assert pg.cleanup_native(RUN, tmp_path, 55432, owned) is False
+    assert calls == []  # An explicit process-table error is refused outright.
+    # Permission, timeout and malformed output likewise cannot prove absence.
+    for outcome in (PermissionError("fake"), pg.subprocess.TimeoutExpired("ps", 5),
+                    SimpleNamespace(returncode=0, stdout="malformed", stderr="")):
+        def unreadable(*args, **kwargs):
+            if isinstance(outcome, Exception):
+                raise outcome
+            return outcome
+        monkeypatch.setattr(pg.subprocess, "run", unreadable)
+        assert pg.cleanup_native(RUN, tmp_path, 55432, owned) is False
+    def denied(pid, sig):
+        raise PermissionError("fake probe denied")
+    monkeypatch.setattr(pg.os, "kill", denied)
+    monkeypatch.setattr(pg.subprocess, "run", lambda *args, **kwargs:
+        SimpleNamespace(returncode=1, stdout="", stderr=""))
+    assert pg.cleanup_native(RUN, tmp_path, 55432, owned) is False
+
+
+def test_h_c1_kill_probe_absence(tmp_path, monkeypatch):
+    calls = []
+    def absent(pid, sig):
+        calls.append((pid, sig))
+        raise ProcessLookupError
+    monkeypatch.setattr(pg.os, "kill", absent)
+    monkeypatch.setattr(pg.subprocess, "run", lambda *args, **kwargs:
+        SimpleNamespace(returncode=1, stdout="", stderr=""))
+    owned = dict(pid=12345, start_id="ps:1700000000", started_at=1700000000)
+    assert pg.native_process_identity(12345) is None
+    assert pg.cleanup_native(RUN, tmp_path, 55432, owned) is True
+    assert calls == [(12345, 0), (12345, 0)]
+
+
+def test_h_c1_mixed_versions(tmp_path):
+    names = ("initdb", "pg_ctl", "postgres")
+    for wrong in names:
+        calls = []
+        def version(argv, **kwargs):
+            name = Path(argv[0]).name
+            calls.append(name)
+            return SimpleNamespace(returncode=0,
+                stdout=name + " (PostgreSQL) " + ("17.1" if name == wrong else "16.6") + "\n")
+        with pytest.raises(RuntimeError, match="requires PostgreSQL 16"):
+            pg.resolve_native_binaries(environ={"LEAF_PG_BIN": str(tmp_path / "bin")},
+                executable=lambda path: True, runner=version)
+        assert wrong in calls
+
+
+def test_h_c1_split_directories(tmp_path):
+    override, path = tmp_path / "pg16", tmp_path / "pg17"
+    available = {str(override / "pg_ctl"), str(path / "initdb"), str(path / "postgres")}
+    def version(argv, **kwargs):
+        return SimpleNamespace(returncode=0, stdout=Path(argv[0]).name + " (PostgreSQL) 16.6\n")
+    with pytest.raises(RuntimeError, match="must share a directory"):
+        pg.resolve_native_binaries(environ={"LEAF_PG_BIN": str(override), "PATH": str(path)},
+            executable=lambda name: name in available, runner=version)
+
+
+def test_h_c1_server_major(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.server_version = 170001
+    with pytest.raises(RuntimeError, match="^proof native database start failed$"):
+        c.start()
+    assert not c.alive and c.inventory() is None
+    assert sum("start" in argv for argv, kwargs in c.calls) == 1
+    assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+    assert not list(tmp_path.glob("postgres*"))

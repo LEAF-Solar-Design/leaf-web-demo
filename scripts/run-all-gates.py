@@ -2582,12 +2582,12 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_proof_string_sizer.py"), 70),
         Suite("scripts-seed-proof-drawings", "scripts test_seed_proof_drawings.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_seed_proof_drawings.py"), 5),
-        # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets.
+        # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets. A1/C1: 85 collected, +28 fake native rows and +7 C1 rows.
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 50),
-        # Records A/A2/B/C/D/E: measured 32 boundary/runtime + 15 authority + 22 execution + 134 lifetime + 37 receipt rows.
+              SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 85),
+        # Records A/A2/B/C/D/E/A1/C1: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 rows.
         Suite("scripts-proof-project", "scripts test_proof_project.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 240),
+              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 272),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
