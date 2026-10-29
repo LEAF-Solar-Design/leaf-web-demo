@@ -444,6 +444,80 @@ describe('scoped Vercel authorization HTTP contract', () => {
     expect(validateVercelDestinations(issued, 'https://studio.example')).toEqual(issued)
   })
 })
+describe('Vercel destination HTTP contract', () => {
+  const account = { ownerId: 'team_123', teamId: 'team_123' }
+  const destination = { projectId: 'prj_123', accountId: account.ownerId, name: '<Jessica & studio>' }
+  const list = { revision: 3, account, projects: [{ id: destination.projectId, name: destination.name }], truncated: false }
+  const saved = { revision: 4, account, destination }
+  it('uses exact authenticated bounded requests, encoded search, and caller cancellation', async () => {
+    const { client, fetchImpl, options } = setup(list)
+    const search = 'Jessica & + studio'
+    expect(await client.listVercelProjects(projectId, 'vercel-account', { expectedRevision: 3, search }, options)).toEqual(list)
+    fetchImpl.mockResolvedValueOnce(response(saved))
+    expect(await client.selectVercelProject(projectId, 'vercel-account', { expectedRevision: 3, projectId: destination.projectId, search }, options)).toEqual(saved)
+    fetchImpl.mockResolvedValueOnce(response({ ...saved, destination: null }))
+    expect(await client.getVercelDestination(projectId, 'vercel-account', options)).toEqual({ ...saved, destination: null })
+    const root = `https://ops.example/api/v1/projects/${projectId}/integrations/connections/vercel-account/vercel`
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${root}/projects?${new URLSearchParams({ expectedRevision: '3', search })}`, `${root}/destination`, `${root}/destination`,
+    ])
+    expect(fetchImpl.mock.calls.map(([, request]) => request.method)).toEqual(['GET', 'PUT', 'GET'])
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual({ expectedRevision: 3, projectId: 'prj_123', search })
+    expect(fetchImpl.mock.calls[0][1].body).toBeUndefined()
+    expect(fetchImpl.mock.calls[2][1].body).toBeUndefined()
+    for (const [, request] of fetchImpl.mock.calls) expect(request).toMatchObject({ signal: options.signal,
+      credentials: 'omit', cache: 'no-store', redirect: 'error', headers: { Authorization: 'Bearer first' } })
+  })
+  it.each([{ expectedRevision: 0 }, { expectedRevision: 2147483648 }, { expectedRevision: 3, search: 'x'.repeat(101) },
+    { expectedRevision: 3, search: '\n' }, { expectedRevision: 3, search: '\u0085' }, { expectedRevision: 3, teamId: 'team_123' }])('rejects invalid list input locally', async (input) => {
+    const { client, fetchImpl, options } = setup(list)
+    await expect(client.listVercelProjects(projectId, 'vercel-account', input, options)).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([{ expectedRevision: 2147483647, projectId: 'prj_123' }, { expectedRevision: 3, projectId: 'prj_123\n' },
+    { expectedRevision: 3, projectId: 'x'.repeat(257) }, { expectedRevision: 3, projectId: 'prj_123', name: 'invented' },
+    { expectedRevision: 3, projectId: 'prj_123', accountId: 'foreign' }])('rejects invalid mutation input locally', async (input) => {
+    const { client, fetchImpl, options } = setup(saved)
+    await expect(client.selectVercelProject(projectId, 'vercel-account', input, options)).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([{ ...list, revision: 4 }, { ...list, projects: [...list.projects, ...list.projects] },
+    { ...list, projects: Array.from({ length: 21 }, (_, i) => ({ id: `prj_${i}`, name: 'Project' })) },
+    { ...list, projects: [{ id: 'prj_123', name: '  ' }] }, { ...list, projects: [{ id: 'prj_123', name: 'x\n' }] },
+    { ...list, account: { ownerId: 'foreign', teamId: account.teamId } }, { ...list, extra: 'unsafe' }])('rejects invalid list responses', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.listVercelProjects(projectId, 'vercel-account', { expectedRevision: 3 }, options)).rejects.toMatchObject({ dispatched: false })
+  })
+  it.each([{ ...saved, revision: 3 }, { ...saved, revision: 2147483648 }, { ...saved, destination: null },
+    { ...saved, destination: { ...destination, projectId: 'other' } },
+    { ...saved, destination: { ...destination, accountId: 'foreign' } }])('rejects unsafe PUT acknowledgements with dispatched metadata', async (value) => {
+    const { client, options } = setup(value)
+    await expect(client.selectVercelProject(projectId, 'vercel-account', { expectedRevision: 3, projectId: 'prj_123' }, options)).rejects.toMatchObject({ dispatched: true })
+  })
+  it('accepts maximum read revision and personal identity but rejects inconsistent GET identity', async () => {
+    const value = { revision: 2147483647, account: { ownerId: 'user_123', teamId: null }, destination: null }
+    const { client, fetchImpl, options } = setup(value)
+    expect(await client.getVercelDestination(projectId, 'vercel-account', options)).toEqual(value)
+    fetchImpl.mockResolvedValueOnce(response({ ...value, projects: [], truncated: false, destination: undefined }))
+    expect((await client.listVercelProjects(projectId, 'vercel-account', { expectedRevision: 2147483647 }, options)).revision).toBe(2147483647)
+    fetchImpl.mockResolvedValueOnce(response({ ...saved, destination: { ...destination, accountId: 'foreign' } }))
+    await expect(client.getVercelDestination(projectId, 'vercel-account', options)).rejects.toMatchObject({ dispatched: false })
+  })
+  it('does not dispatch pre-aborted requests and propagates in-flight cancellation', async () => {
+    const { client, fetchImpl } = setup(list)
+    const controller = new AbortController()
+    controller.abort()
+    await expect(client.listVercelProjects(projectId, 'vercel-account', { expectedRevision: 3 }, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchImpl).not.toHaveBeenCalled()
+    const active = new AbortController()
+    fetchImpl.mockImplementationOnce((url, request) => new Promise((resolve, reject) => {
+      request.signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })
+    }))
+    const pending = client.selectVercelProject(projectId, 'vercel-account', { expectedRevision: 3, projectId: 'prj_123' }, { signal: active.signal })
+    active.abort()
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError', dispatched: true })
+  })
+})
 describe('manual workflow history HTTP contract', () => {
   it('uses a bounded, authenticated, uncached collection GET with the caller signal', async () => {
     const page = { items: [workflow.run], next_cursor: 'page_2' }

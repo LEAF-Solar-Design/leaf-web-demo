@@ -33,6 +33,19 @@ const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const vercelState = z.string().regex(/^[A-Za-z0-9_-]{43}(?![\s\S])/)
 const vercelId = z.string().regex(/^[A-Za-z0-9_-]{1,256}(?![\s\S])/)
 const vercelCode = z.string().regex(/^[A-Za-z0-9_-]{1,2048}(?![\s\S])/)
+const vercelReadRevision = z.number().int().min(1).max(2147483647)
+const vercelWriteRevision = z.number().int().min(1).max(2147483646)
+const vercelSearch = z.string().max(100).refine((value) => !/[\x00-\x1f\x7f-\x9f]/.test(value))
+const vercelName = z.string().min(1).max(256).refine((value) => value.trim().length > 0 && !/[\x00-\x1f\x7f-\x9f]/.test(value))
+const vercelAccount = z.strictObject({ ownerId: vercelId, teamId: vercelId.nullable() })
+  .refine((value) => value.teamId === null || value.teamId === value.ownerId)
+const vercelProjectList = z.strictObject({ revision: vercelReadRevision, account: vercelAccount,
+  projects: z.array(z.strictObject({ id: vercelId, name: vercelName })).max(20)
+    .refine((values) => new Set(values.map((value) => value.id)).size === values.length), truncated: z.boolean() })
+const vercelDestination = z.strictObject({ projectId: vercelId, accountId: vercelId, name: vercelName })
+const vercelDestinationRead = z.strictObject({ revision: vercelReadRevision, account: vercelAccount,
+  destination: vercelDestination.nullable() })
+  .refine((value) => value.destination === null || value.destination.accountId === value.account.ownerId)
 const vercelIssue = z.strictObject({ state: vercelState, expiresAt: z.string().datetime().max(64),
   authorizationUrl: z.string().min(1).max(2048), callbackUri: z.string().min(1).max(2048) })
 const vercelCompletion = z.strictObject({ configurationId: vercelId, integrationId: vercelId, userId: vercelId,
@@ -460,6 +473,26 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       return setupResponse(vercelCompletion, id, `connections/${connectionId}/vercel/complete`,
         { ...options, method: 'POST', body, bodyLimit: 4096 },
         (value) => value.configurationId === body.configurationId && value.revision > body.expectedRevision)
+    },
+    async listVercelProjects(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const query = parse(z.strictObject({ expectedRevision: vercelReadRevision, search: vercelSearch.optional() }), input)
+      const params = new URLSearchParams({ expectedRevision: String(query.expectedRevision) })
+      if (query.search !== undefined) params.set('search', query.search)
+      return setupResponse(vercelProjectList, id, `connections/${connectionId}/vercel/projects?${params}`,
+        { signal: options?.signal, method: 'GET', bodyLimit: 4096 }, (value) => value.revision === query.expectedRevision)
+    },
+    async selectVercelProject(id, connectionId, input, options) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedRevision: vercelWriteRevision, projectId: vercelId, search: vercelSearch.optional() }), input)
+      return setupResponse(vercelDestinationRead, id, `connections/${connectionId}/vercel/destination`,
+        { signal: options?.signal, method: 'PUT', body, bodyLimit: 4096 },
+        (value) => value.revision > body.expectedRevision && value.destination?.projectId === body.projectId)
+    },
+    async getVercelDestination(id, connectionId, options) {
+      parse(slug, connectionId)
+      return setupResponse(vercelDestinationRead, id, `connections/${connectionId}/vercel/destination`,
+        { signal: options?.signal, method: 'GET', bodyLimit: 4096 })
     },
     async revokeConnection(id, connectionId, expectedRevision, options) {
       parse(slug, connectionId); parse(revision, expectedRevision)

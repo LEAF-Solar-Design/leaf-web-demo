@@ -27,7 +27,9 @@ function validDefinition(resource, definition) {
     op.pagination.kind === 'none' && op.pagination.records_pointer === '' && op.idempotency.kind === 'read' && !op.adapter_ref
 }
 const safeId = (value) => typeof value === 'string' && /^[A-Za-z0-9_-]{1,256}(?![\s\S])/.test(value)
-const emptyView = { busy: false, phase: 'empty', unknown: false, message: '', error: '', linked: null }
+const emptyView = { busy: false, phase: 'empty', unknown: false, message: '', error: '', linked: null, destination: null }
+const emptyDestination = () => ({ search: '', projects: null, selectedId: '', revision: null, truncated: false,
+  pending: null, saved: null, needsRefresh: false })
 
 export function VercelConnectionPanel({ client, projectId, scope, signal, guard, onForbidden }) {
   const key = scopeKey(scope, projectId)
@@ -52,7 +54,10 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
     const ctx = { key, signal, client, controller: new AbortController(), phase: 'empty', busy: false, unknown: false, pending: null, states: new Set() }
     context.current = ctx
     setView(emptyView)
-    const dispose = () => { clearPending(ctx); ctx.controller.abort(); ctx.linked = null; ctx.states.clear() }
+    const dispose = () => {
+      clearPending(ctx); ctx.controller.abort(); ctx.linked = null; ctx.destination = null; ctx.states.clear()
+      if (context.current === ctx) setView(emptyView)
+    }
     if (signal.aborted) dispose()
     else signal.addEventListener('abort', dispose, { once: true })
     return () => { dispose(); signal.removeEventListener('abort', dispose); if (context.current === ctx) context.current = null }
@@ -66,7 +71,8 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
   function update(ctx, patch = {}) {
     if (!current(ctx)) return
     Object.assign(ctx, patch)
-    setView({ busy: ctx.busy, phase: ctx.phase, unknown: ctx.unknown, message: ctx.message || '', error: ctx.error || '', linked: ctx.linked || null })
+    setView({ busy: ctx.busy, phase: ctx.phase, unknown: ctx.unknown, message: ctx.message || '', error: ctx.error || '', linked: ctx.linked || null,
+      destination: ctx.destination ? { ...ctx.destination } : null })
   }
   const options = (ctx) => ({ signal: ctx.controller.signal })
   function matchesConnection(ctx, value) {
@@ -78,10 +84,12 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
   function verifyLinked(ctx, value) {
     const result = ctx.completed
     if (!result || !matchesConnection(ctx, value) || value.revision !== result.revision || result.ownerId !== (result.teamId ?? result.userId) ||
+        !value.identity_verified || value.provider_account_id !== result.ownerId ||
         !value.credential_purposes.includes('access_token') || value.cleanup !== result.cleanup) throw new Error('readback')
     ctx.connection = value
     ctx.phase = 'linked'; ctx.unknown = false
     ctx.linked = { team: result.teamId !== null, cleanup: result.cleanup }
+    ctx.destination = { ...emptyDestination(), revision: value.revision }
     ctx.message = 'Vercel account linked.'
   }
   async function reconcile(ctx) {
@@ -265,6 +273,101 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
     if (!ctx || !ctx.unknown) return
     work(ctx, async () => { await reconcile(ctx); update(ctx, { message: 'Saved status confirmed. Continue when ready.' }) })
   }
+  function matchesAccount(ctx, account) {
+    return account?.ownerId === ctx.completed.ownerId && account.teamId === ctx.completed.teamId
+  }
+  async function destinationConnection(ctx, expectedRevision) {
+    await guarded(ctx)
+    const fresh = await client.getConnectionSummary(projectId, ctx.connectionId, options(ctx))
+    await guarded(ctx)
+    if (!matchesConnection(ctx, fresh) || !fresh.identity_verified || fresh.provider_account_id !== ctx.completed.ownerId ||
+        !fresh.credential_purposes.includes('access_token') || fresh.cleanup !== ctx.completed.cleanup) throw new Error('identity')
+    if (fresh.revision !== expectedRevision) throw Object.assign(new Error('revision'), { status: 409 })
+    ctx.connection = fresh
+  }
+  function destinationWork(task) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || ctx.busy || ctx.phase !== 'linked' || !ctx.destination) return
+    work(ctx, async () => {
+      try { await task(ctx, ctx.destination) }
+      catch (failure) {
+        if (!current(ctx) || [401, 403].includes(failure?.status)) throw failure
+        const dest = ctx.destination
+        if (failure?.status === 409) {
+          Object.assign(dest, { projects: null, selectedId: '', pending: null, saved: null, needsRefresh: true })
+          update(ctx, { error: 'The connection changed. Refresh destination status before choosing again.', message: '' })
+        } else {
+          // Keep the intended ID after an uncertain PUT or failed confirmation GET. Never replay the PUT.
+          if (!dest.pending) Object.assign(dest, { projects: null, selectedId: '', saved: null, needsRefresh: true })
+          update(ctx, { error: dest.pending ? 'The destination is not confirmed. Check destination status before continuing. No save will be repeated.' :
+            'Vercel destinations could not be verified. Refresh destination status before choosing again.', message: '' })
+        }
+      }
+    })
+  }
+  function loadProjects() {
+    destinationWork(async (ctx, dest) => {
+      if (dest.pending || dest.needsRefresh) return
+      Object.assign(dest, { projects: null, selectedId: '', saved: null })
+      await destinationConnection(ctx, dest.revision)
+      const result = await client.listVercelProjects(projectId, ctx.connectionId,
+        { expectedRevision: dest.revision, search: dest.search }, options(ctx))
+      await guarded(ctx)
+      if (!matchesAccount(ctx, result.account) || result.revision !== dest.revision) throw new Error('identity')
+      Object.assign(dest, { projects: result.projects, truncated: result.truncated, loadedSearch: dest.search })
+      update(ctx, { message: result.projects.length ? 'Choose a Vercel project for this destination.' : 'No Vercel projects found.' })
+    })
+  }
+  async function readDestination(ctx, dest) {
+    await guarded(ctx)
+    const result = await client.getVercelDestination(projectId, ctx.connectionId, options(ctx))
+    await guarded(ctx)
+    if (!matchesAccount(ctx, result.account) || (result.destination && result.destination.accountId !== ctx.completed.ownerId) ||
+        result.revision < dest.revision) throw new Error('identity')
+    await destinationConnection(ctx, result.revision)
+    const pending = dest.pending
+    const ack = pending?.acknowledged
+    const matches = pending && result.destination?.projectId === pending.projectId &&
+      (ack ? result.revision === ack.revision && result.destination.name === ack.destination.name &&
+        result.destination.accountId === ack.destination.accountId && matchesAccount(ctx, ack.account) :
+        result.revision > pending.revision && result.destination.name === pending.name)
+    Object.assign(dest, { revision: result.revision, needsRefresh: false, pending: null, projects: null, selectedId: '', saved: matches ? result.destination : null })
+    update(ctx, { error: '', message: matches ? 'Vercel destination saved and confirmed.' :
+      pending ? 'The intended destination is unconfirmed. Load projects and make a new choice.' : 'Destination status refreshed. Load projects to make a new choice.' })
+  }
+  function saveDestination() {
+    destinationWork(async (ctx, dest) => {
+      if (dest.pending || dest.needsRefresh || !dest.selectedId || dest.revision >= 2147483647) return
+      const selected = dest.projects?.find((project) => project.id === dest.selectedId)
+      if (!selected) return
+      await destinationConnection(ctx, dest.revision)
+      await guarded(ctx)
+      dest.pending = { projectId: selected.id, name: selected.name, revision: dest.revision, acknowledged: null }
+      dest.saved = null
+      update(ctx, { message: 'Saving destination; confirmation is pending…' })
+      let ack
+      try {
+        ack = await client.selectVercelProject(projectId, ctx.connectionId,
+          { expectedRevision: dest.revision, projectId: selected.id, search: dest.loadedSearch }, options(ctx))
+      } catch (failure) {
+        if (failure?.dispatched === false || (failure?.status >= 400 && failure.status < 500 && ![408, 429].includes(failure.status))) dest.pending = null
+        throw failure
+      }
+      await guarded(ctx)
+      if (!matchesAccount(ctx, ack.account) || ack.destination?.accountId !== ctx.completed.ownerId ||
+          ack.destination.projectId !== selected.id || ack.revision <= dest.revision) throw new Error('identity')
+      dest.pending.acknowledged = ack
+      await readDestination(ctx, dest)
+    })
+  }
+  function editDestination(field, value) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || ctx.busy || !ctx.destination || ctx.destination.pending || ctx.destination.needsRefresh) return
+    ctx.destination[field] = value
+    ctx.destination.saved = null
+    if (field === 'search') Object.assign(ctx.destination, { projects: null, selectedId: '', truncated: false })
+    update(ctx, { message: '', error: '' })
+  }
   if (scope.projectRole !== 'owner' || signal.aborted) return null
   return <section className="integration-setup" aria-label="Connect Vercel">
     <h2>Connect Vercel</h2>
@@ -277,5 +380,36 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
     {view.phase === 'waiting' && <button type="button" disabled={view.busy} onClick={cancel}>Cancel authorization</button>}
     {view.unknown && <button type="button" disabled={view.busy} onClick={recover}>Check Vercel status</button>}
     {view.linked && <p>{view.linked.team ? 'Verified Vercel team account.' : 'Verified personal Vercel account.'} {view.linked.cleanup === 'complete' ? 'Cleanup complete.' : 'Cleanup needs attention.'}</p>}
+    {view.linked && view.destination && <div>
+      <h3>Vercel publishing destination</h3>
+      <p>Choose an existing project. Saving a destination does not publish your site.</p>
+      <label>Search Vercel projects
+        <input type="search" maxLength={100} value={view.destination.search}
+          style={{ boxSizing: 'border-box', width: '100%', minHeight: 44 }}
+          disabled={view.busy || Boolean(view.destination.pending) || view.destination.needsRefresh}
+          onChange={(event) => editDestination('search', event.target.value)} />
+      </label>
+      <button type="button" disabled={view.busy || Boolean(view.destination.pending) || view.destination.needsRefresh} onClick={loadProjects}>Load Vercel projects</button>
+      {view.destination.projects && <>
+        {view.destination.truncated && <p>Showing at most 20 projects. Narrow your search to find another project.</p>}
+        {view.destination.projects.length > 0 && <>
+          <label>Vercel project
+            <select value={view.destination.selectedId} style={{ boxSizing: 'border-box', width: '100%', minHeight: 44 }}
+              disabled={view.busy || Boolean(view.destination.pending) || view.destination.needsRefresh}
+              onChange={(event) => editDestination('selectedId', event.target.value)}>
+              <option value="">Choose a project</option>
+              {view.destination.projects.map((project) => <option key={project.id} value={project.id}>{project.name}</option>)}
+            </select>
+          </label>
+          <button type="button" disabled={view.busy || Boolean(view.destination.pending) || view.destination.needsRefresh ||
+            !view.destination.selectedId || view.destination.revision >= 2147483647} onClick={saveDestination}>Save destination</button>
+        </>}
+      </>}
+      {view.destination.pending && <button type="button" disabled={view.busy}
+        onClick={() => destinationWork(readDestination)}>Check destination status</button>}
+      {view.destination.needsRefresh && <button type="button" disabled={view.busy}
+        onClick={() => destinationWork(readDestination)}>Refresh destination status</button>}
+      {view.destination.saved && <p style={{ overflowWrap: 'anywhere' }}>Confirmed destination: {view.destination.saved.name}</p>}
+    </div>}
   </section>
 }
