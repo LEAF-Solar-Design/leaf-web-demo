@@ -46,6 +46,12 @@ REQUIRED_MODULES = ("fastapi", "uvicorn", "psycopg", "psycopg_pool", "jwt",
 REQUIRED_TEST_IDS = ("project_browser_create_import", "project_browser_bearer_required",
                      "project_settings_worker_readback")
 ENGINE_OUTPUTS = ("engine.js", "engine_bg.wasm")
+# The managed stack and injected browser client share this closed public contract.
+MANAGED_PUBLIC_UI_SETTINGS = MappingProxyType({
+    "VITE_CAD_EDIT": "1", "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1",
+    "VITE_TENANT_ID": "{organization_id}", "VITE_MOCK": "0",
+    "VITE_API_BASE": "{app_origin}",
+})
 TOOLS = ("node", "cargo", "rustc", "wasm-pack")
 BUILD_TIMEOUT_S = 600.0  # Provisional bounded policy, not a measured build budget.
 VERSION_TIMEOUT_S = 15.0
@@ -886,6 +892,11 @@ def _clean_libpq(environ):
     return _libpq_cleaner(environ)
 
 
+def _managed_public_ui_environment(app_origin, organization_id):
+    return {key: value.format(app_origin=app_origin, organization_id=organization_id)
+            for key, value in MANAGED_PUBLIC_UI_SETTINGS.items()}
+
+
 def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
                         profile_env: Mapping[str, str], organization_id: str) -> dict[str, str]:
     """Project consumers receive one authority and no ambient policy or credentials."""
@@ -912,8 +923,6 @@ def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
             "LEAF_AGENT_MOCK": "1", "LEAF_GUEST_DXF_EXTRACT": "local",
             "LEAF_AUTHORED_EXECUTION": "0", "LEAF_HARNESS_AUTHORING_MODE": "disabled",
             "LEAF_AGENT_STORE": "postgres", "LEAF_HARNESS_SESSION_STORE": "postgres",
-            "VITE_CAD_EDIT": "1", "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1",
-            "VITE_TENANT_ID": organization_id, "VITE_MOCK": "0",
             "LEAF_CANONICAL_WORKER_TOOL": WORKER_TOOL, "LEAF_CANONICAL_WORKER_REQUIRED": "1",
             "LEAF_EXPECTED_WORKER_REVISION": plan.descriptor.source_revision,
             "LEAF_CANONICAL_WORKER_ID": "project:" + plan.config.run_id,
@@ -926,8 +935,9 @@ def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
         env["DATABASE_URL"] = dsn
         env["LEAF_HARNESS_DATABASE_URL"] = dsn
         web, app = f"http://127.0.0.1:{ports.web}", f"http://127.0.0.1:{ports.app}"
+        env.update(_managed_public_ui_environment(app, organization_id))
         env.update({"LEAF_E2E_BASE_URL": web, "LEAF_E2E_API_BASE": app,
-                    "VITE_API_BASE": app, "LEAF_APP_URL": app, "LEAF_CORS_ORIGINS": web,
+                    "LEAF_APP_URL": app, "LEAF_CORS_ORIGINS": web,
                     "BROKER_URL": f"http://127.0.0.1:{ports.broker}",
                     "WEB_PORT": str(ports.web), "APP_PORT": str(ports.app),
                     "BROKER_PORT": str(ports.broker), "HARNESS_PORT": str(ports.harness)})
@@ -1722,6 +1732,9 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
             _refuse(FailureCode.LAUNCH, Stage.STACK)
         if effects.browser_runner is None or effects.browser_runner is _browser_unavailable:
             _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
+        # PP-3B production custody/install admission precedes stack acquisition.
+        if effects.browser_runner is _run_project_browser:
+            _browser_install(scope, plan.host.environment)
         env = project_environment(plan, os_env=plan.host.environment, dsn=prepared.dsn,
             profile_env=prepared.identity_lease.profile, organization_id=prepared.binding.organization_id)
         start = effects.clock.monotonic()
@@ -1748,6 +1761,7 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
         # This distinct late mint is never added to the shared stack environment.
         token = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=360)
         browser_env = _PrivateEnvironment(_essential_environment(plan.host.environment))
+        browser_env.update({key: env[key] for key in MANAGED_PUBLIC_UI_SETTINGS})
         browser_env.update({"LEAF_E2E_TOKEN": token.reveal(), "LEAF_E2E_MANAGED": "1",
             "LEAF_PROOF_PROJECT_RUN_ID": plan.config.run_id})
         browser_request = BrowserRequest(plan.config.run_id, plan.source, prepared.identity.public_key_thumbprint,
@@ -2150,6 +2164,176 @@ def _later(record):
 def _browser_unavailable(request, *, scope):
     """PP-3B has not landed; production browser execution remains unavailable."""
     _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
+
+
+# PP-3B browser wire contract. Kept separate from E's final, post-cleanup receipt.
+BROWSER_REPORT_SCHEMA = "leaf.project-browser.v1"
+BROWSER_REPORT_LIMIT = 4 * 1024 * 1024
+
+
+def _browser_install(scope, environment):
+    # A production child needs D's lifetime owner, including pending-start drain.
+    # A duck-typed scope cannot provide that custody guarantee.
+    if not isinstance(scope, RunScope):
+        _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
+    node = shutil.which("node", path=environment.get("PATH", ""))
+    cli = REPO / "web/node_modules/@playwright/test/cli.js"
+    if not node or not cli.is_file():
+        _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
+    return node, cli
+
+
+def _browser_object(value, fields):
+    if type(value) is not dict or set(value) != set(fields):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    return value
+
+
+def _browser_pairs(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        result[key] = value
+    return result
+
+
+def _browser_strings(value):
+    if type(value) is not list or any(type(item) is not str for item in value):
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    return tuple(value)
+
+
+def _read_browser_report(path, request):
+    """Read leaf.project-browser.v1 once, bounded; no partial evidence escapes."""
+    try:
+        if not _path_safe(path) or not path.is_file():
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        with path.open("rb") as stream:
+            payload = stream.read(BROWSER_REPORT_LIMIT + 1)
+        if len(payload) > BROWSER_REPORT_LIMIT:
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        raw = json.loads(payload.decode("utf-8"), object_pairs_hook=_browser_pairs)
+        _browser_object(raw, ("schema", "run_id", "source_binding", "public_key_thumbprint",
+            "exit_code", "selected_test_ids", "started_test_ids", "completed_test_ids",
+            "outcomes", "annotation_types", "checkpoints", "canonical"))
+        if raw["schema"] != BROWSER_REPORT_SCHEMA:
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        source = _browser_object(raw["source_binding"], ("commit", "dirty_tree_sha256",
+            "tested_source_manifest_sha256", "files", "declared_untracked", "expected_migrations"))
+        if (any(type(source[key]) is not str for key in ("commit", "dirty_tree_sha256",
+                "tested_source_manifest_sha256")) or type(source["files"]) is not list):
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        files = []
+        for item in source["files"]:
+            _browser_object(item, ("path", "sha256", "size"))
+            if (type(item["path"]) is not str or type(item["sha256"]) is not str
+                    or type(item["size"]) is not int or item["size"] < 0):
+                _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+            files.append(FileProof(**item))
+        source = SourceProof(source["commit"], source["dirty_tree_sha256"],
+            source["tested_source_manifest_sha256"], tuple(files),
+            _browser_strings(source["declared_untracked"]), _browser_strings(source["expected_migrations"]))
+        if type(raw["outcomes"]) is not list:
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        outcomes = []
+        for outcome in raw["outcomes"]:
+            _browser_object(outcome, ("test_id", "status", "retry"))
+            if (type(outcome["test_id"]) is not str or type(outcome["status"]) is not str
+                    or type(outcome["retry"]) is not int):
+                _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+            outcomes.append(TestOutcome(**outcome))
+        checkpoints = _browser_object(raw["checkpoints"], CHECKPOINTS)
+        canonical = _browser_object(raw["canonical"], ("organization_id", "project_id", "drawing_id",
+            "input_version_id", "output_version_id", "job_id", "binding_id", "worker_id", "checkout_fence",
+            "before_settings_sha256", "settings_sha256", "reopened_settings_sha256"))
+        if (type(raw["run_id"]) is not str or type(raw["public_key_thumbprint"]) is not str
+                or type(raw["exit_code"]) is not int or raw["exit_code"] != 0):
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        result = BrowserResult(raw["run_id"], source, raw["public_key_thumbprint"], raw["exit_code"],
+            _browser_strings(raw["selected_test_ids"]), _browser_strings(raw["started_test_ids"]),
+            _browser_strings(raw["completed_test_ids"]), tuple(outcomes),
+            _browser_strings(raw["annotation_types"]), checkpoints, CanonicalEvidence(**canonical))
+        return _validate_browser(result, request)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+
+
+class _ProjectBrowser:
+    def __init__(self, process, report, request):
+        self.process = process
+        self.report = report
+        self.request = request
+
+    def __repr__(self):
+        return "<owned project browser>"
+
+    def poll(self):
+        code = self.process.poll()
+        if code is None:
+            return None
+        if type(code) is not int or code != 0:
+            _refuse(FailureCode.BROWSER_EXIT, Stage.BROWSER)
+        return _read_browser_report(self.report, self.request)
+
+    def stop(self, deadline):
+        return self.process.stop(deadline)
+
+
+def _run_project_browser(request, *, scope):
+    if type(request) is not BrowserRequest:
+        _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
+    node, cli = _browser_install(scope, request.environment)
+    try:
+        from dataclasses import asdict
+        environment = _PrivateEnvironment(_essential_environment(request.environment))
+        for key in ("LEAF_E2E_TOKEN", "LEAF_E2E_MANAGED", "LEAF_PROOF_PROJECT_RUN_ID"):
+            environment[key] = request.environment[key]
+        if (environment["LEAF_E2E_MANAGED"] != "1"
+                or environment["LEAF_PROOF_PROJECT_RUN_ID"] != request.run_id
+                or re.fullmatch(r"[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+",
+                    environment["LEAF_E2E_TOKEN"]) is None):
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        public_environment = _managed_public_ui_environment(request.app_origin, request.organization_id)
+        for key in MANAGED_PUBLIC_UI_SETTINGS:
+            value = request.environment.get(key)
+            if value != public_environment[key]:
+                _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+            environment[key] = value
+        for origin in (request.web_origin, request.app_origin):
+            match = re.fullmatch(r"http://127\.0\.0\.1:([1-9][0-9]{0,4})", origin)
+            if match is None or int(match[1]) > 65535:
+                _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        root = request.output_root / "project-browser"
+        output = root / "playwright-output"
+        report = root / "browser-result.json"
+        if (not _path_safe(root) or not request.output_root.is_dir()
+                or not _path_absent(root) or not _path_absent(report)):
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        root.mkdir(mode=0o700, exist_ok=False)
+        output.mkdir(mode=0o700, exist_ok=False)
+        # Exclusive reporter creation remains authoritative if a file appears later.
+        if not _path_absent(report):
+            _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        metadata = {"profile": PROFILE, "run_id": request.run_id,
+            "source_binding": asdict(request.source_binding),
+            "public_key_thumbprint": request.public_key_thumbprint,
+            "organization_id": request.organization_id, "binding_id": request.binding_id,
+            "worker_id": request.worker_id, "web_origin": request.web_origin,
+            "app_origin": request.app_origin, "required_test_ids": request.required_test_ids}
+        environment.update({"LEAF_PROJECT_REQUEST": json.dumps(metadata, separators=(",", ":")),
+            "LEAF_PROJECT_BASE_URL": request.web_origin, "LEAF_PROJECT_OUTPUT_DIR": str(output),
+            "LEAF_PROJECT_PROOF_OUTPUT": str(report)})
+        spec = ProcessSpec("project-browser", (node, str(cli), "test", "-c", "playwright.project.config.mjs"),
+            REPO / "web", environment, request.deadline)
+        process = _launch_supervised(spec, scope=scope)
+        return _ProjectBrowser(process, report, request)
+    except ProofRefused:
+        raise
+    except Exception:
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
 
 
 class _Clock:
@@ -2694,7 +2878,7 @@ class _RuntimeProcess:
 
     def start(self):
         spec = self.spec
-        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child"}:
+        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child", "project-browser"}:
             raise RuntimeError("unknown process role")
         with self._lock:
             if self._start_attempted or self._stop_requested:
@@ -2841,6 +3025,7 @@ def _launch_runtime(spec, *, scope):
     # Registration is synchronous and precedes the first possible child.
     kind = {"migration-child": ResourceKind.MIGRATION_PROCESS,
             "seed-child": ResourceKind.SEED_PROCESS,
+            "project-browser": ResourceKind.BROWSER_PROCESS,
             "stack-launcher": ResourceKind.STACK_PROCESS}.get(spec.role, ResourceKind.RUNTIME_PROCESS)
     scope.acquire(kind, lambda: process.stop(time.monotonic() + 5.0))
     process.start()
@@ -3051,7 +3236,7 @@ def production_effects() -> Effects:
     effects = Effects(lambda run_id: _authority_factory(run_id,
         reservation=getattr(host, "_reservation", None), environ=getattr(host, "_authority_environment", None)),
                    _issuer_factory, None, None,
-                   _launch_supervised, None, _browser_unavailable, _canonical_reader,
+                   _launch_supervised, None, _run_project_browser, _canonical_reader,
                    _Clock(), host, _ReceiptWriter())
     return replace(effects,
         readiness_probe=lambda request: check_readiness(request, effects=effects),
