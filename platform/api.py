@@ -504,6 +504,59 @@ async def save_project_page(project_id: uuid.UUID, request: Request,
     return JSONResponse({'page': page}, headers={'Cache-Control': 'private, no-store'})
 
 
+def _proposal_response(operation):
+    from . import project_page_proposal as proposals
+    headers = {'Cache-Control': 'private, no-store'}
+    try:
+        return operation()
+    except proposals.ProposalError as exc:
+        raise HTTPException(status_code=exc.status, detail=str(exc), headers=headers) from None
+    except project_lifecycle.LifecycleUnavailable:
+        raise HTTPException(status_code=404, detail='project resource not found', headers=headers) from None
+    except project_lifecycle.LifecycleForbidden:
+        raise HTTPException(status_code=403, detail='project access denied', headers=headers) from None
+    except project_lifecycle.LifecycleConflict:
+        raise HTTPException(status_code=409, detail='Portfolio proposal source changed.', headers=headers) from None
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid portfolio proposal request.', headers=headers) from None
+
+
+def _get_proposal_actor(
+    x_org_id: str | None = Header(default=None),
+    x_actor_binding_id: str | None = Header(default=None),
+    authorization: str | None = Header(default=None),
+) -> _LifecycleActor:
+    try:
+        return _get_lifecycle_actor(x_org_id, x_actor_binding_id, authorization)
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), 'Cache-Control': 'private, no-store'}
+        raise
+
+
+@router.post('/projects/{project_id}/page/proposals')
+async def propose_project_page(project_id: str, request: Request,
+                               actor: _LifecycleActor = Depends(_get_proposal_actor)):
+    from . import project_page_proposal as proposals
+    try:
+        project_id = uuid.UUID(project_id)
+    except ValueError:
+        raise HTTPException(status_code=422, detail='Invalid portfolio proposal request.',
+                            headers={'Cache-Control': 'private, no-store'}) from None
+    # Authorize before consuming even a byte of caller input or spending on a model.
+    await run_in_threadpool(_proposal_response, lambda: project_lifecycle.require_project_role(
+        actor.org_id, project_id, actor.binding_id, write=True))
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > proposals.MAX_INPUT_BYTES:
+            raise HTTPException(status_code=413, detail='Portfolio proposal request is too large.',
+                                headers={'Cache-Control': 'private, no-store'})
+        raw.extend(chunk)
+    body = _proposal_response(lambda: proposals.parse_request(bytes(raw)))
+    result = await run_in_threadpool(_proposal_response, lambda: proposals.propose(
+        actor.org_id, project_id, actor.binding_id, **body))
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
 @router.get('/projects/{project_id}/page/source')
 def export_project_page(project_id: uuid.UUID, revision: int = Query(ge=1, le=2147483647),
                         target: Literal['web', 'ios'] = Query(default='web'),
