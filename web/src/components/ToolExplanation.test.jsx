@@ -52,6 +52,32 @@ describe('ToolExplanation', () => {
     expect(screen.queryByText('Limits')).toBeNull()
   })
 
+  it('shows and copies false, zero and null defaults, omitting undeclared defaults', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    clipboard({ writeText })
+    const defaultTool = { params: { properties: {
+      enabled: { type: 'boolean', default: false },
+      count: { type: 'integer', default: 0 },
+      scale: { type: ['number', 'null'], default: null },
+      other: { type: 'string' },
+    } } }
+    render(<ToolExplanation tool={defaultTool} />)
+    fireEvent.click(screen.getByText('How this tool works'))
+    expect(screen.getByText('Default: false').closest('li').textContent).toContain('enabled (boolean, optional)')
+    expect(screen.getByText('Default: 0').closest('li').textContent).toContain('count (integer, optional)')
+    expect(screen.getByText('Default: null').closest('li').textContent).toContain('scale (number or null, optional)')
+    expect(screen.getByText('other (string, optional): no description').textContent).not.toContain('Default:')
+    expect(screen.getAllByText(/^Default:/)).toHaveLength(3)
+    await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Copy explanation' })) })
+    const copiedText = writeText.mock.calls[0][0]
+    expect(copiedText).toBe(explainTool(defaultTool).text)
+    expect(copiedText).toContain('- enabled (boolean, optional, default false): no description')
+    expect(copiedText).toContain('- count (integer, optional, default 0): no description')
+    expect(copiedText).toContain('- scale (number or null, optional, default null): no description')
+    expect(copiedText).toContain('- other (string, optional): no description')
+    expect(copiedText).not.toContain('default undefined')
+  })
+
   it('copies the exact explanation text and acknowledges success', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     clipboard({ writeText })

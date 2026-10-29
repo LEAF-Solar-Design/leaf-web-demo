@@ -53,7 +53,7 @@ function buildExplanation(tool) {
     summary,
     `Effect: ${effect.label}`,
     ...(inputs.length ? ['Inputs:', ...inputs.map((input) =>
-      `- ${input.name} (${input.type}, ${input.required ? 'required' : 'optional'}): ${input.description || 'no description'}`)] : ['Inputs: none']),
+      `- ${input.name} (${input.type}, ${input.required ? 'required' : 'optional'}${input.default !== undefined ? `, default ${JSON.stringify(input.default)}` : ''}): ${input.description || 'no description'}`)] : ['Inputs: none']),
     `Outputs: ${outputs}`,
     ...[...provenance, ...limits].map(({ label, value }) => `${label}: ${value}`),
     'Not provided by this tool record:',

@@ -22,7 +22,9 @@ export default function ToolExplanation({ tool }) {
       <p className={`tool-explain-effect ${explanation.effect.editsDrawing ? 'write' : 'read'}`}>{explanation.effect.label}</p>
       <h4>Inputs</h4>
       {explanation.inputs.length ? <ul>{explanation.inputs.map((input) => (
-        <li key={input.name}>{input.name} ({input.type}, {input.required ? 'required' : 'optional'}): {input.description || 'no description'}</li>
+        <li key={input.name}>{input.name} ({input.type}, {input.required ? 'required' : 'optional'}): {input.description || 'no description'}
+          {input.default !== undefined && <span> Default: {JSON.stringify(input.default)}</span>}
+        </li>
       ))}</ul> : <p>No inputs</p>}
       <p>Outputs: {explanation.outputs}</p>
       <h4>Provenance</h4>

@@ -37,7 +37,8 @@ describe('explainTool', () => {
       { name: 'count', type: 'integer', required: false, description: null, default: 0 },
       { name: 'other', type: 'any', required: false, description: null, default: undefined },
     ])
-    expect(result.text).toContain('Inputs:\n- scale (number or null, required): Scale factor\n- enabled (boolean, optional): no description')
+    expect(result.text).toContain('Inputs:\n- scale (number or null, required, default null): Scale factor\n- enabled (boolean, optional, default false): no description\n- count (integer, optional, default 0): no description\n- other (any, optional): no description')
+    expect(result.text).not.toContain('default undefined')
   })
 
   it.each([undefined, null, 'x', {}, 42, false])('returns the full fallback object for %j', (tool) => {
