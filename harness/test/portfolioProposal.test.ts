@@ -104,7 +104,7 @@ describe("source-bound portfolio proposals", () => {
     } } }, result({ subtype: "error_during_execution", is_error: true })]);
     await expect(f.service.propose(request())).rejects.toMatchObject({ code: "sdk_failure" });
     expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: { cost_tokens: 5 }, stop_reason: "error" });
-    expectFailure(f.logger, "sdk_query", "sdk_query_failed");
+    expectFailure(f.logger, "sdk_query", "result_failed");
   });
 
   it.each([
@@ -156,17 +156,53 @@ describe("source-bound portfolio proposals", () => {
   });
 
   it.each([
-    [assistant('{"edits":[]}')],
-    [assistant('{"edits":[]}'), result({ subtype: "error_max_turns" })],
-    [assistant('{"edits":[]}'), result({ is_error: true })],
-    [result({ result: '{"edits":[]}' })],
-    [{ ...assistant('{"edits":[]}'), error: "authentication_failed" }, result()],
-    [{ type: "assistant", message: { content: [{ type: "text", text: '{"edits":[]}' }], stop_reason: "max_tokens" } }, result()],
-  ])("requires successful SDK completion and assistant text (%#)", async (...events) => {
+    { events: [], code: "missing_result" },
+    { events: [assistant('{"edits":[]}')], code: "missing_result" },
+    { events: [assistant('{"edits":[]}'), result({ subtype: "error_max_turns" })], code: "turn_limit" },
+    { events: [assistant('{"edits":[]}'), result({ is_error: true })], code: "result_failed" },
+    { events: [result({ result: '{"edits":[]}' })], code: "invalid_output" },
+    { events: [{ ...assistant('{"edits":[]}'), error: "authentication_failed" }, result()], code: "authentication_failed" },
+    { events: [{ type: "assistant", message: { content: [{ type: "text", text: '{"edits":[]}' }], stop_reason: "max_tokens" } }, result()], code: "output_token_limit" },
+    { events: [result({ subtype: "error_during_execution", is_error: true })], code: "result_failed" },
+    { events: [result({ subtype: exceptionSentinel })], code: "result_failed" },
+    { events: [result({ subtype: undefined })], code: "result_shape_invalid" },
+    { events: [result({ subtype: { body: exceptionSentinel } })], code: "result_shape_invalid" },
+    { events: [result({ is_error: undefined })], code: "result_shape_invalid" },
+    { events: [result({ is_error: exceptionSentinel })], code: "result_shape_invalid" },
+    { events: [assistant('{"edits":[]}'), result(), assistant(exceptionSentinel)], code: "event_after_result" },
+    { events: [assistant('{"edits":[]}'), result(), result()], code: "event_after_result" },
+  ] satisfies Array<{ events: unknown[]; code: PortfolioProposalFailure["code"] }>)("requires successful SDK completion and assistant text (%#)", async ({ events, code }) => {
     const f = setup(events);
     await expect(f.service.propose(request())).rejects.toBeInstanceOf(PortfolioProposalError);
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
-    expectFailure(f.logger, "sdk_query", events.length === 1 && (events[0] as { type: string }).type === "result" ? "invalid_output" : "sdk_query_failed");
+    expectFailure(f.logger, "sdk_query", code);
+  });
+
+  it.each([
+    { error: "rate_limit", code: "rate_limit" },
+    { error: "authentication_failed", code: "authentication_failed" },
+    { error: "oauth_org_not_allowed", code: "oauth_org_not_allowed" },
+    { error: "billing_error", code: "billing_error" },
+    { error: exceptionSentinel, code: "assistant_error" },
+    { error: "RATE_LIMIT", code: "assistant_error" },
+    { error: "rate_limit ", code: "assistant_error" },
+    { error: null, code: "assistant_error" },
+    { error: false, code: "assistant_error" },
+    { error: { code: "rate_limit", body: `${exceptionSentinel} ${secret}` }, code: "assistant_error" },
+  ] satisfies Array<{ error: unknown; code: PortfolioProposalFailure["code"] }>)("allowlists only exact assistant error literals (%#)", async ({ error, code }) => {
+    const f = setup([{ ...assistant(exceptionSentinel), error }, result()]);
+    await expect(f.service.propose(request())).rejects.toThrow("Portfolio proposal failed: sdk_failure");
+    expectFailure(f.logger, "sdk_query", code);
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "error" });
+  });
+
+  it("does not inspect or coerce arbitrary assistant error payloads", async () => {
+    const inspect = vi.fn(() => { throw new Error(exceptionSentinel); });
+    const error = { body: `${exceptionSentinel} ${secret}`, get message() { return inspect(); }, toString: inspect };
+    const f = setup([{ ...assistant(exceptionSentinel), error }]);
+    await expect(f.service.propose(request())).rejects.toMatchObject({ code: "sdk_failure" });
+    expect(inspect).not.toHaveBeenCalled();
+    expectFailure(f.logger, "sdk_query", "assistant_error");
   });
 
   it("contains SDK capabilities and injects only a scrubbed child environment", async () => {
@@ -262,7 +298,23 @@ describe("source-bound portfolio proposals", () => {
     input.instruction = `${input.instruction} ${exceptionSentinel} ${secret}`;
     await expect(f.service.propose(input)).rejects.toMatchObject({ code: "sdk_failure" });
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
-    expectFailure(f.logger, "sdk_query", "sdk_query_failed");
+    expectFailure(f.logger, "sdk_query", "sdk_exception_before_event");
+  });
+
+  it.each([
+    { events: [] }, { events: [null] }, { events: [{ type: "system" }] },
+    { events: [assistant('{"edits":[]}')] }, { events: [assistant('{"edits":[]}'), result()] },
+  ])("classifies iterator exceptions by event observation without inspecting them (%#)", async ({ events }) => {
+    const inspect = vi.fn(() => `${exceptionSentinel} ${secret}`);
+    const error = { get message() { return inspect(); }, get stack() { return inspect(); }, get stderr() { return inspect(); } };
+    const f = setup([], { sdkImport: async () => ({ query: () => (async function* () {
+      for (const event of events) yield event;
+      throw error;
+    })() }) });
+    await expect(f.service.propose(request())).rejects.toThrow("Portfolio proposal failed: sdk_failure");
+    expect(inspect).not.toHaveBeenCalled();
+    expectFailure(f.logger, "sdk_query", events.length === 0 ? "sdk_exception_before_event" : "sdk_exception_after_event");
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "error" });
   });
 
   it("preserves the original error and settlement when the warning logger throws", async () => {
