@@ -1,5 +1,6 @@
 import { useLayoutEffect, useRef, useState } from 'react'
 import { UUID, validateVercelDestinations } from './client.js'
+import { loadProjectPage } from '../site/projectPageClient.js'
 
 // This preset is imported only. It is never executed by this account-linking flow.
 // Pinned v10 contract: a top-level array of project objects, without query bindings.
@@ -55,7 +56,7 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
     context.current = ctx
     setView(emptyView)
     const dispose = () => {
-      clearPending(ctx); ctx.controller.abort(); ctx.linked = null; ctx.destination = null; ctx.states.clear()
+      clearPending(ctx); ctx.controller.abort(); ctx.linked = null; ctx.destination = null; ctx.preview = null; ctx.states.clear()
       if (context.current === ctx) setView(emptyView)
     }
     if (signal.aborted) dispose()
@@ -72,7 +73,7 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
     if (!current(ctx)) return
     Object.assign(ctx, patch)
     setView({ busy: ctx.busy, phase: ctx.phase, unknown: ctx.unknown, message: ctx.message || '', error: ctx.error || '', linked: ctx.linked || null,
-      destination: ctx.destination ? { ...ctx.destination } : null })
+      destination: ctx.destination ? { ...ctx.destination } : null, preview: ctx.preview ? { ...ctx.preview } : null })
   }
   const options = (ctx) => ({ signal: ctx.controller.signal })
   function matchesConnection(ctx, value) {
@@ -287,7 +288,7 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
   }
   function destinationWork(task) {
     const ctx = context.current
-    if (!ctx || !current(ctx) || ctx.busy || ctx.phase !== 'linked' || !ctx.destination) return
+    if (!ctx || !current(ctx) || ctx.busy || ctx.phase !== 'linked' || !ctx.destination || ctx.preview?.frozen) return
     work(ctx, async () => {
       try { await task(ctx, ctx.destination) }
       catch (failure) {
@@ -308,6 +309,7 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
   function loadProjects() {
     destinationWork(async (ctx, dest) => {
       if (dest.pending || dest.needsRefresh) return
+      ctx.preview = null
       Object.assign(dest, { projects: null, selectedId: '', saved: null })
       await destinationConnection(ctx, dest.revision)
       const result = await client.listVercelProjects(projectId, ctx.connectionId,
@@ -362,12 +364,129 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
   }
   function editDestination(field, value) {
     const ctx = context.current
-    if (!ctx || !current(ctx) || ctx.busy || !ctx.destination || ctx.destination.pending || ctx.destination.needsRefresh) return
+    if (!ctx || !current(ctx) || ctx.busy || !ctx.destination || ctx.destination.pending || ctx.destination.needsRefresh || ctx.preview?.frozen) return
+    ctx.preview = null
     ctx.destination[field] = value
     ctx.destination.saved = null
     if (field === 'search') Object.assign(ctx.destination, { projects: null, selectedId: '', truncated: false })
     update(ctx, { message: '', error: '' })
   }
+  const sameDestination = (a, b) => a && b && ['projectId', 'accountId', 'name'].every((field) => a[field] === b[field])
+  function samePermission(a, b) {
+    return a.enabled === b.enabled && a.revision === b.revision && a.grantRevision === b.grantRevision &&
+      sameRef(a.connectorRef, b.connectorRef) && a.account.ownerId === b.account.ownerId && a.account.teamId === b.account.teamId &&
+      sameDestination(a.destination, b.destination)
+  }
+  async function readPreviewPermission(ctx, expected) {
+    expected ||= ctx.preview.binding
+    await guarded(ctx)
+    const value = await client.getVercelPreviewPermission(projectId, ctx.connectionId, options(ctx))
+    await guarded(ctx)
+    if (!matchesAccount(ctx, value.account) || !sameDestination(value.destination, ctx.destination.saved)) throw new Error('preview destination changed')
+    if (expected) {
+      if (!samePermission(value, expected)) throw new Error('preview permission changed')
+    } else if (ctx.preview.enabling) {
+      const before = ctx.preview.enabling
+      if (!value.enabled || value.revision <= before.revision || value.grantRevision <= before.grantRevision) throw new Error('enable unconfirmed')
+    } else if (value.revision !== ctx.destination.revision || value.grantRevision !== ctx.connection.grant_revision ||
+        !sameRef(value.connectorRef, ctx.connection.connector_ref)) throw new Error('preview binding changed')
+    ctx.preview.permission = value
+    ctx.preview.binding = value
+    ctx.preview.enabling = null
+    if (value.enabled) ctx.preview.frozen = true
+    return value
+  }
+  function previewWork(task) {
+    const ctx = context.current
+    if (!ctx || !current(ctx) || ctx.busy || ctx.phase !== 'linked' || !ctx.destination?.saved) return
+    ctx.preview ||= { permission: null, enabling: null, frozen: false, run: null, result: null, message: '' }
+    work(ctx, async () => {
+      try { await task(ctx, ctx.preview) }
+      catch (failure) {
+        if (!current(ctx) || [401, 403].includes(failure?.status)) throw failure
+        // A failed read never proves that a potentially dispatched write was safe to repeat.
+        ctx.preview.permission = null
+        ctx.preview.message = ''
+        update(ctx, { error: ctx.preview.run ? 'The preview result is unconfirmed. Check status. Creation will not be repeated.' :
+          'Preview access could not be confirmed. Check preview access before continuing.', message: '' })
+      }
+    })
+  }
+  function checkPreviewAccess() {
+    previewWork(async (ctx, preview) => {
+      const value = await readPreviewPermission(ctx, preview.enableAck || preview.permission)
+      preview.message = value.enabled ? 'Private previews are enabled for this destination.' : 'Enable previews to allow private preview creation.'
+      update(ctx)
+    })
+  }
+  function enablePreviews() {
+    previewWork(async (ctx, preview) => {
+      if (!preview.permission || preview.permission.enabled || preview.enabling || preview.run) return
+      const before = await readPreviewPermission(ctx, preview.permission)
+      await guarded(ctx)
+      preview.enabling = before; preview.permission = null; preview.binding = null; preview.frozen = true
+      let ack
+      try {
+        ack = await client.enableVercelPreviews(projectId, ctx.connectionId,
+          { expectedConnectionRevision: before.revision, expectedGrantRevision: before.grantRevision }, options(ctx))
+      } catch (failure) {
+        if (failure?.dispatched === false) { preview.enabling = null; preview.frozen = false }
+        throw failure
+      }
+      await guarded(ctx)
+      if (!ack.enabled || !matchesAccount(ctx, ack.account) || !sameDestination(ack.destination, ctx.destination.saved) ||
+          ack.revision <= before.revision || ack.grantRevision <= before.grantRevision) throw new Error('enable unconfirmed')
+      preview.enableAck = ack
+      await readPreviewPermission(ctx, ack)
+      preview.message = 'Private previews are enabled for this destination.'
+      update(ctx)
+    })
+  }
+  function previewSavedPage() {
+    previewWork(async (ctx, preview) => {
+      if (!preview.permission?.enabled || preview.enabling || (preview.run &&
+          !['ready', 'failed', 'failed_not_sent'].includes(preview.result?.status))) return
+      const permission = await readPreviewPermission(ctx, preview.permission)
+      await guarded(ctx)
+      const saved = await loadProjectPage(projectId, options(ctx))
+      await guarded(ctx)
+      if (!saved) { preview.message = 'Save a page before previewing it.'; update(ctx); return }
+      await readPreviewPermission(ctx, permission)
+      await guarded(ctx)
+      // Retain this identity before dispatch; recovery only reads this same run.
+      const run = { runId: crypto.randomUUID(), savedRevision: saved.revision }
+      preview.run = run; preview.result = null; preview.message = 'Uploading and creating the saved page preview…'
+      update(ctx)
+      try {
+        const result = await client.createVercelPreviewRun(projectId, { ...run, connectionId: ctx.connectionId,
+          expectedConnectionRevision: permission.revision, expectedGrantRevision: permission.grantRevision }, options(ctx))
+        await guarded(ctx)
+        preview.result = result; preview.message = ''
+      } catch (failure) {
+        if (failure?.dispatched === false) preview.run = null
+        throw failure
+      }
+      update(ctx)
+    })
+  }
+  function checkPreviewStatus() {
+    previewWork(async (ctx, preview) => {
+      if (!preview.run) return
+      await readPreviewPermission(ctx, preview.permission)
+      const { runId, savedRevision } = preview.run
+      const observe = preview.result?.status === 'submitted' && preview.result.deploymentId
+      const result = await (observe ? client.observeVercelPreviewRun(projectId, runId, savedRevision, options(ctx)) :
+        client.getVercelPreviewRun(projectId, runId, savedRevision, options(ctx)))
+      await guarded(ctx)
+      preview.result = result.observation === 'unavailable' && preview.result ?
+        { ...preview.result, observation: 'unavailable' } : result
+      preview.message = ''
+      update(ctx)
+    })
+  }
+  const previewStatus = { uploading: 'Uploading the saved page.', creating: 'Creating a private preview.',
+    uncertain: 'Preview creation is unconfirmed. Check status; creation will not be repeated.', submitted: 'Preview submitted. The build is not ready yet.',
+    ready: 'Your private preview is ready.', failed: 'The preview build failed or was canceled.', failed_not_sent: 'The preview was not sent.' }
   if (scope.projectRole !== 'owner' || signal.aborted) return null
   return <section className="integration-setup" aria-label="Connect Vercel">
     <h2>Connect Vercel</h2>
@@ -383,6 +502,7 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
     {view.linked && view.destination && <div>
       <h3>Vercel publishing destination</h3>
       <p>Choose an existing project. Saving a destination does not publish your site.</p>
+      <fieldset disabled={Boolean(view.preview?.frozen)} style={{ border: 0, padding: 0, minWidth: 0 }}>
       <label>Search Vercel projects
         <input type="search" maxLength={100} value={view.destination.search}
           style={{ boxSizing: 'border-box', width: '100%', minHeight: 44 }}
@@ -409,7 +529,29 @@ export function VercelConnectionPanel({ client, projectId, scope, signal, guard,
         onClick={() => destinationWork(readDestination)}>Check destination status</button>}
       {view.destination.needsRefresh && <button type="button" disabled={view.busy}
         onClick={() => destinationWork(readDestination)}>Refresh destination status</button>}
+      </fieldset>
       {view.destination.saved && <p style={{ overflowWrap: 'anywhere' }}>Confirmed destination: {view.destination.saved.name}</p>}
+      {view.destination.saved && <section aria-label="Preview" style={{ overflowWrap: 'anywhere', minWidth: 0 }}>
+        <h3>Preview</h3>
+        <p>Create a private preview of your saved page in {view.destination.saved.name}. This does not publish publicly.</p>
+        <p role="status">{view.preview?.message}</p>
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <button type="button" style={{ minHeight: 44 }} disabled={view.busy} onClick={checkPreviewAccess}>Check preview access</button>
+          {view.preview?.permission && !view.preview.permission.enabled && !view.preview.enabling &&
+            <button type="button" style={{ minHeight: 44 }} disabled={view.busy} onClick={enablePreviews}>Enable previews</button>}
+          {view.preview?.permission?.enabled && !view.preview.enabling && (!view.preview.run ||
+            ['ready', 'failed', 'failed_not_sent'].includes(view.preview.result?.status)) &&
+            <button type="button" style={{ minHeight: 44 }} disabled={view.busy} onClick={previewSavedPage}>Preview saved page</button>}
+          {view.preview?.run && <button type="button" style={{ minHeight: 44 }} disabled={view.busy} onClick={checkPreviewStatus}>
+            {view.preview.result?.status === 'submitted' && view.preview.result.deploymentId ? 'Check build status' : 'Check status'}</button>}
+        </div>
+        {view.preview?.run && <p>Saved revision: {view.preview.run.savedRevision}</p>}
+        {view.preview?.result && <p>{previewStatus[view.preview.result.status]}</p>}
+        {view.preview?.result?.reason === 'upload_unavailable' && <p>The saved page upload is unavailable.</p>}
+        {view.preview?.result?.observation === 'unavailable' && <p>Build observation is unavailable. The last known state is retained; check again.</p>}
+        {view.preview?.result?.status === 'ready' && view.preview.permission?.enabled && !view.error && <a style={{ display: 'inline-block', minHeight: 44 }}
+          href={view.preview.result.url} target="_blank" rel="noopener noreferrer">Open preview</a>}
+      </section>}
     </div>}
   </section>
 }

@@ -444,6 +444,78 @@ describe('scoped Vercel authorization HTTP contract', () => {
     expect(validateVercelDestinations(issued, 'https://studio.example')).toEqual(issued)
   })
 })
+describe('Vercel saved preview HTTP contract', () => {
+  const permission = { enabled: true, revision: 4, grantRevision: 2, connectorRef: ref,
+    account: { ownerId: 'user_123', teamId: null }, destination: { projectId: 'prj_123', accountId: 'user_123', name: 'Saved page' } }
+  const input = { runId: projectId, connectionId: 'vercel-account', savedRevision: 17,
+    expectedConnectionRevision: 4, expectedGrantRevision: 2 }
+  const submitted = { runId: projectId, savedRevision: 17, status: 'submitted', deploymentId: 'dpl_saved', url: null, reason: null }
+  it('uses all five scoped methods, current auth, exact bodies, and truthful projections', async () => {
+    const { client, fetchImpl, options } = setup(permission)
+    expect(await client.getVercelPreviewPermission(projectId, input.connectionId, options)).toEqual(permission)
+    authHeaders.mockReturnValue({ Authorization: 'Bearer refreshed' })
+    const enable = { expectedConnectionRevision: 3, expectedGrantRevision: 1 }
+    expect(await client.enableVercelPreviews(projectId, input.connectionId, enable, options)).toEqual(permission)
+    fetchImpl.mockResolvedValueOnce(response(submitted))
+    expect(await client.createVercelPreviewRun(projectId, input, options)).toEqual(submitted)
+    fetchImpl.mockResolvedValueOnce(response(submitted))
+    expect(await client.getVercelPreviewRun(projectId, projectId, 17, options)).toEqual(submitted)
+    const ready = { ...submitted, status: 'ready', url: 'https://saved.vercel.app/' }
+    fetchImpl.mockResolvedValueOnce(response(ready))
+    expect(await client.observeVercelPreviewRun(projectId, projectId, 17, options)).toEqual(ready)
+    const root = `https://ops.example/api/v1/projects/${projectId}/integrations`
+    expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([
+      `${root}/connections/vercel-account/vercel/preview-permission`, `${root}/connections/vercel-account/vercel/preview-permission`,
+      `${root}/vercel-preview-runs`, `${root}/vercel-preview-runs/${projectId}`, `${root}/vercel-preview-runs/${projectId}/observe`,
+    ])
+    expect(fetchImpl.mock.calls.map(([, request]) => request.method)).toEqual(['GET', 'PUT', 'POST', 'GET', 'POST'])
+    expect(fetchImpl.mock.calls.map(([, request]) => request.body && JSON.parse(request.body))).toEqual([undefined, enable, input, undefined, {}])
+    for (const [, request] of fetchImpl.mock.calls) expect(request).toMatchObject({ signal: options.signal, credentials: 'omit', redirect: 'error', cache: 'no-store' })
+    expect(fetchImpl.mock.calls[4][1].headers.Authorization).toBe('Bearer refreshed')
+  })
+  it.each([{ runId: projectId.toUpperCase().replace('11111111', 'AAAAAAAA') }, { runId: `${projectId}\n` },
+    { savedRevision: 0 }, { savedRevision: Number.MAX_SAFE_INTEGER + 1 }, { expectedConnectionRevision: 2147483648 },
+    { expectedGrantRevision: 0 }, { connectionId: '../other' }, { url: 'https://evil.test' }, { teamId: 'team_other' },
+    { source: 'bytes' }, { token: 'private' }, { target: 'production' }])('rejects submission input before dispatch: %j', async (patch) => {
+    const { client, fetchImpl, options } = setup(submitted)
+    await expect(client.createVercelPreviewRun(projectId, { ...input, ...patch }, options)).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+  it.each([{ extra: true }, { savedRevision: 18 }, { runId: '22222222-2222-4222-8222-222222222222' },
+    { deploymentId: 'invalid' }, { deploymentId: `dpl_${'a'.repeat(253)}` }, { status: 'ready', url: null },
+    { status: 'ready', deploymentId: null, url: 'https://safe.vercel.app' }, { observation: 'ready' },
+    ...['http://safe.vercel.app', 'https://vercel.app', 'https://vercel.app.evil.test', 'https://safe.vercel.app:443',
+      'https://user@safe.vercel.app', 'https://safe.vercel.app/path', 'https://safe.vercel.app?x=1',
+      'https://safe.vercel.app#', 'https://safe.vercel.app\n', 'https://127.0.0.1', 'https://safe.vercel.app\\evil', 'https://-bad.vercel.app'].map((url) => ({ status: 'ready', url }))])(
+    'rejects malformed, foreign, or unsafe run projections: %j', async (patch) => {
+      const { client, fetchImpl, options } = setup({ ...submitted, ...patch })
+      await expect(client.createVercelPreviewRun(projectId, input, options)).rejects.toMatchObject({ dispatched: true })
+      fetchImpl.mockResolvedValueOnce(response({ ...submitted, ...patch }))
+      await expect(client.getVercelPreviewRun(projectId, projectId, 17, options)).rejects.toMatchObject({ dispatched: false })
+    })
+  it.each([{ extra: 'private' }, { revision: 2147483648 }, { grantRevision: Number.MAX_SAFE_INTEGER + 1 },
+    { destination: null }, { account: { ownerId: 'foreign', teamId: null } }, { connectorRef: { ...ref, digest: 'bad' } }])(
+    'strictly validates preview permission: %j', async (patch) => {
+      const { client, options } = setup({ ...permission, ...patch })
+      await expect(client.getVercelPreviewPermission(projectId, 'vercel-account', options)).rejects.toMatchObject({ dispatched: false })
+      await expect(client.enableVercelPreviews(projectId, 'vercel-account', { expectedConnectionRevision: 3, expectedGrantRevision: 1 }, options))
+        .rejects.toMatchObject({ dispatched: true })
+    })
+  it('requires signals, bounds streamed responses, and retains dispatched uncertainty', async () => {
+    const { client, fetchImpl, options } = setup(submitted)
+    await expect(client.createVercelPreviewRun(projectId, input)).rejects.toMatchObject({ dispatched: false })
+    expect(fetchImpl).not.toHaveBeenCalled()
+    fetchImpl.mockRejectedValueOnce(new Error('lost'))
+    await expect(client.createVercelPreviewRun(projectId, input, options)).rejects.toMatchObject({ dispatched: true })
+    fetchImpl.mockResolvedValueOnce(response(null, { raw: ' '.repeat(262145) }))
+    await expect(client.getVercelPreviewRun(projectId, projectId, 17, options)).rejects.toMatchObject({ dispatched: false })
+    const controller = new AbortController()
+    controller.abort()
+    await expect(client.observeVercelPreviewRun(projectId, projectId, 17, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+})
+
 describe('Vercel destination HTTP contract', () => {
   const account = { ownerId: 'team_123', teamId: 'team_123' }
   const destination = { projectId: 'prj_123', accountId: account.ownerId, name: '<Jessica & studio>' }
