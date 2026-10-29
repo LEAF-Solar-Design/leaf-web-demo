@@ -211,7 +211,7 @@ test('Script controls name scoped effects, native running locks and the Run refu
     ['choose-script', 'Choose script', 'opens', 'script-file-picker'],
     ['run-script', 'Run script', 'submits', 'script-run'],
   ]
-  assert.deepEqual(overrides.controls.slice(48).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  assert.deepEqual(overrides.controls.slice(-3).map((row) => row.id), expected.map(([id]) => `control:${id}`))
   for (const [id, title, kind, target] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
@@ -286,8 +286,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // WL14 adds one desktop Find-submit ready triple.
   // WL16b adds four desktop project Solar states to both inventories.
   // Ops adds ready/desktop and signed-out/desktop triples.
-  assert.equal(previousTriples.length, 864)
-  assert.equal(triples(map).length, 830)
+  // WL32 adds one ready/desktop chooser-open triple.
+  assert.equal(previousTriples.length, 865)
+  assert.equal(triples(map).length, 831)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
@@ -604,8 +605,8 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('fifty-one exact control declarations participate in independent completeness', () => {
-  const expected = ['fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
+test('fifty-two exact control declarations participate in independent completeness', () => {
+  const expected = ['chooser-open', 'fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
     'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
     'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
     'properties-selection', 'properties-walk', 'layer-panels', 'layer-walk', 'job-monitor-expand',
@@ -613,8 +614,8 @@ test('fifty-one exact control declarations participate in independent completene
     'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing',
     'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels', 'open-dxf-browser', 'objects',
     'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes', 'find-drawing-submit'].map((id) => 'control:' + id).sort()
-  // Find-submit joins the previous 50 declarations.
-  assert.equal(expected.length, 51)
+  // Chooser-open joins the previous 51 declarations.
+  assert.equal(expected.length, 52)
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)

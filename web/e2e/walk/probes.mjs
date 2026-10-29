@@ -174,6 +174,7 @@ function actionRecord(entry) {
 
 export function locatorRecipe(entry, state) {
   const effect = entry.expected_effect[state]
+  if (entry.id === 'control:chooser-open') return { ...role('button', 'Open project or material'), trigger: 'click' }
   if (entry.kind === 'control') {
     const context = entry.state_contexts[state]
     if (entry.id === 'control:objects') return {
@@ -303,6 +304,9 @@ function actionTab(action) {
 export function stateRecipe(entry, state) {
   const context = structuredClone(entry.state_contexts?.[state] || {})
   const effect = entry.expected_effect[state]
+  if (entry.id === 'control:chooser-open') return { context, steps: [
+    step('navigate', { url: '/app?surface=cad&drawing=rooftop_demo' }), step('chooser-start'),
+  ] }
   const surface = entry.kind === 'tab' ? profileSurfaces[entry.profile]
     : entry.kind === 'surface' ? entry.source_id
       : entry.kind === 'tool' && entry.source_id.startsWith('solar-') && state === 'ready' ? 'solar'
