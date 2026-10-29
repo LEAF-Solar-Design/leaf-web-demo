@@ -64,9 +64,9 @@ def store_mode():
     if mode not in {"sqlite", "postgres"}:
         raise StoreUnavailable("lab_run_store_invalid")
     if mode == "sqlite":
-        from broker import _deployed_runtime
+        import runtime_posture
 
-        if _deployed_runtime() or platform_link.postgres_required():
+        if runtime_posture._deployed_runtime() or platform_link.postgres_required():
             raise StoreUnavailable("lab_postgres_required")
     return mode
 

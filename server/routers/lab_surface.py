@@ -27,11 +27,11 @@ FLAG_LAB_SURFACE = "LEAF_LAB_SURFACE_ENABLED"
 
 def lab_posture() -> str:
     """Use the deployed runtime vocabulary and deployment environment guard."""
-    from broker import _deployed_runtime, _production_runtime
+    import runtime_posture
 
-    if _production_runtime():
+    if runtime_posture._production_runtime():
         return "production"
-    if (_deployed_runtime() and os.environ.get(
+    if (runtime_posture._deployed_runtime() and os.environ.get(
             "LEAF_DEPLOYMENT_ENVIRONMENT", "").strip().lower() in {"", "staging"}):
         return "staging"
     return "local"
@@ -154,9 +154,9 @@ def tools(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
         if reason is None and os.environ.get("LEAF_LAB_TOOL_NODES") != "1":
             reason = "tool nodes off"
         if reason is None:
-            from broker import _authored_execution_enabled
+            import runtime_posture
 
-            if source == "tenant" and not _authored_execution_enabled():
+            if source == "tenant" and not runtime_posture._authored_execution_enabled():
                 reason = "authored execution not armed"
             elif _broker_lab_sandbox_tier() != "microvm":
                 reason = "sandbox not armed"
