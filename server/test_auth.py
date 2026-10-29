@@ -174,22 +174,36 @@ def test_wrong_audience_rejected():
     assert ei.value.status_code == 401
 
 
-def test_production_audience_rejects_staging_token(monkeypatch):
-    monkeypatch.delenv("LEAF_AUTH0_AUDIENCE", raising=False)
-    with pytest.raises(HTTPException) as ei:
-        auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
-    assert ei.value.status_code == 401
-    payload = auth.verify_platform_token(bearer(mint(aud="https://api.leafdesign.ai")))
-    assert payload["aud"] == "https://api.leafdesign.ai"
+def test_production_audience_rejects_staging_token():
+    saved_audience = os.environ.get("LEAF_AUTH0_AUDIENCE")
+    try:
+        os.environ.pop("LEAF_AUTH0_AUDIENCE", None)
+        with pytest.raises(HTTPException) as ei:
+            auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
+        assert ei.value.status_code == 401
+        payload = auth.verify_platform_token(bearer(mint(aud="https://api.leafdesign.ai")))
+        assert payload["aud"] == "https://api.leafdesign.ai"
+    finally:
+        if saved_audience is None:
+            os.environ.pop("LEAF_AUTH0_AUDIENCE", None)
+        else:
+            os.environ["LEAF_AUTH0_AUDIENCE"] = saved_audience
 
 
-def test_staging_audience_rejects_production_token(monkeypatch):
-    monkeypatch.setenv("LEAF_AUTH0_AUDIENCE", "https://api-staging.leafdesign.ai")
-    with pytest.raises(HTTPException) as ei:
-        auth.verify_platform_token(bearer(mint(aud="https://api.leafdesign.ai")))
-    assert ei.value.status_code == 401
-    payload = auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
-    assert payload["aud"] == "https://api-staging.leafdesign.ai"
+def test_staging_audience_rejects_production_token():
+    saved_audience = os.environ.get("LEAF_AUTH0_AUDIENCE")
+    try:
+        os.environ["LEAF_AUTH0_AUDIENCE"] = "https://api-staging.leafdesign.ai"
+        with pytest.raises(HTTPException) as ei:
+            auth.verify_platform_token(bearer(mint(aud="https://api.leafdesign.ai")))
+        assert ei.value.status_code == 401
+        payload = auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
+        assert payload["aud"] == "https://api-staging.leafdesign.ai"
+    finally:
+        if saved_audience is None:
+            os.environ.pop("LEAF_AUTH0_AUDIENCE", None)
+        else:
+            os.environ["LEAF_AUTH0_AUDIENCE"] = saved_audience
 
 
 def test_wrong_issuer_rejected():
