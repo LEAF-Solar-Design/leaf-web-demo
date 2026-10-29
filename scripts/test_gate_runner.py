@@ -3016,6 +3016,55 @@ def test_fingerprint_ignores_toolchain_paths_but_not_targets():
     assert npx_instead != linux_npm
 
 
+def test_catalog_fingerprint_does_not_depend_on_the_checkout_directory_name(tmp_path, monkeypatch):
+    g = _load_runner()
+    source = g.selection_catalog(tmp_path / "source")
+    relay = g.selection_catalog(tmp_path / "relay-src.Ab12Cd")
+    assert source["catalog_sha256"] == relay["catalog_sha256"]
+
+    build_suites = g.build_suites
+
+    def changed_target():
+        suites = build_suites()
+        suite = next(s for s in suites if s.id == "platform")
+        target = suite.argv.index(f"{g.REPO.name}/platform/tests")
+        suite.argv[target] += "/test_changed.py"
+        return suites
+
+    monkeypatch.setattr(g, "build_suites", changed_target)
+    changed = g.selection_catalog(tmp_path / "relay-src.Ab12Cd")
+    assert changed["catalog_sha256"] != source["catalog_sha256"]
+
+
+@pytest.mark.parametrize("arg, expected", [
+    ("relay-src.Ab12Cd/platform/tests", "<REPO>/platform/tests"),
+    ("/x/relay-src.Ab12Cd/server/a.py", "<REPO>/server/a.py"),
+    ("relay-src.Ab12Cd", "<REPO>"),
+    ("/x/relay-src.Ab12Cd", "<REPO>"),
+    ("--rootdir=relay-src.Ab12Cd/platform", "--rootdir=<REPO>/platform"),
+    (r"relay-src.Ab12Cd\platform\tests", "<REPO>/platform/tests"),
+    (r"\x\relay-src.Ab12Cd\server\a.py", "<REPO>/server/a.py"),
+    ("-q", "-q"),
+    ("tests/x.py", "tests/x.py"),
+    ("/usr/bin/env", "/usr/bin/env"),
+    ("--maxWorkers=2", "--maxWorkers=2"),
+    ("relay-src.Ab12Cdx/y", "relay-src.Ab12Cdx/y"),
+    (r"tests\x.py", r"tests\x.py"),
+    (r"--rootdir=tests\x.py", r"--rootdir=tests\x.py"),
+])
+def test_fingerprint_arg_canonicalizes_only_checkout_targets(monkeypatch, arg, expected):
+    g = _load_runner()
+    monkeypatch.setattr(g, "REPO", Path("/x/relay-src.Ab12Cd"))
+    assert g._fingerprint_arg(arg, parent_relative=True) == expected
+    assert g._fingerprint_arg(
+        "relay-src.Ab12Cd/platform/tests", parent_relative=False) == "relay-src.Ab12Cd/platform/tests"
+    assert g._fingerprint_arg(
+        "/x/relay-src.Ab12Cd/server/a.py", parent_relative=False) == "<REPO>/server/a.py"
+    monkeypatch.setattr(g, "REPO", Path("/x/src"))
+    assert g._fingerprint_arg(
+        "src/components/x.test.js", parent_relative=False) == "src/components/x.test.js"
+
+
 def test_fingerprint_ignores_the_checkout_root_but_not_the_suite_directory(monkeypatch):
     """Run 32018150977 flipped the eight shards onto CodeBuild-hosted runners,
     which hand every job its OWN checkout root
