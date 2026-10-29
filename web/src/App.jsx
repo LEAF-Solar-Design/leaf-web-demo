@@ -4019,6 +4019,11 @@ export default function App() {
     }
   }, [drafting, surfaceSlots.toolbar.profile])
   const studioShell = !!studioGround && surfaceSlots.chrome.shell === 'cockpit'
+  // The rail lives in the Studio sidebar on the studio shell, so opening it opens that panel.
+  const openToolRail = useCallback(() => {
+    setNavExpanded(true)
+    if (studioShell) setBrowserPanel('studio')
+  }, [studioShell, setNavExpanded, setBrowserPanel])
   const browserAssetActive = studioShell && surfaceSlots.ground === 'board'
   useDockRise(projectLayout.appRef, studioShell)
   // Build routing and "Open author flow" both use setAuthorOpen. The studio
@@ -4320,7 +4325,7 @@ export default function App() {
       onRun: (tool) => onRequestCatalogRun(tool, null, RIBBON_RATIONALE, 'ribbon'),
       catalogOptions: {
         onRequestRun: onRequestCatalogRun,
-        onOpenFamily: (family) => { setNavExpanded(true); setFamilyOpen(family.family_id, true) },
+        onOpenFamily: (family) => { openToolRail(); setFamilyOpen(family.family_id, true) },
         running: !!running, previewing: !!previewing, writeLocked,
         writeEntitled: canRunWrite, engineDirty,
       },
@@ -4341,7 +4346,7 @@ export default function App() {
   }, [surfaceSlots.toolbar.profile, railFamilies, onRequestCatalogRun, setFamilyOpen,
     running, previewing, writeLocked, canRunWrite, engineDirty, mock, signedIn, projectsErr,
     orgId, openProjectId, standalonePolicyReady, projectBusy, agentDisabled, routing, clearAgentSession,
-    openAgentMode, jobs.length, ship, setNavExpanded, setJobRailExpanded,
+    openAgentMode, jobs.length, ship, openToolRail, setJobRailExpanded,
     solarRoutesStatus, showSolarStrings, selectedHandle, drafting, catalog.families, solarFormTool, catalogRunContext?.projectId, onOpenSolarForm])
   const previousRibbonProfile = useRef(null)
   const entryRibbonTab = profileEntryTab(previousRibbonProfile.current, surfaceSlots.toolbar.profile, ribbonTab, surfaceSlots.toolbar.home)
@@ -4365,8 +4370,10 @@ export default function App() {
           : tool), quickAfter: [
           ...WORKSPACE_QUICK_AFTER,
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
-            expanded: drawerViewport ? studioDrawer === 'nav' : navExpanded,
-            onClick: () => drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(!navExpanded) },
+            expanded: studioShell ? browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded) : drawerViewport ? studioDrawer === 'nav' : navExpanded,
+            onClick: () => studioShell
+              ? drawerViewport && browserPanel === 'studio' && studioDrawer === 'nav' ? toggleStudioDrawer('nav') : openToolRail()
+              : drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(!navExpanded) },
         ], view: null, version: null, rail: [], author: null }
     }
     const view = viewCluster({
@@ -4398,7 +4405,7 @@ export default function App() {
     const families = catalogClusters(railFamilies, {
       onRequestRun: onRequestCatalogRun,
       onOpenFamily: (fam) => {
-        setNavExpanded(true)
+        openToolRail()
         setFamilyOpen(fam.family_id, true)
       },
       running: !!running,
@@ -4432,7 +4439,7 @@ export default function App() {
     const tabFamilies = catalogTabClusters(railFamilies, {
       onRequestRun: onRequestCatalogRun,
       onOpenFamily: (fam) => {
-        setNavExpanded(true)
+        openToolRail()
         setFamilyOpen(fam.family_id, true)
       },
       running: !!running,
@@ -4526,12 +4533,14 @@ export default function App() {
         ...((navSpine || drawerViewport) ? [
           { id: 'sep-2', kind: 'sep' },
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar', title: 'Expand the tool rail',
-            expanded: drawerViewport ? studioDrawer === 'nav' : navExpanded,
-            onClick: () => drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(true) },
+            expanded: studioShell ? browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded) : drawerViewport ? studioDrawer === 'nav' : navExpanded,
+            onClick: () => studioShell
+              ? drawerViewport && browserPanel === 'studio' && studioDrawer === 'nav' ? toggleStudioDrawer('nav') : openToolRail()
+              : drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(true) },
         ] : []),
       ],
     }
-  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
+  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
     shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
