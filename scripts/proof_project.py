@@ -854,6 +854,7 @@ def preflight(config: Config, *, effects: Effects) -> Plan:
 
 _OS_KEYS = frozenset({"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
                       "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "LANG", "LC_ALL"})
+_AUTHORITY_KEYS = ("LEAF_PROOF_PROJECT_AUTHORITY", "LEAF_PG_BIN")
 
 
 class _PrivateEnvironment(dict):
@@ -868,6 +869,12 @@ class _PrivateEnvironment(dict):
 
 def _essential_environment(environ):
     return {key.upper(): value for key, value in environ.items() if key.upper() in _OS_KEYS}
+
+
+def _host_environment(environ):
+    env = _essential_environment(environ)
+    env.update({key: environ[key] for key in _AUTHORITY_KEYS if key in environ})
+    return env
 
 
 def _load_file(name, path, *, package=False):
@@ -2652,7 +2659,7 @@ class _Host:
             tuple(name for name in (".env", ".env.local", ".env.development", ".env.development.local")
                   if (REPO / "web" / name).exists()), candidates, requirements,
             sys.version.split()[0], tuple((name, shutil.which(name) or "") for name in TOOLS),
-            _essential_environment(os.environ), tuple(outputs), tuple(versions))
+            _host_environment(os.environ), tuple(outputs), tuple(versions))
 
     def source_snapshot(self):
         commit = _git("rev-parse", "HEAD").decode().strip()

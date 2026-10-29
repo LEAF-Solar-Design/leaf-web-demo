@@ -150,6 +150,40 @@ def environment(c, ambient=None):
                                  profile_env=profile(c), organization_id="fakeorg")
 
 
+def test_native_select_inspect_carries_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(p.os, "environ", {"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin",
+        "UNRELATED": "not carried"})
+    root = tmp_path / "run-test"
+    config = p.Config("run-test", root, root / "artifacts", p.Ports(0, 0, 0, 0))
+    facts = p.production_effects().host.inspect(config)
+    assert dict(facts.environment) == {"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin"}
+    assert p._authority_kind(facts.environment) == "native"
+
+
+def test_native_select_children_exclude_keys():
+    c = case()
+    c.host.facts = replace(c.host.facts, environment=p._host_environment({"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin"}))
+    env = environment(c, c.host.facts.environment)
+    assert "LEAF_PROOF_PROJECT_AUTHORITY" not in env
+    assert "LEAF_PG_BIN" not in env
+    assert env["PATH"] == "fakepath"
+    assert c.host.facts.environment["LEAF_PROOF_PROJECT_AUTHORITY"] == "native"
+    assert c.host.facts.environment["LEAF_PG_BIN"] == "/opt/fake/bin"
+
+
+def test_native_select_default_docker(tmp_path, monkeypatch):
+    monkeypatch.setattr(p.os, "environ", {"PATH": "fakepath"})
+    root = tmp_path / "run-test"
+    config = p.Config("run-test", root, root / "artifacts", p.Ports(0, 0, 0, 0))
+    facts = p.production_effects().host.inspect(config)
+    assert "LEAF_PROOF_PROJECT_AUTHORITY" not in facts.environment
+    assert "LEAF_PG_BIN" not in facts.environment
+    assert p._authority_kind(facts.environment) == "docker"
+
+
 class TestProjectBoundary:
     def test_invalid_run_id(self):
         for run in ("bad", "../badxx", "-badxxxx", "UPPERBAD", "x" * 65, None):

@@ -2585,9 +2585,9 @@ def build_suites() -> List[Suite]:
         # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets. A1/C1: 85 collected, +28 fake native rows and +7 C1 rows. A1d +2. A1e +2
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 89),
-        # Records A/A2/B/C/D/E/A1/C1/A1c/A1e and PP-3B: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 + 1 A1c + 2 A1e + 21 browser + 6 A1b rows + 3 source rows.
+        # Records A/A2/B/C/D/E/A1/C1/A1c/A1e and PP-3B: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 + 1 A1c + 2 A1e + 21 browser + 6 A1b rows + 3 source rows + 3 native selection rows.
         Suite("scripts-proof-project", "scripts test_proof_project.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 305),
+              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 308),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
