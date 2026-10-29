@@ -11,6 +11,7 @@ from contextvars import ContextVar
 from datetime import datetime, timezone
 from enum import Enum
 from functools import wraps
+import errno
 import hashlib
 import importlib.util
 import json
@@ -3413,21 +3414,38 @@ def _record_publication(writer, path, intent):
     writer._intents[journal.artifact_root / intent.filename] = (intent, raw)
 
 
-def _rename_noreplace(source, target):
-    # Windows rename is atomically no-replace. POSIX os.rename overwrites, so
-    # use the kernel's no-replace rename rather than a check-then-rename race.
-    if os.name == "nt":
-        os.rename(source, target)
-        return
+def _renameat2_noreplace(source, target):
     import ctypes
     library = ctypes.CDLL(None, use_errno=True)
     rename = getattr(library, "renameat2", None)
     if rename is None:
-        _receipt_refused()
+        return errno.ENOSYS
     rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
     rename.restype = ctypes.c_int
     if rename(-100, os.fsencode(source), -100, os.fsencode(target), 1) != 0:
+        return ctypes.get_errno()
+    return True
+
+
+def _rename_noreplace(source, target):
+    # Windows rename is atomically no-replace. POSIX os.rename overwrites, so
+    # use the kernel's no-replace rename or an atomic no-replace hard link.
+    if os.name == "nt":
+        os.rename(source, target)
+        return
+    result = _renameat2_noreplace(source, target)
+    if result is True:
+        return
+    if result not in (errno.EINVAL, errno.ENOSYS, errno.EOPNOTSUPP, errno.ENOTSUP, errno.EPERM):
         _receipt_refused()
+    try:
+        os.link(source, target)
+    except OSError:
+        _receipt_refused()
+    try:
+        os.unlink(source)
+    except OSError:
+        pass  # The receipt is already published; unlink failure must not undo or refuse it.
 
 
 def _commit_receipt(temporary, path, root_identity, artifact_identity, check_cancelled):

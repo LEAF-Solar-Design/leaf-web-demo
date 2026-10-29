@@ -1,6 +1,7 @@
 """Records A/B/C; authority and execution rows use fake effects only."""
 from dataclasses import replace
 from datetime import datetime, timezone
+import errno
 import importlib.util
 import io
 import json
@@ -2913,6 +2914,15 @@ class ReceiptFiles:
             self.files[target.path] = self.files.pop(source.path)
         monkeypatch.setattr(p.os, "rename", move)
         monkeypatch.setattr(p.os, "replace", lambda source, target: move(source, target, replace=True))
+        real_renameat2 = p._renameat2_noreplace
+        def rename_noreplace(source, target):
+            if not isinstance(source, ReceiptPath):
+                return real_renameat2(source, target)
+            if target.exists():
+                return errno.EEXIST
+            move(source, target)
+            return True
+        monkeypatch.setattr(p, "_renameat2_noreplace", rename_noreplace)
         monkeypatch.setattr(p.os, "fsync", lambda fd: None)
 
 
@@ -3469,6 +3479,54 @@ class TestProjectReceipt:
         proof = p.cleanup("run-test", run_root=ROOT, effects=c.effects)
         assert not proof.ok and proof.failures[0].fixed_code == p.FailureCode.CLEANUP_PROCESS
         assert c.private and c.receipts == {} and "remove-authority" not in c.events
+
+    def test_e_b_rename_fallback_link(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EINVAL)
+        assert p._rename_noreplace(source, target) is None
+        assert calls == [("link", source, target), ("unlink", source)]
+
+    def test_e_b_rename_fallback_no_clobber(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        def link(source, target):
+            calls.append(("link", source, target))
+            raise FileExistsError("fake")
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix", link=link,
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.ENOSYS)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == [("link", source, target)]
+
+    def test_e_b_rename_eexist_refused(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EEXIST)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == []
+
+    def test_e_b_rename_other_errno_refused(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EIO)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == []
 
     def test_e_c1_signal_during_commit(self, monkeypatch):
         import signal
