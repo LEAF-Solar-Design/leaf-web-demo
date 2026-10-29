@@ -38,6 +38,7 @@
     "check:deployed-auth0-spa-origin-acceptance": "node --test scripts/test_deployed_auth0_spa_origin_acceptance.mjs",
     "check:deployed-auth0-production-spa-origin-acceptance": "node --test scripts/test_deployed_auth0_production_spa_origin_acceptance.mjs",
     "check:collect-staging-auth0-principal-b": "node --test scripts/test_collect_staging_auth0_synthetic_principal_b.mjs",
+    "check:author-quota-live-proof": "node --test scripts/test_author_quota_live_proof.mjs",
     "check:published-catalog-tool": "node --test src/site/publishedCatalogTool.test.mjs",
     "check:proof-receipt": "node --test e2e/proofReceipt.test.mjs",
     "check:workbench-id": "node --test src/site/workbenchId.test.mjs",

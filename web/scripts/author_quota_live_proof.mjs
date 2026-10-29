@@ -395,6 +395,39 @@ export function createFetchBackend({ fetchImpl = globalThis.fetch, timeoutMs = S
     async stage({ apiOrigin, tenantId, description, idempotencyKey, readToken }) {
       const token = readToken()
       if (!token) throw new ProofError('configuration', `${TOKEN_ENV} is not set`)
+      const headers = {
+        'Content-Type': 'application/json',
+        Authorization: `Bearer ${token}`,
+        ...(tenantId ? { 'X-Tenant-Id': tenantId } : {}),
+      }
+      const authorityPost = async (path, body, code, valid) => {
+        let response
+        let result
+        try {
+          response = await fetchImpl(`${apiOrigin}${path}`, {
+            method: 'POST',
+            redirect: 'manual',
+            signal: AbortSignal.timeout(timeoutMs),
+            headers,
+            body: JSON.stringify(body),
+          })
+          result = await readBoundedJson(response)
+        } catch {
+          throw new ProofError(code, `${code}: HTTP ${response?.status ?? 0}`)
+        }
+        if (response.status < 200 || response.status >= 300 || !valid(result)) {
+          throw new ProofError(code, `${code}: HTTP ${response.status}`)
+        }
+        return result
+      }
+      const session = await authorityPost('/api/sessions', {
+        drawing_id: `quota-proof-${idempotencyKey}`,
+      }, 'authority_session_failed', (body) => typeof body?.session_id === 'string' && body.session_id.trim().length > 0)
+      const turn = await authorityPost(`/api/sessions/${encodeURIComponent(session.session_id)}/messages`, {
+        text: description,
+        classifier_hint: { source: 'author_panel', purpose: 'stage_authority' },
+      }, 'authority_turn_failed', (body) => typeof body?.turn_id === 'string' && body.turn_id.trim().length > 0
+        && !['queued', 'completed', 'failed', 'cancelled'].includes(body.status))
       let response
       try {
         response = await fetchImpl(`${apiOrigin}${STAGE_PATH}`, {
@@ -402,9 +435,9 @@ export function createFetchBackend({ fetchImpl = globalThis.fetch, timeoutMs = S
           redirect: 'manual',
           signal: AbortSignal.timeout(timeoutMs),
           headers: {
-            'Content-Type': 'application/json',
-            Authorization: `Bearer ${token}`,
-            ...(tenantId ? { 'X-Tenant-Id': tenantId } : {}),
+            ...headers,
+            'X-Authority-Session-Id': session.session_id,
+            'X-Authority-Turn-Id': turn.turn_id,
           },
           body: JSON.stringify({ description, mode: 'build', idempotency_key: idempotencyKey }),
         })
