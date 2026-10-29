@@ -74,7 +74,7 @@ async function openProjectUI(page) {
 }
 
 async function openVersionUI(page, version) {
-  await page.getByLabel('Canonical drawing version', { exact: true }).selectOption(version)
+  await page.getByRole('combobox', { name: 'Canonical drawing version', exact: true }).selectOption(version)
   await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
 }
 
@@ -219,7 +219,7 @@ test('project_settings_worker_readback', async ({ browser }, info) => {
     await form.getByLabel('Optimizer ratio', { exact: true }).fill('1.25')
     // The DXF fixture has no INSUNITS. Explicit manual metres are part of this input,
     // not a fabricated extraction result; the form binds the actual intake SHA itself.
-    await form.getByLabel('Drawing units', { exact: true }).selectOption('m')
+  await form.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')
     const submitted = response(page, 'POST', '/api/run', data => ({ job_id: data.job_id, status: data.status }))
     await form.getByRole('button', { name: 'Start Solar design', exact: true }).click()
     const accepted = await submitted
