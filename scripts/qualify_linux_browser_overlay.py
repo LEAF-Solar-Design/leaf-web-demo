@@ -80,6 +80,7 @@ class Supervisor:
         self.groups = set()
         self.descendants = {}
         self.timings = []
+        self.last_returncode = None
 
     def census(self):
         # Chromium is spawned detached by Playwright. Session/group membership
@@ -202,6 +203,7 @@ class Supervisor:
                             require(len(err) + len(data) <= MIB, label + "-stderr-limit")
                             err.extend(data)
             code = child.wait(timeout=1)
+            self.last_returncode = code
             # Diagnostics are intentionally not copied into the final receipt:
             # apt/proxy and inherited-environment errors can contain secrets.
             if code and not allow_failure:
@@ -367,7 +369,8 @@ const result = {launch: false, content: false, screenshot: false, close: false};
 """
 
 
-def qualify(root, runner, receipt):
+def prepare_overlay(root, runner, receipt):
+    """Prepare and validate private libraries without launching a browser."""
     overlay = root / "overlay"
     downloads = root / "downloads"
     overlay.mkdir()
@@ -455,6 +458,11 @@ def qualify(root, runner, receipt):
     child_env["XKB_CONFIG_ROOT"] = str(overlay / "usr/share/X11/xkb")
     child_env["ALSA_CONFIG_PATH"] = str(overlay / "usr/share/alsa/alsa.conf")
     child_env["ALSA_CONFIG_DIR"] = str(overlay / "usr/share/alsa")
+    return child_env
+
+
+def qualify(root, runner, receipt):
+    child_env = prepare_overlay(root, runner, receipt)
     script = root / "qualify.cjs"
     script.write_text(NODE_SCRIPT, encoding="utf-8")
     output = runner.run(["node", str(script), str(PLAYWRIGHT), str(BROWSER), str(root)],
