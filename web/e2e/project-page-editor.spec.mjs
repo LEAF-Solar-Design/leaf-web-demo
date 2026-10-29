@@ -105,6 +105,15 @@ async function installBackend(page) {
           backend.revisions.push(saved)
           reply = { status: 200, body: { page: saved } }
         }
+      } else if (url.pathname === `${PAGE_PATH}/proposals` && method === 'POST') {
+        if (!current || body.expected_revision !== current.revision || body.expected_digest !== current.digest) {
+          reply = { status: 409, body: { error: 'page_conflict' } }
+        } else {
+          const proposed = { ...structuredClone(current.document), headline: 'Baking work, selected with care' }
+          reply = { status: 200, body: { source: { project_id: PROJECT_ID, revision: current.revision, digest: current.digest },
+            proposed_document: proposed, proposed_digest: digest(proposed), edits: [{ id: 'opaque-headline-id', value: proposed.headline }],
+            model: 'rendered-fixture', usage: { input_tokens: 20, output_tokens: 10 } } }
+        }
       } else if (url.pathname === `${PAGE_PATH}/source` && method === 'GET') {
         const saved = backend.revisions.find(row => String(row.revision) === query.revision)
         if (!saved) reply = { status: 404, body: { error: 'revision_not_found' } }
@@ -342,6 +351,92 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
       preservedDocument: original, source: { revision: manifest.revision, document_sha256: manifest.document_sha256,
         archive_sha256: createHash('sha256').update(bytes).digest('hex'), assets, files: manifest.files },
     }), contentType: 'application/json' })
+  })
+
+  test(`portfolio text proposal review, use and save at ${size}`, async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    page.setDefaultTimeout(15_000)
+    const proposalViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
+    await page.setViewportSize(proposalViewport)
+    const backend = await installBackend(page)
+    const original = portfolioImport()
+    original.schema = 'leaf.portfolio.v1'
+    original.categories = [24, 24, 23, 23].map((length, ci) => ({
+      slug: `gallery-${ci + 1}`, title: `Gallery ${ci + 1}`, description: `Collection ${ci + 1}`, hero: 0,
+      images: Array.from({ length }, (_, ii) => ({ material_id: `33333333-3333-4333-8333-${String(ci * 24 + ii).padStart(12, '0')}`,
+        sha256: PHOTOS[0].sha256, preview_sha256: PHOTOS[0].preview_sha256,
+        title: `Pastry ${ci + 1}-${ii + 1}`, alt: `Pastry photograph ${ci + 1}-${ii + 1}` })),
+    }))
+    const savedDigest = digest(original)
+    backend.revisions.push({ revision: 7, digest: savedDigest, document: structuredClone(original) })
+    await page.goto('/app?surface=browser')
+    const editor = await openProject(page)
+    await editor.getByRole('button', { name: 'Open page', exact: true }).click()
+    const preview = page.locator('[data-ground="browser-asset"] .portfolio')
+    await expect(preview.getByRole('heading', { name: original.headline, exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+    const request = editor.getByRole('textbox', { name: 'What should change?', exact: true })
+    await request.fill('Make the headline more concise without adding facts.')
+    await editor.getByRole('button', { name: 'Generate proposal', exact: true }).click()
+    const review = editor.getByRole('region', { name: 'Review proposed text', exact: true })
+    await expect(review.getByText(original.headline, { exact: true })).toBeVisible()
+    await expect(review.getByText('Baking work, selected with care', { exact: true })).toBeVisible()
+    await expect(review.getByRole('heading', { name: 'Headline', exact: true })).toBeVisible()
+    await expect(preview.getByRole('heading', { name: original.headline, exact: true })).toHaveCount(1)
+    const save = editor.getByRole('button', { name: 'Save page', exact: true })
+    await expect(save).toHaveCount(1)
+    await expect(save).toBeDisabled()
+    expect(backend.calls.filter(call => call.method === 'PUT')).toEqual([])
+    const posts = backend.calls.filter(call => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ path: `${PAGE_PATH}/proposals`, body: {
+      expected_revision: 7, expected_digest: savedDigest, instruction: 'Make the headline more concise without adding facts.',
+    }, headers: { authorization: `Bearer ${TOKEN}`, 'x-org-id': ORG } })
+    const use = review.getByRole('button', { name: 'Use proposed changes', exact: true })
+    await use.scrollIntoViewIfNeeded()
+    const geometry = await review.evaluate(node => {
+      const save = node.closest('.project-page-editor').querySelector('.project-page-editor__save-row button')
+      const box = save.getBoundingClientRect(), bounds = node.getBoundingClientRect()
+      return { viewport: { width: innerWidth, height: innerHeight }, pageWidth: document.documentElement.scrollWidth,
+        reviewWidth: node.clientWidth, reviewScrollWidth: node.scrollWidth, reviewLeft: bounds.left, reviewRight: bounds.right,
+        save: { top: box.top, bottom: box.bottom, left: box.left, right: box.right, height: box.height,
+          reachable: save.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2)) } }
+    })
+    expect(geometry.pageWidth).toBeLessThanOrEqual(proposalViewport.width)
+    expect(geometry.reviewScrollWidth).toBeLessThanOrEqual(geometry.reviewWidth)
+    expect(geometry.reviewLeft).toBeGreaterThanOrEqual(0)
+    expect(geometry.reviewRight).toBeLessThanOrEqual(proposalViewport.width)
+    expect(geometry.save.top).toBeGreaterThanOrEqual(0)
+    expect(geometry.save.bottom).toBeLessThanOrEqual(proposalViewport.height)
+    expect(geometry.save.height).toBeGreaterThanOrEqual(44)
+    expect(geometry.save.reachable).toBe(true)
+    await testInfo.attach(`portfolio-proposal-review-${size}`, { body: await page.screenshot(), contentType: 'image/png' })
+    await use.focus()
+    await page.keyboard.press('Enter')
+    await expect(review).toHaveCount(0)
+    await expect(editor.getByRole('textbox', { name: 'Headline', exact: true })).toHaveValue('Baking work, selected with care')
+    await expect(preview.getByRole('heading', { name: 'Baking work, selected with care', exact: true })).toHaveCount(1)
+    await expect(editor.getByText('Review the draft, then Save page.', { exact: true })).toBeVisible()
+    expect(backend.calls.filter(call => call.method === 'PUT')).toEqual([])
+    await expect(save).toBeEnabled()
+    await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    await expect(preview.getByRole('heading', { name: 'Baking work, selected with care', exact: true })).toBeVisible()
+    await testInfo.attach(`portfolio-proposal-used-preview-${size}`, { body: await page.screenshot(), contentType: 'image/png' })
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+    await save.click()
+    await expect(editor.locator('.project-page-editor__save-row').getByRole('status')).toHaveText('Saved')
+    const puts = backend.calls.filter(call => call.method === 'PUT')
+    expect(puts).toHaveLength(1)
+    expect(puts[0].body).toEqual({ expected_revision: 7, document: { ...original, headline: 'Baking work, selected with care' } })
+    expect(backend.revisions.at(-1).document.categories).toEqual(original.categories)
+    expect(backend.revisions.at(-1).document.categories.reduce((count, category) => count + category.images.length, 0)).toBe(94)
+    await testInfo.attach(`portfolio-proposal-saved-${size}`, { body: await page.screenshot(), contentType: 'image/png' })
+    await testInfo.attach(`portfolio-proposal-evidence-${size}`, { body: JSON.stringify({
+      kind: 'rendered-ui-fixture-proof', liveProviderAcceptance: false, viewport: proposalViewport, geometry,
+      source: { project_id: PROJECT_ID, revision: 7, digest: savedDigest }, proposalRequests: posts, saves: puts,
+      preservedPhotoCount: 94, savedRevision: backend.revisions.at(-1).revision,
+    }, null, 2), contentType: 'application/json' })
+    expect(backend.foreign).toEqual([])
   })
 
   test(`portfolio visual text selection at ${size}`, async ({ page }, testInfo) => {

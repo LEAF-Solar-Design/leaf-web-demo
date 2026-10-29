@@ -4,7 +4,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
 import { portfolioField } from './PortfolioEditor.jsx'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, proposeProjectPage } from './projectPageClient.js'
 import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
 import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
 import { registerEscapeOwner } from '../lib/useEscapeOwner.js'
@@ -24,6 +24,7 @@ vi.mock('../projects/api.js', () => ({ getStoredActorBindingId: () => 'binding-a
 vi.mock('./projectPageClient.js', async importOriginal => ({
   ...await importOriginal(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn(), downloadProjectPageSource: vi.fn(),
   submitProjectNativePreview: vi.fn(), loadProjectNativePreview: vi.fn(), downloadProjectNativePreviewScreenshot: vi.fn(),
+  proposeProjectPage: vi.fn(),
 }))
 
 const PROJECT = '11111111-1111-4111-8111-111111111111'
@@ -49,6 +50,7 @@ beforeEach(() => {
   submitProjectNativePreview.mockResolvedValue(nativeJob('queued'))
   loadProjectNativePreview.mockResolvedValue(nativeJob('running'))
   downloadProjectNativePreviewScreenshot.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
+  proposeProjectPage.mockResolvedValue(proposalResult())
   vi.stubGlobal('fetch', vi.fn())
   URL.createObjectURL = vi.fn(() => 'blob:page-source')
   URL.revokeObjectURL = vi.fn()
@@ -71,6 +73,168 @@ const importDraft = () => {
   value.categories[0].images = [PHOTO, PHOTO_TWO].map(row => ({ source_sha256: row.sha256, title: row.name, alt: row.name }))
   return value
 }
+
+const proposalResult = (changes = { headline: 'Selected baking work' }) => ({
+  source: { project_id: PROJECT, revision: 7, digest: 'a'.repeat(64) }, proposed_document: { ...portfolioDraft(), ...changes },
+  proposed_digest: 'd'.repeat(64), edits: Object.entries(changes).map(([id, value]) => ({ id, value })), model: 'fixture', usage: {},
+})
+const ask = () => {
+  fireEvent.change(screen.getByLabelText('What should change?'), { target: { value: 'Shorten the headline' } })
+  fireEvent.click(button('Generate proposal'))
+}
+
+describe('portfolio text proposal review', () => {
+  it('keeps generation separate from preview and save, then uses the proposal as an unsaved draft', async () => {
+    const previews = vi.fn()
+    function ActualPreview() {
+      const [value, setValue] = React.useState(null)
+      return <><ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={next => { previews(next); setValue(next.document) }} />
+        <section aria-label="Actual page preview"><PagePreview document={value} projectId={PROJECT} /></section></>
+    }
+    render(<ActualPreview />)
+    await openPortfolio()
+    const preview = within(screen.getByRole('region', { name: 'Actual page preview' }))
+    expect(preview.getByRole('heading', { name: 'Selected work', exact: true })).toBeTruthy()
+    const calls = previews.mock.calls.length
+    ask()
+    const review = await screen.findByRole('region', { name: 'Review proposed text' })
+    expect(within(review).getByRole('heading', { name: 'Headline', exact: true })).toBeTruthy()
+    expect(within(review).getByText('Selected work', { exact: true })).toBeTruthy()
+    expect(within(review).getByText('Selected baking work', { exact: true })).toBeTruthy()
+    expect(previews).toHaveBeenCalledTimes(calls)
+    expect(preview.getByRole('heading', { name: 'Selected work', exact: true })).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(proposeProjectPage).toHaveBeenCalledExactlyOnceWith(PROJECT,
+      { revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() }, 'Shorten the headline', { signal: expect.any(AbortSignal) })
+    fireEvent.click(button('Use proposed changes'))
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(preview.getByRole('heading', { name: 'Selected baking work', exact: true })).toBeTruthy()
+    expect(previews).toHaveBeenCalledTimes(calls + 1)
+    expect(screen.getByLabelText('Headline').value).toBe('Selected baking work')
+    expect(screen.getByText('Review the draft, then Save page.')).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Save page'))
+    await waitFor(() => expect(saveProjectPage).toHaveBeenCalledTimes(1))
+    expect(saveProjectPage.mock.lastCall.slice(0, 3)).toEqual([PROJECT, proposalResult().proposed_document, 7])
+    expect(saveProjectPage.mock.lastCall[1].categories).toEqual(portfolioDraft().categories)
+  })
+
+  it('discards without changing the draft or preview, and reports an empty proposal', async () => {
+    const onPreview = vi.fn(); setup({ onPreview }); await openPortfolio()
+    ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    const calls = onPreview.mock.calls.length
+    fireEvent.click(button('Discard proposal'))
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(onPreview).toHaveBeenCalledTimes(calls)
+    proposeProjectPage.mockResolvedValueOnce(proposalResult({}))
+    fireEvent.click(button('Generate proposal'))
+    await screen.findByText('No text changes proposed.')
+    expect(screen.queryByRole('button', { name: 'Use proposed changes' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(onPreview).toHaveBeenCalledTimes(calls)
+  })
+
+  it('guards unsaved, dirty and invalid portfolios and invalidates review on manual edit', async () => {
+    setup(); fireEvent.click(button('Create a portfolio'))
+    fireEvent.change(screen.getByLabelText('What should change?'), { target: { value: 'Shorten text' } })
+    expect(button('Generate proposal').disabled).toBe(true)
+    expect(screen.getByText('Save changes first to request a text proposal.')).toBeTruthy()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+    fireEvent.click(button('Reload saved page'))
+    await waitFor(() => expect(screen.getByLabelText('Name').value).toBe('Your portfolio'))
+    await waitFor(() => expect(button('Reload saved page').disabled).toBe(false))
+    ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'My own draft' } })
+    expect(screen.queryByRole('button', { name: 'Use proposed changes' })).toBeNull()
+    expect(button('Generate proposal').disabled).toBe(true)
+    fireEvent.click(button('Generate proposal'))
+    expect(proposeProjectPage).toHaveBeenCalledTimes(1)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: '' } })
+    expect(button('Generate proposal').disabled).toBe(true)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('cancels its own operation, clears busy and ignores the late response after another request', async () => {
+    const pending = deferred(), next = deferred(), onPreview = vi.fn()
+    proposeProjectPage.mockReturnValueOnce(pending.promise).mockReturnValueOnce(next.promise)
+    setup({ onPreview }); await openPortfolio(); ask()
+    expect(button('Generating proposal…').disabled).toBe(true)
+    fireEvent.click(button('Generating proposal…'))
+    expect(proposeProjectPage).toHaveBeenCalledTimes(1)
+    const signal = proposeProjectPage.mock.lastCall[3].signal
+    fireEvent.click(button('Cancel generation'))
+    expect(signal.aborted).toBe(true)
+    expect(button('Generate proposal').disabled).toBe(false)
+    expect(screen.getByLabelText('What should change?').value).toBe('Shorten the headline')
+    fireEvent.click(button('Generate proposal'))
+    await act(async () => { pending.resolve(proposalResult()); await pending.promise })
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(button('Generating proposal…').disabled).toBe(true)
+    await act(async () => { next.resolve(proposalResult({ headline: 'New request result' })); await next.promise })
+    expect(screen.getByRole('region', { name: 'Review proposed text' }).textContent).toContain('New request result')
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each(['logout', 'project', 'account', 'token', 'unmount'])('ignores pending proposals after %s', async mode => {
+    const pending = deferred(), onPreview = vi.fn()
+    proposeProjectPage.mockReturnValueOnce(pending.promise)
+    const view = setup({ onPreview }); await openPortfolio(); ask()
+    const signal = proposeProjectPage.mock.lastCall[3].signal
+    if (mode === 'logout') act(() => auth.logout())
+    if (mode === 'project') view.rerender(<ProjectPageEditor projectId={OTHER} accountScope="account-a" onPreview={onPreview} />)
+    if (mode === 'account') view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-b" onPreview={onPreview} />)
+    if (mode === 'token') act(() => { auth.scope = 'account-b'; auth.token() })
+    if (mode === 'unmount') view.unmount()
+    expect(signal.aborted).toBe(true)
+    await act(async () => { pending.resolve(proposalResult()); await pending.promise })
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('clears a review on reload and import, preserving a replacement draft', async () => {
+    setup(); await openPortfolio(); ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    loadProjectPage.mockResolvedValueOnce({ revision: 8, digest: 'e'.repeat(64), document: { ...portfolioDraft(), headline: 'Saved elsewhere' } })
+    fireEvent.click(button('Reload saved page'))
+    await screen.findByDisplayValue('Saved elsewhere')
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO, PHOTO_TWO] })
+    fireEvent.change(screen.getByLabelText('Import portfolio content'), { target: { files: [importFile(importDraft())] } })
+    await screen.findByText('Portfolio imported as an unsaved draft. Review it, then Save page.')
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each([500, 409])('preserves request, draft and preview on generation failure %s', async status => {
+    const onPreview = vi.fn()
+    proposeProjectPage.mockRejectedValueOnce(Object.assign(new Error('Proposal failed safely.'), { status }))
+    setup({ onPreview }); await openPortfolio(); ask()
+    await screen.findByRole('alert')
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(screen.getByLabelText('What should change?').value).toBe('Shorten the headline')
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(button('Reload saved page').disabled).toBe(false)
+    expect(button('Generate proposal').disabled).toBe(status === 409)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('preserves the explicitly accepted draft and normal reload recovery after a save conflict', async () => {
+    const onPreview = vi.fn()
+    saveProjectPage.mockRejectedValueOnce(Object.assign(new Error('The saved page changed elsewhere. Your draft is still here. Reload the saved page to continue.'), { status: 409 }))
+    setup({ onPreview }); await openPortfolio(); ask(); await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.click(button('Use proposed changes')); fireEvent.click(button('Save page'))
+    await screen.findByRole('alert')
+    expect(screen.getByLabelText('Headline').value).toBe('Selected baking work')
+    expect(onPreview.mock.lastCall[0].document.headline).toBe('Selected baking work')
+    expect(button('Save page').disabled).toBe(true)
+    expect(button('Reload saved page').disabled).toBe(false)
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('portfolio project document', () => {
   it('wires separate portfolio edit controls through PagePreview without nesting navigation or View actions', () => {

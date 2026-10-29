@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges } from './projectPageClient.js'
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
 import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
@@ -41,6 +41,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   const [suspended, setSuspended] = useState(false)
   const [native, setNative] = useState(null)
   const [reviewRequest, setReviewRequest] = useState(0)
+  const [instruction, setInstruction] = useState('')
+  const [proposal, setProposal] = useState(null)
+  const sourceSnapshot = useRef(null)
   const actionRow = useRef(null)
   const editor = useRef(null)
   const nativeSession = useRef(null)
@@ -57,6 +60,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   if (draft) {
     try { validatePageDocument(draft) } catch (failure) { validation = failure.message }
   }
+  sourceSnapshot.current = { saved, draft }
+  useEffect(() => { setProposal(null) }, [draft, saved])
+  useEffect(() => { setInstruction('') }, [saved])
 
   const clearNative = () => {
     const session = nativeSession.current
@@ -82,6 +88,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
       operation.current = null
       clearNative()
       setNative(null)
+      setProposal(null)
+      setInstruction('')
       setDraft(null)
       setSaved(null)
       setError(null)
@@ -130,12 +138,14 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   const create = () => {
     if (!enabled || operation.current) return
     const document = { ...EMPTY_PAGE }
+    setProposal(null); setInstruction('')
     setDraft(document); setSaved(null); setError(null); setNotice('')
     show(document)
   }
   const createPortfolio = () => {
     if (!enabled || operation.current) return
     const document = emptyPortfolio()
+    setProposal(null); setInstruction('')
     setDraft(document); setError(null); setNotice('')
     show(document)
   }
@@ -153,6 +163,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     }
   }
   const open = () => perform('loading', async (signal, current) => {
+    setProposal(null)
     const page = await loadProjectPage(projectId, { signal })
     if (!current()) return
     if (!page) { setNotice('No saved page yet. Choose Create a page to begin.'); return }
@@ -166,6 +177,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     const expectedScope = readActiveScope()
     if (!expectedScope) { setError({ message: 'Sign in before importing project photos.' }); return }
     void perform('importing', async (signal, current) => {
+      setProposal(null)
       const document = await importPortfolio(file, projectId, { signal, expectedScope })
       if (!current() || readActiveScope() !== expectedScope) return
       setDraft(document); show(document)
@@ -196,12 +208,42 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
       : 'Next.js source downloaded. See the included README to run it independently.')
   })
   const change = (field, value) => {
+    setProposal(null)
     const document = { ...draft, [field]: value }
     setDraft(document); setNotice('')
     show(document)
   }
-  const changePortfolio = document => { setDraft(document); setNotice(''); show(document) }
+  const changePortfolio = document => { setProposal(null); setDraft(document); setNotice(''); show(document) }
+  const proposalBlocked = !enabled || Boolean(busy) || dirty || Boolean(validation) || !saved || Boolean(error?.conflict) || Boolean(native?.active)
+  const generateProposal = () => {
+    if (!live.current || proposalBlocked || operation.current || !instruction.trim() || Array.from(instruction).length > 4000
+      || draft?.schema !== 'leaf.portfolio.v1') return
+    const snapshot = sourceSnapshot.current
+    void perform('proposing', async (signal, current) => {
+      setProposal(null)
+      const result = await proposeProjectPage(projectId, snapshot.saved, instruction, { signal })
+      if (!current() || sourceSnapshot.current.saved !== snapshot.saved || sourceSnapshot.current.draft !== snapshot.draft) return
+      const changes = portfolioTextChanges(snapshot.saved.document, result.proposed_document)
+      if (!changes.length) { setNotice('No text changes proposed.'); return }
+      setProposal({ snapshot, document: result.proposed_document, changes })
+    })
+  }
+  const cancelProposal = () => {
+    if (busy !== 'proposing') return
+    operation.current?.abort()
+    operation.current = null
+    setBusy(null); setProposal(null); setNotice('Proposal generation cancelled.')
+  }
+  const useProposal = () => {
+    if (!live.current || !proposal || proposalBlocked || operation.current || sourceSnapshot.current.saved !== proposal.snapshot.saved
+      || sourceSnapshot.current.draft !== proposal.snapshot.draft) { setProposal(null); return }
+    const document = proposal.document
+    portfolioTextChanges(saved.document, document)
+    setProposal(null); setDraft(document); show(document)
+    setNotice('Review the draft, then Save page.')
+  }
   const state = busy === 'saving' ? 'Saving…' : dirty ? 'Unsaved changes' : saved ? 'Saved' : ''
+  const proposalNotice = notice && /^(?:No text changes proposed\.|Review the draft, then Save page\.|Proposal generation cancelled\.|Proposal discarded\.)/.test(notice)
 
   const observeNative = async (session, submit = false) => {
     if (!live.current || nativeSession.current !== session || session.active) return
@@ -275,7 +317,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   }
   const checkNative = () => {
     const session = nativeSession.current
-    if (enabled && !session?.active && session?.job) void observeNative(session)
+    if (enabled && !busy && !operation.current && !session?.active && session?.job) void observeNative(session)
   }
   const nativeStatus = native?.job?.status
   const nativeLabel = nativeStatus === 'complete' ? native.url ? 'Ready' : native.active ? 'Building' : 'Screenshot unavailable'
@@ -301,6 +343,31 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
         <button type="button" onClick={save} disabled={!enabled || Boolean(busy) || !dirty || Boolean(validation) || error?.conflict}>Save page</button>
         <p role="status" aria-live="polite">{state}</p>
       </div>
+      {draft.schema === 'leaf.portfolio.v1' && <section className="project-page-editor__proposal" aria-label="Ask for a text change">
+        <h3>Ask for a text change</h3>
+        <p className="project-page-editor__note">Propose text-only edits to a saved portfolio. Photos, layout and structure stay the same. Review before using any changes.</p>
+        <label htmlFor={`${id}-instruction`}><span>What should change?</span>
+          <textarea id={`${id}-instruction`} rows={3} maxLength={4000} value={instruction} disabled={!enabled || Boolean(busy)} onChange={event => setInstruction(event.target.value)} />
+        </label>
+        {(dirty || validation || !saved) && <p className="project-page-editor__note">Save changes first to request a text proposal.</p>}
+        <div className="project-page-editor__actions">
+          <button type="button" onClick={generateProposal} disabled={proposalBlocked || !instruction.trim() || Array.from(instruction).length > 4000}>{busy === 'proposing' ? 'Generating proposal…' : 'Generate proposal'}</button>
+          {busy === 'proposing' && <button type="button" onClick={cancelProposal}>Cancel generation</button>}
+        </div>
+        {proposal && <section aria-label="Review proposed text" className="project-page-editor__proposal-review">
+          <h4>Review proposed text</h4>
+          <p className="project-page-editor__note">Your draft and preview stay as they are until you use these changes.</p>
+          <ol>{proposal.changes.map((change, index) => <li key={index}>
+            <h5>{change.label}</h5>
+            <dl><dt>Current text</dt><dd>{change.before || '(Empty)'}</dd><dt>Proposed text</dt><dd>{change.after || '(Empty)'}</dd></dl>
+          </li>)}</ol>
+          <div className="project-page-editor__actions">
+            <button type="button" onClick={useProposal} disabled={proposalBlocked}>Use proposed changes</button>
+            <button type="button" onClick={() => { setProposal(null); setNotice('Proposal discarded. Your draft is unchanged.') }}>Discard proposal</button>
+          </div>
+        </section>}
+        {proposalNotice && <p role="status">{notice}</p>}
+      </section>}
       {validation && <div className="project-page-editor__validation">
         <p className="project-page-editor__error" role="alert">{validation}</p>
         {draft.schema === 'leaf.portfolio.v1' && <button type="button" onClick={() => setReviewRequest(value => value + 1)}>Show all fields to review errors</button>}
@@ -332,7 +399,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
         <div className="project-page-editor__actions">
           <button type="button" onClick={buildNative} disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
             || Boolean(native?.job && !['failed', 'cancelled'].includes(nativeStatus))}>Build iOS preview</button>
-          {native?.job && <button type="button" onClick={checkNative} disabled={!enabled || Boolean(native.active)}>Check preview again</button>}
+          {native?.job && <button type="button" onClick={checkNative} disabled={!enabled || Boolean(busy) || Boolean(native.active)}>Check preview again</button>}
         </div>
         {dirty && <p className="project-page-editor__note">Save changes before building a new preview.</p>}
         {native && <p role="status" aria-live="polite">{nativeLabel || (native.active ? 'Submitting' : 'Submission unconfirmed')} · Saved revision {native.revision}</p>}
@@ -341,6 +408,6 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
       </section>}
     </>}
     {error && <p className="project-page-editor__error" role="alert">{error.message}</p>}
-    {notice && <p role="status">{notice}</p>}
+    {notice && !proposalNotice && <p role="status">{notice}</p>}
   </section>
 }
