@@ -22,7 +22,7 @@ import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErr
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
 import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled,
-  enterWorkspaceIfChooser, enterWorkspaceEnvironment, openSolarCadProfile, STUDIO_RAIL_FEATURES, revealStudioRail, prepareStudioRail } from './fixtures.mjs'
+  enterWorkspaceIfChooser, enterWorkspaceEnvironment, reloadAndReenter, openSolarCadProfile, STUDIO_RAIL_FEATURES, revealStudioRail, prepareStudioRail } from './fixtures.mjs'
 import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
@@ -1124,6 +1124,96 @@ test('workspace entry refuses a fourth entry click with a data-entered diagnosti
   await assert.rejects(enterWorkspaceEnvironment(page, assertions), /data-entered.*3 clicks/)
   assert.deepEqual(polls, [{ timeout: 20_000, passes: 4 }])
   assert.equal(events.filter(event => event === 'Continue workspace').length, 3)
+})
+
+test('foreign checkout reload re-enters the chooser before restoring the ribbon tab', async () => {
+  const fake = workspaceEnvironmentFake({ entered: 'true' })
+  const { page, events } = fake
+  const getByRole = page.getByRole
+  const assertEntered = async () => assert.equal(
+    await page.locator('section.workspace-environment').getAttribute('data-entered'), 'true')
+  page.request = { post: async (path, options) => {
+    assert.equal(path, '/api/drawings/private/checkout')
+    assert.deepEqual(options, { data: { holder: 'walk-other-editor', ttl_s: 300 }, timeout: 15_000 })
+    return { status: () => 200, json: async () => ({ acquired: true }) }
+  } }
+  page.reload = async options => {
+    assert.equal(options, undefined)
+    events.push('reload')
+    fake.setEntered('false')
+  }
+  page.getByText = (text, options) => {
+    assert.equal(text, 'Editing locked by walk-other-editor')
+    assert.deepEqual(options, { exact: false })
+    return { _apiName: 'Locator', _expect: async expression => {
+      assert.equal(expression, 'to.be.visible')
+      await assertEntered()
+      events.push('lock visible')
+      return { matches: true, log: [] }
+    } }
+  }
+  page.getByRole = (role, options) => {
+    if (role === 'tablist') {
+      assert.deepEqual(options, { name: 'Ribbon', exact: true })
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'tab')
+        assert.deepEqual(options, { name: 'Manage', exact: true })
+        return { click: async () => { await assertEntered(); events.push('Manage') } }
+      } }
+    }
+    if (role === 'button' && options.name === 'More panels') return { isVisible: async () => false }
+    return getByRole(role, options)
+  }
+  await setupStep({}, { page, evidence: {}, drawingId: 'private', ribbonTab: 'Manage' }, { kind: 'foreign-checkout' })
+  assert.deepEqual(events, ['reload', 'Continue workspace', 'assert:data-entered=true', 'lock visible', 'Manage'])
+})
+
+test('reloadAndReenter reloads once without entry clicks on builds without an environment', async () => {
+  const { page, events } = workspaceEnvironmentFake({ present: false })
+  const options = { timeout: 60_000 }
+  page.reload = async received => { assert.equal(received, options); events.push('reload') }
+  await reloadAndReenter(page, options)
+  assert.deepEqual(events, ['reload'])
+})
+
+test('signed-out session enters the chooser before Details without clicking Sign in', async () => {
+  const { page, events } = workspaceEnvironmentFake({ resume: false })
+  const getByRole = page.getByRole
+  let detailsOpen = false
+  const panel = { visible: () => detailsOpen,
+    getByTestId: id => {
+      assert.equal(id, 'diagnostics-block')
+      return { text: 'session signed out' }
+    },
+    getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Refresh', exact: true })
+      return { visible: () => detailsOpen }
+    },
+  }
+  page.getByRole = (role, options) => {
+    if (role === 'navigation') return getByRole(role, options)
+    if (role === 'dialog') {
+      assert.deepEqual(options, { name: 'Session · provenance', exact: true })
+      return panel
+    }
+    assert.equal(role, 'button')
+    assert.equal(options.exact, true)
+    if (options.name === 'Sign out') return { count: 0 }
+    assert.equal(options.name, 'Details', 'Sign in must never be used to enter the signed-out workspace')
+    return { count: 1, click: async () => {
+      assert.equal(await page.locator('section.workspace-environment').getAttribute('data-entered'), 'true')
+      events.push('Details'); detailsOpen = true
+    } }
+  }
+  const assertions = value => ({
+    toHaveCount: async expected => assert.equal(value.count, expected),
+    toBeVisible: async () => assert.equal(value.visible(), true),
+    toHaveText: async expected => assert.match(value.text, expected),
+  })
+  await assertEffect({ assertion: { target: 'signed-out-session' } }, { page }, null, null, assertions)
+  assert.deepEqual(events, ['Open project or material', 'Close Project panel',
+    'assert:aria-expanded=false', 'assert:data-entered=true', 'Details'])
 })
 
 test('workspace chooser entry ignores Describe and returns false when no entry is offered', async () => {

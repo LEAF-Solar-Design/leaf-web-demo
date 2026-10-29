@@ -1485,6 +1485,11 @@ export async function enterWorkspaceEnvironment(page, assertions = expect) {
   if (entryLimitError) throw entryLimitError
 }
 
+export async function reloadAndReenter(page, options) {
+  await page.reload(options)
+  await enterWorkspaceEnvironment(page)
+}
+
 export async function openSolarCadProfile(page) {
   const controls = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
   if (await controls.count?.()) {
@@ -2529,7 +2534,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       const chain = await verified.json()
       assertions(chain.versions.length).toBeGreaterThan(1)
       assertions(recipe.redo ? chain.head < chain.latest : chain.head > 1).toBe(true)
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       await requireWorkspace(runtime)
       if (runtime.ribbonTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: runtime.ribbonTab })
       evidence.savedVersionHistory = { head: chain.head, latest: chain.latest, versions: chain.versions, redo: recipe.redo }
@@ -2965,7 +2970,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
     }
     case 'seed-solar-chain': {
       await seedSolarChain(runtime, recipe)
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       await requireWorkspace(runtime)
       return
     }
@@ -3005,7 +3010,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         evidence.solarSeed = { drawingId: runtime.drawingId, parent: chain.head,
           version: runtime.drawingVersion, graphRev: receipt.result.after_rev }
       } finally { await release() }
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       await requireWorkspace(runtime)
       return
     }
@@ -3013,7 +3018,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       const response = await page.request.post(`/api/drawings/${runtime.drawingId}/checkout`, { data: { holder: 'walk-other-editor', ttl_s: 300 }, timeout: 15_000 })
       expect(response.status()).toBe(200)
       expect((await response.json()).acquired).toBe(true)
-      await page.reload()
+      await reloadAndReenter(page)
       await expect(page.getByText('Editing locked by walk-other-editor', { exact: false })).toBeVisible()
       if (runtime.ribbonTab) await setupStep(probe, runtime, { kind: 'ribbon-tab', name: runtime.ribbonTab })
       return
@@ -3032,7 +3037,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       expect(policyResponse.entitlements[recipe.capability]).toBe(recipe.allowed)
       if (probe.featureId === 'action:author-tool') evidence.authorPolicy = { status: response.status(), policyResponse,
         beforeReload: await disclosureEvidence(page, 'Author') }
-      await page.reload({ timeout: 60_000 })
+      await reloadAndReenter(page, { timeout: 60_000 })
       if (probe.featureId === 'action:author-tool') {
         await requireWorkspace(runtime)
         evidence.authorPolicy.afterReload = await disclosureEvidence(page, 'Author')
@@ -3331,6 +3336,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   }
   if (target === 'signed-out-session') {
     await expect(page.getByRole('button', { name: 'Sign out', exact: true })).toHaveCount(0)
+    await enterWorkspaceEnvironment(page)
     const details = page.getByRole('button', { name: 'Details', exact: true })
     await expect(details).toHaveCount(1)
     await details.click()
