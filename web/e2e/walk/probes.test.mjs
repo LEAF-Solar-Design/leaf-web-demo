@@ -11,6 +11,21 @@ import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, disc
 
 const map = buildFeatureMap()
 
+test('WL32 chooser-open declares one desktop ready task using the provisioned drawing and visible label', () => {
+  const entry = map.entries.find(row => row.id === 'control:chooser-open')
+  assert.deepEqual(entry.states, ['ready'])
+  assert.deepEqual(entry.viewports, ['desktop'])
+  const probe = resolveProbe(entry, 'ready')
+  assert.deepEqual(probe.setup.steps, [
+    { kind: 'navigate', url: '/app?surface=cad&drawing=rooftop_demo' }, { kind: 'chooser-start' },
+  ])
+  assert.equal(probe.locator.role, 'button')
+  assert.equal(probe.locator.name, 'Open project or material')
+  assert.equal(probe.locator.trigger, 'click')
+  assert.equal(probe.assertion.kind, 'opens')
+  assert.equal(probe.assertion.target, 'chooser-project-sidebar')
+})
+
 test('engine wasm route matches versioned and unversioned wasm URLs only', () => {
   assert.ok(ENGINE_WASM_ROUTE.test('https://h/engine/engine_bg.wasm'))
   assert.ok(ENGINE_WASM_ROUTE.test('https://h/engine/engine_bg.wasm?v=0123456789abcdef'))

@@ -24,6 +24,7 @@ import { createRedHatMeasurementCapture } from './redHatMeasurements.mjs'
 import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
 import { createQcDevMeasurementCapture } from './qcDevMeasurements.mjs'
 import { collectUiUxMeasurements } from './uiUxMeasurements.mjs'
+import { collectUnfamiliarMeasurements } from './unfamiliarMeasurements.mjs'
 import { composePersonaMeasurementBundle } from './personaMeasurementBundle.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
@@ -648,6 +649,56 @@ export async function assertRailExpandFamily(page, family, assertions = expect) 
   const name = new RegExp('^' + family.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '\\s*·')
   const section = page.locator('aside.nav .section').filter({ has: page.getByRole('button', { name }) })
   await assertions(section.locator('.section-body')).toBeVisible()
+}
+
+export async function prepareChooserStart(runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  evidence.chooserTask = {
+    startingChooser: 'What would you like to work on?',
+    targetLabel: 'Open project or material',
+    nextStep: 'Project sidebar visible; Close Project focused; Project expanded',
+  }
+  const heading = page.getByRole('heading', { name: evidence.chooserTask.startingChooser, exact: true })
+  if (!await heading.isVisible()) {
+    await page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+      .getByRole('button', { name: 'Choose', exact: true }).click()
+  }
+  await assertions(heading).toBeVisible()
+  await assertions(page.getByRole('region', { name: 'Project sidebar', exact: true })).toBeHidden()
+}
+
+export async function assertChooserOpen(runtime, assertions = expect) {
+  const { page } = runtime
+  await assertions(page.getByRole('region', { name: 'Project sidebar', exact: true })).toBeVisible()
+  await assertions(page.getByRole('button', { name: 'Close Project', exact: true })).toBeFocused()
+  await assertions(page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('button', { name: 'Project', exact: true })).toHaveAttribute('aria-expanded', 'true')
+}
+
+export async function runChooserOpen(probe, runtime, assertions = expect) {
+  const { page, evidence } = runtime
+  const primaryLocator = page.getByRole('button', { name: 'Open project or material', exact: true })
+  const navigationLocator = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  let nextStepFound = false, failure
+  try {
+    await assertions(primaryLocator).toBeVisible()
+    await assertions(primaryLocator).toHaveCount(1)
+    await primaryLocator.click()
+    evidence.oracleReached = probe.assertion.assertionId
+    await assertEffect(probe, runtime, primaryLocator, {}, assertions)
+    nextStepFound = true
+  } catch (error) { failure = error }
+  try {
+    await navigationLocator.getByRole('button', { name: 'Choose', exact: true }).click()
+    await assertions(page.getByRole('heading', { name: 'What would you like to work on?', exact: true })).toBeVisible()
+  } catch (error) { failure ||= error }
+  try {
+    const measurements = await collectUnfamiliarMeasurements({ page, primaryLocator, navigationLocator,
+      nextStepFound, reference: 'unfamiliar:control:chooser-open[ready]@desktop' })
+    if (measurements) addPersonaFragment(evidence, { persona: 'unfamiliar', measurements,
+      bundleReference: 'walk:control:chooser-open[ready]@desktop' })
+  } catch { /* Optional evidence never changes the functional verdict. */ }
+  if (failure) throw failure
 }
 
 export function addPersonaFragment(evidence, { persona, measurements, bundleReference }) {
@@ -2721,7 +2772,7 @@ async function baselineThreeState(probe, runtime, recipe) {
 export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'census-disclosure', 'census-script', 'census-download-only',
   'fresh-sign-out-page', 'baseline-three-state', 'prepare-engine-transport', 'hold-engine-boot',
-  'navigate', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
+  'navigate', 'chooser-start', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
   'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
@@ -2984,6 +3035,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
   if (probe.setup?.context?.projectSolar && !runtime.projectSolar) observeProjectSolarResponses(runtime)
   await prepareStudioRail(probe, runtime, recipe)
   switch (recipe.kind) {
+    case 'chooser-start': await prepareChooserStart(runtime, assertions); return
     case 'open-project-solar': await openProjectSolar(runtime, assertions); return
     case 'publish-project-solar': await publishProjectSolar(runtime, assertions); return
     case 'switch-project-solar-forms': await switchProjectSolarForms(runtime, assertions); return
@@ -3808,6 +3860,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (target === 'chooser-project-sidebar') {
+    await assertChooserOpen(runtime, assertions)
+    return
+  }
   if (probe.featureId === 'action:rail-expand' && probe.state === 'ready'
     && runtime.testInfo.project.name !== 'phone' && runtime.railExpandFamily) {
     await assertRailExpandFamily(page, runtime.railExpandFamily, assertions)
@@ -4382,6 +4438,11 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
+    if (probe.featureId === 'control:chooser-open' && typeof runChooserOpen === 'function') {
+      await runChooserOpen(probe, runtime, runtime.recipeAssertions || expect)
+      evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
+      return
+    }
     if (runtime.solarDocument && typeof solarDocumentProbe === 'function') {
       probe = solarDocumentProbe(probe, runtime.solarDocument)
       evidence.effectiveEffect = probe.assertion

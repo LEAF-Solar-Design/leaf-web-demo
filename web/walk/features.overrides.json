@@ -2148,6 +2148,21 @@
       "certify": "both"
     },
     {
+      "id": "control:chooser-open",
+      "source_id": "chooser-open",
+      "title": "Open project or material",
+      "sources": ["web/src/site/WorkspaceEnvironment.jsx"],
+      "states": ["ready"],
+      "state_contexts": {
+        "ready": { "document": true, "name": "Open project or material" }
+      },
+      "expected_effect": {
+        "ready": { "kind": "opens", "target": "chooser-project-sidebar" }
+      },
+      "viewports": ["desktop"],
+      "certify": "both"
+    },
+    {
       "id": "control:ribbon-script",
       "source_id": "ribbon-script",
       "title": "ribbon script",

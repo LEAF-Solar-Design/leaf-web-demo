@@ -35,6 +35,119 @@ import { qcDev, uiUxDev } from './lenses/index.mjs'
 import { PANEL_PERFORMANCE_BUDGETS, PANEL_PERFORMANCE_BUDGET_SOURCE, PANEL_PERFORMANCE_VIEWPORTS,
   preparePanelPerformanceCapture } from './fixtures.mjs'
 import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
+import { runInNewContext } from 'node:vm'
+import { unfamiliar } from './lenses/index.mjs'
+
+function chooserOpenFixture({ chooser = false, label = true, opens = true, focus = true, expanded = true,
+  observerFails = false } = {}) {
+  const clicks = [], focusChecks = [], navigations = []
+  let sidebar = false, focused = false
+  const forbidden = () => assert.fail('chooser discovery must not create, import, save, request a model or build')
+  const handle = { isConnected: true, isVisible: async () => true, dispose: async () => {},
+    getBoundingClientRect: () => ({ x: 10, y: 10, width: 100, height: 40 }), contains: () => false }
+  const navigationHandle = { ...handle }
+  const primary = {
+    isVisible: async () => chooser && label, count: async () => label ? 1 : 0,
+    elementHandle: async () => handle,
+    ariaSnapshot: async () => '- button "Open project or material"',
+    click: async () => {
+      assert.ok(chooser && label)
+      clicks.push('Open project or material'); chooser = false; sidebar = opens; focused = opens && focus
+    },
+  }
+  const choose = { click: async () => { clicks.push('Choose'); chooser = true; sidebar = false; focused = false } }
+  const project = { getAttribute: async (name) => {
+    assert.equal(name, 'aria-expanded'); return String(sidebar && expanded)
+  } }
+  const navigation = {
+    count: async () => 1, elementHandle: async () => navigationHandle,
+    ariaSnapshot: async () => '- navigation "Workspace controls"',
+    getByRole(role, { name, exact }) {
+      assert.equal(role, 'button'); assert.equal(exact, true)
+      if (name === 'Choose') return choose
+      if (name === 'Project') return project
+      return forbidden()
+    },
+  }
+  const page = {
+    request: { post: forbidden, put: forbidden, patch: forbidden, delete: forbidden, get: forbidden },
+    create: forbidden, import: forbidden, save: forbidden, submit: forbidden, build: forbidden,
+    keyboard: { press: forbidden },
+    goto: async (url) => { assert.equal(url, '/app?surface=cad&drawing=rooftop_demo'); navigations.push(url) },
+    evaluate: async (callback, argument) => {
+      if (observerFails) throw new Error('observer unavailable')
+      return runInNewContext(`(${callback.toString()})(argument)`, { argument,
+        window: { innerWidth: 1440, innerHeight: 1000,
+          getComputedStyle: () => ({ display: 'block', visibility: 'visible' }) },
+        document: { elementFromPoint: () => handle } })
+    },
+    getByRole(role, { name, exact }) {
+      assert.equal(exact, true)
+      if (role === 'button' && name === 'Open project or material') return primary
+      if (role === 'navigation' && name === 'Workspace controls') return navigation
+      if (role === 'heading' && name === 'What would you like to work on?') return { isVisible: async () => chooser }
+      if (role === 'region' && name === 'Project sidebar') return { isVisible: async () => sidebar }
+      if (role === 'button' && name === 'Close Project') return { focused: () => {
+        focusChecks.push('Close Project'); return focused
+      } }
+      return forbidden()
+    },
+  }
+  const assertions = (locator) => ({
+    toBeVisible: async () => assert.equal(await locator.isVisible(), true),
+    toBeHidden: async () => assert.equal(await locator.isVisible(), false),
+    toHaveCount: async (count) => assert.equal(await locator.count(), count),
+    toBeFocused: async () => assert.equal(locator.focused(), true),
+    toHaveAttribute: async (name, value) => assert.equal(await locator.getAttribute(name), value),
+  })
+  const evidence = { schema: 'leaf.walk-evidence.v1', viewport: 'desktop', steps: [] }
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'control:chooser-open'), 'ready')
+  const runtime = { page, evidence, recipeAssertions: assertions, testInfo: { project: { name: 'desktop' }, annotations: [] },
+    runStep: async (_name, callback) => callback() }
+  return { probe, runtime, clicks, focusChecks, navigations }
+}
+
+test('WL32 chooser discovery uses labeled clicks, verifies focus and passes the real unfamiliar lens', async () => {
+  for (const chooser of [false, true]) {
+    const fake = chooserOpenFixture({ chooser })
+    await runProbe(fake.probe, fake.runtime)
+    assert.deepEqual(fake.clicks, [...(chooser ? [] : ['Choose']), 'Open project or material', 'Choose'])
+    assert.deepEqual(fake.focusChecks, ['Close Project'])
+    assert.deepEqual(fake.navigations, ['/app?surface=cad&drawing=rooftop_demo'])
+    assert.equal(fake.runtime.evidence.chooserTask.targetLabel, 'Open project or material')
+    assert.equal(fake.runtime.evidence.result.result, 'passed')
+    assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'pass')
+  }
+})
+
+test('WL32 missing chooser label preserves functional failure and unfamiliar UNKNOWN without guessed navigation', async () => {
+  const fake = chooserOpenFixture({ label: false })
+  await assert.rejects(runProbe(fake.probe, fake.runtime))
+  assert.deepEqual(fake.clicks, ['Choose', 'Choose'])
+  assert.deepEqual(fake.navigations, ['/app?surface=cad&drawing=rooftop_demo'])
+  assert.equal(fake.runtime.evidence.measurements.navigation.nextStepFound, false)
+  assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'unknown')
+  assert.ok(fake.runtime.evidence.failure)
+  assert.equal(fake.runtime.evidence.result, undefined)
+})
+
+test('WL32 hidden sidebar, lost focus or unexpanded Project preserves failure and unfamiliar FINDING', async () => {
+  for (const options of [{ opens: false }, { focus: false }, { expanded: false }]) {
+    const fake = chooserOpenFixture(options)
+    await assert.rejects(runProbe(fake.probe, fake.runtime))
+    assert.deepEqual(fake.clicks, ['Choose', 'Open project or material', 'Choose'])
+    assert.equal(fake.runtime.evidence.measurements.navigation.nextStepFound, false)
+    assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'finding')
+    assert.ok(fake.runtime.evidence.failure)
+  }
+})
+
+test('WL32 optional observer failures leave the chooser functional verdict intact', async () => {
+  const fake = chooserOpenFixture({ observerFails: true })
+  await runProbe(fake.probe, fake.runtime)
+  assert.equal(fake.runtime.evidence.result.result, 'passed')
+  assert.equal(unfamiliar.evaluate(fake.runtime.evidence).status, 'unknown')
+})
 
 function panelPerformanceFixture({ featureId = 'control:linked-services', state = 'ready', viewport = 'desktop',
   url = 'https://walk.test/app', overlay = false, ready = true, visible = true, enabled = true,
