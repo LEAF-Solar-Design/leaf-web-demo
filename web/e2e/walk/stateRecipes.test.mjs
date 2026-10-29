@@ -1853,6 +1853,84 @@ const censusAssertions = (value) => ({
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
 
+const workspaceAssertionSource = fixtureSource.slice(fixtureSource.indexOf('export async function requireNoDrawing('),
+  fixtureSource.indexOf('async function setSection(')).replace('export ', '')
+const workspaceCanvasSource = fixtureSource.slice(fixtureSource.indexOf('const canvas ='),
+  fixtureSource.indexOf('async function viewportBounds('))
+const extractedRequireWorkspace = assertions => new Function('expect', 'enterWorkspaceEnvironment',
+  `${workspaceCanvasSource}\n${workspaceAssertionSource}; return requireWorkspace`)(assertions,
+  page => enterWorkspaceEnvironment(page, boundedWorkspacePoll().assertions))
+
+function requireWorkspaceFake({ present = true, failedDrawing = false } = {}) {
+  const environment = workspaceEnvironmentFake({ present })
+  const checked = []
+  const command = { name: 'command', visible: true }
+  const drawing = { name: 'canvas', get visible() {
+    return !present || environment.events.includes('assert:data-entered=true')
+  } }
+  const alert = { name: 'load error', visible: true }
+  const undo = { name: 'undo', visible: true, disabled: true }
+  const page = { ...environment.page, getByRole: (role, options) => {
+    assert.deepEqual(environment.events, present ? ['Continue workspace', 'assert:data-entered=true'] : [])
+    if (role === 'combobox') {
+      assert.deepEqual(options, { name: 'Command bar', exact: true })
+      return command
+    }
+    if (role === 'region') {
+      assert.equal(failedDrawing, false)
+      assert.deepEqual(options, { name: 'Drawing', exact: true })
+      return { locator: selector => { assert.equal(selector, 'canvas:visible'); return drawing } }
+    }
+    if (role === 'alert') return { filter: ({ hasText }) => {
+      assert.equal(hasText.test("Couldn't load drawing"), true)
+      assert.equal(hasText.test('Couldn’t load drawing'), true)
+      return alert
+    } }
+    assert.equal(role, 'toolbar')
+    assert.deepEqual(options, { name: 'Quick access', exact: true })
+    return { getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Undo version (unavailable: No saved versions yet)', exact: true })
+      return undo
+    } }
+  } }
+  const assertions = value => ({
+    toBeVisible: async () => { checked.push(`${value.name}:visible`); assert.equal(value.visible, true) },
+    toBeDisabled: async () => { checked.push(`${value.name}:disabled`); assert.equal(value.disabled, true) },
+  })
+  return { environment, drawing, alert, undo, checked,
+    run: () => extractedRequireWorkspace(assertions)({ page, failedDrawing }) }
+}
+
+test('requireWorkspace enters the chooser once before asserting the command bar and canvas', async () => {
+  const fake = requireWorkspaceFake()
+  assert.equal(fake.drawing.visible, false)
+  await fake.run()
+  assert.deepEqual(fake.environment.events, ['Continue workspace', 'assert:data-entered=true'])
+  assert.deepEqual(fake.checked, ['command:visible', 'canvas:visible'])
+})
+
+test('requireWorkspace without an environment asserts the workspace without clicks', async () => {
+  const fake = requireWorkspaceFake({ present: false })
+  await fake.run()
+  assert.deepEqual(fake.environment.events, [])
+  assert.deepEqual(fake.checked, ['command:visible', 'canvas:visible'])
+})
+
+test('requireWorkspace asserts the load error and no-drawing signal after entry', async () => {
+  const fake = requireWorkspaceFake({ failedDrawing: true })
+  await fake.run()
+  assert.deepEqual(fake.checked, ['command:visible', 'load error:visible', 'undo:visible', 'undo:disabled'])
+  fake.alert.visible = false
+  await assert.rejects(fake.run(), assert.AssertionError)
+  fake.alert.visible = true
+  fake.undo.visible = false
+  await assert.rejects(fake.run(), assert.AssertionError)
+  fake.undo.visible = true
+  fake.undo.disabled = false
+  await assert.rejects(fake.run(), assert.AssertionError)
+})
+
 test('project Solar walk functions and staging steps contain no untimed empty-argument clicks', () => {
   for (const name of ['assertProjectSolarDrawing', 'openProjectSolar', 'selectProjectSolarVersion',
     'openProjectSolarTool', 'takeProjectSolarCheckout', 'publishProjectSolar', 'switchProjectSolarForms']) {
