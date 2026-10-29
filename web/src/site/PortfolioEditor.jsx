@@ -92,10 +92,28 @@ function Field({ label, value, limit, onChange, multiline = false }) {
   return <label><span>{label}</span>{multiline ? <textarea value={value} maxLength={limit} rows={4} onChange={event => onChange(event.target.value)} /> : <input value={value} maxLength={limit} onChange={event => onChange(event.target.value)} />}</label>
 }
 
-export default function PortfolioEditor({ document, onChange, projectId }) {
+function Disclosure({ title, initiallyOpen = false, reviewRequest, children }) {
+  const holder = useRef(null)
+  useEffect(() => {
+    if (reviewRequest) holder.current.open = true
+  }, [reviewRequest])
+  return <details className="portfolio-editor__disclosure" ref={holder} open={initiallyOpen || undefined}>
+    <summary>{title}</summary>
+    <div className="portfolio-editor__fields">{children}</div>
+  </details>
+}
+
+export default function PortfolioEditor({ document, onChange, projectId, reviewRequest }) {
   const scope = useSyncExternalStore(subscribeActiveScope, readActiveScope, () => null)
   const [photos, setPhotos] = useState([]), [error, setError] = useState(''), [loading, setLoading] = useState(false)
   const operation = useRef(null)
+  // Editor-only identities survive the document clone, without entering the saved schema.
+  const identities = useRef(new WeakMap()), serial = useRef(0), added = useRef(new Set())
+  const identity = item => {
+    if (!identities.current.has(item)) identities.current.set(item, ++serial.current)
+    return identities.current.get(item)
+  }
+  const newItem = item => { added.current.add(identity(item)); return item }
   useEffect(() => {
     setPhotos([]); setError('')
     const clear = () => { operation.current?.abort(); operation.current = null; setPhotos([]); setLoading(false) }
@@ -111,7 +129,13 @@ export default function PortfolioEditor({ document, onChange, projectId }) {
     } catch (failure) { if (!controller.signal.aborted && readActiveScope() === scope) setError(failure.message) }
     finally { if (operation.current === controller) { operation.current = null; setLoading(false) } }
   }
-  const update = action => { const next = JSON.parse(JSON.stringify(document)); action(next); onChange(next) }
+  const update = action => {
+    const next = JSON.parse(JSON.stringify(document))
+    for (const field of ['categories', 'resume']) document[field].forEach((item, index) => {
+      identities.current.set(next[field][index], identity(item))
+    })
+    action(next); onChange(next)
+  }
   const category = (index, action) => update(next => action(next.categories[index]))
   const image = (ci, ii, action) => category(ci, next => action(next.images[ii]))
   const count = document.categories.reduce((sum, item) => sum + item.images.length, 0)
@@ -125,24 +149,32 @@ export default function PortfolioEditor({ document, onChange, projectId }) {
     next.images.splice(ii, 1); next.hero = Math.max(0, next.images.indexOf(hero))
   })
   return <div className="portfolio-editor">
-    { [['name', 'Name', 120], ['headline', 'Headline', 240], ['introduction', 'Introduction', 2400], ['about', 'About', 8000]].map(([key, label, limit]) => <Field key={key} label={label} value={document[key]} limit={limit} multiline={['introduction', 'about'].includes(key)} onChange={value => update(next => { next[key] = value })} />) }
+    { [['name', 'Name', 120], ['headline', 'Headline', 240], ['introduction', 'Introduction', 2400]].map(([key, label, limit]) => <Field key={key} label={label} value={document[key]} limit={limit} multiline={key === 'introduction'} onChange={value => update(next => { next[key] = value })} />) }
+    <Disclosure key={`${scope}:${projectId}:about`} title="About / Contact" reviewRequest={reviewRequest}>
+    <Field label="About" value={document.about} limit={8000} multiline onChange={value => update(next => { next.about = value })} />
     <Field label="Contact email" value={document.contact.email} limit={254} onChange={value => update(next => { next.contact.email = value })} />
     <Field label="Location" value={document.contact.location} limit={160} onChange={value => update(next => { next.contact.location = value })} />
+    </Disclosure>
     <h3>Galleries</h3><p>Add photos from this project. At least one photo per gallery is required to save.</p>
     <button type="button" disabled={loading || !scope} onClick={loadPhotos}>{loading ? 'Loading photos…' : 'Load project photos'}</button>
     {error && <p role="alert">{error}</p>}
-    {document.categories.map((item, ci) => <section className="portfolio-editor__category" key={ci} aria-label={`Gallery ${ci + 1}`}>
-      <h4>Gallery {ci + 1}</h4>
+    {document.categories.map((item, ci) => <section className="portfolio-editor__category" key={`${scope}:${projectId}:${identity(item)}`} aria-label={`Gallery ${ci + 1}`}>
+      <Disclosure title={`${item.title || `Gallery ${ci + 1}`} · ${item.images.length} ${item.images.length === 1 ? 'photo' : 'photos'}`} initiallyOpen={added.current.has(identity(item)) || !item.images.length} reviewRequest={reviewRequest}>
       <Field label="Category title" value={item.title} limit={120} onChange={value => category(ci, next => { next.title = value })} />
       <Field label="Category slug" value={item.slug} limit={48} onChange={value => category(ci, next => { next.slug = value })} />
       <Field label="Category description" value={item.description} limit={1200} multiline onChange={value => category(ci, next => { next.description = value })} />
       <label><span>Hero image</span><select value={item.hero} disabled={!item.images.length} onChange={event => category(ci, next => { next.hero = Number(event.target.value) })}>{item.images.map((entry, ii) => <option key={ii} value={ii}>{entry.title || entry.alt || `Image ${ii + 1}`}</option>)}</select></label>
       <label><span>Add project photo to {item.title || `gallery ${ci + 1}`}</span><select value="" disabled={count >= 200} onChange={event => {
         const row = photos.find(photo => photo.material_id === event.target.value)
-        if (row) category(ci, next => { next.images.push(photoReference(row)) })
+        if (row) {
+          added.current.add(identity(item))
+          added.current.add(`${identity(item)}:${row.material_id}`)
+          category(ci, next => { next.images.push(photoReference(row)) })
+        }
       }}><option value="">Choose an uploaded photo</option>{photos.filter(photo => !item.images.some(entry => entry.material_id === photo.material_id)).map(photo => <option key={photo.material_id} value={photo.material_id}>{photo.name}</option>)}</select></label>
       {!loading && !photos.length && <p>Use Load project photos after uploading in Photos.</p>}
       {item.images.map((entry, ii) => <section key={entry.material_id} aria-label={`Image ${ii + 1}`}>
+        <Disclosure title={`Photo ${ii + 1}: ${entry.title || entry.alt || 'Untitled photo'}`} initiallyOpen={added.current.has(`${identity(item)}:${entry.material_id}`)} reviewRequest={reviewRequest}>
         <Field label={`Caption ${ii + 1}`} value={entry.title} limit={200} onChange={value => image(ci, ii, next => { next.title = value })} />
         <Field label={`Alt text ${ii + 1}`} value={entry.alt} limit={400} onChange={value => image(ci, ii, next => { next.alt = value })} />
         <div className="project-page-editor__actions">
@@ -152,22 +184,27 @@ export default function PortfolioEditor({ document, onChange, projectId }) {
         </div>
         <label><span>Assign image {ii + 1} to gallery</span><select value={ci} onChange={event => {
           const target = Number(event.target.value)
+          added.current.add(identity(document.categories[target]))
+          added.current.add(`${identity(document.categories[target])}:${entry.material_id}`)
           update(next => {
             const source = next.categories[ci], hero = source.images[source.hero]
             const [moved] = source.images.splice(ii, 1)
             source.hero = Math.max(0, source.images.indexOf(hero)); next.categories[target].images.push(moved)
           })
         }}>{document.categories.map((destination, index) => <option key={index} value={index} disabled={index !== ci && destination.images.some(photo => photo.material_id === entry.material_id)}>{destination.title}</option>)}</select></label>
+        </Disclosure>
       </section>)}
       <button type="button" disabled={document.categories.length <= 1} onClick={() => update(next => { next.categories.splice(ci, 1) })}>Remove gallery {ci + 1}</button>
+      </Disclosure>
     </section>)}
     <button type="button" disabled={document.categories.length >= 12} onClick={() => update(next => {
       let suffix = 1
       while (next.categories.some(item => item.slug === `gallery-${suffix}`)) suffix++
-      next.categories.push({ slug: `gallery-${suffix}`, title: 'New gallery', description: '', hero: 0, images: [] })
+      next.categories.push(newItem({ slug: `gallery-${suffix}`, title: 'New gallery', description: '', hero: 0, images: [] }))
     })}>Add gallery</button>
     <h3>Resume</h3>
-    {document.resume.map((section, si) => <section key={si} aria-label={`Resume section ${si + 1}`}>
+    {document.resume.map((section, si) => <section key={`${scope}:${projectId}:${identity(section)}`} aria-label={`Resume section ${si + 1}`}>
+      <Disclosure title={section.heading || `Resume section ${si + 1}`} initiallyOpen={added.current.has(identity(section))} reviewRequest={reviewRequest}>
       <Field label="Section heading" value={section.heading} limit={120} onChange={value => update(next => { next.resume[si].heading = value })} />
       {section.entries.map((entry, ei) => <section key={ei} aria-label={`Resume entry ${ei + 1}`}>
         {[['title', 200], ['subtitle', 240], ['dates', 120], ['description', 2400]].map(([field, limit]) => <Field key={field} label={`Entry ${field}`} value={entry[field]} limit={limit} multiline={field === 'description'} onChange={value => update(next => { next.resume[si].entries[ei][field] = value })} />)}
@@ -175,7 +212,8 @@ export default function PortfolioEditor({ document, onChange, projectId }) {
       </section>)}
       <button type="button" disabled={section.entries.length >= 20} onClick={() => update(next => { next.resume[si].entries.push({ title: '', subtitle: '', dates: '', description: '' }) })}>Add resume entry</button>
       <button type="button" onClick={() => update(next => { next.resume.splice(si, 1) })}>Remove resume section {si + 1}</button>
+      </Disclosure>
     </section>)}
-    <button type="button" disabled={document.resume.length >= 8} onClick={() => update(next => { next.resume.push({ heading: 'Experience', entries: [] }) })}>Add resume section</button>
+    <button type="button" disabled={document.resume.length >= 8} onClick={() => update(next => { next.resume.push(newItem({ heading: 'Experience', entries: [] })) })}>Add resume section</button>
   </div>
 }

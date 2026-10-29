@@ -16,7 +16,11 @@
 .portfolio-viewer button { margin-bottom: 16px; }
 .portfolio :focus-visible { outline: 2px solid #202020; outline-offset: 4px; }
 .portfolio-editor { display: grid; gap: 14px; min-width: 0; }
-.portfolio-editor section { display: grid; gap: 14px; min-width: 0; padding-block: 12px; border-top: 1px solid #ddd; }
+.portfolio-editor section { display: grid; gap: 14px; min-width: 0; padding-block: 4px; }
+.portfolio-editor__disclosure { min-width: 0; border-top: 1px solid var(--leaf-line, #bdb9b2); }
+.portfolio-editor__disclosure > summary { box-sizing: border-box; min-height: 44px; padding: 12px 4px; cursor: pointer; color: var(--leaf-ink, #202020); overflow-wrap: anywhere; }
+.portfolio-editor__disclosure > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.portfolio-editor__fields { display: grid; gap: 14px; min-width: 0; padding: 8px 0 12px; }
 .portfolio-editor h3, .portfolio-editor h4 { margin-bottom: 0; }
 .browser-asset-viewport:has(.portfolio) { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); height: auto; overflow: auto; }
 .browser-asset-viewport .portfolio-viewer { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); display: flex; flex-direction: column; overscroll-behavior: contain; }
