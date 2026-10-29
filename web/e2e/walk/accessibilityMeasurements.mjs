@@ -113,6 +113,9 @@ export function createAccessibilityMeasurementCapture({ page, dialog, openTarget
           const connected = await page.evaluate((target) => target.isConnected, original)
           if (connected === false) return true
           if (connected === true) {
+            const dismissed = await page.evaluate((target) =>
+              target.closest('[inert], [aria-hidden="true"]') !== null, original)
+            if (dismissed === true) return true
             const visible = await original.isVisible()
             return typeof visible === 'boolean' ? !visible : undefined
           }

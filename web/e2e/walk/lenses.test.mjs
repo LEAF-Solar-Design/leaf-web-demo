@@ -95,6 +95,25 @@ test('combined measured evidence gives pass or finding for all ten lens evaluato
   }
 })
 
+test('dialog modality follows a typed declared expectation and otherwise requires modal semantics', () => {
+  const entry = find('accessibility.dialog-keyboard')
+  for (const [expectedModal, status] of [[false, 'pass'], [true, 'finding'], [undefined, 'finding'],
+    [null, 'finding'], ['false', 'finding']]) {
+    const evidence = clone(good[entry.id])
+    evidence.measurements.overlay.modal = false
+    if (expectedModal !== undefined) evidence.measurements.overlay.expectedModal = expectedModal
+    assert.equal(entry.evaluate(evidence).status, status)
+    for (const path of entry.requiredEvidenceFields) {
+      const incomplete = clone(evidence)
+      remove(incomplete, path)
+      assert.equal(entry.evaluate(incomplete).status, 'unknown', `missing ${path}`)
+    }
+  }
+  const mismatch = clone(good[entry.id])
+  mismatch.measurements.overlay.expectedModal = false
+  assert.equal(entry.evaluate(mismatch).status, 'finding')
+})
+
 test('real v1 runner shape without measurements yields unknown for every lens', () => {
   // Same fields as fixtures.mjs walkEvidence, including runProbe context/result.
   const evidence = { schema: 'leaf.walk-evidence.v1', test: 'Open drawing', viewport: 'phone',
