@@ -2240,6 +2240,17 @@ def _private_directory(path):
         kernel.LocalFree(descriptor)
 
 
+def _native_tombstone_present(root):
+    """True when a native removal tombstone may exist under root; an unreadable root counts as present (fails closed)."""
+    try:
+        with os.scandir(root) as entries:
+            return any(entry.name.startswith("postgres.removing-") for entry in entries)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 class _Host:
     @staticmethod
     def read_stack_ready(path):
@@ -2287,7 +2298,7 @@ class _Host:
         # root scrubbing must never erase a failed stop or a foreign marker.
         native = reservation.run_root / "postgres"
         if (native.exists() or native.is_symlink()
-                or any(reservation.run_root.glob("postgres.removing-*"))):
+                or _native_tombstone_present(reservation.run_root)):
             return False
         root = reservation.run_root
         if (not root.is_absolute() or root == Path(root.anchor)

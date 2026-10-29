@@ -4712,3 +4712,19 @@ def test_h_c1_parent_loss_reused_pid(tmp_path, monkeypatch):
     monkeypatch.setattr(c.pg, "native_process_identity", replacement)
     assert p.guardian_main(c.request, effects=c.effects) == 0
     assert c.alive and c.signals == [] and c.acks == [] and len(c.checks) >= 2
+
+
+def test_h_a1c_scrub_unreadable_root_refuses(tmp_path, monkeypatch):
+    info = tmp_path.stat()
+    reservation = p.Reservation(tmp_path, tmp_path / "artifacts",
+        root_identity=(info.st_dev, info.st_ino))
+    scandir = p.os.scandir
+    removals = []
+    def unreadable(root):
+        if root == tmp_path:
+            raise PermissionError("fake")
+        return scandir(root)
+    monkeypatch.setattr(p.os, "scandir", unreadable)
+    monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
+    assert p._Host.scrub(reservation, keep_safe=False) is False
+    assert removals == []
