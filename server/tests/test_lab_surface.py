@@ -1,8 +1,11 @@
 """Lab admission, tenant boundary, status contract, and mounting checks."""
 from __future__ import annotations
 
+import os
 from pathlib import Path
 import re
+import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -349,6 +352,35 @@ def test_app_mounts_the_aggregator_exactly_once():
     assert "app.include_router(lab_surface.router)" not in source
 
 
+def test_lab_modules_never_import_broker():
+    server_dir = Path(__file__).resolve().parents[1]
+    env = dict(os.environ, PYTHONPATH=str(server_dir),
+               LEAF_RUNTIME_ENV="production", LEAF_LAB_RUN_STORE="sqlite")
+    script = """
+import sys
+import requests
+
+original_send = requests.adapters.HTTPAdapter.send
+import routers.lab_surface
+import lab_artifacts
+import lab_run_store
+
+try:
+    lab_run_store.store_mode()
+except lab_run_store.StoreUnavailable:
+    pass
+routers.lab_surface.lab_posture()
+print("broker" in sys.modules)
+print(requests.adapters.HTTPAdapter.send is original_send)
+"""
+    result = subprocess.run(
+        [sys.executable, "-B", "-c", script], cwd=server_dir, env=env,
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.splitlines() == ["False", "True"]
+
+
 @pytest.mark.parametrize("flag,source,authored,tier,reason", [
     (None, "catalog_seed", True, "microvm", "tool nodes off"),
     ("true", "catalog_seed", True, "microvm", "tool nodes off"),
@@ -360,7 +392,7 @@ def test_app_mounts_the_aggregator_exactly_once():
     ("1", "operator_owned_engine", False, "microvm", None),
 ])
 def test_tools_contract_and_availability(monkeypatch, flag, source, authored, tier, reason):
-    import broker
+    import runtime_posture
     from test_lab_tool_manifests import read_tool
 
     monkeypatch.delenv("LEAF_LAB_TOOL_NODES", raising=False)
@@ -372,7 +404,7 @@ def test_tools_contract_and_availability(monkeypatch, flag, source, authored, ti
         seen.append(tenant)
         return (tool,)
     monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", projection)
-    monkeypatch.setattr(broker, "_authored_execution_enabled", lambda: authored)
+    monkeypatch.setattr(runtime_posture, "_authored_execution_enabled", lambda: authored)
     # SEL-316h: sandbox availability comes from broker health, not the app environment.
     monkeypatch.setattr(lab_surface.requests, "get", lambda *a, **k: _health_response({
         "lab_sandbox_tier": tier}))
