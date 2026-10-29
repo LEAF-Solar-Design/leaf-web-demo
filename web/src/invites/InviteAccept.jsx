@@ -11,6 +11,7 @@ export default function InviteAccept({ signedIn, onAccepted }) {
   })
   const [authenticated, setAuthenticated] = useState(() => isSignedIn())
   const [message, setMessage] = useState(null)
+  const [acceptError, setAcceptError] = useState(null)
   const [busy, setBusy] = useState(false)
   const [signInError, setSignInError] = useState(null)
   const pending = useRef(false)
@@ -28,7 +29,7 @@ export default function InviteAccept({ signedIn, onAccepted }) {
   if (!invite) return null
   if (invite.invalid) return <p role="alert">This invite link is not valid.</p>
   if (message) return <p role="status">{message}</p>
-  if (!(signedIn ?? authenticated)) return <section aria-label="Accept organization invitation">
+  if (!(authenticated || signedIn)) return <section aria-label="Accept organization invitation">
     <p>Sign in first to accept this invitation. Keep this page open, then sign in.</p>
     {authConfigured && <button type="button" disabled={busy} onClick={async () => {
       setBusy(true)
@@ -46,6 +47,7 @@ export default function InviteAccept({ signedIn, onAccepted }) {
     if (pending.current) return
     pending.current = true
     setBusy(true)
+    setAcceptError(null)
     try {
       const result = await acceptOrgInvitation(invite.token)
       if (!active.current) return
@@ -57,15 +59,21 @@ export default function InviteAccept({ signedIn, onAccepted }) {
       }
     } catch (error) {
       if (!active.current) return
-      setMessage(error.status === 404 ? 'This invite has expired or was already used.'
-        : error.status === 409 && error.body?.detail === 'already_member' ? 'You already belong to an organization.'
-          : error.message || 'The invitation could not be accepted.')
-      setInvite({})
+      if (error?.status === 404 || error?.status === 400
+        || (error?.status === 409 && error.body?.detail === 'already_member')) {
+        setMessage(error.status === 404 ? 'This invite has expired or was already used.'
+          : error.status === 400 ? 'This invite link is not valid.'
+            : 'You already belong to an organization.')
+        setInvite({})
+      } else {
+        setAcceptError('The invitation could not be accepted right now. Try again.')
+      }
     } finally { pending.current = false; if (active.current) setBusy(false) }
   }
 
   return <section aria-label="Accept organization invitation">
     <p>Join this organization as an editor?</p>
+    {acceptError && <p role="alert">{acceptError}</p>}
     <button type="button" disabled={busy} onClick={() => void accept()}>Accept</button>
     <button type="button" disabled={busy} onClick={() => setInvite(null)}>Cancel</button>
   </section>

@@ -62,13 +62,53 @@ describe('accept organization invitation', () => {
   it.each([
     [404, 'invitation_unavailable', 'This invite has expired or was already used.'],
     [409, 'already_member', 'You already belong to an organization.'],
+    [400, 'invalid_token', 'This invite link is not valid.'],
   ])('explains failure %s %s', async (status, detail, message) => {
     acceptOrgInvitation.mockRejectedValue({ status, body: { detail } })
     const onAccepted = vi.fn()
     render(<InviteAccept onAccepted={onAccepted} />)
     fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
     expect(await screen.findByRole('status')).toHaveTextContent(message)
+    expect(screen.queryByRole('button', { name: 'Accept' })).toBeNull()
     expect(onAccepted).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [500, { status: 500 }],
+    ['network', new Error('Network request failed')],
+    [429, { status: 429 }],
+    ['too_many_pending', { status: 409, body: { detail: 'too_many_pending' } }],
+  ])('keeps the invitation available to retry after %s failure', async (_name, error) => {
+    const result = { org_id: 'org-one', binding_id: 'binding-one', role: 'editor' }
+    acceptOrgInvitation.mockRejectedValueOnce(error).mockResolvedValueOnce(result)
+    const onAccepted = vi.fn()
+    render(<InviteAccept onAccepted={onAccepted} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(await screen.findByRole('alert')).toHaveTextContent('The invitation could not be accepted right now. Try again.')
+    expect(screen.getByText('Join this organization as an editor?')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Accept' })).not.toBeDisabled()
+    expect(onAccepted).not.toHaveBeenCalled()
+    expect(window.location.hash).toBe('')
+    fireEvent.click(screen.getByRole('button', { name: 'Accept' }))
+    expect(await screen.findByRole('status')).toHaveTextContent('You joined the organization.')
+    expect(screen.queryByRole('alert')).toBeNull()
+    expect(acceptOrgInvitation).toHaveBeenCalledTimes(2)
+    expect(acceptOrgInvitation).toHaveBeenNthCalledWith(1, TOKEN)
+    expect(acceptOrgInvitation).toHaveBeenNthCalledWith(2, TOKEN)
+    expect(onAccepted).toHaveBeenCalledWith(result)
+  })
+
+  it('offers acceptance with a stored token before session proof succeeds', () => {
+    render(<InviteAccept signedIn={false} />)
+    expect(screen.getByText('Join this organization as an editor?')).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Accept' })).toBeEnabled()
+    expect(screen.queryByText(/Sign in first/)).toBeNull()
+  })
+
+  it('offers acceptance when signedIn is true without a stored token', () => {
+    isSignedIn.mockReturnValue(false)
+    render(<InviteAccept signedIn={true} />)
+    expect(screen.getByRole('button', { name: 'Accept' })).toBeEnabled()
   })
 
   it('holds the token in memory while asking a signed-out user to sign in', async () => {
@@ -98,7 +138,8 @@ describe('accept organization invitation', () => {
       subscribeTokenStored.mock.calls[0][0]()
       return { ok: true }
     })
-    render(<InviteAccept />)
+    render(<InviteAccept signedIn={false} />)
+    expect(screen.getByText(/Sign in first/)).toBeTruthy()
     fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
     await screen.findByRole('button', { name: 'Accept' })
     expect(loginWithPopupFromClick).toHaveBeenCalledTimes(1)
