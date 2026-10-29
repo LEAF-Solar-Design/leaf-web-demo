@@ -21,6 +21,7 @@ import { createEndUserMeasurementCapture } from './endUserMeasurements.mjs'
 import { collectSupportMeasurements } from './supportMeasurements.mjs'
 import { createOpsSreMeasurementCapture } from './opsSreMeasurements.mjs'
 import { createRedHatMeasurementCapture } from './redHatMeasurements.mjs'
+import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
 import { composePersonaMeasurementBundle } from './personaMeasurementBundle.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
@@ -502,6 +503,92 @@ export async function discloseControlPanel(page, recipe) {
   if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') {
     await more.click({ timeout: 15_000 })
   }
+}
+
+export const PANEL_PERFORMANCE_BUDGET_SOURCE = 'WL28-PANEL-PERFORMANCE-BUDGETS.md'
+export const PANEL_PERFORMANCE_VIEWPORTS = Object.freeze({
+  desktop: Object.freeze({ width: 1440, height: 1000 }),
+  phone: Object.freeze({ width: 390, height: 844 }),
+})
+// Product acceptance targets, not historical baselines. These probes currently
+// run on desktop only; retain the declared phone target without widening scope.
+export const PANEL_PERFORMANCE_BUDGETS = Object.freeze(Object.fromEntries([
+  'action:bar-shortcuts', 'control:claude-accounts', 'control:linked-services', 'control:version-history',
+].map(featureId => [featureId, Object.freeze({
+  source: PANEL_PERFORMANCE_BUDGET_SOURCE, state: 'ready', viewports: Object.freeze(['desktop']),
+  maxDurationMs: Object.freeze({ desktop: 2000, phone: 3000 }), maxRequiredSteps: 1,
+})])))
+
+export async function preparePanelPerformanceCapture({ page, probe, viewport, locator, evidence,
+  createCapture = createPerformanceMeasurementCapture, assertions = expect }) {
+  const budget = PANEL_PERFORMANCE_BUDGETS[probe.featureId]
+  if (!budget || probe.state !== budget.state || !budget.viewports.includes(viewport)) return null
+  const diagnostic = () => {
+    evidence.measurementDiagnostics ||= []
+    evidence.measurementDiagnostics.push({ persona: 'performance', message: 'Optional persona observation failed' })
+  }
+  try {
+    const url = page.url()
+    if (!/^\/app(?:\/|$)/.test(new URL(url).pathname)
+      || !await page.evaluate(() => document.readyState === 'complete') || page.url() !== url) return null
+    for (const role of ['dialog', 'alertdialog', 'menu', 'listbox']) {
+      const overlays = page.getByRole(role)
+      for (let index = 0; index < await overlays.count(); index++) {
+        if (await overlays.nth(index).isVisible()) return null
+      }
+    }
+    let launcher = locator
+    if (probe.featureId === 'action:bar-shortcuts') {
+      const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+        .getByRole('button', { name: 'Project', exact: true })
+      launcher = await project.isVisible() ? project
+        : page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first()
+    }
+    if (!await launcher.isVisible() || !await launcher.isEnabled()) return null
+    const suffix = `${probe.featureId}[${probe.state}]@${viewport}`
+    let capture = createCapture({ reference: `performance:${suffix}`, baseline: {
+      reference: `${budget.source}:${probe.featureId}@${viewport}`,
+      maxDurationMs: budget.maxDurationMs[viewport], maxRequiredSteps: budget.maxRequiredSteps,
+    } })
+    let started = false
+    const observe = callback => {
+      if (!capture) return
+      try { callback(capture) } catch { capture = null; diagnostic() }
+    }
+    return {
+      // The real dispatch stays outside the optional observer's catch.
+      async dispatch(action) {
+        observe(current => {
+          if (!started) { current.start(); started = true }
+          current.requiredStep()
+        })
+        return action()
+      },
+      async finish() {
+        if (!capture || !started) return
+        try {
+          const spec = ACCESSIBILITY_DIALOG_SCOPE[probe.featureId]
+          const panel = page.getByRole('dialog', { name: spec.name, exact: true })
+          const closeName = probe.featureId === 'action:bar-shortcuts' ? 'Close'
+            : probe.featureId === 'control:version-history' ? 'Close version history' : spec.initialFocus.name
+          const close = panel.getByRole('button', { name: closeName, exact: true })
+          await assertions(panel).toBeVisible()
+          await assertions(close).toBeVisible()
+          await assertions(close).toBeEnabled()
+          const focus = spec.initialFocus.role ? panel.getByRole(spec.initialFocus.role,
+            { name: spec.initialFocus.name, exact: true }) : launcher
+          await assertions(focus).toBeFocused()
+          capture.observeWait({ observed: false, progress: '', reason: '' })
+          capture.finish()
+          const result = capture.result()
+          if (result) addPersonaFragment(evidence, { persona: 'performance', measurements: result,
+            bundleReference: `walk:${suffix}` })
+          else diagnostic()
+        } catch { diagnostic() }
+        capture = null
+      },
+    }
+  } catch { diagnostic(); return null }
 }
 
 export function studioDrawerLocator(page, drawer) {
@@ -3651,7 +3738,8 @@ async function activate(probe, runtime, locator) {
       const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true })
       if (await project.isVisible()) await project.focus()
       else await page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first().focus()
-      await page.keyboard.press(recipe.key)
+      if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(() => page.keyboard.press(recipe.key))
+      else await page.keyboard.press(recipe.key)
     }
   } else if (recipe.trigger === 'navigate') await page.goto(recipe.url)
   else if (recipe.trigger === 'select') {
@@ -3660,7 +3748,8 @@ async function activate(probe, runtime, locator) {
     const choice = choices.find((value) => value !== current && value !== 'index...')
     expect(choice, 'a property change must offer another real value').toBeDefined()
     await locator.selectOption(choice)
-  } else await locator.click()
+  } else if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(() => locator.click())
+  else await locator.click()
 }
 
 export async function assertEffect(probe, runtime, locator, before, assertions = expect) {
@@ -4327,6 +4416,9 @@ export async function runProbe(probe, runtime) {
     const accessibilityCapture = typeof prepareAccessibilityCapture === 'function'
       ? await prepareAccessibilityCapture({ page, probe, viewport: runtime.testInfo.project.name,
         locator, evidence, cleanup: runtime.cleanup }) : null
+    runtime.panelPerformanceCapture = typeof preparePanelPerformanceCapture === 'function'
+      ? await preparePanelPerformanceCapture({ page, probe, viewport: runtime.testInfo.project.name,
+        locator, evidence }) : null
     if (probe.kind === 'tool' && probe.sourceId === 'solar-solve-proposal' && probe.state === 'ready'
       && probe.assertion.target === 'catalog-run-decision') {
       runtime.catalogRunRequests = []
@@ -4350,6 +4442,7 @@ export async function runProbe(probe, runtime) {
       evidence.oracleReached = probe.assertion.assertionId
       return assertEffect(probe, runtime, locator, before)
     })
+    if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
     if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
     if (typeof followAccessibilityCapture === 'function') {
       await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence,

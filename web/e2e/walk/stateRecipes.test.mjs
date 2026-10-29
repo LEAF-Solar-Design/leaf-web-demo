@@ -29,8 +29,147 @@ import { setStudioDrawer, studioDrawerLocator, assertStudioDrawer, studioDrawerP
   setToolRail, railExpandLauncher, assertRailExpandFamily } from './fixtures.mjs'
 import { ACCESSIBILITY_DIALOG_SCOPE, accessibilityDialogTargets, mergeAccessibilityMeasurements, addPersonaFragment,
   prepareAccessibilityCapture, followAccessibilityCapture } from './fixtures.mjs'
-import { accessibility, mobileTouch, endUser, support, opsSre, redHat } from './lenses/index.mjs'
+import { accessibility, mobileTouch, endUser, support, opsSre, redHat, performance as performanceLens } from './lenses/index.mjs'
 import { createWalkPersonaObservers, protectedStateDigest } from './fixtures.mjs'
+import { PANEL_PERFORMANCE_BUDGETS, PANEL_PERFORMANCE_BUDGET_SOURCE, PANEL_PERFORMANCE_VIEWPORTS,
+  preparePanelPerformanceCapture } from './fixtures.mjs'
+import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
+
+function panelPerformanceFixture({ featureId = 'control:linked-services', state = 'ready', viewport = 'desktop',
+  url = 'https://walk.test/app', overlay = false, ready = true, visible = true, enabled = true,
+  closeVisible = true, closeEnabled = true, focusReached = true, createCapture } = {}) {
+  let time = 0, opened = false, actions = 0, captures = 0
+  const evidence = { schema: 'leaf.walk-evidence.v1', featureId, state, viewport,
+    result: { result: 'passed', featureId, state } }
+  const probe = { featureId, state }
+  const focus = { focused: () => focusReached }
+  const close = { visible: closeVisible, enabled: closeEnabled, focused: () => focusReached }
+  const spec = ACCESSIBILITY_DIALOG_SCOPE[featureId]
+  const panel = { get visible() { return opened }, getByRole(role, options) {
+    if (role === 'switch') {
+      assert.deepEqual(options, { name: 'Single-key shortcuts', exact: true })
+      return focus
+    }
+    assert.deepEqual([role, options], ['button', { name: featureId === 'action:bar-shortcuts' ? 'Close'
+      : featureId === 'control:version-history' ? 'Close version history' : spec.initialFocus.name, exact: true }])
+    return close
+  } }
+  const page = { url: () => url, evaluate: async () => ready, getByRole(role, options) {
+    if (options?.name === spec?.name && role === 'dialog') return panel
+    if (role === 'navigation') return { getByRole: () => ({
+      isVisible: async () => visible, isEnabled: async () => enabled,
+    }) }
+    return { count: async () => overlay ? 1 : 0, nth: () => ({ isVisible: async () => overlay }) }
+  } }
+  const assertions = target => ({
+    toBeVisible: async () => assert.equal(target.visible, true),
+    toBeEnabled: async () => assert.equal(target.enabled, true),
+    toBeFocused: async () => assert.equal(target.focused(), true),
+  })
+  return { evidence, probe, page, assertions,
+    locator: { isVisible: async () => visible, isEnabled: async () => enabled, focused: () => focusReached },
+    async prepare() {
+      return preparePanelPerformanceCapture({ page, probe, viewport, evidence, assertions,
+        locator: this.locator, createCapture: options => {
+          captures++
+          return createCapture ? createCapture(options) : createPerformanceMeasurementCapture({ ...options, now: () => time })
+        } })
+    },
+    async action() { actions++; opened = true },
+    at(value) { time = value },
+    counts: () => ({ actions, captures }),
+  }
+}
+
+test('WL28 frozen product budgets retain both viewport targets and only actual probe viewports', () => {
+  assert.equal(PANEL_PERFORMANCE_BUDGET_SOURCE, 'WL28-PANEL-PERFORMANCE-BUDGETS.md')
+  assert.deepEqual(PANEL_PERFORMANCE_VIEWPORTS, { desktop: { width: 1440, height: 1000 }, phone: { width: 390, height: 844 } })
+  assert.ok(Object.isFrozen(PANEL_PERFORMANCE_BUDGETS))
+  for (const budget of Object.values(PANEL_PERFORMANCE_BUDGETS)) {
+    assert.ok(Object.isFrozen(budget) && Object.isFrozen(budget.maxDurationMs) && Object.isFrozen(budget.viewports))
+    assert.deepEqual(budget, { source: PANEL_PERFORMANCE_BUDGET_SOURCE, state: 'ready', viewports: ['desktop'],
+      maxDurationMs: { desktop: 2000, phone: 3000 }, maxRequiredSteps: 1 })
+  }
+})
+
+test('WL28 each confirmed panel opening with one dispatched action feeds a passing real performance lens', async () => {
+  for (const featureId of Object.keys(PANEL_PERFORMANCE_BUDGETS)) {
+    const fake = panelPerformanceFixture({ featureId }), verdict = structuredClone(fake.evidence.result)
+    const capture = await fake.prepare()
+    fake.at(9000) // Preparation is outside the activation clock.
+    await capture.dispatch(() => fake.action())
+    fake.at(11000)
+    await capture.finish()
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'pass')
+    assert.deepEqual(fake.evidence.measurements.task, { durationMs: 2000, requiredSteps: 1 })
+    assert.deepEqual(fake.evidence.measurements.wait, { observed: false, progress: '', reason: '' })
+    assert.equal(fake.evidence.measurements.baseline.reference, `${PANEL_PERFORMANCE_BUDGET_SOURCE}:${featureId}@desktop`)
+    assert.equal(fake.evidence.measurements.reference, `walk:${featureId}[ready]@desktop`)
+    assert.deepEqual(fake.counts(), { actions: 1, captures: 1 })
+    assert.deepEqual(fake.evidence.result, verdict)
+  }
+})
+
+test('WL28 excess duration or a second actual dispatch yields a performance finding', async () => {
+  for (const [duration, steps] of [[2001, 1], [100, 2]]) {
+    const fake = panelPerformanceFixture(), capture = await fake.prepare()
+    for (let i = 0; i < steps; i++) await capture.dispatch(() => fake.action())
+    fake.at(duration)
+    await capture.finish()
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'finding')
+    assert.equal(fake.counts().actions, steps)
+    assert.equal(fake.evidence.measurements.task.requiredSteps, steps)
+    assert.equal(fake.evidence.result.result, 'passed')
+  }
+})
+
+test('WL28 unconfirmed Close or initial focus leaves performance UNKNOWN and preserves the functional verdict', async () => {
+  for (const options of [{ closeVisible: false }, { closeEnabled: false }, { focusReached: false }]) {
+    const fake = panelPerformanceFixture(options), verdict = structuredClone(fake.evidence.result)
+    const capture = await fake.prepare()
+    await capture.dispatch(() => fake.action())
+    await capture.finish()
+    assert.equal(fake.evidence.personaFragments, undefined)
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'unknown')
+    assert.deepEqual(fake.evidence.result, verdict)
+  }
+})
+
+test('WL28 failed-load, try, other probes, unused viewports and unmet preconditions create no capture', async () => {
+  for (const options of [{ state: 'failed-load' }, { url: 'https://walk.test/try' },
+    { featureId: 'control:session-details' }, { viewport: 'phone' }, { viewport: 'tablet' },
+    { overlay: true }, { visible: false }, { enabled: false }, { ready: false }]) {
+    const fake = panelPerformanceFixture(options)
+    assert.equal(await fake.prepare(), null)
+    assert.equal(fake.counts().captures, 0)
+    assert.equal(fake.evidence.personaFragments, undefined)
+  }
+})
+
+test('WL28 observer exceptions are value-free and never swallow activation failures', async () => {
+  for (const phase of ['create', 'start', 'requiredStep', 'finish']) {
+    const fake = panelPerformanceFixture({ createCapture(options) {
+      const fail = () => { throw new Error('private-performance-value') }
+      if (phase === 'create') return fail()
+      return { ...createPerformanceMeasurementCapture({ ...options, now: () => 0 }), [phase]: fail }
+    } })
+    const verdict = structuredClone(fake.evidence.result), capture = await fake.prepare()
+    if (capture) {
+      await capture.dispatch(() => fake.action())
+      await capture.finish()
+      assert.equal(fake.counts().actions, 1)
+    }
+    assert.equal(performanceLens.evaluate(fake.evidence).status, 'unknown')
+    assert.deepEqual(fake.evidence.result, verdict)
+    assert.deepEqual(fake.evidence.measurementDiagnostics,
+      [{ persona: 'performance', message: 'Optional persona observation failed' }])
+    assert.equal(JSON.stringify(fake.evidence).includes('private-performance-value'), false)
+  }
+  const fake = panelPerformanceFixture(), capture = await fake.prepare()
+  const failure = new Error('real activation failure')
+  await assert.rejects(capture.dispatch(() => { throw failure }), error => error === failure)
+  assert.equal(fake.evidence.personaFragments, undefined)
+})
 
 function observerWalkFixture(persona, overrides = {}) {
   const probe = persona === 'end-user' ? { featureId: 'control:version-history', state: 'ready' }
