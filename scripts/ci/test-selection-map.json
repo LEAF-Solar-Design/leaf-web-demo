@@ -708,6 +708,7 @@
     "web-app-wiring",
     "web-async-author-stage",
     "web-author-quota-gate",
+    "web-author-quota-live-proof",
     "web-build",
     "web-checkout-identity-check",
     "web-collect-staging-auth0-principal-b",

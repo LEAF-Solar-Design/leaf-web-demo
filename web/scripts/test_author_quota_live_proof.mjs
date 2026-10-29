@@ -321,28 +321,122 @@ describe('request budget and envelope', () => {
     assert.throws(() => summarizeQuotaRefusal({ error_code: 'quota_exceeded' }), (e) => e.code === 'quota_envelope')
   })
 
-  it('the fetch backend sends one POST with the bearer and no retries', async () => {
+  it('the fetch backend obtains authority before staging with the bearer and no retries', async () => {
     const seen = []
     const backend = createFetchBackend({
       fetchImpl: async (url, init) => {
         seen.push({ url, init })
+        if (seen.length === 1) return { status: 201, text: async () => JSON.stringify({ session_id: 'session/1' }) }
+        if (seen.length === 2) return { status: 202, text: async () => JSON.stringify({ turn_id: 'turn-1', status: 'running' }) }
         return { status: 429, text: async () => JSON.stringify(quotaEnvelope('t', 1, 1)) }
       },
     })
     const response = await backend.stage({
       apiOrigin: 'https://staging-api.leaf.test',
-      tenantId: null,
+      tenantId: 'tenant-1',
       description: 'd',
       idempotencyKey: 'k',
       readToken: () => TOKEN,
     })
-    assert.equal(seen.length, 1)
-    assert.equal(seen[0].url, 'https://staging-api.leaf.test/api/author/stage')
-    assert.equal(seen[0].init.method, 'POST')
-    assert.equal(seen[0].init.redirect, 'manual')
-    assert.equal(seen[0].init.headers.Authorization, `Bearer ${TOKEN}`)
+    assert.deepEqual(seen.map(({ url }) => url), [
+      'https://staging-api.leaf.test/api/sessions',
+      'https://staging-api.leaf.test/api/sessions/session%2F1/messages',
+      'https://staging-api.leaf.test/api/author/stage',
+    ])
+    for (const { init } of seen) {
+      assert.equal(init.method, 'POST')
+      assert.equal(init.redirect, 'manual')
+      assert.equal(init.headers.Authorization, `Bearer ${TOKEN}`)
+      assert.equal(init.headers['X-Tenant-Id'], 'tenant-1')
+      assert.equal(init.headers['Content-Type'], 'application/json')
+      assert.ok(init.signal instanceof AbortSignal)
+    }
+    assert.deepEqual(JSON.parse(seen[0].init.body), { drawing_id: 'quota-proof-k' })
+    assert.deepEqual(JSON.parse(seen[1].init.body), {
+      text: 'd',
+      classifier_hint: { source: 'author_panel', purpose: 'stage_authority' },
+    })
+    assert.deepEqual(JSON.parse(seen[2].init.body), { description: 'd', mode: 'build', idempotency_key: 'k' })
+    assert.equal(seen[2].init.headers['X-Authority-Session-Id'], 'session/1')
+    assert.equal(seen[2].init.headers['X-Authority-Turn-Id'], 'turn-1')
     assert.equal(response.status, 429)
     assert.equal(response.body.quota_kind, 'daily_author')
     assert.equal(fetchCalls, 0)
+  })
+
+  it('adapter stops before stage when session creation fails', async () => {
+    const seen = []
+    const backend = createFetchBackend({
+      fetchImpl: async (url) => {
+        seen.push(url)
+        return { status: 403, text: async () => JSON.stringify({ session_id: 'session-1' }) }
+      },
+    })
+    await assert.rejects(
+      backend.stage({ ...configFor(), idempotencyKey: 'k', readToken: () => TOKEN }),
+      (e) => e instanceof ProofError && e.code === 'authority_session_failed',
+    )
+    assert.deepEqual(seen, ['https://staging-api.leaf.test/api/sessions'])
+  })
+
+  it('adapter stops before stage when the turn is queued', async () => {
+    const seen = []
+    const backend = createFetchBackend({
+      fetchImpl: async (url) => {
+        seen.push(url)
+        const body = seen.length === 1 ? { session_id: 'session-1' } : { turn_id: 'turn-1', status: 'queued' }
+        return { status: 202, text: async () => JSON.stringify(body) }
+      },
+    })
+    await assert.rejects(
+      backend.stage({ ...configFor(), idempotencyKey: 'k', readToken: () => TOKEN }),
+      (e) => e instanceof ProofError && e.code === 'authority_turn_failed',
+    )
+    assert.deepEqual(seen, [
+      'https://staging-api.leaf.test/api/sessions',
+      'https://staging-api.leaf.test/api/sessions/session-1/messages',
+    ])
+  })
+
+  it('adapter uses a distinct drawing per probe', async () => {
+    const drawings = []
+    const backend = createFetchBackend({
+      fetchImpl: async (url, init) => {
+        let body = {}
+        if (url.endsWith('/api/sessions')) {
+          drawings.push(JSON.parse(init.body).drawing_id)
+          body = { session_id: `session-${drawings.length}` }
+        } else if (url.endsWith('/messages')) {
+          body = { turn_id: `turn-${drawings.length}`, status: 'running' }
+        }
+        return { status: 202, text: async () => JSON.stringify(body) }
+      },
+    })
+    for (const idempotencyKey of ['probe-1', 'probe-2']) {
+      await backend.stage({ ...configFor(), idempotencyKey, readToken: () => TOKEN })
+    }
+    assert.deepEqual(drawings, ['quota-proof-probe-1', 'quota-proof-probe-2'])
+  })
+
+  it('adapter errors never contain the token', async () => {
+    for (const code of ['authority_session_failed', 'authority_turn_failed']) {
+      const backend = createFetchBackend({
+        fetchImpl: async (url) => {
+          if (code === 'authority_turn_failed' && url.endsWith('/api/sessions')) {
+            return { status: 201, text: async () => JSON.stringify({ session_id: TOKEN }) }
+          }
+          return { status: 403, text: async () => JSON.stringify({ message: TOKEN }) }
+        },
+      })
+      await assert.rejects(
+        backend.stage({ ...configFor(), idempotencyKey: 'k', readToken: () => TOKEN }),
+        (e) => {
+          assert.equal(e.code, code)
+          assert.equal(e.message, `${code}: HTTP 403`)
+          assert.ok(!e.message.includes(TOKEN))
+          return true
+        },
+      )
+    }
   })
 })

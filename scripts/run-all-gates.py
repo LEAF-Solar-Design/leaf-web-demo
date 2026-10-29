@@ -3433,6 +3433,8 @@ def build_suites() -> List[Suite]:
         Suite("web-proof-receipt-contract",
               "web proof receipt contract", "script", WEB,
               [_npm(), "run", "check:proof-receipt"], None),
+        # The proof's adapter contract had no automated consumer.
+        Suite("web-author-quota-live-proof", "web author quota live proof contract", "script", WEB, [_npm(), "run", "check:author-quota-live-proof"], None),
         # The seeded workbench id is the deployed acceptance driver's contract
         # with the surface: it seeds a server-canonical id and requires that
         # exact drawing to open.
