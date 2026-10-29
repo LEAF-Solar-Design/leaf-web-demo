@@ -3220,7 +3220,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
               # W1C-3 adds the commit suite registration contract.
               # SEL-303b adds the mirror/stage-policy registration contract.
-              ["test_studio_walk_regression_gate.py"], 244),
+              # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
+              ["test_studio_walk_regression_gate.py"], 272),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
