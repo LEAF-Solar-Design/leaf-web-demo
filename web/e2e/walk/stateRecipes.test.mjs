@@ -2005,12 +2005,41 @@ test('WL14 owner Escape keeps command-bar focus through activation and menu dism
   await assert.rejects(activate(probe, runtime, bar), assert.AssertionError)
 })
 
+test('keyboard actions focus the visible Workspace controls Project button before dispatch', async () => {
+  const activate = extractedActivate(() => assert.fail('ordinary keyboard actions must not assert command-bar focus'))
+  for (const [key, target] of [['Escape', 'escape:drawer'], ['r', 'retry'], ['?', 'keyboard-shortcut-sheet']]) {
+    const events = []
+    const runtime = { page: {
+      getByRole: (role, options) => {
+        assert.equal(role, 'navigation')
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.deepEqual(options, { name: 'Project', exact: true })
+          return { isVisible: async () => true, focus: async () => events.push('project-focused') }
+        } }
+      },
+      keyboard: { press: async (pressed) => events.push(pressed) },
+    } }
+    await activate({ locator: { trigger: 'keyboard', key }, assertion: { target } }, runtime, {})
+    assert.deepEqual(events, ['project-focused', key])
+  }
+})
+
 test('other keyboard actions retain workspace-tab focus before dispatch', async () => {
   const activate = extractedActivate(() => assert.fail('ordinary keyboard actions must not assert command-bar focus'))
   for (const [key, target] of [['Escape', 'escape:drawer'], ['r', 'retry']]) {
     const events = []
     const runtime = { page: {
       getByRole: (role, options) => {
+        if (role === 'navigation') {
+          assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+          return { getByRole: (role, options) => {
+            assert.equal(role, 'button')
+            assert.deepEqual(options, { name: 'Project', exact: true })
+            return { isVisible: async () => false, focus: () => assert.fail('absent Project button must not receive focus') }
+          } }
+        }
         assert.equal(role, 'tablist')
         assert.deepEqual(options, { name: 'Workspace profile', exact: true })
         return { getByRole: (role) => {
@@ -3553,7 +3582,7 @@ test('no-rung keyboard actions preserve the workspace, refuse dispatch and leave
     const page = {
       on: (_, callback) => { requestObserver = callback }, off: () => {},
       evaluate: async (callback) => callback.toString().includes('requestAnimationFrame') ? undefined : structuredClone(state),
-      getByRole: (role) => role === 'combobox' ? input : { getByRole: () => ({ first: () => ({ focus: async () => {} }) }) },
+      getByRole: (role) => role === 'combobox' ? input : { getByRole: () => ({ isVisible: async () => false, first: () => ({ focus: async () => {} }) }) },
       keyboard: { press: async (pressed) => assert.equal(pressed, key) },
     }
     const probe = { featureId, kind: 'action', state: 'ready', locator: { trigger: 'keyboard', key }, assertion: { kind: 'disabled_with_reason' } }
