@@ -15,6 +15,7 @@ import { normalizedControlKey, solarChainSteps } from './probes.mjs'
 import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
+import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
@@ -3841,7 +3842,10 @@ export async function runProbe(probe, runtime) {
       runtime.cleanup.push(async () => page.off('request', observe))
     }
     if (probe.assertion.kind !== 'disabled_with_reason' || probe.locator?.keyboardAction === 'engine:repeat') {
-      await test.step(`Activate ${probe.featureId}`, () => activate(probe, runtime, locator))
+      await test.step(`Activate ${probe.featureId}`, () => typeof activateWithMobileTouchMeasurements === 'function'
+        ? activateWithMobileTouchMeasurements({ page, locator, probe, viewport: runtime.testInfo.project.name,
+          evidence, activate: () => activate(probe, runtime, locator) })
+        : activate(probe, runtime, locator))
     }
     await test.step(probe.assertion.assertionId, () => {
       evidence.oracleReached = probe.assertion.assertionId
