@@ -3220,7 +3220,9 @@ async function activate(probe, runtime, locator) {
     else {
       // Focus a real non-text control without clicking outside a drawer.
       // That click could close it before the keyboard action under test.
-      await page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first().focus()
+      const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true })
+      if (await project.isVisible()) await project.focus()
+      else await page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first().focus()
       await page.keyboard.press(recipe.key)
     }
   } else if (recipe.trigger === 'navigate') await page.goto(recipe.url)
