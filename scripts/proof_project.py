@@ -615,6 +615,9 @@ def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
                 event = request.channel.receive(min(0.1, remaining))
             except EOFError:
                 break
+            if event == "conflict":
+                disarm_refused = True
+                break
             if event == "disarm":
                 # Independently observe absence; a sender's claim is not proof.
                 stopped = True
@@ -4766,6 +4769,8 @@ def _guardian_entry():
         effects = production_effects()
         jobs = []
         class Channel:
+            authority_captured = False
+
             def receive(self, timeout):
                 try:
                     item = messages.get(timeout=timeout)
@@ -4786,9 +4791,14 @@ def _guardian_entry():
                         _exact(item, ("event", "ownership"))
                     ownership = _read_owned_public(item["ownership"], run_id, native_identity=identity)
                     _validate_ownership(ownership, run_id, allocated=True)
-                    if ownership.kind == "native":
-                        effects.host._native_context = (run_id, root, ownership.port)
-                    object.__setattr__(request, "ownership", ownership)
+                    if self.authority_captured and (request.ownership.kind != ownership.kind
+                            or (ownership.kind == "native" and request.ownership != ownership)):
+                        return "conflict"
+                    if not self.authority_captured or ownership.kind == "docker":
+                        if ownership.kind == "native":
+                            effects.host._native_context = (run_id, root, ownership.port)
+                        object.__setattr__(request, "ownership", ownership)
+                        self.authority_captured = True
                 elif (set(item) == {"event", "handle"} and item["event"] == "job"
                         and type(item["handle"]) is int and item["handle"] > 0):
                     jobs.append(_TransferredJob(item["handle"]))
