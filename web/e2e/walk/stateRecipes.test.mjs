@@ -22,7 +22,7 @@ import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErr
   observeStagingNetwork, stagingNetworkFailure, stagingEvidenceStep,
   appendStagingRequest, appendStagingConsole } from '../walk-staging/projectSolarSteps.mjs'
 import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled,
-  enterWorkspaceIfChooser, enterWorkspaceEnvironment, openSolarCadProfile } from './fixtures.mjs'
+  enterWorkspaceIfChooser, enterWorkspaceEnvironment, openSolarCadProfile, STUDIO_RAIL_FEATURES, revealStudioRail, prepareStudioRail } from './fixtures.mjs'
 import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
@@ -1006,6 +1006,80 @@ function boundedWorkspacePoll({ passes = 4, beforePass = () => {} } = {}) {
   return { polls, assertions }
 }
 
+function studioRailFake({ visible = true, expanded = 'false' } = {}) {
+  const workspace = workspaceEnvironmentFake()
+  const events = workspace.events
+  class Locator {
+    constructor(kind) { this.kind = kind; this._apiName = 'Locator' }
+    async isVisible() { return visible }
+    async getAttribute(name) {
+      assert.equal(name, 'aria-expanded')
+      assert.equal(visible, true, 'absent Studio must not be read')
+      return expanded
+    }
+    async click() {
+      events.push('Studio click')
+      expanded = expanded === 'true' ? 'false' : 'true'
+    }
+    async _expect(expression, options) {
+      if (this.kind === 'button') {
+        assert.ok(['to.have.attribute', 'to.have.attribute.value'].includes(expression))
+        assert.equal(options.expressionArg, 'aria-expanded')
+        assert.equal(options.expectedText[0].string, 'true')
+        assert.equal(expanded, 'true')
+        events.push('Studio expanded wait')
+      } else {
+        assert.equal(expression, 'to.be.visible')
+        assert.equal(expanded, 'true')
+        events.push('Studio rail visible wait')
+      }
+      return { matches: true, received: expanded, log: [] }
+    }
+  }
+  const button = new Locator('button')
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(role, 'navigation')
+      assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'button')
+        assert.deepEqual(options, { name: 'Studio', exact: true })
+        return button
+      } }
+    },
+    locator: selector => {
+      assert.equal(selector, '#project-workspace-activity')
+      return new Locator('rail')
+    },
+  }
+  return { page, events, workspace, expanded: () => expanded }
+}
+
+test('Studio rail reveal opens once and waits for the expanded button and visible rail', async () => {
+  const fake = studioRailFake()
+  assert.equal(await revealStudioRail(fake.page), true)
+  assert.deepEqual(fake.events, ['Studio click', 'Studio expanded wait', 'Studio rail visible wait'])
+})
+
+test('Studio rail reveal leaves an already open panel alone', async () => {
+  const fake = studioRailFake({ expanded: 'true' })
+  assert.equal(await revealStudioRail(fake.page), false)
+  assert.deepEqual(fake.events, [])
+})
+
+test('Studio rail reveal tolerates builds without Workspace controls', async () => {
+  const fake = studioRailFake({ visible: false })
+  assert.equal(await revealStudioRail(fake.page), false)
+  assert.deepEqual(fake.events, [])
+})
+
+test('Studio rail features contain exactly the three rail controls', () => {
+  assert.equal(Object.isFrozen(STUDIO_RAIL_FEATURES), true)
+  assert.deepEqual([...STUDIO_RAIL_FEATURES].sort(), [
+    'control:job-monitor-expand', 'control:linked-services', 'control:notification-collapse',
+  ])
+})
+
 test('workspace entry continues an existing workspace and waits for entry', async () => {
   const { page, events } = workspaceEnvironmentFake()
   await enterWorkspaceEnvironment(page)
@@ -1852,6 +1926,61 @@ const censusAssertions = (value) => ({
 })
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+
+test('rail recipes reveal Studio before their control and restore only panels they opened', async () => {
+  const map = buildFeatureMap()
+  for (const featureId of [...STUDIO_RAIL_FEATURES, 'control:session-details']) {
+    for (const state of ['ready', 'failed-load']) {
+      for (const initiallyOpen of [false, true]) {
+        const fake = studioRailFake({ expanded: String(initiallyOpen) })
+        const rail = STUDIO_RAIL_FEATURES.has(featureId)
+        const probe = resolveProbe(map.entries.find(entry => entry.id === featureId), state)
+        const recipe = probe.setup.steps.find(step => ['baseline-three-state', 'job-monitor-collapsed'].includes(step.kind))
+        assert.ok(recipe, `${featureId}/${state} has a rail setup hook`)
+        const studioRole = fake.page.getByRole
+        const controlLocator = { visible: true, countValue: 0, isVisible: async () => false,
+          getByRole: () => controlLocator }
+        fake.page.getByRole = (role, options) => {
+          if (role === 'navigation') return studioRole(role, options)
+          if (rail) assert.equal(fake.expanded(), 'true', 'control lookup requires open Studio')
+          fake.events.push('control lookup')
+          return controlLocator
+        }
+        const studioLocator = fake.page.locator
+        fake.page.locator = selector => selector === '#project-workspace-activity'
+          ? studioLocator(selector) : controlLocator
+        const runtime = { page: fake.page, cleanup: [], evidence: {} }
+        const enter = async actualRuntime => {
+          assert.equal(actualRuntime, runtime)
+          await enterWorkspaceEnvironment(fake.workspace.page)
+          fake.events.push('workspace ready')
+        }
+        const reveal = async page => {
+          assert.equal(page, fake.page)
+          assert.equal(fake.events.at(-1), 'workspace ready')
+          fake.events.push('Studio reveal')
+          return revealStudioRail(page)
+        }
+        await prepareStudioRail(probe, runtime, { kind: 'unrelated-recipe' }, { enter, reveal })
+        assert.deepEqual(fake.events, [])
+        await prepareStudioRail(probe, runtime, recipe, { enter, reveal })
+        assert.equal(fake.events.includes('workspace ready'), rail)
+        assert.equal(fake.events.includes('Studio reveal'), rail)
+        assert.equal(runtime.cleanup.length, rail && !initiallyOpen ? 1 : 0)
+        const control = recipe.control || { role: 'toolbar', name: 'Job monitor' }
+        fake.page.getByRole(control.role, { name: control.name })
+        if (rail && !initiallyOpen) {
+          assert.ok(fake.events.indexOf('workspace ready') < fake.events.indexOf('Studio click'))
+          assert.ok(fake.events.indexOf('Studio rail visible wait') < fake.events.indexOf('control lookup'))
+        }
+        for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+        for (const cleanup of runtime.cleanup) await cleanup()
+        assert.equal(fake.expanded(), String(initiallyOpen))
+        assert.equal(fake.events.filter(event => event === 'Studio click').length, rail && !initiallyOpen ? 2 : 0)
+      }
+    }
+  }
+})
 
 const workspaceAssertionSource = fixtureSource.slice(fixtureSource.indexOf('export async function requireNoDrawing('),
   fixtureSource.indexOf('async function setSection(')).replace('export ', '')
