@@ -131,7 +131,7 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 265  # +11 portable page template cases.
     assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
+    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
@@ -4292,7 +4292,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
+    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4388,7 +4388,7 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # LD1b adds one demo classification regression to the 1178 platform rows.
     assert suites["platform"].expected == 1205
-    assert suites["gate-runner-selftest"].expected == 244  # SEL-303b mirror registration.
+    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
 
 
 def test_demo_actor_gate_registration():
@@ -4493,7 +4493,7 @@ def test_w1c_commit_solve_gate_registration():
             uses_database=database, db_gated=database,
             database_skip_reasons=((r"PostgreSQL integration test requires DATABASE_URL",) if database else ()))
         assert selection["mandatory_suite_ids"].count(suite_id) == 1
-    assert suites["gate-runner-selftest"].expected == 244
+    assert suites["gate-runner-selftest"].expected == 272
 
 
 def test_lab_git_mirror_gate_registration():
@@ -4507,3 +4507,286 @@ def test_lab_git_mirror_gate_registration():
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
 
+
+
+class TestProjectDispatch:
+    """PP-3A2 F: 25 source-contract rows; Linux CI needs no PowerShell or stack."""
+
+    RUNNER = REPO / "web/scripts/run_unified_local_proof.ps1"
+    START = "# >>> project dispatch (PP-3A2 F)"
+    END = "# <<< project dispatch"
+
+    def _source(self):
+        # Preserve line endings so the legacy hash also catches a CRLF rewrite.
+        with self.RUNNER.open(encoding="utf-8", newline="") as stream:
+            return stream.read()
+
+    def _parts(self):
+        text = self._source()
+        assert text.count(self.START) == text.count(self.END) == 1
+        prefix, rest = text.split(self.START + "\n")
+        block, suffix = rest.split(self.END + "\n")
+        return prefix, block, suffix
+
+    @staticmethod
+    def _code(text):
+        # Match the runner-source idiom in test_proof_string_sizer.py.
+        return re.sub(r"#[^\n]*", "", re.sub(r"<#.*?#>", "", text, flags=re.S))
+
+    @staticmethod
+    def _catalog():
+        source = (SCRIPTS / "run-all-gates.py").read_text(encoding="utf-8")
+        match = re.search(r"(?ms)^def build_suites\(.*?(?=^def |\Z)", source)
+        assert match is not None
+        return re.sub(r"(?m)^\s*#.*$", "", match.group())
+
+    def test_project_mode_admitted(self):
+        text = self._code(self._source())
+        match = re.search(r"\[ValidateSet\(([^)]*)\)\]\s*\[string\]\$Mode\s*=\s*'account'", text)
+        assert match is not None
+        assert re.findall(r"'([^']+)'", match[1]) == ["account", "guest", "project"]
+
+    def test_synthetic_mutual_exclusion(self):
+        prefix, _, _ = self._parts()
+        assert re.search(
+            r"if\s*\(\$SyntheticStringSizing\s+-and\s+\$SyntheticRooftop\)\s*\{\s*"
+            r"throw 'SyntheticRooftop and SyntheticStringSizing are mutually exclusive'\s*\}",
+            self._code(prefix))
+
+    def test_project_string_sizing_refused(self):
+        prefix, _, _ = self._parts()
+        assert re.search(
+            r"if\s*\(\$SyntheticStringSizing\s+-or\s+\$SyntheticRooftop\)\s*\{\s*"
+            r"if\s*\(\$Mode -ne 'account'\)\s*\{\s*"
+            r"throw 'Synthetic string sizing runs in account mode only'\s*\}",
+            self._code(prefix))
+
+    def test_project_rooftop_refused(self):
+        prefix, _, _ = self._parts()
+        assert re.search(
+            r"if\s*\(\$SyntheticStringSizing\s+-or\s+\$SyntheticRooftop\)\s*\{\s*"
+            r"if\s*\(\$Mode -ne 'account'\)\s*\{\s*"
+            r"throw 'Synthetic string sizing runs in account mode only'\s*\}",
+            self._code(prefix))
+
+    def test_early_project_dispatch(self):
+        prefix, _, suffix = self._parts()
+        legacy = self._code(prefix + suffix)
+        for pattern in (r"(?<!function )\bTest-PortOpen\s+\$port", r"\bInvoke-ProofRetentionPrune\b",
+                        r"\bNew-Item\b", r"\$env:\w+\s*=", r"\bGet-ProofRuntime\b"):
+            match = re.search(pattern, legacy)
+            assert match is not None, pattern
+            assert match.start() >= len(self._code(prefix)), pattern
+        assert "function Test-PortOpen" not in prefix
+
+    def test_project_runtime_requirements(self):
+        _, block, _ = self._parts()
+        block = self._code(block)
+        match = re.search(r"\$ppRequirements\s*=\s*@\((.*?)\n  \)", block, re.S)
+        assert match is not None
+        assert re.findall(r"\(Join-Path \$repoRoot '([^']+)'\)", match[1]) == [
+            r"server\requirements.txt", r"platform\requirements.txt", r"server\requirements-auth.txt"]
+        assert re.fullmatch(r"\s*\(Join-Path \$repoRoot '[^']+'\),\s*"
+                            r"\(Join-Path \$repoRoot '[^']+'\),\s*"
+                            r"\(Join-Path \$repoRoot '[^']+'\)\s*", match[1])
+        assert re.findall(r"Get-ProofRuntime[^\n]*", block) == [
+            "Get-ProofRuntime -RequirementFiles $ppRequirements"]
+        assert "$python = Get-ProofRuntime" in block
+        assert not re.search(r"\$ppRequirements\s*\+=", block)
+
+    def test_project_child_environment(self):
+        _, block, _ = self._parts()
+        assert not re.search(r"\$env:\w+\s*=|SetEnvironmentVariable|\bSet-Location\b|\bNew-Item\b",
+                             self._code(block), re.I)
+
+    def test_project_only_overrides(self):
+        prefix, block, suffix = self._parts()
+        code = self._code(block)
+        refusal = ("if ($Mode -ne 'project' -and $ProjectRunRoot) {\n"
+                   "  throw 'ProjectRunRoot applies to project mode only'\n}")
+        assert code.lstrip().startswith(refusal)
+        declaration = "  [string]$ProjectRunRoot = '',\n"
+        outside = prefix + suffix
+        assert outside.count(declaration) == 1
+        assert "  [string]$Mode = 'account',\n" + declaration in prefix
+        assert not re.search(r"\$Project\w+", outside.replace(declaration, "", 1), re.I)
+        assert "ProjectArtifactRoot" not in code and "ProjectRunId" not in code
+        assert code.count("if ($Mode -eq 'project') {") == 1
+
+    def test_supervisor_and_receipt(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        call = r"& $python -B (Join-Path $repoRoot 'scripts\proof_project.py') "
+        statements = [
+            call + "supervise --run-id $ppRun --run-root $ppRunRoot",
+            "$ppExit = $LASTEXITCODE",
+            call + "verify-receipt --run-id $ppRun --receipt $ppReceipt",
+            "$ppReceiptExit = $LASTEXITCODE",
+            "if ($ppReceiptExit -ne 0) { throw 'Project proof receipt failed verification' }",
+            'Write-Host "Project proof run $ppRun receipt: $ppReceipt"',
+            "exit $ppExit",
+        ]
+        # Adjacent statements forbid success-only verification and an early exit.
+        assert re.search(r"\s+".join(map(re.escape, statements)), code)
+        assert code.count(call) == 2
+        assert "measure-migration" not in code
+
+    def test_legacy_bytes(self):
+        import hashlib
+
+        prefix, _, suffix = self._parts()
+        legacy = prefix + suffix
+        line = "  [string]$ProjectRunRoot = '',\n"
+        assert legacy.count(line) == 1
+        legacy = legacy.replace(line, "", 1)
+        validation = "[ValidateSet('account', 'guest', 'project')]"
+        assert legacy.count(validation) == 1
+        legacy = legacy.replace(validation, "[ValidateSet('account', 'guest')]", 1)
+        # git cat-file -p HEAD:web/scripts/run_unified_local_proof.ps1 at 0981c59c.
+        assert hashlib.sha256(legacy.encode("utf-8")).hexdigest() == (
+            "fd002fded0a25f78aaff528a2db68aa269d910d1789f6cf144527063667df458")
+
+    def test_gate_registration(self):
+        catalog_ids = re.findall(r'\bSuite\(\s*"([^"]+)"', self._catalog())
+        selection = (SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8")
+        mandatory = re.search(r'"mandatory_suite_ids"\s*:\s*\[([^\]]*)\]', selection, re.S)
+        assert mandatory is not None
+        mandatory_ids = re.findall(r'"([^"]+)"', mandatory[1])
+        for ids in (catalog_ids, mandatory_ids):
+            assert ids.count("scripts-proof-project-pg") == 1
+            assert ids.count("scripts-proof-project") == 1
+            assert ids.index("scripts-proof-project") == ids.index("scripts-proof-project-pg") + 1
+            assert [name for name in ids if name.startswith("scripts-proof-project-")] == [
+                "scripts-proof-project-pg"]
+
+    def test_fake_only_gate_policy(self):
+        catalog = self._catalog()
+        suite = re.search(r'\bSuite\("gate-runner-selftest",.*?(?=\n\s*Suite\(|\Z)', catalog, re.S)
+        assert suite is not None
+        selection = (SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8")
+        mandatory = re.search(r'"mandatory_suite_ids"\s*:\s*\[([^\]]*)\]', selection, re.S)
+        assert mandatory is not None
+        assert re.findall(r'"([^"]+)"', mandatory[1]).count("gate-runner-selftest") == 1
+        assert '_py_pytest("test_gate_runner.py")' in suite[0]
+        source = (SCRIPTS / "run-all-gates.py").read_text(encoding="utf-8")
+        defaults = re.search(r"(?ms)^class Suite:.*?(?=^@dataclass)", source)
+        assert defaults is not None
+        for name, value in (("db_gated", "False"), ("uses_database", "False"),
+                            ("opt_in_env", '""'), ("allowed_skip_reasons", "()"),
+                            ("database_skip_reasons", "()")):
+            assert re.search(rf"(?m)^    {name}:.*?=\s*{re.escape(value)}\s*(?:#.*)?$", defaults[0])
+            override = re.search(rf"\b{name}\s*=\s*([^\n]+)", suite[0])
+            if override is not None:
+                assert re.match(re.escape(value) + r"\s*(?:,|\))", override[1]), name
+
+    def test_project_test_grep_refused(self):
+        _, block, _ = self._parts()
+        assert "if ($TestGrep) { throw 'TestGrep does not apply to project mode' }" in self._code(block)
+
+    def test_project_keep_run_root_refused(self):
+        _, block, _ = self._parts()
+        assert "if ($KeepRunRoot) { throw 'KeepRunRoot does not apply to project mode' }" in self._code(block)
+
+    def test_project_nondefault_ports_refused(self):
+        _, block, _ = self._parts()
+        assert re.search(
+            re.escape("if ($WebPort -ne 5275 -or $AppPort -ne 8230 -or $BrokerPort -ne 8240 -or $HarnessPort -ne 8250)")
+            + r"\s*\{\s*throw 'Project mode requires the default ports'\s*\}", self._code(block))
+
+    def test_project_relative_root_refused(self):
+        _, block, _ = self._parts()
+        # IsPathRooted alone accepts drive-relative C:foo and root-relative \foo.
+        condition = r"if ($ProjectRunRoot -and (-not [System.IO.Path]::IsPathRooted($ProjectRunRoot) -or $ProjectRunRoot -notmatch '^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))'))"
+        assert re.search(re.escape(condition) + r"\s*\{\s*throw 'ProjectRunRoot must be an absolute path'\s*\}", self._code(block))
+
+    def test_project_root_trailing_separator(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        normalized = r"$ppRunRoot = if ($ProjectRunRoot) { $ProjectRunRoot.TrimEnd([char[]]'\/') } else {"
+        receipt = "$ppReceipt = Join-Path (Join-Path $ppRunRoot 'artifacts') 'project-proof-receipt.json'"
+        supervisor = "supervise --run-id $ppRun --run-root $ppRunRoot"
+        verifier = "verify-receipt --run-id $ppRun --receipt $ppReceipt"
+        assert code.count(normalized) == 1
+        assert code.index("throw 'ProjectRunRoot must be an absolute path'") < code.index(normalized)
+        assert code.index(normalized) < code.index(receipt) < code.index(supervisor) < code.index(verifier)
+        assert len(re.findall(r"(?m)^\s*\$ppRunRoot\s*=", code)) == 1
+        assert len(re.findall(r"(?m)^\s*\$ppReceipt\s*=", code)) == 1
+
+    def test_project_drive_root_refused(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        # GetPathRoot also covers UNC share roots; both slash styles are trimmed.
+        refusal = r"""  if ($ppRunRoot.Replace('/', '\') -eq [System.IO.Path]::GetPathRoot($ppRunRoot).TrimEnd([char[]]'\/')) {
+    throw 'ProjectRunRoot must not be a filesystem root'
+  }
+"""
+        assert code.count(refusal) == 1
+        assert code.index("$ppRunRoot =") < code.index(refusal) < code.index("$ppReceipt =")
+        assert code.index(refusal) < code.index("Get-ProofRuntime")
+
+    def test_project_refusals_before_side_effects(self):
+        prefix, block, _ = self._parts()
+        code = self._code(block)
+        # Pin the entire refusal prefix: inserted calls, environment writes, allocation,
+        # nested conditions or a guard moved below bootstrap cannot hide between checks.
+        refusals = r"""if ($Mode -ne 'project' -and $ProjectRunRoot) {
+  throw 'ProjectRunRoot applies to project mode only'
+}
+if ($Mode -eq 'project') {
+  if ($TestGrep) { throw 'TestGrep does not apply to project mode' }
+  if ($KeepRunRoot) { throw 'KeepRunRoot does not apply to project mode' }
+  if ($WebPort -ne 5275 -or $AppPort -ne 8230 -or $BrokerPort -ne 8240 -or $HarnessPort -ne 8250) {
+    throw 'Project mode requires the default ports'
+  }
+  if ($ProjectRunRoot -and (-not [System.IO.Path]::IsPathRooted($ProjectRunRoot) -or $ProjectRunRoot -notmatch '^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))')) {
+    throw 'ProjectRunRoot must be an absolute path'
+  }
+"""
+        assert code.startswith(refusals)
+        assert code.index('Get-ProofRuntime') > len(refusals)
+        assert not re.search(r"\b(?:Test-PortOpen|Invoke-ProofRetentionPrune|New-Item|Get-ProofRuntime)\b|\$env:\w+\s*=", self._code(prefix))
+
+    def test_project_run_identity_and_root(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert code.count("$ppRun = 'pp3-' + [guid]::NewGuid().ToString('N')") == 1
+        assert re.findall(r"(?m)^\s*\$ppRun\s*=.*", code) == [
+            "  $ppRun = 'pp3-' + [guid]::NewGuid().ToString('N')"]
+        assert re.search(re.escape(r"$ppRunRoot = if ($ProjectRunRoot) { $ProjectRunRoot.TrimEnd([char[]]'\/') } else {")
+                         + r"\s*" + re.escape('Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-project-e2e-$ppRun"')
+                         + r"\s*\}", code)
+        assert len(re.findall(r"(?m)^\s*\$ppRunRoot\s*=", code)) == 1
+
+    def test_project_supervise_exact_argv(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert re.findall(r"(?m)^\s*&[^\n]+\bsupervise\b[^\n]*", code) == [
+            r"  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') supervise --run-id $ppRun --run-root $ppRunRoot"]
+        assert not re.search(r"--(?:artifact-root|\w+-port|keep-run-root)|@ppKeepArgs", code)
+
+    def test_project_receipt_exact_path(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert re.findall(r"(?m)^\s*\$ppReceipt\s*=[^\n]+", code) == [
+            "  $ppReceipt = Join-Path (Join-Path $ppRunRoot 'artifacts') 'project-proof-receipt.json'"]
+        assert re.findall(r"(?m)^\s*&[^\n]+\bverify-receipt\b[^\n]*", code) == [
+            r"  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') verify-receipt --run-id $ppRun --receipt $ppReceipt"]
+
+    def test_project_receipt_failure_throws(self):
+        _, block, _ = self._parts()
+        assert re.search(re.escape("$ppReceiptExit = $LASTEXITCODE") + r"\s+"
+                         + re.escape("if ($ppReceiptExit -ne 0) { throw 'Project proof receipt failed verification' }"), self._code(block))
+
+    def test_project_supervisor_exit_preserved(self):
+        _, block, _ = self._parts()
+        code = self._code(block)
+        assert re.search(r"supervise --run-id \$ppRun --run-root \$ppRunRoot\s+"
+                         + re.escape("$ppExit = $LASTEXITCODE"), code)
+        assert re.findall(r"(?m)^\s*\$ppExit\s*=[^\n]+", code) == ["  $ppExit = $LASTEXITCODE"]
+        assert re.findall(r"(?m)^\s*exit\s+[^\n]+", code) == ["  exit $ppExit"]
+        assert code.rstrip().endswith("exit $ppExit\n}")
+
+    def test_project_summary_names_run_and_receipt(self):
+        _, block, _ = self._parts()
+        assert re.findall(r"(?m)^\s*Write-Host[^\n]+", self._code(block)) == [
+            '  Write-Host "Project proof run $ppRun receipt: $ppReceipt"']

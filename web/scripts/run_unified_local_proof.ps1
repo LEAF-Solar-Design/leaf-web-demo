@@ -4,8 +4,9 @@ param(
   [int]$BrokerPort = 8240,
   [int]$HarnessPort = 8250,
   [string]$TestGrep = '',
-  [ValidateSet('account', 'guest')]
+  [ValidateSet('account', 'guest', 'project')]
   [string]$Mode = 'account',
+  [string]$ProjectRunRoot = '',
   [switch]$KeepRunRoot,
   [switch]$SyntheticStringSizing,
   [switch]$SyntheticRooftop
@@ -34,6 +35,42 @@ if ($SyntheticStringSizing -or $SyntheticRooftop) {
   }
 }
 
+# >>> project dispatch (PP-3A2 F)
+if ($Mode -ne 'project' -and $ProjectRunRoot) {
+  throw 'ProjectRunRoot applies to project mode only'
+}
+if ($Mode -eq 'project') {
+  if ($TestGrep) { throw 'TestGrep does not apply to project mode' }
+  if ($KeepRunRoot) { throw 'KeepRunRoot does not apply to project mode' }
+  if ($WebPort -ne 5275 -or $AppPort -ne 8230 -or $BrokerPort -ne 8240 -or $HarnessPort -ne 8250) {
+    throw 'Project mode requires the default ports'
+  }
+  if ($ProjectRunRoot -and (-not [System.IO.Path]::IsPathRooted($ProjectRunRoot) -or $ProjectRunRoot -notmatch '^(?:[a-zA-Z]:[\\/]|[\\/]{2}[^\\/]+[\\/][^\\/]+(?:[\\/]|$))')) {
+    throw 'ProjectRunRoot must be an absolute path'
+  }
+  $ppRun = 'pp3-' + [guid]::NewGuid().ToString('N')
+  $ppRunRoot = if ($ProjectRunRoot) { $ProjectRunRoot.TrimEnd([char[]]'\/') } else {
+    Join-Path ([System.IO.Path]::GetTempPath()) "leaf-unified-project-e2e-$ppRun"
+  }
+  if ($ppRunRoot.Replace('/', '\') -eq [System.IO.Path]::GetPathRoot($ppRunRoot).TrimEnd([char[]]'\/')) {
+    throw 'ProjectRunRoot must not be a filesystem root'
+  }
+  $ppReceipt = Join-Path (Join-Path $ppRunRoot 'artifacts') 'project-proof-receipt.json'
+  $ppRequirements = @(
+    (Join-Path $repoRoot 'server\requirements.txt'),
+    (Join-Path $repoRoot 'platform\requirements.txt'),
+    (Join-Path $repoRoot 'server\requirements-auth.txt')
+  )
+  $python = Get-ProofRuntime -RequirementFiles $ppRequirements
+  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') supervise --run-id $ppRun --run-root $ppRunRoot
+  $ppExit = $LASTEXITCODE
+  & $python -B (Join-Path $repoRoot 'scripts\proof_project.py') verify-receipt --run-id $ppRun --receipt $ppReceipt
+  $ppReceiptExit = $LASTEXITCODE
+  if ($ppReceiptExit -ne 0) { throw 'Project proof receipt failed verification' }
+  Write-Host "Project proof run $ppRun receipt: $ppReceipt"
+  exit $ppExit
+}
+# <<< project dispatch
 function Test-PortOpen([int]$Port) {
   $client = [System.Net.Sockets.TcpClient]::new()
   try {
