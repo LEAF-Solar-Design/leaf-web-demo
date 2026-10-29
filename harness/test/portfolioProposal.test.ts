@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { GrantLease, GrantSettlement, OAuthGrantProvider } from "../src/ports/index.js";
 import { PortfolioProposalError, PortfolioProposalService } from "../src/agent/portfolioProposal.js";
-import type { PortfolioProposalOptions, PortfolioProposalRequest } from "../src/agent/portfolioProposal.js";
+import type { PortfolioProposalFailure, PortfolioProposalOptions, PortfolioProposalRequest } from "../src/agent/portfolioProposal.js";
 
 const secret = "tenant-grant-12345678901234567890";
+const exceptionSentinel = "exception-sentinel-do-not-log";
 const lease: GrantLease = { grant: { kind: "oauth", oauthToken: secret }, account_id: "account", lease_id: "lease" };
 function request(): PortfolioProposalRequest {
   return { tenant_id: "tenant", source: { project_id: "project", revision: 7, digest64hex: "a".repeat(64) },
@@ -30,8 +31,23 @@ function setup(events: unknown[] = [assistant('{"edits":[{"id":"title","value":"
     for (const event of events) yield event;
   })());
   const sdkImport = vi.fn(async () => ({ query }));
-  const service = new PortfolioProposalService({ oauth, sdkImport, ...overrides });
-  return { service, oauth, query, sdkImport, getGrant, acquireGrant, settleGrant };
+  const logger = { warn: vi.fn((_record: PortfolioProposalFailure) => {}) };
+  const service = new PortfolioProposalService({ oauth, sdkImport, logger, ...overrides });
+  return { service, oauth, query, sdkImport, getGrant, acquireGrant, settleGrant, logger };
+}
+function expectFailure(logger: ReturnType<typeof setup>["logger"], stage: PortfolioProposalFailure["stage"], code: PortfolioProposalFailure["code"]) {
+  // Compare the complete argument list as well as rendered output: no hidden error argument.
+  expect(logger.warn.mock.calls).toEqual([[{
+    event: "portfolio_proposal_failure",
+    operation_id: expect.stringMatching(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/),
+    stage, code,
+  }]]);
+  const record = logger.warn.mock.calls[0][0];
+  for (const sentinel of [secret, exceptionSentinel, request().instruction, "tenant", "project", "account", "configured-test-model"]) {
+    expect(Object.values(record)).not.toContain(sentinel);
+    expect(JSON.stringify(logger.warn.mock.calls)).not.toContain(sentinel);
+  }
+  return record;
 }
 afterEach(() => { vi.useRealTimers(); vi.unstubAllEnvs(); });
 
@@ -51,12 +67,15 @@ describe("source-bound portfolio proposals", () => {
     expect(f.acquireGrant).toHaveBeenCalledExactlyOnceWith("tenant");
     expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: { cost_tokens: 22 }, stop_reason: "end_turn" });
     expect((f.query.mock.calls[0][0].options.abortController as AbortController).signal.aborted).toBe(true);
+    expect(f.logger.warn).not.toHaveBeenCalled();
   });
 
   it("returns real no-change and leaves unknown usage absent", async () => {
     const f = setup([assistant('{"edits":[]}'), result()]);
+    f.logger.warn.mockImplementation(() => { throw new Error("logger failed"); });
     expect(await f.service.propose(request())).toMatchObject({ edits: [], usage: {} });
     expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "end_turn" });
+    expect(f.logger.warn).not.toHaveBeenCalled();
   });
 
   it("snapshots the trusted source and catalog before awaiting the lease", async () => {
@@ -85,6 +104,7 @@ describe("source-bound portfolio proposals", () => {
     } } }, result({ subtype: "error_during_execution", is_error: true })]);
     await expect(f.service.propose(request())).rejects.toMatchObject({ code: "sdk_failure" });
     expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: { cost_tokens: 5 }, stop_reason: "error" });
+    expectFailure(f.logger, "sdk_query", "sdk_query_failed");
   });
 
   it.each([
@@ -112,6 +132,7 @@ describe("source-bound portfolio proposals", () => {
     await expect(f.service.propose(mutate(request()) as PortfolioProposalRequest)).rejects.toMatchObject({ code: "invalid_request" });
     expect(f.acquireGrant).not.toHaveBeenCalled();
     expect(f.sdkImport).not.toHaveBeenCalled();
+    expect(f.logger.warn).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -131,6 +152,7 @@ describe("source-bound portfolio proposals", () => {
     await expect(f.service.propose(request())).rejects.toMatchObject({ code: "invalid_output" });
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
     expect(f.settleGrant.mock.calls[0][2].stop_reason).toBe("error");
+    expectFailure(f.logger, "sdk_query", "invalid_output");
   });
 
   it.each([
@@ -144,6 +166,7 @@ describe("source-bound portfolio proposals", () => {
     const f = setup(events);
     await expect(f.service.propose(request())).rejects.toBeInstanceOf(PortfolioProposalError);
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "sdk_query", events.length === 1 && (events[0] as { type: string }).type === "result" ? "invalid_output" : "sdk_query_failed");
   });
 
   it("contains SDK capabilities and injects only a scrubbed child environment", async () => {
@@ -172,12 +195,14 @@ describe("source-bound portfolio proposals", () => {
     expect(f.query.mock.calls[0][0].prompt).not.toContain(secret);
     expect(f.query.mock.calls[0][0].prompt).toContain("[REDACTED]");
     expect(JSON.stringify(f.settleGrant.mock.calls)).not.toContain(secret);
+    expectFailure(f.logger, "sdk_query", "invalid_output");
   });
 
   it("rejects an escaped actual grant in parsed output", async () => {
     const escaped = secret.split("").map(c => `\\u${c.charCodeAt(0).toString(16).padStart(4, "0")}`).join("");
     const f = setup([assistant(`{"edits":[{"id":"title","value":"${escaped}"}]}`), result()]);
     await expect(f.service.propose(request())).rejects.toMatchObject({ code: "invalid_output" });
+    expectFailure(f.logger, "sdk_query", "invalid_output");
   });
 
   it("strips JSON-escaped API grants before encoding prompt data", async () => {
@@ -198,11 +223,20 @@ describe("source-bound portfolio proposals", () => {
 
   it("requires lease support and sanitizes unavailable grants", async () => {
     const f = setup();
-    const unleased = new PortfolioProposalService({ oauth: { getGrant: f.getGrant } });
+    const unleased = new PortfolioProposalService({ oauth: { getGrant: f.getGrant }, logger: f.logger });
     await expect(unleased.propose(request())).rejects.toMatchObject({ code: "grant_unavailable" });
     expect(f.getGrant).not.toHaveBeenCalled();
-    f.acquireGrant.mockRejectedValueOnce(new Error(secret));
+    const missing = expectFailure(f.logger, "lease_support", "lease_methods_missing");
+    f.logger.warn.mockClear();
+    f.acquireGrant.mockRejectedValueOnce(new Error(`${exceptionSentinel} ${secret}`));
     await expect(f.service.propose(request())).rejects.toThrow("Portfolio proposal failed: grant_unavailable");
+    expect(f.settleGrant).not.toHaveBeenCalled();
+    const rejected = expectFailure(f.logger, "acquisition", "acquisition_rejected");
+    expect(rejected.operation_id).not.toBe(missing.operation_id);
+    f.logger.warn.mockClear();
+    f.acquireGrant.mockImplementationOnce(() => { throw new Error(exceptionSentinel); });
+    await expect(f.service.propose(request())).rejects.toMatchObject({ code: "grant_unavailable" });
+    expect(expectFailure(f.logger, "acquisition", "acquisition_rejected").operation_id).not.toBe(rejected.operation_id);
     expect(f.settleGrant).not.toHaveBeenCalled();
   });
 
@@ -212,19 +246,48 @@ describe("source-bound portfolio proposals", () => {
     await expect(f.service.propose(request())).rejects.toMatchObject({ code: "grant_unavailable" });
     expect(f.query).not.toHaveBeenCalled();
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "grant", "grant_unusable");
   });
 
   it("fails sanitized SDK errors with exactly one settlement", async () => {
-    const f = setup([], { sdkImport: async () => { throw new Error(secret); } });
+    const f = setup([], { sdkImport: async () => { throw new Error(`${exceptionSentinel} ${secret}`); } });
     await expect(f.service.propose(request())).rejects.toThrow("Portfolio proposal failed: sdk_failure");
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "sdk_import", "sdk_import_failed");
+  });
+
+  it("classifies a thrown SDK query without logging its arguments or exception", async () => {
+    const f = setup([], { sdkImport: async () => ({ query: () => { throw new Error(`${exceptionSentinel} ${secret}`); } }) });
+    const input = request();
+    input.instruction = `${input.instruction} ${exceptionSentinel} ${secret}`;
+    await expect(f.service.propose(input)).rejects.toMatchObject({ code: "sdk_failure" });
+    expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "sdk_query", "sdk_query_failed");
+  });
+
+  it("preserves the original error and settlement when the warning logger throws", async () => {
+    const original = new PortfolioProposalError("sdk_failure");
+    const f = setup([], { sdkImport: async () => { throw original; } });
+    f.logger.warn.mockImplementationOnce(() => { throw new Error("logger failed"); });
+    await expect(f.service.propose(request())).rejects.toBe(original);
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "error" });
+    expectFailure(f.logger, "sdk_import", "sdk_import_failed");
   });
 
   it("never reports success or retries when settlement fails", async () => {
     const f = setup();
-    f.settleGrant.mockRejectedValueOnce(new Error(secret));
+    f.settleGrant.mockRejectedValueOnce(new Error(`${exceptionSentinel} ${secret}`));
     await expect(f.service.propose(request())).rejects.toThrow("Portfolio proposal failed: settlement_failure");
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "settlement", "settlement_failed");
+
+    // Cleanup settlement still takes precedence over an earlier SDK failure.
+    f.logger.warn.mockClear();
+    f.query.mockImplementationOnce(() => (async function* () { throw new Error(exceptionSentinel); })());
+    f.settleGrant.mockRejectedValueOnce(new Error(secret));
+    await expect(f.service.propose(request())).rejects.toMatchObject({ code: "settlement_failure" });
+    expect(f.settleGrant).toHaveBeenCalledTimes(2);
+    expectFailure(f.logger, "settlement", "settlement_failed");
   });
 
   it("times out a late import without ever starting query", async () => {
@@ -239,6 +302,7 @@ describe("source-bound portfolio proposals", () => {
     expect(f.query).not.toHaveBeenCalled();
     expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "timeout" });
     expect(vi.getTimerCount()).toBe(0);
+    expectFailure(f.logger, "sdk_import", "timeout");
   });
 
   it("checks caller abort before acquiring", async () => {
@@ -247,6 +311,7 @@ describe("source-bound portfolio proposals", () => {
     caller.abort();
     await expect(f.service.propose(request(), caller.signal)).rejects.toMatchObject({ code: "aborted" });
     expect(f.acquireGrant).not.toHaveBeenCalled();
+    expectFailure(f.logger, "lease_support", "aborted");
   });
 
   it("settles a grant that arrives after caller cancellation without importing", async () => {
@@ -263,6 +328,7 @@ describe("source-bound portfolio proposals", () => {
     await Promise.resolve();
     expect(f.sdkImport).not.toHaveBeenCalled();
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "acquisition", "aborted");
   });
 
   it("settles a grant arriving after timeout and handles late import rejection", async () => {
@@ -286,6 +352,8 @@ describe("source-bound portfolio proposals", () => {
     lateImport.reject(new Error(secret));
     await vi.advanceTimersByTimeAsync(0);
     expect(second.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "acquisition", "timeout");
+    expectFailure(second.logger, "sdk_import", "timeout");
   });
 
   it("aborts a cooperative SDK before settling its lease", async () => {
@@ -306,10 +374,12 @@ describe("source-bound portfolio proposals", () => {
     const caller = new AbortController();
     const outcome = expect(f.service.propose(request(), caller.signal)).rejects.toMatchObject({ code: "aborted" });
     await started.promise;
+    f.logger.warn.mockImplementationOnce(() => { throw new Error("logger failed"); });
     f.settleGrant.mockImplementationOnce(async () => { expect(sawAbort).toBe(true); });
     caller.abort();
     await outcome;
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "sdk_query", "aborted");
   });
 
   it.each(["timeout", "aborted"] as const)("bounds an ignoring SDK, aborts before settlement and handles late rejection: %s", async code => {
@@ -335,6 +405,7 @@ describe("source-bound portfolio proposals", () => {
     await vi.advanceTimersByTimeAsync(0);
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
     expect(vi.getTimerCount()).toBe(0);
+    expectFailure(f.logger, "sdk_query", code);
   });
 
   it("bounds settlement too and never retries a hanging settlement", async () => {
@@ -348,5 +419,6 @@ describe("source-bound portfolio proposals", () => {
     late.reject(new Error(secret));
     await vi.advanceTimersByTimeAsync(0);
     expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "settlement", "timeout");
   });
 });
