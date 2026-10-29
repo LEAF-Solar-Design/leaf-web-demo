@@ -175,7 +175,7 @@ test('unsupported or ambiguous root syntax supplies no role or name', async () =
 })
 
 test('credential-shaped and oversized names are omitted, never echoed', async () => {
-  for (const name of ['Bearer top-secret', 'password=hunter2', 'Authorization: private',
+  for (const name of ['Bearer redacted', 'password=hunter2', 'Authorization: redacted',
     'cookie=session-private', 'eyJabc.def.ghi', 'x'.repeat(201)]) {
     const fake = fixture({ snapshot: `- dialog ${JSON.stringify(name)}` })
     const result = await complete(fake)
