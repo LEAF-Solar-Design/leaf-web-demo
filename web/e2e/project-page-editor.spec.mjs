@@ -13,6 +13,8 @@ const ORG = 'cat-proof-org'
 const PROJECT_ID = '5a1f0c3e-2b7d-4c8a-9e61-0d4f7b2a9c11'
 const PROJECT = { project_id: PROJECT_ID, name: 'Jessica page proof', status: 'active' }
 const PAGE_PATH = `/api/projects/${PROJECT_ID}/page`
+const NATIVE_PATH = `/api/projects/${PROJECT_ID}/native-previews`
+const NATIVE_JOB = '77777777-7777-4777-8777-777777777777'
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }
 const canonical = document => JSON.stringify(Object.fromEntries(Object.entries(document).sort(([a], [b]) => a.localeCompare(b))))
 const digest = document => createHash('sha256').update(canonical(document)).digest('hex')
@@ -47,7 +49,7 @@ function sourceArchive(saved, previews = {}, target = 'web') {
 
 async function installBackend(page) {
   const state = makeCatProofState()
-  const backend = { calls: [], foreign: [], revisions: [], downloads: [], photoCalls: [] }
+  const backend = { calls: [], foreign: [], revisions: [], downloads: [], photoCalls: [], nativeCalls: [], nativeStatuses: [], nativeJob: null }
   await page.addInitScript(({ token, org }) => {
     localStorage.setItem('leaf.jwt', token)
     localStorage.setItem('leaf.org_id', org)
@@ -64,7 +66,31 @@ async function installBackend(page) {
     const body = request.postData() ? request.postDataJSON() : null
     const query = Object.fromEntries(url.searchParams)
     let reply
-    if (url.pathname.startsWith(PAGE_PATH)) {
+    if (url.pathname.startsWith(NATIVE_PATH)) {
+      const headers = await request.allHeaders()
+      const call = { method, path: url.pathname, body, idempotencyKey: headers['idempotency-key'] || null,
+        authenticated: headers.authorization === `Bearer ${TOKEN}`, org: headers['x-org-id'] }
+      backend.nativeCalls.push(call)
+      if (method === 'POST' && url.pathname === NATIVE_PATH) {
+        const saved = backend.revisions.find(row => row.revision === body?.revision)
+        if (!saved || !call.idempotencyKey) reply = { status: 422, body: {} }
+        else {
+          const previews = Object.fromEntries(PHOTOS.map(photo => [photo.material_id, PREVIEW.toString('base64')]))
+          backend.nativeJob ||= { job_id: NATIVE_JOB, revision: saved.revision, document_sha256: saved.digest,
+            archive_sha256: createHash('sha256').update(sourceArchive(saved, previews, 'ios')).digest('hex') }
+          reply = { status: 202, body: { ...backend.nativeJob, status: 'queued' } }
+        }
+      } else if (method === 'GET' && url.pathname === `${NATIVE_PATH}/${NATIVE_JOB}` && backend.nativeJob) {
+        const status = backend.nativeStatuses.includes('running') ? 'complete' : 'running'
+        reply = { status: 200, body: { ...backend.nativeJob, status,
+          ...(status === 'complete' ? { receipt: { kind: 'simulator', receipt_id: PROJECT_ID, sha256: 'c'.repeat(64) }, evidence_basis: 'authenticated-worker-report' } : {}) } }
+      } else if (method === 'GET' && url.pathname === `${NATIVE_PATH}/${NATIVE_JOB}/screenshot` && backend.nativeStatuses.includes('complete')) {
+        call.status = 200
+        return route.fulfill({ status: 200, headers: CORS, contentType: 'image/png', body: PREVIEW })
+      } else reply = { status: 404, body: {} }
+      call.status = reply.status
+      if (reply.body.status) backend.nativeStatuses.push(reply.body.status)
+    } else if (url.pathname.startsWith(PAGE_PATH)) {
       backend.calls.push({ method, path: url.pathname, query, body, headers: await request.allHeaders() })
       const current = backend.revisions.at(-1) || null
       if (url.pathname === PAGE_PATH && method === 'GET') reply = { status: 200, body: { page: current } }
@@ -129,6 +155,63 @@ async function expectInsideViewport(locator, viewport) {
 }
 
 for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`native preview journey, ${size}${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    await page.setViewportSize(viewport)
+    const backend = await installBackend(page)
+    const document = portfolioImport()
+    document.schema = 'leaf.portfolio.v1'
+    document.categories[0].images = PHOTOS.map(photo => ({ material_id: photo.material_id, sha256: photo.sha256,
+      preview_sha256: photo.preview_sha256, title: photo.name, alt: photo.name }))
+    backend.revisions.push({ revision: 7, digest: digest(document), document })
+    await page.goto('/app?surface=browser')
+    const editor = await openProject(page)
+    await editor.getByRole('button', { name: 'Open page', exact: true }).click()
+    await expect(page.locator('[data-ground="browser-asset"] .portfolio').getByRole('heading', { name: 'Selected pastry work' })).toBeVisible()
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+    const native = editor.getByRole('region', { name: 'iOS preview', exact: true })
+    const build = native.getByRole('button', { name: 'Build iOS preview', exact: true })
+    await expect(build).toBeEnabled()
+    await build.click()
+    await expect(native.getByRole('status').filter({ hasText: 'Queued · Saved revision 7' })).toBeVisible()
+    await expect(native.getByRole('status').filter({ hasText: 'Building · Saved revision 7' })).toBeVisible()
+    await expect(native.getByRole('status').filter({ hasText: 'Ready · Saved revision 7' })).toBeVisible({ timeout: 20_000 })
+    const image = native.getByRole('img', { name: 'iOS simulator preview of saved portfolio revision 7', exact: true })
+    await image.scrollIntoViewIfNeeded()
+    await expect.poll(() => image.evaluate(node => node.complete && node.naturalWidth > 0)).toBe(true)
+    expect(await image.getAttribute('src')).toMatch(/^blob:/)
+    const posts = backend.nativeCalls.filter(call => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    expect(posts[0]).toMatchObject({ path: NATIVE_PATH, body: { revision: 7 }, authenticated: true, org: ORG })
+    expect(posts[0].body).toEqual({ revision: 7 })
+    expect(posts[0].idempotencyKey).toMatch(/^[\x21-\x7e]{1,200}$/)
+    expect(backend.nativeStatuses).toEqual(['queued', 'running', 'complete'])
+    expect(backend.nativeCalls.filter(call => call.path.endsWith('/screenshot'))).toEqual([
+      expect.objectContaining({ method: 'GET', authenticated: true, status: 200 }),
+    ])
+    for (const call of backend.nativeCalls) expect(call.authenticated).toBe(true)
+    const geometry = await native.evaluate(node => ({
+      viewport: { width: innerWidth, height: innerHeight }, pageWidth: document.documentElement.scrollWidth,
+      region: { width: node.clientWidth, scrollWidth: node.scrollWidth },
+      image: { width: node.querySelector('img').getBoundingClientRect().width, height: node.querySelector('img').getBoundingClientRect().height },
+    }))
+    expect(geometry.pageWidth).toBeLessThanOrEqual(viewport.width)
+    expect(geometry.region.scrollWidth).toBeLessThanOrEqual(geometry.region.width)
+    expect(geometry.image.width).toBeLessThanOrEqual(geometry.region.width)
+    expect(geometry.image.height).toBeLessThanOrEqual(viewport.height * .6 + 1)
+    await testInfo.attach(`native-preview-${size}`, { body: await page.screenshot(), contentType: 'image/png' })
+    await testInfo.attach(`native-preview-region-${size}`, { body: await native.screenshot(), contentType: 'image/png' })
+    await editor.getByRole('textbox', { name: 'Name', exact: true }).fill('Unsaved portfolio edit')
+    await expect(build).toBeDisabled()
+    await expect(image).toHaveAttribute('alt', 'iOS simulator preview of saved portfolio revision 7')
+    expect(backend.nativeCalls.filter(call => call.method === 'POST')).toHaveLength(1)
+    await testInfo.attach(`native-preview-evidence-${size}`, { body: JSON.stringify({
+      kind: 'rendered-ui-fixture-proof', workerAcceptance: false, savedRevision: 7,
+      requests: backend.nativeCalls, statuses: backend.nativeStatuses, geometry, dirtyBuildDisabled: await build.isDisabled(),
+    }, null, 2), contentType: 'application/json' })
+    expect(backend.foreign).toEqual([])
+  })
+
   test(`portfolio import, galleries, resume, private previews and export at ${size}`, async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     page.setDefaultTimeout(15_000)

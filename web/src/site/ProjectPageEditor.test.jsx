@@ -1,8 +1,9 @@
 import React from 'react'
+import { Blob as NativeBlob } from 'node:buffer'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot } from './projectPageClient.js'
 import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
 import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
 import { registerEscapeOwner } from '../lib/useEscapeOwner.js'
@@ -21,6 +22,7 @@ vi.mock('../api.js', () => ({
 vi.mock('../projects/api.js', () => ({ getStoredActorBindingId: () => 'binding-a', listProjectPhotos: vi.fn(), readProjectPhotoPreview: vi.fn() }))
 vi.mock('./projectPageClient.js', async importOriginal => ({
   ...await importOriginal(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn(), downloadProjectPageSource: vi.fn(),
+  submitProjectNativePreview: vi.fn(), loadProjectNativePreview: vi.fn(), downloadProjectNativePreviewScreenshot: vi.fn(),
 }))
 
 const PROJECT = '11111111-1111-4111-8111-111111111111'
@@ -41,6 +43,9 @@ beforeEach(() => {
   loadProjectPage.mockResolvedValue(page())
   saveProjectPage.mockImplementation(async (_id, document, revision) => ({ ...page(revision + 1), document }))
   downloadProjectPageSource.mockResolvedValue(new Blob(['zip'], { type: 'application/zip' }))
+  submitProjectNativePreview.mockResolvedValue(nativeJob('queued'))
+  loadProjectNativePreview.mockResolvedValue(nativeJob('running'))
+  downloadProjectNativePreviewScreenshot.mockResolvedValue(new Blob(['png'], { type: 'image/png' }))
   vi.stubGlobal('fetch', vi.fn())
   URL.createObjectURL = vi.fn(() => 'blob:page-source')
   URL.revokeObjectURL = vi.fn()
@@ -50,6 +55,13 @@ const PHOTO = { material_id: '33333333-3333-4333-8333-333333333333', sha256: 'b'
 const PHOTO_TWO = { ...PHOTO, material_id: '44444444-4444-4444-8444-444444444444', sha256: 'd'.repeat(64), name: 'Bread.jpg' }
 const imageRef = row => ({ material_id: row.material_id, sha256: row.sha256, preview_sha256: row.preview_sha256, title: row.name, alt: row.name })
 const portfolioDraft = () => ({ ...emptyPortfolio(), categories: [{ slug: 'cakes', title: 'Cakes', description: '', hero: 0, images: [imageRef(PHOTO), imageRef(PHOTO_TWO)] }] })
+const nativeJob = (status, changes = {}) => ({ job_id: OTHER, status, revision: 7, document_sha256: 'a'.repeat(64), archive_sha256: 'b'.repeat(64),
+  ...(status === 'complete' ? { receipt: { kind: 'simulator', receipt_id: PROJECT, sha256: 'c'.repeat(64) }, evidence_basis: 'authenticated-worker-report' } : {}), ...changes })
+const openPortfolio = async () => {
+  loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+  fireEvent.click(button('Open page'))
+  await screen.findByLabelText('Name')
+}
 const importFile = value => ({ name: 'portfolio.json', size: JSON.stringify(value).length, text: async () => JSON.stringify(value) })
 const importDraft = () => {
   const value = portfolioDraft(); value.schema = 'leaf.portfolio.import.v1'
@@ -379,7 +391,264 @@ describe('project page editor', () => {
   })
 })
 
+describe('saved portfolio iOS preview', () => {
+  it('submits the exact revision once, polls serially, and displays the authenticated screenshot', async () => {
+    const pending = deferred()
+    submitProjectNativePreview.mockReturnValueOnce(pending.promise)
+    setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview')); fireEvent.click(button('Build iOS preview'))
+      expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
+      expect(submitProjectNativePreview).toHaveBeenCalledWith(PROJECT, 7, expect.any(String), { signal: expect.any(AbortSignal) })
+      await act(async () => pending.resolve(nativeJob('queued')))
+      expect(screen.getByText('Queued · Saved revision 7')).toBeTruthy()
+      const running = deferred()
+      loadProjectNativePreview.mockReturnValueOnce(running.promise).mockResolvedValueOnce(nativeJob('complete'))
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(1)
+      await act(async () => running.resolve(nativeJob('running')))
+      expect(screen.getByText('Building · Saved revision 7')).toBeTruthy()
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      expect(screen.getByText('Ready · Saved revision 7')).toBeTruthy()
+      expect(screen.getByRole('img', { name: 'iOS simulator preview of saved portfolio revision 7' }).getAttribute('src')).toBe('blob:page-source')
+      expect(downloadProjectNativePreviewScreenshot).toHaveBeenCalledWith(PROJECT, OTHER, { signal: expect.any(AbortSignal) })
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(2)
+    } finally { vi.useRealTimers() }
+  })
+
+  it('disables dirty submission and retains one key after an uncertain submission without losing edits', async () => {
+    submitProjectNativePreview.mockRejectedValueOnce(Object.assign(new Error('private server details'), { status: 409 }))
+    setup(); await openPortfolio()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Unsaved work' } })
+    expect(button('Build iOS preview')).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: portfolioDraft().name } })
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText(/Submission could not be confirmed/)
+    expect(screen.queryByText('private server details')).toBeNull()
+    const key = submitProjectNativePreview.mock.lastCall[2]
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('failed'))
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Failed · Saved revision 7')
+    expect(submitProjectNativePreview.mock.lastCall[2]).toBe(key)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Keep this draft' } })
+    expect(screen.getByLabelText('Name').value).toBe('Keep this draft')
+    expect(button('Save page')).toBeEnabled()
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(7)
+  })
+
+  it.each(['failed', 'cancelled'])('allows an explicit new build with a new key after %s', async status => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob(status)).mockResolvedValueOnce(nativeJob('failed'))
+    setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText(`${status === 'failed' ? 'Failed' : 'Cancelled'} · Saved revision 7`)
+    const key = submitProjectNativePreview.mock.lastCall[2]
+    fireEvent.click(button('Build iOS preview'))
+    await waitFor(() => expect(submitProjectNativePreview).toHaveBeenCalledTimes(2))
+    expect(submitProjectNativePreview.mock.lastCall[2]).not.toBe(key)
+  })
+
+  it('retries a known-job read and screenshot failure with GET only', async () => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('queued'))
+    loadProjectNativePreview.mockRejectedValueOnce(new Error('read failed')).mockResolvedValue(nativeJob('complete'))
+    downloadProjectNativePreviewScreenshot.mockRejectedValueOnce(new Error('image failed')).mockResolvedValue(new Blob(['png']))
+    setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview'))
+      await act(async () => {})
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      expect(screen.getByText(/Could not check this preview/)).toBeTruthy()
+      await act(async () => { await vi.advanceTimersByTimeAsync(10000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(1)
+      fireEvent.click(button('Check preview again'))
+      await act(async () => {})
+      expect(screen.queryByRole('img', { name: /iOS simulator/ })).toBeNull()
+      fireEvent.click(button('Check preview again'))
+      await act(async () => {})
+      expect(screen.getByText('Ready · Saved revision 7')).toBeTruthy()
+      expect(submitProjectNativePreview).toHaveBeenCalledTimes(1)
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(3)
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each([{ job_id: PROJECT }, { revision: 8 }, { document_sha256: 'd'.repeat(64) }, { archive_sha256: 'd'.repeat(64) }])('rejects changed readback identity %j', async changes => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('queued'))
+    loadProjectNativePreview.mockResolvedValueOnce(nativeJob('complete', changes))
+    setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview'))
+      await act(async () => {})
+      await act(async () => { await vi.advanceTimersByTimeAsync(2000) })
+      expect(screen.getByText(/Could not check this preview/)).toBeTruthy()
+      expect(downloadProjectNativePreviewScreenshot).not.toHaveBeenCalled()
+    } finally { vi.useRealTimers() }
+  })
+
+  it('bounds observation at fifteen minutes and lets a known job be checked again', async () => {
+    const pending = deferred()
+    loadProjectNativePreview.mockReturnValueOnce(pending.promise)
+    const view = setup(); await openPortfolio()
+    vi.useFakeTimers()
+    try {
+      fireEvent.click(button('Build iOS preview'))
+      await act(async () => {})
+      await act(async () => { await vi.advanceTimersByTimeAsync(15 * 60 * 1000) })
+      expect(loadProjectNativePreview).toHaveBeenCalledTimes(1)
+      expect(loadProjectNativePreview.mock.lastCall[2].signal.aborted).toBe(true)
+      expect(screen.getByText(/Observation paused after 15 minutes/)).toBeTruthy()
+      expect(button('Check preview again')).toBeEnabled()
+      await act(async () => pending.resolve(nativeJob('complete')))
+      expect(downloadProjectNativePreviewScreenshot).not.toHaveBeenCalled()
+      view.unmount()
+    } finally { vi.useRealTimers() }
+  })
+
+  it.each(['project', 'account', 'scope', 'logout', 'unmount'])('aborts and ignores a late submission on %s invalidation', async kind => {
+    const pending = deferred()
+    submitProjectNativePreview.mockReturnValueOnce(pending.promise)
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    const signal = submitProjectNativePreview.mock.lastCall[3].signal
+    if (kind === 'unmount') view.unmount()
+    else if (kind === 'logout') act(() => auth.logout())
+    else if (kind === 'scope') act(() => { auth.scope = 'account-b'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    else view.rerender(<ProjectPageEditor projectId={kind === 'project' ? OTHER : PROJECT} accountScope={kind === 'account' ? 'account-b' : 'account-a'} />)
+    expect(signal.aborted).toBe(true)
+    await act(async () => pending.resolve(nativeJob('complete')))
+    expect(downloadProjectNativePreviewScreenshot).not.toHaveBeenCalled()
+    expect(screen.queryByRole('region', { name: 'iOS preview' })).toBeNull()
+  })
+
+  it('revokes screenshots on replacement, saved revision change, and logout', async () => {
+    submitProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    loadProjectNativePreview.mockResolvedValue(nativeJob('complete'))
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 7')
+    fireEvent.click(button('Check preview again'))
+    await waitFor(() => expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source'))
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New saved work' } })
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(screen.queryByRole('img', { name: /iOS simulator/ })).toBeNull()
+    expect(button('Build iOS preview')).toBeEnabled()
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('complete', { revision: 8 }))
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 8')
+    const count = URL.revokeObjectURL.mock.calls.length
+    act(() => auth.logout())
+    expect(URL.revokeObjectURL.mock.calls.length).toBeGreaterThan(count)
+    view.unmount()
+  })
+
+  it.each(['scope', 'logout', 'unmount'])('fences late screenshot bytes on %s', async kind => {
+    const pending = deferred()
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('complete'))
+    downloadProjectNativePreviewScreenshot.mockReturnValueOnce(pending.promise)
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await waitFor(() => expect(downloadProjectNativePreviewScreenshot).toHaveBeenCalledTimes(1))
+    const signal = downloadProjectNativePreviewScreenshot.mock.lastCall[2].signal
+    if (kind === 'unmount') view.unmount()
+    else if (kind === 'logout') act(() => auth.logout())
+    else act(() => { auth.scope = 'account-b'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    expect(signal.aborted).toBe(true)
+    await act(async () => pending.resolve(new Blob(['late screenshot'])))
+    expect(URL.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it.each(['scope', 'unmount'])('revokes a ready screenshot on %s', async kind => {
+    submitProjectNativePreview.mockResolvedValueOnce(nativeJob('complete'))
+    const view = setup(); await openPortfolio()
+    fireEvent.click(button('Build iOS preview'))
+    await screen.findByText('Ready · Saved revision 7')
+    if (kind === 'unmount') view.unmount()
+    else act(() => { auth.scope = 'account-b'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:page-source')
+  })
+})
+
 describe('authenticated page transport', () => {
+  it('uses producer-shaped native jobs and exact authenticated submit, status and screenshot contracts', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    const png = new NativeBlob([Buffer.from('iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+jRZkAAAAASUVORK5CYII=', 'base64')], { type: 'image/png' })
+    fetch.mockResolvedValueOnce({ ok: true, status: 202, json: async () => nativeJob('queued') })
+    expect(await client.submitProjectNativePreview(PROJECT, 7, 'preview-key')).toEqual(nativeJob('queued'))
+    expect(fetch.mock.lastCall[0]).toBe(`https://api.example.test/api/projects/${PROJECT}/native-previews`)
+    expect(fetch.mock.lastCall[1]).toMatchObject({ method: 'POST', body: '{"revision":7}', headers: { 'Content-Type': 'application/json', 'Idempotency-Key': 'preview-key' }, cache: 'no-store' })
+    for (const status of ['running', 'complete', 'failed', 'cancelled']) {
+      fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => nativeJob(status) })
+      expect(await client.loadProjectNativePreview(PROJECT, OTHER)).toEqual(nativeJob(status))
+      expect(fetch.mock.lastCall[0]).toBe(`https://api.example.test/api/projects/${PROJECT}/native-previews/${OTHER}`)
+    }
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png' }), blob: async () => png })
+    expect(await client.downloadProjectNativePreviewScreenshot(PROJECT, OTHER)).toBe(png)
+    expect(fetch.mock.lastCall[0]).toBe(`https://api.example.test/api/projects/${PROJECT}/native-previews/${OTHER}/screenshot`)
+    for (const [, options] of fetch.mock.calls) expect(options.headers).toMatchObject({ Authorization: 'Bearer fixture', 'X-Org-Id': 'org-a', 'X-Actor-Binding-Id': 'binding-a' })
+  })
+
+  it('rejects malformed native requests and producer status, identity, digest and receipt readbacks', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    for (const [project, revision, key] of [[OTHER + '/x', 7, 'key'], [PROJECT + '\n', 7, 'key'], [PROJECT, 0, 'key'], [PROJECT, true, 'key'], [PROJECT, Number.MAX_SAFE_INTEGER + 1, 'key'], [PROJECT, 7, ''], [PROJECT, 7, 'x'.repeat(201)], [PROJECT, 7, 'bad\nkey'], [PROJECT, 7, 'key\n']]) {
+      await expect(client.submitProjectNativePreview(project, revision, key)).rejects.toThrow()
+    }
+    await expect(client.loadProjectNativePreview(PROJECT, '../job')).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+    for (const changes of [{ status: 'submitted' }, { job_id: PROJECT }, { job_id: OTHER + '\n' }, { document_sha256: 'A'.repeat(64) }, { document_sha256: 'a'.repeat(64) + '\n' }, { archive_sha256: 'short' }, { revision: true },
+      { receipt: { kind: 'fixture', receipt_id: PROJECT, sha256: 'c'.repeat(64) } }, { receipt: { kind: 'simulator', receipt_id: 'bad', sha256: 'c'.repeat(64) } }, { evidence_basis: 'fixture' }]) {
+      fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => nativeJob('complete', changes) })
+      await expect(client.loadProjectNativePreview(PROJECT, OTHER)).rejects.toThrow('iOS preview')
+    }
+    fetch.mockResolvedValueOnce({ ok: true, status: 202, json: async () => nativeJob('queued', { revision: 8 }) })
+    await expect(client.submitProjectNativePreview(PROJECT, 7, 'key')).rejects.toThrow('iOS preview')
+  })
+
+  it('bounds PNG responses before buffering and rejects non-PNG bytes', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    for (const response of [
+      { headers: new Headers({ 'content-type': 'text/html' }) },
+      { headers: new Headers({ 'content-type': 'image/png', 'content-length': String(16 * 1024 * 1024 + 1) }) },
+      { headers: new Headers({ 'content-type': 'image/png' }), blob: async () => new NativeBlob(['not png']) },
+      { headers: new Headers({ 'content-type': 'image/png' }), blob: async () => new NativeBlob(['x'.repeat(64)]) },
+    ]) {
+      fetch.mockResolvedValueOnce({ ok: true, status: 200, ...response })
+      await expect(client.downloadProjectNativePreviewScreenshot(PROJECT, OTHER)).rejects.toThrow('iOS preview')
+    }
+    const reader = { read: vi.fn().mockResolvedValue({ done: false, value: { byteLength: 16 * 1024 * 1024 + 1 } }), cancel: vi.fn(), releaseLock: vi.fn() }
+    fetch.mockResolvedValueOnce({ ok: true, status: 200, headers: new Headers({ 'content-type': 'image/png' }), body: { getReader: () => reader } })
+    await expect(client.downloadProjectNativePreviewScreenshot(PROJECT, OTHER)).rejects.toThrow('iOS preview')
+    expect(reader.read).toHaveBeenCalledTimes(1)
+    expect(reader.cancel).toHaveBeenCalled()
+    expect(reader.releaseLock).toHaveBeenCalled()
+  })
+
+  it('keeps native failures bounded, uses unauthorized handling and times out with abort cleanup', async () => {
+    const client = await vi.importActual('./projectPageClient.js')
+    fetch.mockResolvedValueOnce({ ok: false, status: 409, json: async () => ({ detail: 'SECRET' }) })
+    await expect(client.submitProjectNativePreview(PROJECT, 7, 'same-key')).rejects.toThrow('Could not access the iOS preview')
+    fetch.mockResolvedValueOnce({ ok: false, status: 401 })
+    await expect(client.loadProjectNativePreview(PROJECT, OTHER)).rejects.toMatchObject({ status: 401 })
+    expect(auth.unauthorized).toHaveBeenCalledTimes(1)
+    vi.useFakeTimers()
+    try {
+      fetch.mockImplementation(async (_url, { signal }) => ({ ok: true, status: 200,
+        json: () => new Promise((_resolve, reject) => signal.addEventListener('abort', () => reject(new DOMException('Aborted', 'AbortError')), { once: true })),
+      }))
+      const timed = expect(client.loadProjectNativePreview(PROJECT, OTHER)).rejects.toThrow('iOS preview service took too long')
+      await vi.advanceTimersByTimeAsync(30000); await timed
+      const controller = new AbortController()
+      const cancelled = expect(client.loadProjectNativePreview(PROJECT, OTHER, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
+      await vi.advanceTimersByTimeAsync(0)
+      controller.abort(); await cancelled
+    } finally { vi.useRealTimers() }
+  })
+
   it('uses the current project identity on reads, writes and exact revision exports', async () => {
     const client = await vi.importActual('./projectPageClient.js')
     fetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ page: null }) })

@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview } from './projectPageClient.js'
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
 import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
@@ -39,6 +39,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState('')
   const [suspended, setSuspended] = useState(false)
+  const [native, setNative] = useState(null)
+  const nativeSession = useRef(null)
   const live = useRef(false)
   const operation = useRef(null)
   const preview = useRef(onPreview)
@@ -53,12 +55,30 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     try { validatePageDocument(draft) } catch (failure) { validation = failure.message }
   }
 
+  const clearNative = () => {
+    const session = nativeSession.current
+    nativeSession.current = null
+    if (session) {
+      session.controller?.abort()
+      clearTimeout(session.timer)
+      clearTimeout(session.deadlineTimer)
+      if (session.url) URL.revokeObjectURL(session.url)
+    }
+  }
+  useEffect(() => {
+    clearNative()
+    setNative(null)
+    return clearNative
+  }, [saved?.revision, saved?.digest])
+
   useEffect(() => {
     live.current = true
     const invalidate = () => {
       live.current = false
       operation.current?.abort()
       operation.current = null
+      clearNative()
+      setNative(null)
       setDraft(null)
       setSaved(null)
       setError(null)
@@ -77,6 +97,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     return () => {
       live.current = false
       operation.current?.abort()
+      clearNative()
       logout(); token(); activeScope(); window.removeEventListener('storage', storage)
       for (const url of downloads.current) URL.revokeObjectURL(url)
       downloads.current.clear()
@@ -162,6 +183,84 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   const changePortfolio = document => { setDraft(document); setNotice(''); show(document) }
   const state = busy === 'saving' ? 'Saving…' : dirty ? 'Unsaved changes' : saved ? 'Saved' : ''
 
+  const observeNative = async (session, submit = false) => {
+    if (!live.current || nativeSession.current !== session || session.active) return
+    session.active = true
+    session.deadline = Date.now() + 15 * 60 * 1000
+    const controller = new AbortController()
+    session.controller = controller
+    const current = () => live.current && nativeSession.current === session && !controller.signal.aborted
+    const publish = extra => setNative({ revision: session.revision, job: session.job, url: session.url, active: session.active, ...extra })
+    const stop = () => {
+      clearTimeout(session.timer)
+      clearTimeout(session.deadlineTimer)
+      session.active = false
+      session.controller = null
+    }
+    session.deadlineTimer = setTimeout(() => {
+      if (!current()) return
+      controller.abort()
+      stop()
+      publish({ message: 'Observation paused after 15 minutes. The build may still be running. Check again for progress.' })
+    }, 15 * 60 * 1000)
+    publish({})
+    const step = async first => {
+      try {
+        const value = first && submit
+          ? await submitProjectNativePreview(projectId, session.revision, session.key, { signal: controller.signal })
+          : await loadProjectNativePreview(projectId, session.job.job_id, { signal: controller.signal })
+        if (!current()) return
+        // prepare_source copies page.digest into source.document_sha256.
+        const job = validateNativePreview(value, session.job || { revision: session.revision, document_sha256: session.digest })
+        session.job = job
+        if (job.status !== 'complete' && session.url) {
+          URL.revokeObjectURL(session.url)
+          session.url = null
+        }
+        publish({})
+        if (job.status === 'complete') {
+          const blob = await downloadProjectNativePreviewScreenshot(projectId, job.job_id, { signal: controller.signal })
+          if (!current()) return
+          const url = URL.createObjectURL(blob)
+          if (session.url) URL.revokeObjectURL(session.url)
+          session.url = url
+          stop(); publish({})
+        } else if (['failed', 'cancelled'].includes(job.status)) {
+          stop(); publish({})
+        } else if (Date.now() >= session.deadline) {
+          stop(); publish({ message: 'Observation paused. The build may still be running. Check again for progress.' })
+        } else session.timer = setTimeout(() => { if (current()) void step(false) }, 2000)
+      } catch {
+        if (!current()) return
+        if (session.url) { URL.revokeObjectURL(session.url); session.url = null }
+        stop()
+        publish({ message: session.job
+          ? 'Could not check this preview or load its screenshot. Check again to retry.'
+          : 'Submission could not be confirmed. Retry to check the same submission.' })
+      }
+    }
+    await step(true)
+  }
+  const buildNative = () => {
+    if (!enabled || operation.current || busy || dirty || validation || !saved
+      || draft?.schema !== 'leaf.portfolio.v1' || nativeSession.current?.active) return
+    let session = nativeSession.current
+    if (session?.job && !['failed', 'cancelled'].includes(session.job.status)) return
+    if (!session || session.job) {
+      clearNative()
+      session = { revision: saved.revision, digest: saved.digest, key: crypto.randomUUID(), job: null, url: null, active: false }
+      nativeSession.current = session
+    }
+    void observeNative(session, true)
+  }
+  const checkNative = () => {
+    const session = nativeSession.current
+    if (enabled && !session?.active && session?.job) void observeNative(session)
+  }
+  const nativeStatus = native?.job?.status
+  const nativeLabel = nativeStatus === 'complete' ? native.url ? 'Ready' : native.active ? 'Building' : 'Screenshot unavailable'
+    : ({ queued: 'Queued', running: 'Building', failed: 'Failed', cancelled: 'Cancelled' })[nativeStatus]
+
   return <section className="project-page-editor" aria-label="Page editor">
     <h2>Page</h2>
     <p className="project-page-editor__note">Create a coming-soon page or photo portfolio. Saving keeps a draft in this project; it does not publish a site.</p>
@@ -197,6 +296,19 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
         {draft.schema === 'leaf.portfolio.v1' && <button type="button" onClick={() => download('ios')} disabled={!enabled || Boolean(busy) || dirty || !saved}>Download native iOS source</button>}
       </div>
       {dirty && <p className="project-page-editor__note">Save before downloading source. Reload saved page replaces your current draft.</p>}
+      {saved?.document.schema === 'leaf.portfolio.v1' && draft.schema === 'leaf.portfolio.v1' && <section className="project-page-editor__native" aria-label="iOS preview">
+        <h3>iOS preview</h3>
+        <p className="project-page-editor__note">Build a private simulator preview of your saved portfolio. It is not an installed or published app.</p>
+        <div className="project-page-editor__actions">
+          <button type="button" onClick={buildNative} disabled={!enabled || Boolean(busy) || dirty || Boolean(validation) || Boolean(native?.active)
+            || Boolean(native?.job && !['failed', 'cancelled'].includes(nativeStatus))}>Build iOS preview</button>
+          {native?.job && <button type="button" onClick={checkNative} disabled={!enabled || Boolean(native.active)}>Check preview again</button>}
+        </div>
+        {dirty && <p className="project-page-editor__note">Save changes before building a new preview.</p>}
+        {native && <p role="status" aria-live="polite">{nativeLabel || (native.active ? 'Submitting' : 'Submission unconfirmed')} · Saved revision {native.revision}</p>}
+        {native?.message && <p className="project-page-editor__note" role="status">{native.message}</p>}
+        {native?.url && <img className="project-page-editor__native-image" src={native.url} alt={`iOS simulator preview of saved portfolio revision ${native.job.revision}`} />}
+      </section>}
     </>}
     {error && <p className="project-page-editor__error" role="alert">{error.message}</p>}
     {notice && <p role="status">{notice}</p>}

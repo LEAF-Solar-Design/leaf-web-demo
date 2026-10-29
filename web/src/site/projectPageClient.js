@@ -31,7 +31,7 @@ function pagePath(projectId) {
   return `/api/projects/${projectId}/page`
 }
 
-async function request(path, { signal, ...options } = {}, consume = response => response) {
+async function request(path, { signal, native = false, ...options } = {}, consume = response => response) {
   const headers = { ...authHeaders(), ...options.headers }
   const org = getStoredOrgId()
   const actor = getStoredActorBindingId()
@@ -74,12 +74,94 @@ async function request(path, { signal, ...options } = {}, consume = response => 
     }
     return await consume(response)
   } catch (error) {
+    if (native) {
+      if (error.name === 'AbortError' && !timedOut) throw error
+      const failure = new Error(timedOut ? 'The iOS preview service took too long. Try again.' : 'Could not access the iOS preview. Try again.')
+      failure.status = error.status
+      throw failure
+    }
     if (timedOut) throw new Error('The page service took too long. Your draft is still here. Try again.')
     throw error
   } finally {
     clearTimeout(timeout)
     signal?.removeEventListener('abort', cancel)
   }
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const DIGEST = /^[0-9a-f]{64}$/
+const validUuid = value => typeof value === 'string' && value.length === 36 && UUID.test(value)
+const validDigest = value => typeof value === 'string' && value.length === 64 && DIGEST.test(value)
+const MAX_SCREENSHOT = 16 * 1024 * 1024
+const nativeInvalid = () => { throw new Error('The iOS preview response could not be verified. Try again.') }
+
+function nativePath(projectId, jobId) {
+  if (!validUuid(projectId) || (jobId !== undefined && !validUuid(jobId))) nativeInvalid()
+  return `/api/projects/${projectId}/native-previews${jobId === undefined ? '' : `/${jobId}`}`
+}
+
+export function validateNativePreview(value, expected = {}) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)
+    || !validUuid(value.job_id)
+    || !Number.isSafeInteger(value.revision) || value.revision < 1
+    || !validDigest(value.document_sha256) || !validDigest(value.archive_sha256)
+    || !['queued', 'running', 'complete', 'failed', 'cancelled'].includes(value.status)) nativeInvalid()
+  for (const field of ['job_id', 'revision', 'document_sha256', 'archive_sha256']) {
+    if (expected[field] !== undefined && value[field] !== expected[field]) nativeInvalid()
+  }
+  if (value.status === 'complete') {
+    const receipt = value.receipt
+    if (value.evidence_basis !== 'authenticated-worker-report' || !receipt || Array.isArray(receipt)
+      || Object.keys(receipt).sort().join(',') !== 'kind,receipt_id,sha256'
+      || receipt.kind !== 'simulator' || !validUuid(receipt.receipt_id) || !validDigest(receipt.sha256)) nativeInvalid()
+  }
+  return { job_id: value.job_id, status: value.status, revision: value.revision,
+    document_sha256: value.document_sha256, archive_sha256: value.archive_sha256,
+    ...(value.status === 'complete' ? { receipt: { ...value.receipt }, evidence_basis: value.evidence_basis } : {}) }
+}
+
+export async function submitProjectNativePreview(projectId, revision, idempotencyKey, { signal } = {}) {
+  if (!Number.isSafeInteger(revision) || revision < 1 || typeof idempotencyKey !== 'string'
+    || idempotencyKey.length < 1 || idempotencyKey.length > 200 || /[^\x21-\x7e]/.test(idempotencyKey)) nativeInvalid()
+  return request(nativePath(projectId), { native: true, signal, method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'Idempotency-Key': idempotencyKey },
+    body: JSON.stringify({ revision }),
+  }, async response => validateNativePreview(await response.json(), { revision }))
+}
+
+export async function loadProjectNativePreview(projectId, jobId, { signal } = {}) {
+  return request(nativePath(projectId, jobId), { native: true, signal },
+    async response => validateNativePreview(await response.json(), { job_id: jobId }))
+}
+
+export async function downloadProjectNativePreviewScreenshot(projectId, jobId, { signal } = {}) {
+  return request(`${nativePath(projectId, jobId)}/screenshot`, { native: true, signal }, async response => {
+    if ((response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() !== 'image/png') nativeInvalid()
+    const length = response.headers.get('content-length')
+    if (length && (!/^\d+$/.test(length) || Number(length) > MAX_SCREENSHOT)) nativeInvalid()
+    const reader = response.body?.getReader()
+    let blob
+    if (reader) {
+      const chunks = []
+      let size = 0
+      try {
+        while (true) {
+          const { done, value } = await reader.read()
+          if (done) break
+          size += value.byteLength
+          if (size > MAX_SCREENSHOT) nativeInvalid()
+          chunks.push(value)
+        }
+        blob = new Blob(chunks, { type: 'image/png' })
+      } finally {
+        try { await reader.cancel() } finally { reader.releaseLock() }
+      }
+    } else blob = await response.blob()
+    if (blob.size < 33 || blob.size > MAX_SCREENSHOT) nativeInvalid()
+    const signature = new Uint8Array(await blob.slice(0, 16).arrayBuffer())
+    if (![137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82].every((byte, index) => signature[index] === byte)) nativeInvalid()
+    return blob
+  })
 }
 
 async function readPage(response, allowAbsent) {
