@@ -310,6 +310,89 @@ async function expectDraftingBands(page, info, phase) {
   await expectCenterHit(page.locator('.bar-command-line .bar-field'))
 }
 
+for (const [size, viewport] of [['desktop', { width: 1440, height: 709 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`fresh workspace header opens and dismisses Projects at ${size}`, async ({ page }, info) => {
+    page.setDefaultTimeout(15_000)
+    await page.setViewportSize(viewport)
+    const mutations = await backend(page)
+    await page.goto('/app?surface=browser')
+    const environment = page.locator('.workspace-environment')
+    const chooser = page.locator('.environment-chooser')
+    const projects = page.getByRole('button', { name:/^Projects: change project\./ })
+    const picker = page.locator('.proj-menu[role="menu"]')
+    const attachGeometry = async phase => {
+      const geometry = await page.evaluate(() => {
+        const rect = selector => {
+          const el = document.querySelector(selector)
+          if (!el) return null
+          const b = el.getBoundingClientRect()
+          return { x:b.x, y:b.y, width:b.width, height:b.height, right:b.right, bottom:b.bottom }
+        }
+        const trigger = document.querySelector('.proj-chip[aria-haspopup="menu"]')
+        const b = trigger.getBoundingClientRect()
+        const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)
+        return { width:innerWidth, height:innerHeight,
+          scroll:Math.max(document.documentElement.scrollWidth, document.body.scrollWidth),
+          entered:document.querySelector('.workspace-environment').dataset.entered,
+          drawerTop:getComputedStyle(document.documentElement).getPropertyValue('--drawer-top'),
+          header:rect('header.top'), backdrop:rect('.environment-backdrop'),
+          projects:rect('.proj-chip[aria-haspopup="menu"]'), picker:rect('.proj-menu'),
+          chooser:rect('.environment-chooser'),
+          projectsOwnsCenter:hit === trigger || trigger.contains(hit),
+          centerHit:hit ? { tag:hit.tagName, className:hit.className } : null }
+      })
+      await info.attach(`${size}-${phase}-geometry`, { body:JSON.stringify(geometry, null, 2), contentType:'application/json' })
+      await info.attach(`${size}-${phase}`, { body:await page.screenshot(), contentType:'image/png' })
+      expect(geometry.width).toBe(viewport.width)
+      expect(geometry.height).toBe(viewport.height)
+      expect(geometry.scroll).toBeLessThanOrEqual(geometry.width)
+      return geometry
+    }
+    // Playwright's page fixture has a fresh context. Do not enter Studio to
+    // uncover the header: this is the chooser's initial, intercepting state.
+    await expect(environment).toHaveAttribute('data-entered', 'false')
+    await expect(chooser).toBeVisible()
+    await expect(projects).toBeEnabled()
+    const initial = await attachGeometry('initial')
+    expect(initial.backdrop.y).toBeGreaterThanOrEqual(initial.header.bottom)
+    await expectCenterHit(projects)
+    const projectLabel = await projects.textContent()
+    await projects.click()
+    await expect(projects).toHaveAttribute('aria-expanded', 'true')
+    await expect(picker).toBeVisible()
+    await expect(environment).toHaveAttribute('data-entered', 'false')
+    // Focus a real picker control without creating or opening a project.
+    const draft = picker.getByRole('textbox', { name:'New project', exact:true })
+    await expectCenterHit(draft)
+    await draft.click()
+    await expect(draft).toBeFocused()
+    await attachGeometry('picker-open')
+    await expectCenterHit(projects)
+    await projects.click()
+    await expect(projects).toHaveAttribute('aria-expanded', 'false')
+    await expect(picker).toBeHidden()
+    await expect(projects).toHaveText(projectLabel)
+    await expect(environment).toHaveAttribute('data-entered', 'false')
+    // The backdrop still protects the workspace, while the chooser can enter it.
+    const open = chooser.getByRole('button', { name:'Open project or material', exact:true })
+    await expectCenterHit(open)
+    await open.click()
+    await expect(environment).toHaveAttribute('data-entered', 'true')
+    const sidebar = page.getByRole('region', { name:'Project sidebar', exact:true })
+    await expect(sidebar).toBeVisible()
+    await sidebar.getByRole('button', { name:'Close Project', exact:true }).click()
+    await expect(sidebar).toBeHidden()
+    await page.getByRole('navigation', { name:'Workspace controls', exact:true })
+      .getByRole('button', { name:'Choose', exact:true }).click()
+    await expect(environment).toHaveAttribute('data-entered', 'false')
+    await expectCenterHit(open)
+    await expectCenterHit(projects)
+    await attachGeometry('chooser-restored')
+    await expect(projects).toHaveText(projectLabel)
+    expect(mutations).toEqual([])
+  })
+}
+
 for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wide-desktop', { width: 1600, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`docked workspace chrome remains usable at ${size}`, async ({ page }, info) => {
     test.setTimeout(120_000)
