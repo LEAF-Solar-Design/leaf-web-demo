@@ -2585,9 +2585,9 @@ def build_suites() -> List[Suite]:
         # 34 -> 47 measured 2026-10-13: PP-2d libpq environment isolation and real startup packets. A1/C1: 85 collected, +28 fake native rows and +7 C1 rows. A1d +2. A1e +2
         Suite("scripts-proof-project-pg", "scripts test_proof_project_pg.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 89),
-        # Records A/A2/B/C/D/E/A1/C1: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 rows. A1c 1 row. A1e +2
+        # Records A/A2/B/C/D/E/A1/C1/A1c/A1e and PP-3B: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 + 1 A1c + 2 A1e + 21 browser rows.
         Suite("scripts-proof-project", "scripts test_proof_project.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 275),
+              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 296),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
@@ -3454,6 +3454,10 @@ def build_suites() -> List[Suite]:
         # could gate anything.
         Suite("web-app-wiring", "App.jsx structural wiring pins", "script", WEB,
               [_npm(), "run", "check:app-wiring"], None),
+        # PP-3B: explicit discovery; the script itself requires all 21 rows to pass.
+        Suite("web-project-proof-contract", "web managed project proof contract", "script", WEB,
+              ["node", "--input-type=module", "-e",
+               "import { startVitest } from 'vitest/node'; const ctx = await startVitest('test', ['e2e/project/projectProof.test.mjs'], { config: false, run: true, environment: 'node', include: ['e2e/project/projectProof.test.mjs'], exclude: ['node_modules/**'], reporters: ['verbose'] }); if (!ctx) process.exitCode = 1; else { const rows = ctx.state.getFiles().flatMap(file => file.tasks); if (rows.length !== 21 || rows.some(row => row.type !== 'test' || row.result?.state !== 'pass')) process.exitCode = 1; await ctx.close(); }"], None),
         Suite("web-walk-unit", "Studio walk unit tests", "script", WEB,
               [_npm(), "run", "check:walk-unit"], None),
         Suite("web-elk-rank", "web node --test scripts/elk_rank.test.mjs", "script", WEB,
@@ -5333,6 +5337,7 @@ _SERIAL_SUITE_REASONS = {
     ), "shared PostgreSQL schema"),
     "server-sessions-e2e": "rebuilds shared harness/dist with npm",
     "web-elk-rank": "node --test shares web/node_modules and build outputs in its cwd",
+    "web-project-proof-contract": "Vitest shares web/node_modules and build outputs in its cwd",
     "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
     "studio-walk-regressions": "nested stack boots services and rebuilds shared production bundle",
     "harness-container-smoke": "fixed compose project and container ports 8130/8150",

@@ -4747,3 +4747,367 @@ def test_h_a1c_scrub_unreadable_root_refuses(tmp_path, monkeypatch):
     monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
     assert p._Host.scrub(reservation, keep_safe=False) is False
     assert removals == []
+# PP-3B production browser boundary: only fake children and temporary evidence.
+def browser_case(tmp_path, monkeypatch):
+    from dataclasses import asdict
+    c = SimpleNamespace(exit_code=None, starts=[], stops=[], stopped=True)
+    c.repo = tmp_path / "repo"
+    c.cli = c.repo / "web/node_modules/@playwright/test/cli.js"
+    c.cli.parent.mkdir(parents=True)
+    c.cli.write_text("fake install marker", encoding="utf-8")
+    c.output = tmp_path / "artifacts"
+    c.output.mkdir()
+    c.scope = p.RunScope(effects=case().effects)
+    c.request = p.BrowserRequest("run-test", fake_host().source, "fakekey", "fakeorg", "fakebind",
+        "project:run-test", "http://127.0.0.1:8101", "http://127.0.0.1:8102", p.REQUIRED_TEST_IDS,
+        {"PATH": "fake-path", "SYSTEMROOT": "fake-system", "LEAF_E2E_TOKEN": "header.payload.signature",
+         "LEAF_E2E_MANAGED": "1", "LEAF_PROOF_PROJECT_RUN_ID": "run-test",
+         "VITE_API_BASE": "http://127.0.0.1:8102", "VITE_MOCK": "0", "VITE_TENANT_ID": "fakeorg",
+         "VITE_CAD_EDIT": "1", "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1",
+         "DATABASE_URL": "DATABASE_CANARY", "NODE_OPTIONS": "NODE_CANARY",
+         "LEAF_PROJECT_BASE_URL": "http://foreign.invalid", "HTTPS_PROXY": "PROXY_CANARY",
+         "LEAF_PROJECT_REQUEST": "METADATA_CANARY"}, c.output, 123.5)
+    c.report = c.output / "project-browser/browser-result.json"
+    c.raw = {"schema": p.BROWSER_REPORT_SCHEMA, "run_id": c.request.run_id,
+        "source_binding": asdict(c.request.source_binding), "public_key_thumbprint": "fakekey",
+        "exit_code": 0, "selected_test_ids": list(p.REQUIRED_TEST_IDS),
+        "started_test_ids": list(p.REQUIRED_TEST_IDS), "completed_test_ids": list(p.REQUIRED_TEST_IDS),
+        "outcomes": [{"test_id": name, "status": "passed", "retry": 0} for name in p.REQUIRED_TEST_IDS],
+        "annotation_types": [], "checkpoints": dict.fromkeys(p.CHECKPOINTS, True),
+        "canonical": asdict(p.CanonicalEvidence("fakeorg", "project", "drawing", "input", "output", "job",
+            "fakebind", "project:run-test", 1, HASH, OTHER_HASH, OTHER_HASH))}
+    def child(spec):
+        c.spec = spec
+        def start():
+            assert [kind for kind, _ in c.scope._actions] == [p.ResourceKind.BROWSER_PROCESS]
+            c.starts.append(spec)
+        def stop(deadline):
+            c.stops.append(deadline)
+            return c.stopped
+        c.child = SimpleNamespace(start=start, stop=stop, poll=lambda: c.exit_code)
+        return c.child
+    monkeypatch.setattr(p, "REPO", c.repo)
+    monkeypatch.setattr(p.shutil, "which", lambda name, *, path: "fake-node" if (name, path) == ("node", "fake-path") else None)
+    monkeypatch.setattr(p, "_RuntimeProcess", child)
+    monkeypatch.setattr(p.subprocess, "Popen", lambda *a, **k: pytest.fail("real process forbidden"))
+    c.launch = lambda: p._run_project_browser(c.request, scope=c.scope)
+    c.write = lambda: c.report.write_text(json.dumps(c.raw), encoding="utf-8", newline="\n")
+    return c
+
+
+def browser_refused(action, code=p.FailureCode.BROWSER_EVIDENCE):
+    with pytest.raises(p.ProofRefused) as caught:
+        action()
+    assert caught.value.failure == p.Failure(p.Stage.BROWSER, code)
+    assert "CANARY" not in str(caught.value) and "header.payload.signature" not in str(caught.value)
+
+
+def _pp3b_c1_pipeline(tmp_path, monkeypatch):
+    # Run the actual pipeline, then give its unmodified BrowserRequest to the
+    # actual adapter. All authority, readiness and child processes are fakes.
+    c = execution_case()
+    b = browser_case(tmp_path, monkeypatch)
+    ports = p.Ports(5185, 8010, 8011, 8012)
+    ambient = {"PATH": "fake-path", "SYSTEMROOT": "fake-system",
+        "VITE_API_BASE": "http://foreign.invalid", "VITE_MOCK": "1",
+        "VITE_TENANT_ID": "foreign-tenant", "VITE_CAD_EDIT": "0",
+        "VITE_SOLAR_FLOW_RAIL": "0", "VITE_SOLAR_SETTINGS_FORM": "0",
+        "VITE_EXTRA": "PUBLIC_CANARY", "DSN": "DSN_CANARY",
+        "ACCESS_TOKEN": "TOKEN_CANARY", "LEAF_E2E_TOKEN": "AMBIENT_TOKEN_CANARY",
+        "HTTPS_PROXY": "PROXY_CANARY", "NODE_OPTIONS": "NODE_CANARY"}
+    c.plan = replace(c.prepared.plan,
+        config=replace(c.prepared.plan.config, ports=ports, artifact_root=b.output),
+        host=replace(c.prepared.plan.host, environment=ambient))
+    c.prepared = replace(c.prepared, plan=c.plan,
+        binding=replace(c.prepared.binding, organization_id="org-1"))
+    c.prepared.identity_lease.issuer.mint = lambda *a, **k: "header.payload.signature"
+    c.stack_ready["ports"] = dict(zip(("web", "app", "broker", "harness"), ports.values()))
+    c.auth = (200, "org-1", "hosted_pro", "active")
+    c.evidence = replace(c.evidence, organization_id="org-1")
+    c.result = replace(c.result, canonical=c.evidence)
+    c.canonical = replace(c.canonical, evidence=c.evidence)
+    execute(c)
+    b.request = c.browser_requests[0]
+    b.launch()
+    return c, b
+
+
+class TestProjectBrowser:
+    def test_pp3b_c1_integrated_settings(self, tmp_path, monkeypatch):
+        # Mutations: pipeline_drops_public / child_drops_public.
+        c, b = _pp3b_c1_pipeline(tmp_path, monkeypatch)
+        expected = {"VITE_API_BASE": "http://127.0.0.1:8010", "VITE_MOCK": "0",
+            "VITE_TENANT_ID": "org-1", "VITE_CAD_EDIT": "1",
+            "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1"}
+        assert set(p.MANAGED_PUBLIC_UI_SETTINGS) == set(expected)
+        assert b.request.web_origin == "http://127.0.0.1:5185"
+        assert b.request.app_origin == expected["VITE_API_BASE"]
+        assert b.request.organization_id == expected["VITE_TENANT_ID"]
+        for env in (c.launches[0].environment, b.request.environment, b.spec.environment):
+            assert {key: value for key, value in env.items() if key.startswith("VITE_")} == expected
+        # Replay the read's counterexample at the compiler's process.env input:
+        # no empty API base, mock default, demo tenant, or web-port destination.
+        child = b.spec.environment
+        assert child["VITE_API_BASE"] + "/api/projects" == "http://127.0.0.1:8010/api/projects"
+        assert child["VITE_MOCK"] != "1" and child["VITE_TENANT_ID"] != "demo-tenant"
+
+    def test_pp3b_c1_wrong_api(self, tmp_path, monkeypatch):
+        # Mutation: accept_wrong_api.
+        c = browser_case(tmp_path, monkeypatch)
+        c.request = replace(c.request, environment={**c.request.environment,
+            "VITE_API_BASE": c.request.web_origin})
+        browser_refused(c.launch)
+        assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_mock_enabled(self, tmp_path, monkeypatch):
+        # Mutation: accept_mock_enabled.
+        c = browser_case(tmp_path, monkeypatch)
+        c.request = replace(c.request, environment={**c.request.environment, "VITE_MOCK": "1"})
+        browser_refused(c.launch)
+        assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_foreign_tenant(self, tmp_path, monkeypatch):
+        # Mutation: accept_foreign_tenant.
+        c = browser_case(tmp_path, monkeypatch)
+        c.request = replace(c.request, environment={**c.request.environment, "VITE_TENANT_ID": "foreign"})
+        browser_refused(c.launch)
+        assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_missing_flag(self, tmp_path, monkeypatch):
+        # Mutations: accept_missing_cad / accept_missing_rail / accept_missing_form.
+        for flag in ("VITE_CAD_EDIT", "VITE_SOLAR_FLOW_RAIL", "VITE_SOLAR_SETTINGS_FORM"):
+            with monkeypatch.context() as patch:
+                c = browser_case(tmp_path / flag, patch)
+                env = dict(c.request.environment)
+                del env[flag]
+                c.request = replace(c.request, environment=env)
+                browser_refused(c.launch)
+                assert c.starts == [] and not c.report.parent.exists()
+
+    def test_pp3b_c1_no_extra_environment(self, tmp_path, monkeypatch):
+        # Mutations: pipeline_copies_private / child_copies_private.
+        with monkeypatch.context() as patch:
+            pipeline, b = _pp3b_c1_pipeline(tmp_path / "pipeline", patch)
+            for env in (b.request.environment, b.spec.environment):
+                assert set(env) & {"DATABASE_URL", "DSN", "ACCESS_TOKEN", "HTTPS_PROXY", "NODE_OPTIONS"} == set()
+                assert "fakedb" not in json.dumps(dict(env)) and "CANARY" not in json.dumps(dict(env))
+                assert "VITE_EXTRA" not in env
+                assert env["LEAF_E2E_TOKEN"] == "header.payload.signature"
+            assert pipeline.launches[0].environment["DATABASE_URL"] == "fakedb"
+        c = browser_case(tmp_path / "child", monkeypatch)
+        private = {key: key + "_CANARY" for key in ("DATABASE_URL", "DSN", "ACCESS_TOKEN",
+            "LEAF_HARNESS_DATABASE_URL", "LEAF_PROOF_PROJECT_JWKS_FILE", "LEAF_E2E_OTHER_TOKEN",
+            "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "NO_PROXY", "http_proxy", "NODE_OPTIONS",
+            "VITE_EXTRA", "vite_extra")}
+        c.request = replace(c.request, environment={**c.request.environment, **private})
+        c.launch()
+        assert not set(private) & set(c.spec.environment)
+        assert "CANARY" not in json.dumps(dict(c.spec.environment))
+        assert {key for key in c.spec.environment if key.upper().startswith("VITE_")} == {
+            "VITE_API_BASE", "VITE_MOCK", "VITE_TENANT_ID", "VITE_CAD_EDIT",
+            "VITE_SOLAR_FLOW_RAIL", "VITE_SOLAR_SETTINGS_FORM"}
+
+    def test_pp3b_c1_shared_constant(self, tmp_path, monkeypatch):
+        # Mutations: stack_hardcodes_flag / pipeline_hardcodes_flag / child_hardcodes_flag.
+        # Perturb both a fixed value and the key set to detect copied literals at
+        # any construction site; production still admits exactly the six keys.
+        settings = {**p.MANAGED_PUBLIC_UI_SETTINGS, "VITE_CAD_EDIT": "shared-flag",
+            "VITE_PP3B_C1_SENTINEL": "shared-key"}
+        monkeypatch.setattr(p, "MANAGED_PUBLIC_UI_SETTINGS", MappingProxyType(settings))
+        c, b = _pp3b_c1_pipeline(tmp_path, monkeypatch)
+        expected = {**settings, "VITE_API_BASE": "http://127.0.0.1:8010", "VITE_TENANT_ID": "org-1"}
+        for env in (c.launches[0].environment, b.request.environment, b.spec.environment):
+            assert {key: value for key, value in env.items() if key.startswith("VITE_")} == expected
+
+    def test_argv_environment_closed(self, tmp_path, monkeypatch):
+        from dataclasses import asdict
+        c = browser_case(tmp_path, monkeypatch)
+        c.launch()
+        assert c.spec.argv == ("fake-node", str(c.cli), "test", "-c", "playwright.project.config.mjs")
+        assert c.spec.cwd == c.repo / "web" and c.spec.deadline == 123.5
+        assert c.spec.output_path is None
+        env = dict(c.spec.environment)
+        assert set(env) == {"PATH", "SYSTEMROOT", "LEAF_E2E_TOKEN", "LEAF_E2E_MANAGED",
+            "LEAF_PROOF_PROJECT_RUN_ID", "LEAF_PROJECT_REQUEST", "LEAF_PROJECT_BASE_URL",
+            "LEAF_PROJECT_OUTPUT_DIR", "LEAF_PROJECT_PROOF_OUTPUT",
+            "VITE_API_BASE", "VITE_MOCK", "VITE_TENANT_ID",
+            "VITE_CAD_EDIT", "VITE_SOLAR_FLOW_RAIL", "VITE_SOLAR_SETTINGS_FORM"}
+        assert env["LEAF_E2E_TOKEN"] == "header.payload.signature"
+        assert env["LEAF_E2E_MANAGED"] == "1" and env["LEAF_PROOF_PROJECT_RUN_ID"] == "run-test"
+        assert env["LEAF_PROJECT_BASE_URL"] == c.request.web_origin
+        assert Path(env["LEAF_PROJECT_OUTPUT_DIR"]) == c.output / "project-browser/playwright-output"
+        assert Path(env["LEAF_PROJECT_PROOF_OUTPUT"]) == c.report
+        assert json.loads(env["LEAF_PROJECT_REQUEST"]) == json.loads(json.dumps({"profile": "project",
+            "run_id": c.request.run_id, "source_binding": asdict(c.request.source_binding),
+            "public_key_thumbprint": "fakekey", "organization_id": "fakeorg", "binding_id": "fakebind",
+            "worker_id": "project:run-test", "web_origin": c.request.web_origin,
+            "app_origin": c.request.app_origin, "required_test_ids": p.REQUIRED_TEST_IDS}))
+        assert "header.payload.signature" not in repr(c.spec.argv) + repr(c.spec)
+        assert "CANARY" not in json.dumps(env)
+        for patch in ({"LEAF_E2E_MANAGED": "0"}, {"LEAF_PROOF_PROJECT_RUN_ID": "wrong-run"},
+                      {"LEAF_E2E_TOKEN": "bad-token"}):
+            c.request = replace(c.request, environment={**dict(c.request.environment), **patch})
+            browser_refused(c.launch)
+        c.request = replace(c.request, web_origin="http://localhost:8101")
+        browser_refused(c.launch)
+
+    def test_output_fresh_existing_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        c.report.parent.mkdir()
+        browser_refused(c.launch)
+        assert c.starts == []
+        c.report.write_bytes(b"existing report")
+        browser_refused(c.launch)
+        assert c.report.read_bytes() == b"existing report" and c.starts == []
+        c.report.unlink()
+        c.report.parent.rmdir()
+        c.launch()
+        assert c.report.parent.is_dir() and (c.report.parent / "playwright-output").is_dir()
+        assert not c.report.exists()
+        browser_refused(c.launch)
+        assert len(c.starts) == 1
+        # Refuse a report inserted after the fresh directories were created.
+        with monkeypatch.context() as race_patch:
+            race = browser_case(tmp_path / "race", race_patch)
+            mkdir = Path.mkdir
+            def insert_report(path, *args, **kwargs):
+                result = mkdir(path, *args, **kwargs)
+                if path == race.report.parent / "playwright-output":
+                    race.report.write_bytes(b"racing existing report")
+                return result
+            race_patch.setattr(Path, "mkdir", insert_report)
+            browser_refused(race.launch)
+            assert race.starts == [] and race.report.read_bytes() == b"racing existing report"
+
+    def test_registered_before_child(self, tmp_path, monkeypatch):
+        runtime_class = p._RuntimeProcess
+        c = browser_case(tmp_path, monkeypatch)
+        transfers = []
+        c.scope.guardian = SimpleNamespace(own_process=transfers.append)
+        browser = c.launch()
+        assert c.spec.role == "project-browser" and browser.process is c.child
+        assert transfers == [c.child]
+        assert len(c.scope._actions) == 1
+        assert c.scope._actions[0][0] is p.ResourceKind.BROWSER_PROCESS
+        assert c.scope._actions[0][1]() is True and len(c.stops) == 1
+        # Exercise the real role allowlist with a Popen fake that acquires nothing.
+        calls = []
+        def popen(*args, **kwargs):
+            calls.append(args)
+            raise OSError("FAKE_POPEN")
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(close=lambda: None))
+        with pytest.raises(RuntimeError, match="runtime process start failed"):
+            runtime_class(c.spec).start()
+        assert len(calls) == 1
+
+    def test_poll_none_while_running(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        assert browser.poll() is None
+        c.write()  # Even a complete report cannot outrun its owned child.
+        assert browser.poll() is None
+
+    def test_complete_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.write()
+        c.exit_code = 0
+        result = browser.poll()
+        assert type(result) is p.BrowserResult and result.source_binding == c.request.source_binding
+        assert all(type(item) is p.FileProof for item in result.source_binding.files)
+        assert type(result.canonical) is p.CanonicalEvidence
+        assert type(result.outcomes) is tuple and all(type(item) is p.TestOutcome for item in result.outcomes)
+        assert p._validate_browser(result, c.request) is result
+        assert result.exit_code == 0 and result.checkpoints == dict.fromkeys(p.CHECKPOINTS, True)
+
+    def test_missing_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        browser_refused(browser.poll)
+
+    def test_malformed_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        for payload in (b"{", b"\xff", b"null", b"[]", b'{"schema":NaN}'):
+            c.report.write_bytes(payload)
+            browser_refused(browser.poll)
+
+    def test_duplicate_keys(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        valid = json.dumps(c.raw)
+        for payload in (valid.replace('{', '{"schema":"leaf.project-browser.v1",', 1),
+                valid.replace('"checkout_fence": 1', '"checkout_fence": 1, "checkout_fence": 1')):
+            c.report.write_text(payload, encoding="utf-8", newline="\n")
+            browser_refused(browser.poll)
+
+    def test_oversize_report(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        c.report.write_bytes(json.dumps(c.raw).encode() + b" " * p.BROWSER_REPORT_LIMIT)
+        browser_refused(browser.poll)
+
+    def test_unknown_fields(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.exit_code = 0
+        for obj in (c.raw, c.raw["source_binding"], c.raw["source_binding"]["files"][0],
+                    c.raw["canonical"], c.raw["outcomes"][0], c.raw["checkpoints"]):
+            obj["unknown"] = "CANARY"
+            c.write()
+            browser_refused(browser.poll)
+            del obj["unknown"]
+        c.raw["schema"] = "leaf.project-browser.v0"
+        c.write()
+        browser_refused(browser.poll)
+        c.raw["schema"] = p.BROWSER_REPORT_SCHEMA
+        for obj, key, value in ((c.raw, "exit_code", False), (c.raw["outcomes"][0], "retry", False),
+                (c.raw["canonical"], "checkout_fence", True),
+                (c.raw["source_binding"]["files"][0], "size", True)):
+            old = obj[key]
+            obj[key] = value
+            c.write()
+            browser_refused(browser.poll)
+            obj[key] = old
+
+    def test_nonzero_exit(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        c.write()
+        for code in (1, -1, 2, False, "0"):
+            c.exit_code = code
+            browser_refused(browser.poll, p.FailureCode.BROWSER_EXIT)
+
+    def test_stop_delegates(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        browser = c.launch()
+        assert browser.stop(99.25) is True
+        c.stopped = False
+        assert browser.stop(100.5) is False
+        assert c.stops == [99.25, 100.5]
+
+    def test_production_wiring(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        effects = p.production_effects()
+        assert effects.browser_runner is p._run_project_browser
+        assert effects.browser_runner is not p._browser_unavailable
+        browser = effects.browser_runner(c.request, scope=c.scope)
+        assert browser.process is c.child and len(c.starts) == 1
+        # Real production lifecycle admission refuses a scope without D's custody.
+        browser_refused(lambda: p._browser_install(fake_scope(), c.request.environment),
+            p.FailureCode.BROWSER_UNAVAILABLE)
+
+    def test_missing_playwright_install(self, tmp_path, monkeypatch):
+        c = browser_case(tmp_path, monkeypatch)
+        c.cli.unlink()
+        browser_refused(c.launch, p.FailureCode.BROWSER_UNAVAILABLE)
+        assert c.starts == [] and not c.report.parent.exists()
+        c.cli.write_text("fake install", encoding="utf-8")
+        monkeypatch.setattr(p.shutil, "which", lambda *a, **k: None)
+        browser_refused(c.launch, p.FailureCode.BROWSER_UNAVAILABLE)
+        assert c.starts == []
