@@ -3366,11 +3366,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   if (target === 'project-board') {
     const environment = page.locator('section.workspace-environment')
     if (await environment.count()) {
-      await expect(page.getByRole('heading', { name: 'What would you like to work on?', exact: true })).toBeVisible()
-      await expect(environment).toHaveAttribute('data-entered', 'false')
+      await assertions(page.getByRole('heading', { name: 'What would you like to work on?', exact: true })).toBeVisible()
+      await assertions(environment).toHaveAttribute('data-entered', 'false')
     } else {
-      await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeVisible()
-      await expect(page.getByRole('button', { name: 'Return to drawing', exact: true })).toBeVisible()
+      await assertions(page.getByRole('heading', { name: 'Project board', exact: true })).toBeVisible()
+      await assertions(page.getByRole('button', { name: 'Return to drawing', exact: true })).toBeVisible()
     }
     return
   }

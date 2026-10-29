@@ -1134,6 +1134,37 @@ test('WL23 Start requires the visible chooser and exited environment, or the leg
   }
 })
 
+test('WL23 project-board routes every environment and legacy check through injected assertions', async () => {
+  const probe = { assertion: { target: 'project-board' } }
+  for (const present of [true, false]) {
+    const calls = []
+    const environment = { count: async () => present ? 1 : 0 }
+    const page = {
+      locator: selector => {
+        assert.equal(selector, 'section.workspace-environment')
+        return environment
+      },
+      getByRole: (role, options) => ({ role, ...options }),
+    }
+    const assertions = locator => {
+      const call = { locator }
+      calls.push(call)
+      return {
+        toBeVisible: async () => { call.matcher = 'toBeVisible' },
+        toHaveAttribute: async (...args) => { call.matcher = 'toHaveAttribute'; call.args = args },
+      }
+    }
+    await assertEffect(probe, { page }, null, {}, assertions)
+    assert.deepEqual(calls, present ? [
+      { locator: { role: 'heading', name: 'What would you like to work on?', exact: true }, matcher: 'toBeVisible' },
+      { locator: environment, matcher: 'toHaveAttribute', args: ['data-entered', 'false'] },
+    ] : [
+      { locator: { role: 'heading', name: 'Project board', exact: true }, matcher: 'toBeVisible' },
+      { locator: { role: 'button', name: 'Return to drawing', exact: true }, matcher: 'toBeVisible' },
+    ])
+  }
+})
+
 function boundedWorkspacePoll({ passes = 4, beforePass = () => {} } = {}) {
   const polls = []
   const assertions = (value, message) => walkExpect(value, message)
