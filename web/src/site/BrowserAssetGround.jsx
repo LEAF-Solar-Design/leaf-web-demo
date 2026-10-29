@@ -2,7 +2,7 @@ import { createContext, useEffect, useRef, useState } from 'react'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import WorkspaceEnvironment from './WorkspaceEnvironment.jsx'
 import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
-import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { authConfigured, isSignedIn, login, subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import './browserAssetGround.css'
@@ -16,6 +16,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
   const browserPanel = controlledPanel ?? localPanel
   const onBrowserPanel = setControlledPanel || setLocalPanel
   const [authEpoch, setAuthEpoch] = useState(0)
+  const [showSignIn, setShowSignIn] = useState(() => authConfigured && !isSignedIn())
   const scopeKey = JSON.stringify([signedIn === true, accountScope || null, projectId || null, authEpoch])
   const scope = useRef(null)
   const [asset, setAsset] = useState(null)
@@ -36,7 +37,10 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
     const checkAccount = () => {
       if (composerDraftAccountScope() !== accountRef.current) invalidate()
     }
-    const token = subscribeTokenStored(checkAccount)
+    const token = subscribeTokenStored(() => {
+      setShowSignIn(authConfigured && !isSignedIn())
+      checkAccount()
+    })
     let photoScope = readActiveScope()
     const activeScope = subscribeActiveScope(() => {
       const nextScope = readActiveScope()
@@ -88,6 +92,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
     <WorkspaceEnvironment scopeKey={currentScope} profile={profile} profiles={profiles} onSelect={onSelect} onDescribe={onDescribe}
       panel={browserPanel} onPanel={onBrowserPanel} activation={activation}
       chooseRequest={boardProps.startFocusRequest} onEnter={onEnterWorkspace}
+      onSignIn={showSignIn ? () => { void login() } : undefined}
       hasContent={profile === 'browser' ? Boolean(shown) : Boolean(boardProps.drawing
         || boardProps.workspace?.drawing_versions?.length || boardProps.workspace?.jobs?.length || boardProps.workspace?.built_tools?.length)}>
       {signedIn && projectId && <ProjectPageEditor key={scopeKey} projectId={projectId} accountScope={accountScope}
