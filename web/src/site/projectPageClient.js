@@ -31,7 +31,7 @@ function pagePath(projectId) {
   return `/api/projects/${projectId}/page`
 }
 
-async function request(path, { signal, native = false, ...options } = {}, consume = response => response) {
+async function request(path, { signal, native = false, proposal = false, ...options } = {}, consume = response => response) {
   const headers = { ...authHeaders(), ...options.headers }
   const org = getStoredOrgId()
   const actor = getStoredActorBindingId()
@@ -42,10 +42,14 @@ async function request(path, { signal, native = false, ...options } = {}, consum
   let timedOut = false
   if (signal?.aborted) cancel()
   signal?.addEventListener('abort', cancel, { once: true })
-  const timeout = setTimeout(() => { timedOut = true; cancel() }, 30000)
+  const timeout = setTimeout(() => { timedOut = true; cancel() }, proposal ? 60000 : 30000)
+  const wait = promise => proposal ? abortable(promise, controller.signal) : promise
   try {
     let response
-    try { response = await fetch(`${config.apiBase}${path}`, { ...options, headers, signal: controller.signal, cache: 'no-store' }) }
+    try {
+      if (controller.signal.aborted) throw new DOMException('Cancelled', 'AbortError')
+      response = await wait(fetch(`${config.apiBase}${path}`, { ...options, headers, signal: controller.signal, cache: 'no-store' }))
+    }
     catch (error) {
       if (error.name === 'AbortError') throw error
       throw new Error('Could not reach the page service. Your draft is still here. Try again.')
@@ -61,18 +65,19 @@ async function request(path, { signal, native = false, ...options } = {}, consum
         422: 'Some page fields were not accepted. Check your draft and try again.',
       }
       let message = messages[response.status]
-      if (response.status === 422) {
+      if (response.status === 422 && !proposal) {
         try {
           const { detail } = await response.json()
           if (typeof detail === 'string' && /^Portfolio (?:previews exceed 64 MiB|(?:source|archive) exceeds 80 MiB)/.test(detail)) message = 'This portfolio is too large to export. Reduce the selected photos, save, and try again.'
           if (typeof detail === 'string' && detail.startsWith('A portfolio photo is missing from this project')) message = 'A selected photo is missing or changed. Re-select it from this project, save, and try again.'
         } catch { /* retain the bounded default message */ }
       }
+      if (proposal) void response.body?.cancel?.().catch(() => {})
       const error = new Error(message || 'The page action failed. Your draft is still here. Try again.')
       error.status = response.status
       throw error
     }
-    return await consume(response)
+    return await wait(consume(response, controller.signal))
   } catch (error) {
     if (native) {
       if (error.name === 'AbortError' && !timedOut) throw error
@@ -94,6 +99,133 @@ const validUuid = value => typeof value === 'string' && value.length === 36 && U
 const validDigest = value => typeof value === 'string' && value.length === 64 && DIGEST.test(value)
 const MAX_SCREENSHOT = 16 * 1024 * 1024
 const nativeInvalid = () => { throw new Error('The iOS preview response could not be verified. Try again.') }
+
+function abortable(promise, signal) {
+  return new Promise((resolve, reject) => {
+    const cancel = () => reject(new DOMException('Cancelled', 'AbortError'))
+    if (signal.aborted) cancel()
+    else signal.addEventListener('abort', cancel, { once: true })
+    Promise.resolve(promise).then(resolve, reject).finally(() => signal.removeEventListener('abort', cancel))
+  })
+}
+
+const proposalInvalid = () => { throw new Error('The text proposal could not be verified. Try again.') }
+const closed = (value, keys) => value && typeof value === 'object' && !Array.isArray(value)
+  && Object.keys(value).sort().join(',') === keys.split(' ').sort().join(',')
+const canonical = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)
+
+// Traverse trusted portfolio structure directly. Model ids are never paths or labels.
+export function portfolioTextChanges(saved, proposed) {
+  try {
+    const copy = validatePortfolioDocument(saved)
+    validatePortfolioDocument(proposed)
+    const changes = []
+    const text = (target, next, field, label) => {
+      if (target[field] !== next[field]) changes.push({ label, before: target[field], after: next[field] })
+      target[field] = next[field]
+    }
+    for (const [field, label] of [['name', 'Name'], ['headline', 'Headline'], ['introduction', 'Introduction'], ['about', 'About']]) text(copy, proposed, field, label)
+    for (const field of ['email', 'location']) text(copy.contact, proposed.contact, field, `Contact ${field}`)
+    if (copy.resume.length !== proposed.resume.length || copy.categories.length !== proposed.categories.length) proposalInvalid()
+    copy.resume.forEach((section, index) => {
+      const next = proposed.resume[index], prefix = `Resume section ${index + 1}: ${section.heading}`
+      text(section, next, 'heading', `${prefix} — heading`)
+      if (section.entries.length !== next.entries.length) proposalInvalid()
+      section.entries.forEach((entry, entryIndex) => {
+        for (const field of ['title', 'subtitle', 'dates', 'description']) text(entry, next.entries[entryIndex], field, `${prefix}, entry ${entryIndex + 1} — ${field}`)
+      })
+    })
+    copy.categories.forEach((category, index) => {
+      const next = proposed.categories[index], prefix = `Gallery ${index + 1}: ${category.title}`
+      for (const field of ['title', 'description']) text(category, next, field, `${prefix} — ${field}`)
+      if (category.images.length !== next.images.length) proposalInvalid()
+      category.images.forEach((image, imageIndex) => {
+        for (const [field, label] of [['title', 'caption'], ['alt', 'alt text']]) text(image, next.images[imageIndex], field, `${prefix}, photo ${imageIndex + 1} — ${label}`)
+      })
+    })
+    if (canonical(copy) !== canonical(proposed)) proposalInvalid()
+    return changes
+  } catch { return proposalInvalid() }
+}
+
+async function readProposal(response, signal) {
+  const max = 1024 * 1024
+  let reader
+  try {
+    if ((response.headers.get('content-type') || '').split(';')[0].trim().toLowerCase() !== 'application/json') proposalInvalid()
+    const length = response.headers.get('content-length')
+    if (length !== null && (!/^\d+$/.test(length) || Number(length) > max)) proposalInvalid()
+    reader = response.body?.getReader()
+    let encoded
+    if (reader) {
+      const chunks = []
+      let size = 0
+      while (true) {
+        const { done, value } = await abortable(reader.read(), signal)
+        if (done) break
+        size += value.byteLength
+        if (size > max) proposalInvalid()
+        chunks.push(value)
+      }
+      const bytes = new Uint8Array(size)
+      let offset = 0
+      for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+      encoded = new TextDecoder('utf-8', { fatal: true }).decode(bytes)
+    } else encoded = await abortable(response.text(), signal)
+    if (new TextEncoder().encode(encoded).length > max) proposalInvalid()
+    return JSON.parse(encoded)
+  } catch (error) {
+    if (error.name === 'AbortError') throw error
+    return proposalInvalid()
+  } finally {
+    if (reader) {
+      void reader.cancel().catch(() => {})
+      reader.releaseLock()
+    } else if (response.body?.cancel) void response.body.cancel().catch(() => {})
+  }
+}
+
+export async function proposeProjectPage(projectId, saved, instruction, { signal } = {}) {
+  const path = pagePath(projectId)
+  if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
+    || typeof instruction !== 'string' || !instruction.trim() || Array.from(instruction).length > 4000) {
+    throw new Error('Save the portfolio and enter a text change of 1 to 4000 characters.')
+  }
+  let document
+  try { document = validatePortfolioDocument(saved.document) } catch { return proposalInvalid() }
+  const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
+  return request(`${path}/proposals`, { signal, proposal: true, method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ expected_revision: source.revision, expected_digest: source.digest, instruction }),
+  }, async (response, requestSignal) => {
+    const value = await readProposal(response, requestSignal)
+    if (!closed(value, 'source proposed_document proposed_digest edits model usage')
+      || !closed(value.source, 'project_id revision digest') || canonical(value.source) !== canonical(source)
+      || !validDigest(value.proposed_digest) || typeof value.model !== 'string' || !value.model.trim()
+      || value.model.length > 128 || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.model)
+      || !Array.isArray(value.edits) || value.edits.length > 32
+      || !value.usage || typeof value.usage !== 'object' || Array.isArray(value.usage)) proposalInvalid()
+    const ids = new Set()
+    for (const edit of value.edits) {
+      if (!closed(edit, 'id value') || typeof edit.id !== 'string' || !edit.id.trim() || edit.id.length > 128
+        || ids.has(edit.id) || typeof edit.value !== 'string' || Array.from(edit.value).length > 8000) proposalInvalid()
+      ids.add(edit.id)
+    }
+    const usageKeys = ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'cost_tokens']
+    for (const [key, count] of Object.entries(value.usage)) {
+      if (!usageKeys.includes(key) || !Number.isSafeInteger(count) || count < 0) proposalInvalid()
+    }
+    const changes = portfolioTextChanges(document, value.proposed_document)
+    const values = value.edits.map(edit => edit.value)
+    for (const change of changes) {
+      const index = values.indexOf(change.after)
+      if (index < 0) proposalInvalid()
+      values.splice(index, 1)
+    }
+    return value
+  })
+}
 
 function nativePath(projectId, jobId) {
   if (!validUuid(projectId) || (jobId !== undefined && !validUuid(jobId))) nativeInvalid()
