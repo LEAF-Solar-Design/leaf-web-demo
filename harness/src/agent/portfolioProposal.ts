@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import type { ConverseTurnUsage, GrantLease, GrantSettlement, OAuthGrantProvider } from "../ports/index.js";
 import { buildScrubbedEnv } from "../ports/impl/agentSdkRunner.js";
 import { grantSecrets, isRedactableSecret, stripSecrets } from "../redact.js";
@@ -22,6 +23,19 @@ export interface PortfolioProposalResult {
 
 export type PortfolioProposalErrorCode = "invalid_request" | "grant_unavailable" | "invalid_output" | "sdk_failure" | "timeout" | "aborted" | "settlement_failure";
 
+type FailureStage = "lease_support" | "acquisition" | "grant" | "sdk_import" | "sdk_query" | "settlement";
+type FailureCode = "lease_methods_missing" | "acquisition_rejected" | "grant_unusable" | "sdk_import_failed" | "sdk_query_failed" | "invalid_output" | "settlement_failed" | "timeout" | "aborted";
+export interface PortfolioProposalFailure {
+  event: "portfolio_proposal_failure";
+  operation_id: string;
+  stage: FailureStage;
+  code: FailureCode;
+}
+const failureCodes: Record<FailureStage, FailureCode> = {
+  lease_support: "lease_methods_missing", acquisition: "acquisition_rejected", grant: "grant_unusable",
+  sdk_import: "sdk_import_failed", sdk_query: "sdk_query_failed", settlement: "settlement_failed",
+};
+
 /** Fixed messages never include request, model output, credentials or SDK errors.
  * Cancellation requests SDK abort; it cannot prove exit of an ignoring SDK child.
  */
@@ -38,6 +52,7 @@ export interface PortfolioProposalOptions {
   sdkImport?: () => Promise<unknown>;
   model?: string;
   timeoutMs?: number;
+  logger?: { warn(record: PortfolioProposalFailure): void };
 }
 
 interface SdkModule {
@@ -109,9 +124,22 @@ export class PortfolioProposalService {
 
   async propose(raw: PortfolioProposalRequest, signal?: AbortSignal): Promise<PortfolioProposalResult> {
     const request = validate(raw);
-    if (signal?.aborted) return fail("aborted");
+    const operationId = randomUUID();
+    let stage: FailureStage = "lease_support";
+    let warned = false;
+    const warn = (failedStage: FailureStage, code: FailureCode = failureCodes[failedStage]) => {
+      if (warned) return;
+      warned = true;
+      // Only fixed fields and a generated correlation id cross the logging boundary.
+      try {
+        (this.options.logger ?? console).warn({
+          event: "portfolio_proposal_failure", operation_id: operationId, stage: failedStage, code,
+        });
+      } catch { /* Diagnostics must not affect proposal or lease semantics. */ }
+    };
+    if (signal?.aborted) { warn(stage, "aborted"); return fail("aborted"); }
     const { oauth } = this.options;
-    if (!oauth.acquireGrant || !oauth.settleGrant) return fail("grant_unavailable");
+    if (!oauth.acquireGrant || !oauth.settleGrant) { warn(stage); return fail("grant_unavailable"); }
     const abort = new AbortController();
     let cancellation: PortfolioProposalError | undefined;
     let rejectCancellation!: (error: PortfolioProposalError) => void;
@@ -144,6 +172,7 @@ export class PortfolioProposalService {
     };
     try {
       check();
+      stage = "acquisition";
       let acquisition: Promise<GrantLease>;
       try { acquisition = oauth.acquireGrant(request.tenant_id); }
       catch { return fail("grant_unavailable"); }
@@ -152,6 +181,7 @@ export class PortfolioProposalService {
       try { lease = await Promise.race([acquisition, cancelled]); }
       catch (error) { if (error instanceof PortfolioProposalError) throw error; return fail("grant_unavailable"); }
       check();
+      stage = "grant";
       const secrets = grantSecrets(lease.grant);
       if (secrets.length !== 1 || !secrets.every(isRedactableSecret)) return fail("grant_unavailable");
       if (stripSecrets(JSON.stringify(request.source), secrets) !== JSON.stringify(request.source) ||
@@ -162,8 +192,10 @@ export class PortfolioProposalService {
         fields: request.fields.map(f => ({ ...f, id: stripSecrets(f.id, secrets), value: stripSecrets(f.value, secrets) })),
       })}`, secrets);
       const work = async () => {
+        stage = "sdk_import";
         const sdk = await this.sdkImport() as SdkModule;
         check(); // A late import must never launch a child.
+        stage = "sdk_query";
         let text = "";
         let complete = false;
         const append = (part: string) => {
@@ -214,14 +246,24 @@ export class PortfolioProposalService {
       };
       const edits = await Promise.race([work(), cancelled]);
       reason = "end_turn";
+      stage = "settlement";
       await Promise.race([settle(lease), cancelled]);
       return { source: request.source, model: this.model, edits, usage };
     } catch (error) {
+      // SDK work updates this boundary asynchronously; snapshot it before cleanup.
+      const failedStage = stage as FailureStage;
       // Abort is the SDK cancellation boundary before handing the lease back.
       abort.abort();
       if (lease && !settled) {
         try { await Promise.race([settle(lease), cancelled]); }
-        catch (settlementError) { if (!cancellation) throw settlementError; }
+        catch (settlementError) {
+          if (!cancellation) { warn("settlement"); throw settlementError; }
+        }
+      }
+      if (!(failedStage === "grant" && error instanceof PortfolioProposalError && error.code === "invalid_request")) {
+        const code = cancellation && error === cancellation ? (cancellation.code === "timeout" ? "timeout" : "aborted") :
+          failedStage === "sdk_query" && error instanceof PortfolioProposalError && error.code === "invalid_output" ? "invalid_output" : failureCodes[failedStage];
+        warn(failedStage, code);
       }
       if (error instanceof PortfolioProposalError) throw error;
       return fail("sdk_failure");
