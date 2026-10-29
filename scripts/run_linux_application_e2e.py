@@ -30,10 +30,13 @@ from qualify_linux_browser_overlay import (
 
 
 def port_free(port):
-    # Binding also rejects a listener that does not answer HTTP. Never kill it.
+    # TIME_WAIT is not a live owner. Reuse closed sockets, but require listen
+    # to reject both a live listener and another process holding the port.
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             probe.bind(('127.0.0.1', port))
+            probe.listen(1)
         return True
     except OSError:
         return False
