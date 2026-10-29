@@ -2689,6 +2689,7 @@ class _Host:
         if scope is not None:
             scope.own_reservation(reservation, keep_safe=config.keep_run_root)
         handles = []
+        stores = []
         try:
             # Reserve private directory stores from the same names used by the child environment.
             for relative in _RUN_ROOT_DIRECTORY_STORES.values():
@@ -2696,6 +2697,7 @@ class _Host:
                 if path == config.run_root or not path.is_relative_to(config.run_root) or not _path_safe(path):
                     raise RuntimeError("unsafe directory store")
                 _private_directory(path)
+                stores.append(path)
             _private_directory(config.artifact_root)
             # Cargo may create a lockfile alongside Cargo.toml. Stage the exact
             # measured vendor inputs so even that output stays off the checkout.
@@ -2740,8 +2742,13 @@ class _Host:
             reservation.release_database_port()
             for handle in handles:
                 handle.close()
-            # Remove only empty directories created here; D handles a partially
-            # staged root. Never recursively delete an unjournaled tree here.
+            # Remove only empty stores and directories created here; D handles a
+            # partially staged root. Never recursively delete an unjournaled tree here.
+            for path in reversed(stores):
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
             try:
                 config.artifact_root.rmdir()
                 config.run_root.rmdir()

@@ -1339,6 +1339,38 @@ def test_run_root_stores_created_before_launch(tmp_path, monkeypatch):
         reservation.release_ports()
 
 
+def test_run_root_stores_removed_when_reservation_fails(tmp_path, monkeypatch):
+    def bind(address):
+        raise OSError("port taken")
+    monkeypatch.setattr(p.socket, "socket", lambda: SimpleNamespace(
+        setsockopt=lambda *args: None, bind=bind, close=lambda: None))
+    c = _run_root_stores_case(tmp_path)
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        p._Host().reserve(c.plan)
+    assert not c.plan.config.run_root.exists()
+    assert c.launches == []
+
+    second = tmp_path / "second"
+    second.mkdir()
+    c = _run_root_stores_case(second)
+    root = c.plan.config.run_root
+    keep = root / "drawings" / "keep.txt"
+    private_directory = p._private_directory
+    def create_with_collision(path):
+        private_directory(path)
+        if path == root:
+            keep.parent.mkdir()
+            keep.write_bytes(b"keep these bytes")
+    monkeypatch.setattr(p, "_private_directory", create_with_collision)
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        p._Host().reserve(c.plan)
+    assert keep.read_bytes() == b"keep these bytes"
+    assert root.is_dir()
+    assert all(not (root / relative).exists()
+               for relative in p._RUN_ROOT_DIRECTORY_STORES.values() if relative != "drawings")
+    assert c.launches == []
+
+
 def test_run_root_stores_agent_state_in_root(tmp_path):
     c = _run_root_stores_case(tmp_path)
     env = p.project_environment(c.plan, os_env=c.plan.host.environment, dsn=c.prepared.dsn,
