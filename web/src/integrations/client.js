@@ -46,6 +46,23 @@ const vercelDestination = z.strictObject({ projectId: vercelId, accountId: verce
 const vercelDestinationRead = z.strictObject({ revision: vercelReadRevision, account: vercelAccount,
   destination: vercelDestination.nullable() })
   .refine((value) => value.destination === null || value.destination.accountId === value.account.ownerId)
+const vercelPreviewPermission = z.strictObject({ enabled: z.boolean(), revision: vercelReadRevision,
+  grantRevision: revision, connectorRef: IntegrationRefV1, account: vercelAccount, destination: vercelDestination })
+  .refine((value) => value.destination.accountId === value.account.ownerId)
+const previewRunId = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/)
+const previewBinding = z.strictObject({ runId: previewRunId, savedRevision: revision })
+const previewUrl = z.string().max(2048).refine((value) => {
+  if (!/^https:\/\/(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+vercel\.app\/?(?![\s\S])/.test(value)) return false
+  try { const url = new URL(value); return url.hostname.length <= 253 && !url.port && !url.username && !url.password }
+  catch { return false }
+})
+const vercelPreviewRun = z.strictObject({ runId: previewRunId, savedRevision: revision,
+  status: z.enum(['uploading', 'creating', 'uncertain', 'submitted', 'ready', 'failed', 'failed_not_sent']),
+  deploymentId: z.string().regex(/^dpl_[A-Za-z0-9_-]{1,252}(?![\s\S])/).nullable(), url: previewUrl.nullable(),
+  reason: z.enum(['creation_unconfirmed', 'upload_unavailable', 'creation_not_sent', 'build_failed', 'build_canceled']).nullable(),
+  observation: z.literal('unavailable').optional(),
+}).refine((value) => (value.status !== 'ready' || (value.deploymentId !== null && value.url !== null && value.reason === null)) &&
+  (value.url === null || value.deploymentId !== null) && (value.status !== 'submitted' || value.deploymentId !== null))
 const vercelIssue = z.strictObject({ state: vercelState, expiresAt: z.string().datetime().max(64),
   authorizationUrl: z.string().min(1).max(2048), callbackUri: z.string().min(1).max(2048) })
 const vercelCompletion = z.strictObject({ configurationId: vercelId, integrationId: vercelId, userId: vercelId,
@@ -493,6 +510,34 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
       parse(slug, connectionId)
       return setupResponse(vercelDestinationRead, id, `connections/${connectionId}/vercel/destination`,
         { signal: options?.signal, method: 'GET', bodyLimit: 4096 })
+    },
+    async getVercelPreviewPermission(id, connectionId, { signal } = {}) {
+      parse(slug, connectionId)
+      return setupResponse(vercelPreviewPermission, id, `connections/${connectionId}/vercel/preview-permission`, { signal, method: 'GET' })
+    },
+    async enableVercelPreviews(id, connectionId, input, { signal } = {}) {
+      parse(slug, connectionId)
+      const body = parse(z.strictObject({ expectedConnectionRevision: vercelReadRevision, expectedGrantRevision: revision }), input)
+      return setupResponse(vercelPreviewPermission, id, `connections/${connectionId}/vercel/preview-permission`,
+        { signal, method: 'PUT', body, bodyLimit: 4096 }, (value) => value.enabled &&
+          value.revision >= body.expectedConnectionRevision && value.grantRevision >= body.expectedGrantRevision)
+    },
+    async createVercelPreviewRun(id, input, { signal } = {}) {
+      const body = parse(z.strictObject({ runId: previewRunId, connectionId: slug, savedRevision: revision,
+        expectedConnectionRevision: vercelReadRevision, expectedGrantRevision: revision }), input)
+      return setupResponse(vercelPreviewRun, id, 'vercel-preview-runs', { signal, method: 'POST', body, bodyLimit: 4096 },
+        (value) => value.runId === body.runId && value.savedRevision === body.savedRevision)
+    },
+    async getVercelPreviewRun(id, runId, savedRevision, { signal } = {}) {
+      const expected = parse(previewBinding, { runId, savedRevision })
+      return setupResponse(vercelPreviewRun, id, `vercel-preview-runs/${expected.runId}`, { signal, method: 'GET' },
+        (value) => value.runId === expected.runId && value.savedRevision === expected.savedRevision)
+    },
+    async observeVercelPreviewRun(id, runId, savedRevision, { signal } = {}) {
+      const expected = parse(previewBinding, { runId, savedRevision })
+      return setupResponse(vercelPreviewRun, id, `vercel-preview-runs/${expected.runId}/observe`,
+        { signal, method: 'POST', body: {}, bodyLimit: 1024 },
+        (value) => value.runId === expected.runId && value.savedRevision === expected.savedRevision)
     },
     async revokeConnection(id, connectionId, expectedRevision, options) {
       parse(slug, connectionId); parse(revision, expectedRevision)
