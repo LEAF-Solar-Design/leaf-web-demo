@@ -3392,13 +3392,13 @@ describe('Solar step rail wiring', () => {
     assert.deepEqual(seatRulePlacementFailures(source + '\n.probe::before { content: "{"; }\n'), [])
   })
 
-  it('SEAT wiring W7 confines all seat material rules to desktop media', () => {
+  it('SEAT wiring W7 confines seat rules to desktop or bounded phone media', () => {
     const source = readFileSync(new URL('./solar/solarFlow.css', import.meta.url), 'utf8')
     const { occurrences, failures } = seatCssStructure(source)
     assert.deepEqual(failures, [])
     assert.ok(occurrences.length > 0, 'seat material rules must be present')
     for (const { index, headers } of occurrences) {
-      assert.ok(headers.some((header) => header.startsWith('@media ') && header.includes('min-width: 1024px')), 'seat material outside desktop media at ' + index)
+      assert.ok(headers.some((header) => header === '@media (min-width: 1024px)' || header === '@media (max-width: 599px)'), 'seat material outside desktop or phone media at ' + index)
     }
   })
 
