@@ -438,6 +438,52 @@ class PostgresJobStore:
             "elapsed_ms": row["elapsed_ms"],
         }
 
+    def expire_native_remote(self, job_id: str, expected_attempt: int) -> str:
+        """Reaper-only settlement; worker completion keeps its live deadline gate."""
+        import native_preview_job as native
+        from jobs import ErrorCode, error_obj, _terminal_fingerprint
+
+        with _db().transaction() as conn:
+            row = conn.execute(
+                "SELECT * FROM async_jobs WHERE job_id = %s FOR UPDATE", (job_id,),
+            ).fetchone()
+            if row is None:
+                return "missing"
+            if (row['status'] not in {'submitted', 'running'}
+                    or row['progress'] == 'closed'
+                    or int(row['attempt'] or 0) != expected_attempt):
+                return "not_owner"
+            try:
+                context = native.record_context(_json(row['execution_json']), row)
+            except (KeyError, TypeError, ValueError):
+                return "not_owner"
+            start = row['started_at']
+            if (context is None or context['schema'] != native.REMOTE_SCHEMA
+                    or type(start) not in (int, float) or not math.isfinite(start)):
+                return "not_owner"
+            # Read the database clock after acquiring the lock. Neither a stale
+            # caller timestamp nor a new environment budget can authorize expiry.
+            now = conn.execute(
+                "SELECT EXTRACT(EPOCH FROM clock_timestamp())::double precision AS now",
+            ).fetchone()['now']
+            if now < start + context['budget_s']:
+                return "not_owner"
+            error = error_obj(ErrorCode.TIMEOUT, "native preview execution budget expired", False)
+            provenance = {'attempt': expected_attempt, 'execution_path': 'native-worker'}
+            fingerprint = _terminal_fingerprint('failed', None, error, provenance)
+            conn.execute(
+                "UPDATE async_jobs SET status = 'failed', progress = 'error', "
+                "updated_at = %s, finished_at = %s, elapsed_ms = %s, "
+                "result_json = NULL, error_json = %s::jsonb, provenance_json = %s::jsonb, "
+                "terminal_fingerprint = %s, lease_owner = NULL, lease_expires_at = NULL "
+                "WHERE job_id = %s",
+                (now, now, int((now - start) * 1000), json.dumps(error),
+                 json.dumps(provenance), fingerprint, job_id),
+            )
+            import platform_link
+            platform_link.terminal_in_transaction(conn, job_id, 'failed', None, error)
+            return "applied"
+
     def complete(
         self, job_id: str, durable_attempt: int, status: str, result: Any,
         error: Any, provenance: Any, fingerprint: str, worker_id: Optional[str],
@@ -526,8 +572,14 @@ class PostgresJobStore:
                 "SELECT job_id, progress FROM async_jobs "
                 "WHERE status IN ('submitted','running') AND "
                 "(updated_at < %s OR progress = %s OR "
-                "(lease_expires_at IS NOT NULL AND lease_expires_at < %s))",
-                (stale_before, closed, now),
+                "(lease_expires_at IS NOT NULL AND lease_expires_at < %s) OR "
+                "(tool = 'internal.native-preview' AND started_at IS NOT NULL "
+                "AND execution_json->'native_preview'->>'schema' = 'leaf.native-preview-job.v2' "
+                "AND execution_json->'native_preview'->>'dispatch_kind' = 'remote-worker' "
+                "AND started_at::numeric + CASE WHEN "
+                "jsonb_typeof(execution_json->'native_preview'->'budget_s') = 'number' "
+                "THEN (execution_json->'native_preview'->>'budget_s')::numeric END <= %s))",
+                (stale_before, closed, now, now),
             )
             return list(cur.fetchall())
 
