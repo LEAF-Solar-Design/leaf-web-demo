@@ -6,6 +6,7 @@ import { artifactReference, boundInput, collectPersonaRuns, evidenceFor, MAX_INP
 import { buildPersonaReport } from './personaReport.mjs'
 
 const usage = 'Usage: --manifest <json> --receipt <json> --out <json>'
+const MAX_PERSONA_OUTPUT_BYTES = 16 * 1024 * 1024
 
 function pathSyntax(value) {
   if (typeof value !== 'string' || !value || /[\x00-\x1f%?#]/.test(value)
@@ -96,7 +97,7 @@ export function personaReportCli(args) {
     }
   }
   const output = JSON.stringify(buildPersonaReport({ featureMap, walkReceipt, runs })) + '\n'
-  if (Buffer.byteLength(output) > MAX_RECEIPT_BYTES) throw new Error('Persona output exceeds 1 MiB bound')
+  if (Buffer.byteLength(output) > MAX_PERSONA_OUTPUT_BYTES) throw new Error('Persona output exceeds 16 MiB bound')
   writeFileSync(outputPath, output, 'utf8')
 }
 
