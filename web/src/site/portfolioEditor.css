@@ -7,6 +7,7 @@
 .portfolio h1 { font: 400 clamp(32px,5vw,64px)/1.15 Georgia,serif; }
 .portfolio p { white-space: pre-wrap; max-width: 70ch; }
 .portfolio-grid { display: grid; grid-template-columns: repeat(2,minmax(0,1fr)); gap: 32px; }
+.portfolio .portfolio-grid[data-gallery-layout="single"] { grid-template-columns: minmax(0,1fr); }
 .portfolio-grid button, .portfolio-grid a { display: block; min-width: 0; background: none; border: 0; text-align: left; padding: 0; text-decoration: none; cursor: pointer; }
 .portfolio img { display: block; width: 100%; height: auto; max-height: 75vh; object-fit: contain; }
 .portfolio figure { margin: 0; min-width: 0; }

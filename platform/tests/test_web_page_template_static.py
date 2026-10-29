@@ -287,5 +287,122 @@ class PortfolioTemplateTests(unittest.TestCase):
             module.source_archive(value, 1, previews, template.PACKAGE_VERSIONS)
 
 
+def portfolio_producer(filename):
+    spec = importlib.util.spec_from_file_location(filename, ROOT / 'platform' / (filename + '.py'))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+class PortfolioLayoutTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.web = portfolio_producer('portfolio_page_template')
+        cls.native = portfolio_producer('portfolio_ios_template')
+
+    def test_legacy_canonical_bytes_and_digest_remain_unchanged(self):
+        value = portfolio_document()
+        raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+        digest = hashlib.sha256(raw).hexdigest()
+        for producer, canonical in [(self.web, self.web.canonical), (self.native, self.native._canonical_json)]:
+            with self.subTest(producer=producer.__name__):
+                actual = producer.validate_document(value)
+                self.assertNotIn('galleryLayout', actual)
+                self.assertEqual(actual, value)
+                self.assertIsNot(actual, value)
+                self.assertEqual(canonical(actual), raw)
+                self.assertEqual(hashlib.sha256(canonical(actual)).hexdigest(), digest)
+        self.assertEqual(self.native.document_digest(value), digest)
+        self.assertEqual(template.document_digest(value), digest)
+
+    def test_both_validators_keep_exact_required_shape_and_layout_enum(self):
+        for producer in [self.web, self.native]:
+            for layout in ['grid', 'single']:
+                value = dict(portfolio_document(), galleryLayout=layout)
+                with self.subTest(producer=producer.__name__, layout=layout):
+                    self.assertEqual(producer.validate_document(value), value)
+            for layout in [None, True, False, 0, 1, [], {}, '', 'Grid', 'Single column', 'single\n']:
+                with self.subTest(producer=producer.__name__, invalid=layout), self.assertRaises(ValueError):
+                    producer.validate_document(dict(portfolio_document(), galleryLayout=layout))
+            for field in portfolio_document():
+                value = dict(portfolio_document(), galleryLayout='single')
+                del value[field]
+                with self.subTest(producer=producer.__name__, missing=field), self.assertRaises(ValueError):
+                    producer.validate_document(value)
+            for path in [(), ('contact',), ('categories', 0), ('categories', 0, 'images', 0)]:
+                value = portfolio_document()
+                target = value
+                for key in path:
+                    target = target[key]
+                target['unknown' if not path else 'galleryLayout'] = 'single'
+                with self.subTest(producer=producer.__name__, path=path), self.assertRaises(ValueError):
+                    producer.validate_document(value)
+
+    def test_real_archives_preserve_layout_photos_and_renderer_branches(self):
+        for native, producer in [(False, self.web), (True, self.native)]:
+            previous_files = None
+            for layout in [None, 'grid', 'single']:
+                value = portfolio_document()
+                first = value['categories'][0]['images'][0]
+                second_bytes = b'second optimized preview fixture'
+                second = dict(first, material_id='22222222-2222-4222-8222-222222222222',
+                              sha256='b' * 64, preview_sha256=hashlib.sha256(second_bytes).hexdigest(),
+                              title='Bread', alt='A loaf of bread')
+                value['categories'][0]['images'].append(second)
+                value['categories'][0]['hero'] = 1
+                if layout is not None:
+                    value['galleryLayout'] = layout
+                previews = {first['material_id']: b'optimized preview fixture', second['material_id']: second_bytes}
+                args = (value, 7, previews) if native else (value, 7, previews, template.PACKAGE_VERSIONS)
+                with self.subTest(native=native, layout=layout):
+                    result = producer.source_archive(*args)
+                    self.assertEqual(result, producer.source_archive(*args))
+                    with zipfile.ZipFile(io.BytesIO(result)) as archive:
+                        files = {name: archive.read(name) for name in archive.namelist()}
+                    data_path = 'Portfolio/PortfolioContent/portfolio.json' if native else 'portfolio.json'
+                    self.assertEqual(json.loads(files[data_path]), value)
+                    manifest = json.loads(files['source-manifest.json'])
+                    raw = json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':')).encode('utf-8')
+                    self.assertEqual(files[data_path], raw + b'\n')
+                    self.assertEqual(manifest['document_sha256'], hashlib.sha256(raw).hexdigest())
+                    self.assertEqual(manifest['revision'], 7)
+                    self.assertEqual(set(manifest['files']), set(files) - {'source-manifest.json'})
+                    for path, record in manifest['files'].items():
+                        self.assertEqual(record, {'sha256': hashlib.sha256(files[path]).hexdigest(), 'size_bytes': len(files[path])})
+                    assets = manifest['assets'] if native else json.loads(files['asset-manifest.json'])
+                    self.assertEqual(set(assets), set(previews))
+                    for image in value['categories'][0]['images']:
+                        asset = assets[image['material_id']]
+                        self.assertEqual(files[asset['path']], previews[image['material_id']])
+                        self.assertEqual(asset['sha256'], image['sha256'])
+                        self.assertEqual(asset['preview_sha256'], image['preview_sha256'])
+                    if previous_files is not None:
+                        for path in files:
+                            if path not in (data_path, 'source-manifest.json'):
+                                self.assertEqual(files[path], previous_files[path], path)
+                    previous_files = files
+                    if native:
+                        swift = files['Portfolio/PortfolioApp.swift'].decode()
+                        self.assertIn('let galleryLayout: String?', swift)
+                        self.assertIn('galleryLayout: portfolio.document.galleryLayout', swift)
+                        home, gallery = swift.split('struct GalleryView: View', 1)
+                        self.assertIn('private let columns = [GridItem(.adaptive(minimum: 240), spacing: 24)]', home)
+                        self.assertIn('galleryLayout == "single"', gallery)
+                        self.assertIn('? [GridItem(.flexible(), spacing: 24)]', gallery)
+                        self.assertIn(': [GridItem(.adaptive(minimum: 240), spacing: 24)]', gallery)
+                        self.assertIn('LazyVGrid(columns: columns', gallery)
+                    else:
+                        route = files['app/[slug]/page.jsx'].decode()
+                        self.assertIn('<Gallery images={c.images} galleryLayout={page.galleryLayout}', route)
+                        viewer = files['app/Gallery.jsx'].decode()
+                        self.assertIn('Gallery({images,galleryLayout})', viewer)
+                        self.assertIn("data-gallery-layout={galleryLayout || 'grid'}", viewer)
+                        self.assertNotIn('data-gallery-layout', files['app/page.jsx'].decode())
+                        css = files['app/globals.css'].decode()
+                        self.assertIn('.portfolio .portfolio-grid[data-gallery-layout="single"]{grid-template-columns:minmax(0,1fr)}', css)
+                        self.assertIn('grid-template-columns:repeat(2,minmax(0,1fr))', css)
+                        self.assertIn('@media(max-width:600px){.portfolio-grid{grid-template-columns:minmax(0,1fr)}', css)
+
+
 if __name__ == '__main__':
     unittest.main()

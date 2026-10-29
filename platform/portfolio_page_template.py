@@ -21,8 +21,8 @@ def canonical(value):
     return json.dumps(value, ensure_ascii=False, sort_keys=True, separators=(',', ':'), allow_nan=False).encode('utf-8')
 
 
-def exact(value, keys):
-    if type(value) is not dict or set(value) != set(keys.split()):
+def exact(value, keys, optional=()):
+    if type(value) is not dict or set(value) - set(optional) != set(keys.split()):
         raise ValueError('Unsupported portfolio fields')
 
 
@@ -40,7 +40,9 @@ def items(value, minimum, maximum):
 
 
 def validate_document(document):
-    exact(document, 'schema name headline introduction about contact resume categories theme')
+    exact(document, 'schema name headline introduction about contact resume categories theme', ('galleryLayout',))
+    if 'galleryLayout' in document and (type(document['galleryLayout']) is not str or document['galleryLayout'] not in ('grid', 'single')):
+        raise ValueError('Unsupported photo layout')
     if document['schema'] != 'leaf.portfolio.v1' or document['theme'] != 'light':
         raise ValueError('Unsupported portfolio schema or theme')
     for key, low, high in [('name', 1, 120), ('headline', 1, 240), ('introduction', 0, 2400), ('about', 0, 8000)]:
@@ -111,11 +113,11 @@ PORTFOLIO_CSS = """*{box-sizing:border-box}body{margin:0}.portfolio{background:w
 
 _VIEWER = """'use client';
 import {useEffect,useRef,useState} from 'react';
-export default function Gallery({images}) {
+export default function Gallery({images,galleryLayout}) {
  const [selected,setSelected]=useState(null); const trigger=useRef(null); const closeButton=useRef(null);
  const close=()=>{setSelected(null);trigger.current?.focus();};
  useEffect(()=>{if(!selected)return;closeButton.current?.focus();const key=e=>{if(e.key==='Escape')close();if(e.key==='Tab'){e.preventDefault();closeButton.current?.focus();}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[selected]);
- return <><div className="portfolio-grid">{images.map((image,i)=><figure key={image.material_id}><button onClick={e=>{trigger.current=e.currentTarget;setSelected(image);}}><img loading="lazy" src={'/images/'+image.material_id+'.jpg'} alt={image.alt}/><span>{image.title}</span></button></figure>)}</div>{selected&&<div className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>Close image</button><img src={'/images/'+selected.material_id+'.jpg'} alt={selected.alt}/><p>{selected.title}</p></div>}</>;
+ return <><div className="portfolio-grid" data-gallery-layout={galleryLayout || 'grid'}>{images.map((image,i)=><figure key={image.material_id}><button onClick={e=>{trigger.current=e.currentTarget;setSelected(image);}}><img loading="lazy" src={'/images/'+image.material_id+'.jpg'} alt={image.alt}/><span>{image.title}</span></button></figure>)}</div>{selected&&<div className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>Close image</button><img src={'/images/'+selected.material_id+'.jpg'} alt={selected.alt}/><p>{selected.title}</p></div>}</>;
 }
 """
 
@@ -137,11 +139,11 @@ def source_archive(document, revision, previews, package_versions):
     files = {
         'portfolio.json': canonical(page) + b'\n',
         'package.json': canonical({'name': 'photo-portfolio', 'version': '1.0.0', 'private': True, 'engines': {'node': '>=20.9.0'}, 'scripts': {'dev': 'next dev', 'build': 'next build --webpack', 'start': 'next start'}, 'dependencies': package_versions}) + b'\n',
-        'app/globals.css': (PORTFOLIO_CSS + '.portfolio nav a{text-decoration:none;padding:4px}\n').encode(),
+        'app/globals.css': (PORTFOLIO_CSS + '.portfolio .portfolio-grid[data-gallery-layout="single"]{grid-template-columns:minmax(0,1fr)}\n.portfolio nav a{text-decoration:none;padding:4px}\n').encode(),
         'app/Gallery.jsx': _VIEWER.encode(),
         'app/layout.jsx': b"import './globals.css';\nimport page from '../portfolio.json';\nexport const metadata={title:page.name,description:page.headline};\nexport default function Layout({children}){return <html lang=\"en\"><body><main className=\"portfolio\"><nav aria-label=\"Portfolio\"><a href=\"/\">{page.name}</a>{page.categories.map(c=><a key={c.slug} href={'/'+c.slug}>{c.title}</a>)}<a href=\"/about\">About / Contact</a><a href=\"/resume\">Resume</a></nav>{children}</main></body></html>;}\n",
         'app/page.jsx': b"import page from '../portfolio.json';\nexport default function Home(){return <><h1>{page.headline}</h1><p>{page.introduction}</p><div className=\"portfolio-grid\">{page.categories.map(c=><a key={c.slug} href={'/'+c.slug}><img src={'/images/'+c.images[c.hero].material_id+'.jpg'} alt={c.images[c.hero].alt}/><h2>{c.title}</h2><p>{c.description}</p></a>)}</div></>;}\n",
-        'app/[slug]/page.jsx': b"import page from '../../portfolio.json';\nimport Gallery from '../Gallery';\nexport const dynamicParams=false;\nexport function generateStaticParams(){return page.categories.map(c=>({slug:c.slug}));}\nexport default async function Category({params}){const {slug}=await params;const c=page.categories.find(c=>c.slug===slug);return <><h1>{c.title}</h1><p>{c.description}</p><Gallery images={c.images}/></>;}\n",
+        'app/[slug]/page.jsx': b"import page from '../../portfolio.json';\nimport Gallery from '../Gallery';\nexport const dynamicParams=false;\nexport function generateStaticParams(){return page.categories.map(c=>({slug:c.slug}));}\nexport default async function Category({params}){const {slug}=await params;const c=page.categories.find(c=>c.slug===slug);return <><h1>{c.title}</h1><p>{c.description}</p><Gallery images={c.images} galleryLayout={page.galleryLayout}/></>;}\n",
         'app/about/page.jsx': b"import page from '../../portfolio.json';\nexport default function About(){return <><h1>About {page.name}</h1><p>{page.about}</p><h2>Contact</h2><p>{page.contact.location}</p>{page.contact.email&&<a href={'mailto:'+page.contact.email}>{page.contact.email}</a>}</>;}\n",
         'app/resume/page.jsx': b"import page from '../../portfolio.json';\nexport default function Resume(){return <><h1>Resume</h1>{page.resume.map((s,i)=><section key={i}><h2>{s.heading}</h2>{s.entries.map((e,j)=><article key={j}><h3>{e.title}</h3><p>{e.subtitle}</p><p>{e.dates}</p><p>{e.description}</p></article>)}</section>)}</>;}\n",
         'next.config.mjs': b'export default {};\n',
