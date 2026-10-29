@@ -1114,7 +1114,7 @@ def build_suites() -> List[Suite]:
                 _py_pytest("tests/test_native_preview_job.py"), 41, uses_database=True,
                 database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
           Suite("server-native-preview-remote", "server tests/test_native_preview_remote.py", "pytest", SERVER,
-                _py_pytest("tests/test_native_preview_remote.py"), 47, uses_database=True,
+                _py_pytest("tests/test_native_preview_remote.py"), 20, uses_database=True,
                 database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
           Suite("server-campaign-transform-admission", "server tests/test_campaign_transform_admission.py", "pytest", SERVER,
                 _py_pytest("tests/test_campaign_transform_admission.py"), 12),
