@@ -22,6 +22,7 @@ import zipfile
 import zlib
 
 ORIGIN = 'https://platform-staging.leafdesign.ai'
+USER_AGENT = 'leaf-native-preview-worker/1'
 MAX_PNG = 16 * 1024 * 1024
 MAX_BODY = 4 * ((MAX_PNG + 2) // 3) + 17408
 SAFE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
@@ -163,7 +164,8 @@ class Http:
         require(data is None or len(data) <= MAX_BODY, 'request-bounds')
         require(0 < limit <= producer().MAX_ARCHIVE_BYTES, 'response-bounds')
         request = urllib.request.Request(self.prefix + suffix, data=data, method=method,
-            headers={'Authorization': 'Bearer ' + self._token, 'Content-Type': 'application/json'})
+            headers={'Authorization': 'Bearer ' + self._token, 'Content-Type': 'application/json',
+                     'User-Agent': USER_AGENT})
         try:
             with self.opener.open(request, timeout=10) as response:
                 require(response.status == 200 and response.geturl() == request.full_url, 'http-denied')

@@ -190,6 +190,27 @@ def test_origin_pinned(origin):
         worker.Http(SCOPE, 'synthetic', origin)
 
 
+@pytest.mark.parametrize('method,suffix,body', [
+    ('POST', 'claim', {}), ('GET', 'job/source?attempt=1', None),
+    ('POST', 'job/heartbeat', {}), ('POST', 'job/complete', {}),
+])
+def test_http_product_user_agent(method, suffix, body):
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def geturl(self): return http.prefix + suffix
+        def read(self, size): return b'{}'
+    class Opener:
+        def open(self, request, timeout):
+            assert request.get_header('User-agent') == 'leaf-native-preview-worker/1'
+            assert request.get_header('Authorization') == 'Bearer synthetic'
+            assert request.get_method() == method
+            return Response()
+    http = worker.Http(SCOPE, 'synthetic', opener=Opener())
+    assert http.request(method, suffix, body) == b'{}'
+
+
 def test_http_limits_redirect_and_redaction():
     class Response:
         status = 200
