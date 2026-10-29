@@ -72,7 +72,11 @@
 .project-page-editor h2 { margin: 0 0 12px; font-size: 18px; }
 .project-page-editor__note { font-size: 13px; line-height: 1.5; opacity: .8; }
 .project-page-editor__actions { display: flex; flex-wrap: wrap; gap: 8px; }
-.project-page-editor button { white-space: normal; overflow-wrap: anywhere; min-height: 40px; max-width: 100%; }
+.project-page-editor button { white-space: normal; overflow-wrap: anywhere; min-height: 44px; max-width: 100%; }
+.project-page-editor__save-row { position: sticky; top: var(--page-sticky-top, 0px); z-index: 2; display: flex; align-items: center; gap: 8px; padding: 8px 0; background: var(--leaf-surface, #fff); border-bottom: 1px solid var(--leaf-line, #bdb9b2); }
+.project-page-editor__save-row > button { flex: 0 0 auto; }
+.project-page-editor__save-row > p { min-width: 0; margin: 0; font-size: 13px; line-height: 1.4; }
+.project-page-editor :is(input, textarea, select, button, summary) { scroll-margin-block-start: calc(var(--page-sticky-top, 0px) + var(--page-actions-height, 80px) + 12px); scroll-margin-block-end: 12px; }
 .project-page-editor fieldset { border: 0; padding: 0; margin: 16px 0; min-width: 0; display: grid; gap: 14px; }
 .project-page-editor__legend { margin-bottom: 12px; font-weight: 600; }
 .project-page-editor label { display: grid; gap: 6px; min-width: 0; font-size: 13px; }
