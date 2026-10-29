@@ -29,8 +29,8 @@ def _canonical_json(value: object) -> bytes:
                       separators=(",", ":"), allow_nan=False).encode("utf-8")
 
 
-def _keys(value: object, names: str) -> None:
-    if type(value) is not dict or set(value) != set(names.split()):
+def _keys(value: object, names: str, optional=()) -> None:
+    if type(value) is not dict or set(value) - set(optional) != set(names.split()):
         raise ValueError("Portfolio object has missing or unsupported fields")
 
 
@@ -52,7 +52,9 @@ def _items(value: object, minimum: int, maximum: int) -> None:
 
 def validate_document(document: dict) -> dict:
     """Return detached F14 data; reject unknown fields, unsafe refs and bounds."""
-    _keys(document, "schema name headline introduction about contact resume categories theme")
+    _keys(document, "schema name headline introduction about contact resume categories theme", ("galleryLayout",))
+    if "galleryLayout" in document and (type(document["galleryLayout"]) is not str or document["galleryLayout"] not in ("grid", "single")):
+        raise ValueError("Unsupported photo layout")
     if document["schema"] != "leaf.portfolio.v1" or document["theme"] != "light":
         raise ValueError("Unsupported portfolio schema or theme")
     for key, low, high in (("name", 1, 120), ("headline", 1, 240),
@@ -194,6 +196,7 @@ struct PortfolioDocument: Decodable {
     let resume: [ResumeSection]
     let categories: [PortfolioCategory]
     let theme: String
+    let galleryLayout: String?
 }
 struct Contact: Decodable { let email: String; let location: String }
 struct ResumeSection: Decodable { let heading: String; let entries: [ResumeEntry] }
@@ -337,7 +340,7 @@ struct HomeView: View {
                 LazyVGrid(columns: columns, alignment: .leading, spacing: 32) {
                     ForEach(portfolio.document.categories) { category in
                         NavigationLink {
-                            GalleryView(category: category, images: portfolio.images)
+                            GalleryView(category: category, images: portfolio.images, galleryLayout: portfolio.document.galleryLayout)
                         } label: {
                             VStack(alignment: .leading, spacing: 12) {
                                 PortfolioImage(photo: category.images[category.hero], images: portfolio.images)
@@ -356,7 +359,12 @@ struct HomeView: View {
 struct GalleryView: View {
     let category: PortfolioCategory
     let images: [String: UIImage]
-    private let columns = [GridItem(.adaptive(minimum: 240), spacing: 24)]
+    let galleryLayout: String?
+    private var columns: [GridItem] {
+        galleryLayout == "single"
+            ? [GridItem(.flexible(), spacing: 24)]
+            : [GridItem(.adaptive(minimum: 240), spacing: 24)]
+    }
     var body: some View {
         ScrollView {
             VStack(alignment: .leading, spacing: 24) {

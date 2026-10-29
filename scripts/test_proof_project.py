@@ -1411,7 +1411,8 @@ def canonical_case():
     import hashlib
     from uuid import UUID
     from contextlib import contextmanager
-    c = SimpleNamespace(connections=0, closes=0, verifications=[], reads=[])
+    c = SimpleNamespace(connections=0, closes=0, verifications=[], reads=[],
+                        read_only=[], rollbacks=[], active_transaction=False, statements=[])
     ids = [str(UUID(int=i)) for i in range(1, 8)]
     c.before = SimpleNamespace(graph={"settings": {"pitch": 10}})
     c.stored = SimpleNamespace(graph={"settings": {"pitch": 20}})
@@ -1431,26 +1432,59 @@ def canonical_case():
         output_version_id=e.output_version_id, provenance={"worker_id": e.worker_id},
         result={"graph_commit": c.commit})
     def verify(job_id, result, *, expected, conn):
+        c.statements.append(c.active_transaction)
         c.verifications.append((job_id, result, expected))
         assert expected == c.commit and result is c.commit
         return {"output_version_id": e.output_version_id}
     def context(expected, version_id, conn):
+        c.statements.append(c.active_transaction)
         c.reads.append(str(version_id))
         return (c.before if str(version_id) == e.input_version_id else
                 c.stored if c.connections == 1 else c.reopened), None
     c.graph = SimpleNamespace(project_graph_job_provenance=verify, _stored_context=context,
                               local=SimpleNamespace(digest=c.digest))
     @contextmanager
-    def connection(environment, deadline):
+    def transaction(*, force_rollback):
+        c.rollbacks.append(force_rollback)
+        c.active_transaction = True
+        try:
+            yield
+        finally:
+            c.active_transaction = False
+    def execute(sql, args):
+        c.statements.append(c.active_transaction)
+        return SimpleNamespace(fetchone=lambda: c.job)
+    @contextmanager
+    def connection(environment, deadline, *, read_only=True):
         assert environment["DATABASE_URL"] == "fakedb" and deadline == 10
         c.connections += 1
+        c.read_only.append(read_only)
         try:
-            yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: c.job))
+            yield SimpleNamespace(execute=execute, transaction=transaction)
         finally:
             c.closes += 1
     c.connection = connection
     c.request = p.CanonicalRequest("execution", p.WORKER_TOOL, {"DATABASE_URL": "fakedb"}, e, 10)
     return c
+
+
+def test_teardown_canonical_proof_rollback_connection(monkeypatch):
+    c = canonical_case()
+    p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+    assert c.connections == c.closes == 2
+    assert c.read_only == [False, False] and c.rollbacks == [True, True]
+    assert c.statements == [True] * 5 and not c.active_transaction
+    calls = []
+    monkeypatch.setitem(sys.modules, "psycopg", SimpleNamespace(
+        connect=lambda dsn, **kwargs: calls.append((dsn, kwargs))))
+    monkeypatch.setitem(sys.modules, "psycopg.rows", SimpleNamespace(dict_row=object()))
+    monkeypatch.setattr(p.os, "environ", {})
+    monkeypatch.setattr(p.time, "monotonic", lambda: 0)
+    p._project_connection({"DATABASE_URL": "fakedb"}, 10)
+    p._project_connection({"DATABASE_URL": "fakedb"}, 10, read_only=False)
+    assert [dsn for dsn, kwargs in calls] == ["fakedb", "fakedb"]
+    assert calls[0][1]["options"] == "-c statement_timeout=2000 -c default_transaction_read_only=on"
+    assert calls[1][1]["options"] == "-c statement_timeout=2000"
 
 
 class TestProjectExecution:
@@ -2148,6 +2182,35 @@ def g_arm(monkeypatch, platform):
     lease = p._GuardianLease(c.plan)
     lease.arm()
     return SimpleNamespace(lease=lease, calls=calls, sent=sent, child=child, plan=c.plan)
+
+
+def test_teardown_guardian_process_exits_hard(monkeypatch):
+    c = g_arm(monkeypatch, "darwin")
+    code = c.calls[0][0][3]
+    assert "m['_guardian_process_main']()" in code
+    assert "sys.exit(m['_guardian_entry']())" not in code
+    class HardExit(BaseException):
+        def __init__(self, code):
+            self.code = code
+    def exit_hard(code):
+        raise HardExit(code)
+    flushed = []
+    monkeypatch.setattr(p.os, "_exit", exit_hard)
+    monkeypatch.setattr(p, "sys", SimpleNamespace(
+        stdout=SimpleNamespace(flush=lambda: flushed.append("stdout")),
+        stderr=SimpleNamespace(flush=lambda: flushed.append("stderr"))))
+    for result, expected in ((0, 0), (3, 3), (None, 1), (True, 1), (256, 1), (-1, 1)):
+        monkeypatch.setattr(p, "_guardian_entry", lambda: result)
+        with pytest.raises(HardExit) as error:
+            p._guardian_process_main()
+        assert error.value.code == expected
+        assert flushed[-2:] == ["stdout", "stderr"]
+    def crash():
+        raise RuntimeError("entry failed")
+    monkeypatch.setattr(p, "_guardian_entry", crash)
+    with pytest.raises(HardExit) as error:
+        p._guardian_process_main()
+    assert error.value.code == 1 and flushed[-2:] == ["stdout", "stderr"]
 
 
 def g_entry(monkeypatch, items, *, main=None):
@@ -4001,6 +4064,30 @@ def verify_document(c, value):
 
 def clone_document(value):
     return json.loads(json.dumps(value))
+
+
+def test_receipt_accepts_darwin_start_id():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    for item in document["stack"]["owned_process_identities"]:
+        item["start_id"] = "Wed Oct 29 9:35:12 2026"
+    assert verify_document(c, document).ok
+    for start_id in ("Wed Oct 29\n9:35:12 2026", "", "x" * 129):
+        invalid = clone_document(document)
+        invalid["stack"]["owned_process_identities"][0]["start_id"] = start_id
+        assert not verify_document(c, invalid).ok
+
+
+def test_receipt_accepts_ready_optional_dependency():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    dependency = next(iter(document["stack"]["app_readiness"]["dependencies"]))
+    document["stack"]["app_readiness"]["dependencies"][dependency]["required"] = False
+    assert verify_document(c, document).ok
+    for field, value in (("state", "degraded"), ("required", "yes")):
+        invalid = clone_document(document)
+        invalid["stack"]["app_readiness"]["dependencies"][dependency][field] = value
+        assert not verify_document(c, invalid).ok
 
 
 def test_src_empty_receipt_zero_size_file():

@@ -164,6 +164,195 @@ async function expectInsideViewport(locator, viewport) {
 }
 
 for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`persisted portfolio gallery layout at ${size}`, async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    const layoutViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
+    await page.setViewportSize(layoutViewport)
+    const backend = await installBackend(page)
+    const imported = portfolioImport()
+    const original = { ...structuredClone(imported), schema: 'leaf.portfolio.v1' }
+    original.categories[0].images = PHOTOS.map(({ material_id, sha256, preview_sha256, name }) => ({ material_id, sha256, preview_sha256, title: name, alt: name }))
+    const singleDocument = { ...structuredClone(original), galleryLayout: 'single' }
+    const puts = () => backend.calls.filter(call => call.method === 'PUT')
+    await page.goto('/app?surface=browser')
+    let editor = await openProject(page)
+    await editor.getByLabel('Import portfolio content').setInputFiles({ name: 'portfolio.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(imported)) })
+    const preview = page.locator('[data-ground="browser-asset"] .portfolio')
+    const gallery = preview.locator('.portfolio-grid[data-gallery-layout]')
+    const tiles = gallery.locator(':scope > figure')
+    await expect(preview.getByRole('heading', { name: original.headline, exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+    const save = () => editor.getByRole('button', { name: 'Save page', exact: true })
+    const layout = () => editor.getByRole('combobox', { name: 'Photo layout', exact: true })
+    const saved = () => expect(editor.locator('.project-page-editor__save-row').getByRole('status')).toHaveText('Saved')
+    const closeEditor = () => page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    const openEditor = () => page.getByRole('button', { name: 'Project', exact: true }).click()
+    const openCakes = async () => {
+      const navigation = preview.getByRole('navigation', { name: 'Portfolio', exact: true })
+      await navigation.scrollIntoViewIfNeeded()
+      await navigation.getByRole('button', { name: 'Cakes', exact: true }).click()
+      await expect(preview.getByRole('heading', { name: 'Cakes', exact: true })).toBeVisible()
+    }
+    const geometry = async value => {
+      await expect(gallery).toHaveAttribute('data-gallery-layout', value)
+      await expect(tiles).toHaveCount(2)
+      // Only category figures are measured: home cards and inspector thumbnails
+      // cannot satisfy this proof. Visit each lazy photo in the bounded scroller.
+      for (const tile of await tiles.all()) {
+        await tile.scrollIntoViewIfNeeded()
+        await expect.poll(() => tile.locator('img').evaluateAll(images => images.length === 1 && images[0].complete && images[0].naturalWidth > 0)).toBe(true)
+      }
+      await tiles.first().scrollIntoViewIfNeeded()
+      await expect.poll(() => tiles.evaluateAll((nodes, stacked) => {
+        const [a, b] = nodes.map(node => node.getBoundingClientRect())
+        return stacked ? Math.abs(a.x - b.x) <= 2 && b.y >= a.bottom + 16 && Math.abs(a.width - b.width) <= 2
+          : Math.abs(a.y - b.y) <= 2 && b.x >= a.right + 16 && Math.abs(a.width - b.width) <= 2
+      }, size === 'phone' || value === 'single')).toBe(true)
+      const measured = await gallery.evaluate(node => {
+        const rect = element => {
+          const { x, y, width, height } = element.getBoundingClientRect()
+          return { x, y, width, height }
+        }
+        const portfolio = node.closest('.portfolio'), scroller = node.closest('.browser-asset-viewport')
+        return { layout: node.dataset.galleryLayout, gallery: rect(node),
+          tiles: [...node.children].map(tile => ({ ...rect(tile), photo: rect(tile.querySelector('.portfolio-photo')),
+            alt: tile.querySelector('img').alt, caption: tile.querySelector(':scope > button > span:last-child').textContent })),
+          portfolio: { width: portfolio.clientWidth, scrollWidth: portfolio.scrollWidth },
+          scroller: { width: scroller.clientWidth, scrollWidth: scroller.scrollWidth },
+          page: { width: document.documentElement.clientWidth, scrollWidth: document.documentElement.scrollWidth } }
+      })
+      for (const tile of measured.tiles) {
+        expect(tile.width).toBeGreaterThan(100)
+        expect(tile.height).toBeGreaterThan(100)
+        expect(tile.photo.width).toBeGreaterThan(100)
+        expect(tile.photo.height).toBeGreaterThan(100)
+        expect(tile.x).toBeGreaterThanOrEqual(-1)
+        expect(tile.x + tile.width).toBeLessThanOrEqual(layoutViewport.width + 1)
+      }
+      expect(measured.tiles.map(({ alt, caption }) => ({ alt, caption }))).toEqual(original.categories[0].images.map(image => ({ alt: image.alt, caption: image.title })))
+      for (const bounds of [measured.portfolio, measured.scroller, measured.page]) expect(bounds.scrollWidth).toBeLessThanOrEqual(bounds.width + 1)
+      return measured
+    }
+    await layout().scrollIntoViewIfNeeded()
+    await expect(layout()).toHaveValue('grid')
+    expect(puts()).toHaveLength(0)
+    await save().click()
+    await saved()
+    expect(backend.revisions).toHaveLength(1)
+    expect(backend.revisions[0].document).toEqual(original)
+    await closeEditor()
+    await openCakes()
+    const gridBefore = await geometry('grid')
+    await openEditor()
+    await layout().scrollIntoViewIfNeeded()
+    await layout().selectOption({ label: 'Single column' })
+    await expect(editor.locator('.project-page-editor__save-row').getByRole('status')).toHaveText('Unsaved changes')
+    await closeEditor()
+    const singleDraft = await geometry('single')
+    expect(puts()).toHaveLength(1)
+    expect(backend.revisions.at(-1).document).toEqual(original)
+    await openEditor()
+    await save().click()
+    await saved()
+    const singleSaved = structuredClone(backend.revisions.at(-1))
+    expect(singleSaved).toMatchObject({ revision: 2, document: singleDocument })
+    expect(singleSaved.document).toEqual(singleDocument)
+    expect(Object.keys(singleSaved.document).filter(key => !Object.hasOwn(original, key))).toEqual(['galleryLayout'])
+
+    await page.reload()
+    editor = await openProject(page)
+    await editor.getByRole('button', { name: 'Open page', exact: true }).click()
+    await expect(preview.getByRole('heading', { name: original.headline, exact: true })).toBeVisible()
+    await openEditor()
+    await layout().scrollIntoViewIfNeeded()
+    await expect(layout()).toHaveValue('single')
+    await expect(layout().locator('option:checked')).toHaveText('Single column')
+    await expect(save()).toBeDisabled()
+    await closeEditor()
+    await openCakes()
+    const singleReloaded = await geometry('single')
+    await testInfo.attach(`single-layout-${size}`, { body: await page.screenshot(), contentType: 'image/png' })
+    expect(puts()).toHaveLength(2)
+    await openEditor()
+    const downloadEvent = page.waitForEvent('download')
+    const source = editor.getByRole('button', { name: 'Download Next.js source', exact: true })
+    await source.scrollIntoViewIfNeeded()
+    await source.click()
+    const download = await downloadEvent
+    expect(download.suggestedFilename()).toBe('nextjs-page-r2.zip')
+    const bytes = await readFile(await download.path())
+    expect(backend.downloads).toHaveLength(1)
+    expect(backend.downloads[0]).toMatchObject({ revision: singleSaved.revision, target: 'web' })
+    expect(bytes.equals(backend.downloads[0].bytes)).toBe(true)
+    expect(backend.calls.filter(call => call.path === `${PAGE_PATH}/source`).map(call => ({ method: call.method, query: call.query }))).toEqual([{ method: 'GET', query: { revision: '2' } }])
+    // Inspect downloaded bytes without extracting or executing the exported app.
+    const inspected = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['-c', [
+      'import base64,io,json,sys,zipfile',
+      'archive=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()))',
+      'print(json.dumps({name:base64.b64encode(archive.read(name)).decode() for name in archive.namelist()}))',
+    ].join(';')], { input: bytes, timeout: 20_000, maxBuffer: 4 * 1024 * 1024 })
+    expect(inspected.error).toBeUndefined()
+    expect(inspected.status, inspected.stderr.toString()).toBe(0)
+    const files = Object.fromEntries(Object.entries(JSON.parse(inspected.stdout.toString())).map(([name, data]) => [name, Buffer.from(data, 'base64')]))
+    const manifest = JSON.parse(files['source-manifest.json'].toString())
+    expect(manifest.schema).toBe('leaf.portfolio-source.v1')
+    expect(manifest.revision).toBe(singleSaved.revision)
+    expect(JSON.parse(files['portfolio.json'].toString())).toEqual(singleSaved.document)
+    expect(manifest.document_sha256).toBe(createHash('sha256').update(files['portfolio.json'].subarray(0, -1)).digest('hex'))
+    expect(Object.keys(manifest.files).sort()).toEqual(Object.keys(files).filter(name => name !== 'source-manifest.json').sort())
+    for (const [name, entry] of Object.entries(manifest.files)) {
+      expect(entry).toEqual({ sha256: createHash('sha256').update(files[name]).digest('hex'), size_bytes: files[name].length })
+    }
+    const assets = JSON.parse(files['asset-manifest.json'].toString())
+    expect(assets).toEqual(Object.fromEntries(PHOTOS.map(photo => [photo.material_id, { sha256: photo.sha256, preview_sha256: photo.preview_sha256, path: `public/images/${photo.material_id}.jpg` }])))
+    for (const photo of PHOTOS) expect(files[assets[photo.material_id].path].equals(PREVIEW)).toBe(true)
+    const css = files['app/globals.css'].toString()
+    expect(css).toContain('.portfolio-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))')
+    expect(css).toContain('.portfolio .portfolio-grid[data-gallery-layout="single"]{grid-template-columns:minmax(0,1fr)}')
+    expect(css).toContain('@media(max-width:600px){.portfolio-grid{grid-template-columns:minmax(0,1fr)}')
+    expect(files['app/Gallery.jsx'].toString()).toContain('data-gallery-layout={galleryLayout || \'grid\'}')
+    expect(files['app/[slug]/page.jsx'].toString()).toContain('<Gallery images={c.images} galleryLayout={page.galleryLayout}/>')
+    expect(JSON.parse(files['package.json'].toString()).dependencies.next).toBeTruthy()
+
+    await layout().scrollIntoViewIfNeeded()
+    await layout().selectOption({ label: 'Grid' })
+    await closeEditor()
+    const gridRestored = await geometry('grid')
+    expect(puts()).toHaveLength(2)
+    expect(backend.revisions.at(-1).document).toEqual(singleDocument)
+    await openEditor()
+    await save().click()
+    await saved()
+    expect(backend.revisions.at(-1).document).toEqual(original)
+    expect(Object.hasOwn(backend.revisions.at(-1).document, 'galleryLayout')).toBe(false)
+    await editor.getByRole('button', { name: 'Reload saved page', exact: true }).scrollIntoViewIfNeeded()
+    await editor.getByRole('button', { name: 'Reload saved page', exact: true }).click()
+    await layout().scrollIntoViewIfNeeded()
+    await expect(layout()).toHaveValue('grid')
+    await expect(save()).toBeDisabled()
+    await closeEditor()
+    await openCakes()
+    const gridReloaded = await geometry('grid')
+    expect(puts().map(call => call.body)).toEqual([
+      { expected_revision: 0, document: original }, { expected_revision: 1, document: singleDocument }, { expected_revision: 2, document: original },
+    ])
+    expect(backend.revisions.map(row => row.revision)).toEqual([1, 2, 3])
+    for (const call of [...backend.calls, ...backend.photoCalls]) {
+      expect(call.headers.authorization).toBe(`Bearer ${TOKEN}`)
+      expect(call.headers['x-org-id']).toBe(ORG)
+    }
+    expect(backend.nativeCalls).toEqual([])
+    expect(backend.foreign).toEqual([])
+    await testInfo.attach(`persisted-gallery-layout-evidence-${size}`, { body: JSON.stringify({
+      kind: 'rendered-studio-and-source-bytes-fixture-proof', independentNextExecution: false, swiftUIBuild: false,
+      viewport: layoutViewport, geometry: { gridBefore, singleDraft, singleReloaded, gridRestored, gridReloaded },
+      revisions: backend.revisions.map(({ revision, digest, document }) => ({ revision, digest, galleryLayout: document.galleryLayout || 'grid' })),
+      saveExpectedRevisions: puts().map(call => call.body.expected_revision), onlyAddedField: 'galleryLayout',
+      preservedDocument: original, source: { revision: manifest.revision, document_sha256: manifest.document_sha256,
+        archive_sha256: createHash('sha256').update(bytes).digest('hex'), assets, files: manifest.files },
+    }), contentType: 'application/json' })
+  })
+
   test(`portfolio text proposal review, use and save at ${size}`, async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     page.setDefaultTimeout(15_000)

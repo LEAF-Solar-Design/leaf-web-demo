@@ -128,7 +128,7 @@ test('J1 row1, J1 row2, J1 row4, J1 row5, J1 row8: served Browser panes, first r
   await expect(material.getByRole('button', { name: 'Upload DWG or DXF' })).toBeEnabled()
   await material.getByLabel('Drawing file').setInputFiles({ name: 'roof.dxf', mimeType: 'application/dxf', buffer: Buffer.from('0\nEOF\n') })
   await expect(material).toContainText('Attached roof.dxf as version 1 to J1 roof')
-  expect(calls).toContainEqual(['attach', { source: { drawing_id: 'j1-upload', version: 1 }, name: 'roof.dxf' }])
+  expect(calls).toContainEqual(['attach', { source: { kind: 'account_upload', drawing_id: 'j1-upload', version: 1 }, name: 'roof.dxf' }])
   expect(calls.findIndex(([kind]) => kind === 'upload')).toBeLessThan(calls.findIndex(([kind]) => kind === 'attach'))
   await board.getByRole('button', { name: 'Back to board' }).click()
 

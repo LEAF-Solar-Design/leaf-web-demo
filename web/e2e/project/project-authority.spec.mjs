@@ -65,17 +65,32 @@ async function navigateProject(page) {
   await injectProjectApi(page, metadata.web_origin, await projectApiBundle())
 }
 
+async function openProjectPanel(page) {
+  await page.getByRole('button', { name: 'Open project or material', exact: true }).click()
+  return page.getByRole('region', { name: 'Project sidebar', exact: true })
+}
+
 async function openProjectUI(page) {
   await navigateProject(page)
-  const switcher = page.locator('header.top .proj-switch')
-  await switcher.locator('button.proj-chip').click()
-  await switcher.getByRole('menuitem').filter({ hasText: projectName }).first().click()
-  await expect(page.locator('[data-ground="browser"]')).toHaveAttribute('data-project-state', 'project')
+  const sidebar = await openProjectPanel(page)
+  await sidebar.getByRole('list', { name: 'Projects', exact: true }).getByRole('button', { name: projectName, exact: true }).click()
+  await expect(page.getByRole('button', { name: `Projects: change project. Project ${projectName}`, exact: true })).toBeVisible()
 }
 
 async function openVersionUI(page, version) {
-  await page.getByRole('combobox', { name: 'Canonical drawing version', exact: true }).selectOption(version)
-  await page.getByRole('tab', { name: 'Solar CAD', exact: true }).click()
+  await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
+  const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
+  await sidebar.getByRole('combobox', { name: 'Canonical drawing version', exact: true }).selectOption(version)
+  await sidebar.getByRole('button', { name: 'Close Project', exact: true }).click()
+  await page.getByRole('combobox', { name: 'Workspace profile', exact: true }).selectOption({ label: 'Solar CAD' })
+  await page.getByRole('button', { name: 'Continue workspace', exact: true }).click()
+}
+
+async function openSettingsForm(page) {
+  const step = page.getByRole('navigation', { name: 'Solar design steps', exact: true }).getByRole('button', { name: /^Settings\b/ })
+  if (!(await step.isVisible())) await page.getByRole('button', { name: 'Solar flow tools', exact: true }).click()
+  await step.click()
+  return page.getByRole('region', { name: 'Solar settings', exact: true })
 }
 
 async function snapshot(page, projectId) {
@@ -114,14 +129,25 @@ async function readContext(page, inputVersion) {
 }
 
 function settingsHash(settings) {
-  // Matches leaf_cloud_client.canonical_bytes for this ASCII, non-exponent fixture.
-  const canonical = settings === null ? 'null' : JSON.stringify(Object.fromEntries(Object.keys(settings).sort().map(key => {
-    const value = settings[key]
-    check(typeof value === 'boolean' || (typeof value === 'string' && /^[\x20-\x7e]*$/.test(value)) ||
-      (typeof value === 'number' && (Number.isSafeInteger(value) || value === 1.25)))
-    return [key, value]
-  })))
-  return createHash('sha256').update(canonical).digest('hex')
+  // Matches leaf_cloud_client.canonical_bytes (json.dumps with sort_keys, compact separators and ensure_ascii) for
+  // null, booleans, printable-ASCII strings and keys, safe integers and non-integral finite numbers written without an
+  // exponent, nested through objects and arrays. Any other value could serialize differently in Python: fail closed.
+  const ascii = value => /^[\x20-\x7e]*$/.test(value)
+  const canonical = value => {
+    if (value === null || typeof value === 'boolean') return JSON.stringify(value)
+    if (typeof value === 'string') { check(ascii(value)); return JSON.stringify(value) }
+    if (typeof value === 'number') {
+      check(Number.isSafeInteger(value) || (Number.isFinite(value) && !Number.isInteger(value) && !/e/i.test(String(value))))
+      return String(value)
+    }
+    if (Array.isArray(value)) return '[' + value.map(canonical).join(',') + ']'
+    check(typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype)
+    return '{' + Object.keys(value).sort().map(key => {
+      check(ascii(key))
+      return JSON.stringify(key) + ':' + canonical(value[key])
+    }).join(',') + '}'
+  }
+  return createHash('sha256').update(canonical(settings)).digest('hex')
 }
 
 test('project_browser_create_import', async ({ browser }, info) => {
@@ -129,23 +155,27 @@ test('project_browser_create_import', async ({ browser }, info) => {
     await navigateProject(page)
     const seen = observe(page)
     try {
-      await page.locator('.ribbon-tool[data-tool="project:create"]').click()
-      const switcher = page.locator('header.top .proj-switch')
-      await switcher.getByLabel('New project').fill(projectName)
+      const sidebar = await openProjectPanel(page)
+      await sidebar.getByRole('textbox', { name: 'Project name', exact: true }).fill(projectName)
       const created = response(page, 'POST', '/api/projects', data => ({ project_id: data.project.project_id, organization_id: data.project.org_id }))
-      await switcher.getByRole('button', { name: 'Create project', exact: true }).click()
+      await sidebar.getByRole('button', { name: 'Create project', exact: true }).click()
       const project = await created
       check(publicId(project.project_id) && project.organization_id === metadata.organization_id)
       const stored = await snapshot(page, project.project_id)
       check(stored.project_id === project.project_id && stored.organization_id === metadata.organization_id)
       await checkpoint(info, 'ui_project_created')
-      // The ribbon's upload action opens the live material pane; upload completion imports through useMaterialIntake.
-      await page.locator('.ribbon-tool[data-tool="files:upload"]').click()
+      await expect(page.getByRole('button', { name: `Projects: change project. Project ${projectName}`, exact: true })).toBeVisible()
+      // The board's drawing tile opens the live Material pane; upload completion imports through useMaterialIntake.
+      await page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true }).click()
+      await page.getByRole('region', { name: 'Project sidebar', exact: true }).getByRole('region', { name: 'Drawing', exact: true }).getByRole('button').click()
       const attached = response(page, 'POST', `/api/projects/${project.project_id}/drawing-versions/import`, data => {
         const v = data.drawing_version
         return { project_id: v.project_id, drawing_id: v.drawing_id, input_version_id: v.version_id, organization_id: v.org_id }
       })
-      await page.locator('[data-pane="material-intake"]').getByLabel('Drawing file').setInputFiles(fixture)
+      const material = page.getByRole('region', { name: 'Material', exact: true })
+      await expect(material.getByText(`Material attaches to ${projectName}`, { exact: true })).toBeVisible()
+      await expect(material.getByRole('button', { name: 'Upload DWG or DXF', exact: true })).toBeEnabled()
+      await material.getByLabel('Drawing file', { exact: true }).setInputFiles(fixture)
       imported = await attached
       check(imported.project_id === project.project_id && imported.organization_id === metadata.organization_id &&
         publicId(imported.drawing_id) && publicId(imported.input_version_id))
@@ -211,15 +241,14 @@ test('project_settings_worker_readback', async ({ browser }, info) => {
     check(acquired.acquired && acquired.organization_id === metadata.organization_id && acquired.project_id === imported.project_id &&
       acquired.drawing_id === imported.drawing_id && Number.isSafeInteger(acquired.fence) && acquired.fence > 0)
     await checkpoint(info, 'ui_checkout_acquired')
-    await page.locator('#solar-step-solar-settings').click()
-    const form = page.getByTestId('solar-settings-form')
+    const form = await openSettingsForm(page)
     await expect(form).toHaveAttribute('data-mode', 'initialize')
     await form.getByLabel('Project name', { exact: true }).fill(projectName)
     await form.getByLabel('Panel layer contains', { exact: true }).fill('PP3B panels')
     await form.getByLabel('Optimizer ratio', { exact: true }).fill('1.25')
     // The DXF fixture has no INSUNITS. Explicit manual metres are part of this input,
     // not a fabricated extraction result; the form binds the actual intake SHA itself.
-  await form.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')
+    await form.getByRole('combobox', { name: 'Drawing units', exact: true }).selectOption('m')
     const submitted = response(page, 'POST', '/api/run', data => ({ job_id: data.job_id, status: data.status }))
     await form.getByRole('button', { name: 'Start Solar design', exact: true }).click()
     const accepted = await submitted
@@ -259,8 +288,8 @@ test('project_settings_worker_readback', async ({ browser }, info) => {
     await page.reload()
     await openProjectUI(page)
     await openVersionUI(page, published.output_version_id)
-    await page.locator('#solar-step-solar-settings').click()
-    await expect(page.getByTestId('solar-settings-form').getByLabel('Panel layer contains', { exact: true })).toHaveValue('PP3B panels')
+    const reopenedForm = await openSettingsForm(page)
+    await expect(reopenedForm.getByLabel('Panel layer contains', { exact: true })).toHaveValue('PP3B panels')
     const reopened = await readContext(page, published.output_version_id)
     const canonical = canonicalProjection({ organization_id: metadata.organization_id, project_id: imported.project_id,
       drawing_id: imported.drawing_id, input_version_id: imported.input_version_id, output_version_id: published.output_version_id,

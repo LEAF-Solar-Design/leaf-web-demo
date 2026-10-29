@@ -2027,7 +2027,7 @@ def _project_http(request, path, *, bearer=None):
         connection.close()
 
 
-def _project_connection(environment, deadline):
+def _project_connection(environment, deadline, *, read_only=True):
     # Explicit connection authority; no pool and no mutation of parent environment.
     dsn = _nonempty_dsn(environment)
     if _clean_libpq(os.environ) != dict(os.environ):
@@ -2037,8 +2037,11 @@ def _project_connection(environment, deadline):
         raise TimeoutError("database deadline")
     import psycopg
     from psycopg.rows import dict_row
+    options = f"-c statement_timeout={max(1, int(min(2, remaining) * 1000))}"
+    if read_only:
+        options += " -c default_transaction_read_only=on"
     return psycopg.connect(dsn, row_factory=dict_row, connect_timeout=max(1, math.ceil(min(2, remaining))),
-        options=f"-c statement_timeout={max(1, int(min(2, remaining) * 1000))} -c default_transaction_read_only=on")
+        options=options)
 
 
 def _settings_hash(context, *, digest):
@@ -2050,7 +2053,8 @@ def _canonical_database_proof(request, *, graph, connection):
     """Verify stored job and historical publication via the canonical verifier."""
     from uuid import UUID
     evidence = request.evidence
-    with connection(request.environment, request.deadline) as conn:
+    # The canonical verifier takes share locks; allow them but never commit proof statements.
+    with connection(request.environment, request.deadline, read_only=False) as conn, conn.transaction(force_rollback=True):
         job = conn.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL",
                            (evidence.job_id,)).fetchone()
         if (job is None or job["status"] != "succeeded" or job["tool_name"] != WORKER_TOOL
@@ -2075,8 +2079,8 @@ def _canonical_database_proof(request, *, graph, connection):
         if _settings_hash(before, digest=graph.local.digest) != evidence.before_settings_sha256:
             _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
         stored_hash = _settings_hash(stored, digest=graph.local.digest)
-    # Reopen on an independent connection after releasing the first read transaction.
-    with connection(request.environment, request.deadline) as conn:
+    # Reopen independently after rolling back the first transaction and releasing its locks.
+    with connection(request.environment, request.deadline, read_only=False) as conn, conn.transaction(force_rollback=True):
         reopened, _ = graph._stored_context(expected, UUID(evidence.output_version_id), conn)
         reopened_hash = _settings_hash(reopened, digest=graph.local.digest)
     return CanonicalProof(evidence, stored_hash, reopened_hash)
@@ -3724,7 +3728,7 @@ def _validate_receipt_structure(document, *, project=True):
         for item in stack["owned_process_identities"]:
             _exact(item, ("role", "pid", "start_id", "parent_pid"))
             if (type(item["pid"]) is not int or item["pid"] <= 0 or type(item["parent_pid"]) is not int
-                    or item["parent_pid"] <= 0 or not _public_id(item["start_id"])):
+                    or item["parent_pid"] <= 0 or not _group_fields(item["pid"], item["start_id"], item["role"])):
                 _receipt_refused()
             roles.append(item["role"])
             pids.append(item["pid"])
@@ -3740,7 +3744,7 @@ def _validate_receipt_structure(document, *, project=True):
         _exact(app["dependencies"], APP_DEPENDENCIES)
         for item in app["dependencies"].values():
             _exact(item, ("state", "required"))
-            if item["state"] != "ready" or item["required"] is not True:
+            if item["state"] != "ready" or type(item["required"]) is not bool:
                 _receipt_refused()
     worker = document["worker"]
     if worker is not None:
@@ -4596,7 +4600,7 @@ class _GuardianLease:
     def arm(self):
         import queue
         self.responses = queue.Queue(maxsize=4)
-        code = "import runpy,sys; m=runpy.run_path(sys.argv[1]); sys.exit(m['_guardian_entry']())"
+        code = "import runpy,sys; m=runpy.run_path(sys.argv[1]); m['_guardian_process_main']()"
         environment = _PrivateEnvironment(_clean_libpq(_essential_environment(self.plan.host.environment)))
         if (_authority_kind(self.plan.host.environment) == "native"
                 and "LEAF_PG_BIN" in self.plan.host.environment):
@@ -4743,6 +4747,26 @@ def _guardian_object(pairs):
             raise ValueError("duplicate guardian message key")
         result[key] = value
     return result
+
+
+def _guardian_process_main():
+    """Exit without interpreter finalization after explicitly flushing output.
+
+    The channel's daemon reader can hold the stdin buffer lock when the main
+    thread returns. CPython then aborts at shutdown, turning an acknowledged
+    disarm into a failure; os._exit skips finalization after an explicit flush.
+    """
+    try:
+        result = _guardian_entry()
+        code = result if type(result) is int and 0 <= result <= 255 else 1
+    except BaseException:
+        code = 1
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except BaseException:
+            pass
+    os._exit(code)
 
 
 def _guardian_entry():

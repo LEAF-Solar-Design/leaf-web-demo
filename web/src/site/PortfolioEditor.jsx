@@ -92,7 +92,7 @@ function PortfolioView({ document, projectId, scope, onSelectField }) {
     {edit({ field: 'name' }, 'name')}
     {view === 'about' ? <><h1>About {document.name}</h1><p>{document.about}</p>{edit({ field: 'about' }, 'About')}<h2>Contact</h2><p>{document.contact.location}</p>{edit({ field: 'contact.location' }, 'location')}<p>{document.contact.email}</p>{edit({ field: 'contact.email' }, 'contact email')}</>
       : view === 'resume' ? <><h1>Resume</h1>{document.resume.map((section, index) => <section key={index}><h2>{section.heading}</h2>{edit({ field: 'resume.heading', section: selectionIdentity(section) }, `resume section ${index + 1} heading`)}{section.entries.map((entry, i) => <article key={i}><h3>{entry.title}</h3><p>{entry.subtitle}</p><p>{entry.dates}</p><p>{entry.description}</p>{['title', 'subtitle', 'dates', 'description'].map(field => <span key={field}>{edit({ field: `resume.${field}`, section: selectionIdentity(section), entry: selectionIdentity(entry) }, `resume section ${index + 1} entry ${i + 1} ${field}`)}</span>)}</article>)}</section>)}</>
-        : category ? <><h1>{category.title}</h1><p>{category.description}</p>{galleryEdits(category)}<div className="portfolio-grid">{category.images.map(image => <figure key={image.material_id}><button onClick={event => { trigger.current = event.currentTarget; setSelected(image) }} aria-label={`View ${image.alt}`}>
+        : category ? <><h1>{category.title}</h1><p>{category.description}</p>{galleryEdits(category)}<div className="portfolio-grid" data-gallery-layout={document.galleryLayout || 'grid'}>{category.images.map(image => <figure key={image.material_id}><button onClick={event => { trigger.current = event.currentTarget; setSelected(image) }} aria-label={`View ${image.alt}`}>
           {photo(image)}<span>{image.title}</span>
         </button>{edit({ field: 'caption', gallery: category.slug, material: image.material_id }, `${category.title} caption for ${image.alt}`)}</figure>)}</div></>
           : <><h1>{document.headline}</h1>{edit({ field: 'headline' }, 'headline')}<p>{document.introduction}</p>{edit({ field: 'introduction' }, 'introduction')}<div className="portfolio-grid">{document.categories.map((item, index) => <div key={index}><button onClick={() => navigate(item.slug)}>
@@ -193,6 +193,10 @@ export default function PortfolioEditor({ document, onChange, projectId, reviewR
     <Field inputRef={target({ field: 'contact.location' })} label="Location" value={document.contact.location} limit={160} onChange={value => update(next => { next.contact.location = value })} />
     </Disclosure>
     <h3>Galleries</h3><p>Add photos from this project. At least one photo per gallery is required to save.</p>
+    <label><span>Photo layout</span><select value={document.galleryLayout || 'grid'} onChange={event => update(next => {
+      if (event.target.value === 'single') next.galleryLayout = 'single'
+      else delete next.galleryLayout
+    })}><option value="grid">Grid</option><option value="single">Single column</option></select></label>
     <button type="button" disabled={loading || !scope} onClick={loadPhotos}>{loading ? 'Loading photos…' : 'Load project photos'}</button>
     {error && <p role="alert">{error}</p>}
     {document.categories.map((item, ci) => <section className="portfolio-editor__category" key={`${scope}:${projectId}:${identity(item)}`} aria-label={`Gallery ${ci + 1}`}>
