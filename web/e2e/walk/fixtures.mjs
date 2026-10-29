@@ -493,6 +493,46 @@ export async function discloseControlPanel(page, recipe) {
     await more.click({ timeout: 15_000 })
   }
 }
+
+export function absenceNamePattern(locator) {
+  if (locator?.unavailableName !== undefined) {
+    if (locator.unavailableName instanceof RegExp
+      || typeof locator.unavailableName === 'string' && locator.unavailableName.trim()) return locator.unavailableName
+    throw new Error('Absence oracle requires a stable action name')
+  }
+  const name = locator?.availableName || locator?.name
+  const label = typeof name === 'string' ? name.split(' (unavailable: ')[0] : ''
+  if (!label.trim()) throw new Error('Absence oracle requires a stable action name')
+  return new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?: \\(unavailable: .+\\))?$')
+}
+
+export async function resolveSurfaceControl(page, probe) {
+  const profile = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('combobox', { name: 'Workspace profile', exact: true })
+  const modern = await profile.isVisible()
+  const legacy = modern
+    ? page.getByRole('tablist', { name: 'Workspace profile', exact: true, includeHidden: true })
+      .getByRole('tab', { name: probe.locator.name, exact: probe.locator.exact !== false, includeHidden: true })
+    : control(page, probe.locator)
+  return {
+    locator: modern ? profile : legacy, legacy, modern,
+    activate: async () => {
+      if (modern) await profile.selectOption(probe.sourceId)
+      else await legacy.click()
+    },
+    assertSelected: async (assertions = expect) => {
+      if (modern) {
+        await assertions(profile).toHaveValue(probe.sourceId)
+        await assertions(page.locator('section.workspace-environment')).toHaveAttribute('data-profile', probe.sourceId)
+      } else await assertions(legacy).toHaveAttribute('aria-selected', 'true')
+    },
+  }
+}
+
+export async function assertSurfaceState(locator, state, assertions = expect) {
+  await assertions(locator.locator('[data-state]')).toHaveAttribute('data-state', state)
+}
+
 const panelButton = (page, name) => page.getByRole('group', { name: 'Workspace panels', exact: true })
   .getByRole('button', { name, exact: true })
 const canvas = (page) => page.getByRole('region', { name: 'Drawing', exact: true }).locator('canvas:visible')
@@ -1102,7 +1142,7 @@ export async function completeSolarReadiness(probe, runtime, locator, assertions
   await workspace(probe, runtime)
   await assertions(runtime.page.locator('.workspace-card')).toHaveAttribute('data-engine-document',
     new RegExp(`^${runtime.drawingId}-v[1-9]\\d*\\.dxf$`), { timeout: 60_000 })
-  await assertions(locator.locator('[data-state]')).toHaveAttribute('data-state', 'available')
+  await assertSurfaceState(locator, 'available', assertions)
   await assertions(locator).toContainText('Ready')
   runtime.evidence.solarReadiness.released = 'Ready'
 }
@@ -2131,12 +2171,15 @@ async function baselineThreeState(probe, runtime, recipe) {
   if (recipe.expanded !== undefined) await expect(locator).toHaveAttribute('aria-expanded', String(recipe.expanded))
   if (target === 'project-board') {
     const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
-    if (await back.isVisible()) await back.click()
-    await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
-    runtime.cleanup.push(async () => {
-      if (await back.isVisible()) await back.click()
-      await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
-    })
+    const restore = async () => {
+      if (await page.locator('section.workspace-environment').count()) await enterWorkspaceEnvironment(page)
+      else {
+        if (await back.isVisible()) await back.click()
+        await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeHidden()
+      }
+    }
+    await restore()
+    runtime.cleanup.push(restore)
   }
   if (['scope-build-picker', 'scope-picker', 'tool-commands', 'unknown-tool-resolver'].includes(target)) {
     const bar = await clearComposer(page)
@@ -3127,9 +3170,9 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       evidence.health = health
       if (runtime.releaseSolarProjection) {
         await assertions.poll(() => evidence.solarProjectionRequests.length).toBeGreaterThan(0)
-        const solar = page.getByRole('tablist', { name: 'Workspace profile', exact: true })
-          .getByRole('tab', { name: 'Solar CAD', exact: false })
-        await assertions(solar.locator('[data-state]')).toHaveAttribute('data-state', 'beta')
+        const solar = page.getByRole('tablist', { name: 'Workspace profile', exact: true, includeHidden: true })
+          .getByRole('tab', { name: 'Solar CAD', exact: false, includeHidden: true })
+        await assertSurfaceState(solar, 'beta', assertions)
         await assertions(solar).toContainText('Beta')
         await assertions(page.locator('.workspace-card')).not.toHaveAttribute('data-engine-document', /.+/)
         evidence.solarReadiness = { transport: 'drawing DXF projection held', pending: 'Beta' }
@@ -3217,6 +3260,10 @@ async function captureBefore(probe, runtime) {
 async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
+  if (probe.kind === 'surface' && recipe.role === 'tab') {
+    await (await resolveSurfaceControl(page, probe)).activate()
+    return
+  }
   if (recipe?.keyboardAction === 'engine:repeat' && typeof activateEngineRepeat === 'function') {
     await activateEngineRepeat(runtime, locator)
     return
@@ -3317,8 +3364,14 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'project-board') {
-    await expect(page.getByRole('heading', { name: 'Project board', exact: true })).toBeVisible()
-    await expect(page.getByRole('button', { name: 'Return to drawing', exact: true })).toBeVisible()
+    const environment = page.locator('section.workspace-environment')
+    if (await environment.count()) {
+      await assertions(page.getByRole('heading', { name: 'What would you like to work on?', exact: true })).toBeVisible()
+      await assertions(environment).toHaveAttribute('data-entered', 'false')
+    } else {
+      await assertions(page.getByRole('heading', { name: 'Project board', exact: true })).toBeVisible()
+      await assertions(page.getByRole('button', { name: 'Return to drawing', exact: true })).toBeVisible()
+    }
     return
   }
   if (target === 'notification-inbox-collapsed') {
@@ -3678,15 +3731,18 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       return
     }
     const surface = PRODUCT_SURFACES.find((surface) => surface.id === probe.sourceId)
+    let statusLocator = locator
     if (surface.contract.chrome.tab) {
-      await expect(locator).toHaveAttribute('aria-selected', 'true')
-      await expect(locator).toContainText(effect.label)
-      await expect(locator.locator('[data-state]')).toHaveAttribute('data-state', effect.state)
+      const resolved = await resolveSurfaceControl(page, probe)
+      await resolved.assertSelected(assertions)
+      statusLocator = resolved.legacy
+      await expect(statusLocator).toContainText(effect.label)
+      await assertSurfaceState(statusLocator, effect.state, assertions)
     }
     if (effect.ground === 'drawing' && effect.state !== 'setup' && effect.state !== 'sign-in') await expect(canvas(page)).toBeVisible()
     else if (effect.ground === 'board') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
     else if (effect.ground === 'sheet') { await expect(page).toHaveURL(/\/sheets$/); await expect(page.getByRole('main')).toBeVisible() }
-    await completeSolarReadiness(probe, runtime, locator, assertions)
+    await completeSolarReadiness(probe, runtime, statusLocator, assertions)
     return
   }
   if (target === 'browser-clipboard') {
@@ -3828,7 +3884,9 @@ export async function runProbe(probe, runtime) {
     // Source-extracted fake runners may omit module dependencies.
     if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, targetRecipe)
     if (typeof phoneRailAvailability === 'function') await phoneRailAvailability(probe, runtime)
-    const locator = control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
+    const locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
+      ? (await resolveSurfaceControl(page, probe)).locator
+      : control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
       if (observations.length) Object.assign(evidence, packUxEvidence([...(evidence.ux_observations || []), ...observations]))
@@ -3848,7 +3906,7 @@ export async function runProbe(probe, runtime) {
         else await expect(failedDrawingGroup).toHaveCount(0)
         // Check the action globally as well: an absent scope alone would
         // make every scoped locator empty, even if the action moved elsewhere.
-        await expect(page.getByRole(probe.locator.role, { name: probe.locator.unavailableName, includeHidden: true })).toHaveCount(0)
+        await expect(page.getByRole(probe.locator.role, { name: typeof absenceNamePattern === 'function' ? absenceNamePattern(probe.locator) : probe.locator.unavailableName, includeHidden: true })).toHaveCount(0)
       })
       evidence.failedDrawing.actionAvailability = 'unavailable_not_rendered'
       evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
