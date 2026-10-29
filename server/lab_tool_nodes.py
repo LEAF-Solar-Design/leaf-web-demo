@@ -31,6 +31,24 @@ def enabled():
     return os.environ.get("LEAF_LAB_TOOL_NODES") == "1"
 
 
+def lab_tool_tier(tenant_id):
+    # Broker record first, active platform org second; fail closed.
+    from deps import backedge_tier
+
+    tier = backedge_tier(tenant_id)
+    if tier is not None:
+        return tier
+    try:
+        import platform_link
+
+        org = platform_link.platform_store().get_org(tenant_id)
+        if org is not None and org.status == "active":
+            return org.tier.strip() if isinstance(org.tier, str) and org.tier.strip() else "restricted"
+    except Exception:
+        return None
+    return None
+
+
 def tool_block_admissible(trusted, effects=("compute", "read")):
     return (trusted is not None and trusted.residency != "host"
             and trusted.aps_live is False
@@ -158,8 +176,7 @@ class ToolNodeAdapter:
         try:
             required = entitlements.tool_required_capability(tool)
             if self.tier_of is None:
-                from deps import backedge_tier
-                tier_of = backedge_tier
+                tier_of = lab_tool_tier
             else:
                 tier_of = self.tier_of
             tier = tier_of(self.tenant)
