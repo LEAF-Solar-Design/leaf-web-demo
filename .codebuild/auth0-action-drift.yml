@@ -32,6 +32,16 @@ phases:
           0|1|2) echo "auth0 action drift check completed with exit $rc" ;;
           *) exit "$rc" ;;
         esac
+      - |
+        set -euo pipefail
+        rc=0
+        python3 scripts/check_auth0_spa_client_drift.py \
+          --domain "$LEAF_AUTH0_DOMAIN" \
+          --receipt-dir auth0-drift-artifacts/spa-receipts || rc=$?
+        case "$rc" in
+          0|1|2) echo "auth0 spa client drift check completed with exit $rc" ;;
+          *) exit "$rc" ;;
+        esac
 artifacts:
   base-directory: auth0-drift-artifacts
   files:
