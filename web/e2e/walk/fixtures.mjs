@@ -17,6 +17,10 @@ import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
 import { createAccessibilityMeasurementCapture } from './accessibilityMeasurements.mjs'
+import { createEndUserMeasurementCapture } from './endUserMeasurements.mjs'
+import { collectSupportMeasurements } from './supportMeasurements.mjs'
+import { createOpsSreMeasurementCapture } from './opsSreMeasurements.mjs'
+import { createRedHatMeasurementCapture } from './redHatMeasurements.mjs'
 import { composePersonaMeasurementBundle } from './personaMeasurementBundle.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
@@ -470,6 +474,10 @@ function catalogSha256(catalog) {
   return createHash('sha256').update(JSON.stringify(catalog)).digest('hex')
 }
 
+export function protectedStateDigest(snapshot) {
+  return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
+}
+
 const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
       annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panel placement',
       view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
@@ -567,6 +575,70 @@ export function addPersonaFragment(evidence, { persona, measurements, bundleRefe
     evidence.measurementSources = bundle?.sources ?? []
     evidence.measurementConflicts = bundle?.conflicts ?? []
   } catch { /* Optional evidence never changes the functional verdict. */ }
+}
+
+// Optional observers consume only facts supplied at the existing assertion sites.
+export function createWalkPersonaObservers({ probe, viewport, evidence,
+  endUser = createEndUserMeasurementCapture, support = collectSupportMeasurements,
+  opsSre = createOpsSreMeasurementCapture, redHat = createRedHatMeasurementCapture }) {
+  const captures = new Map(), observed = new Set()
+  const suffix = `${probe.featureId}[${probe.state}]@${viewport}`
+  const retry = probe.featureId === 'action:bar-retry' && probe.state === 'retry-history'
+  const diagnostic = (persona) => {
+    captures.delete(persona)
+    observed.delete(persona)
+    evidence.measurementDiagnostics ||= []
+    evidence.measurementDiagnostics.push({ persona, message: 'Optional persona observation failed' })
+  }
+  const create = (persona, factory, options = {}) => {
+    try {
+      const capture = factory({ reference: `${persona}:${suffix}`, ...options })
+      if (capture) captures.set(persona, capture)
+    } catch { diagnostic(persona) }
+  }
+  if (viewport === 'desktop' && probe.featureId === 'control:version-history' && probe.state === 'ready') {
+    create('end-user', endUser, { expectedEffect: 'version-history-open' })
+    try { captures.get('end-user')?.start() } catch { diagnostic('end-user') }
+  }
+  if (retry && ['desktop', 'phone'].includes(viewport)) {
+    create('ops-sre', opsSre)
+    captures.set('support', support)
+  }
+  if (probe.featureId && probe.state && probe.assertion?.target === 'engine-refusal'
+    && ['desktop', 'phone'].includes(viewport)) create('red-hat', redHat)
+  return {
+    async observe(persona, event, value) {
+      const capture = captures.get(persona)
+      if (!capture) return
+      try {
+        if (persona === 'support') {
+          if (event !== 'alert' || value.errorObserved !== true) return
+          const { page, alert } = value
+          const measurements = await capture({ page, errorObserved: true, reference: `support:${suffix}`,
+            errorLocator: alert.locator('.pane-fail-title'), explanationLocator: alert.locator('.pane-fail-reason'),
+            recoveryLocator: alert.getByRole('button', { name: 'Retry', exact: true }) })
+          if (measurements) { captures.set(persona, measurements); observed.add(persona) }
+        } else {
+          if (persona === 'red-hat' && ['before', 'after'].includes(event)) value = protectedStateDigest(value)
+          await capture[event](value)
+          if ((persona === 'end-user' && event === 'observeEffect')
+            || (persona === 'ops-sre' && event === 'observeFailure' && value === true)
+            || (persona === 'red-hat' && event === 'observeRefusal' && value.observed === true)) observed.add(persona)
+        }
+      } catch { diagnostic(persona) }
+    },
+    async finish() {
+      for (const persona of observed) {
+        try {
+          const capture = captures.get(persona)
+          const measurements = persona === 'support' ? capture
+            : persona === 'red-hat' ? await capture.result() : await capture.finish()
+          if (measurements) addPersonaFragment(evidence, { persona, measurements, bundleReference: `walk:${suffix}` })
+        } catch { diagnostic(persona) }
+      }
+      observed.clear()
+    },
+  }
 }
 
 export function mergeAccessibilityMeasurements(existing, result) {
@@ -1156,6 +1228,12 @@ export async function assertEngineRefusal(probe, runtime, before, assertions = e
   await assertions(status).toHaveText(probe.assertion.refusal)
   const after = await captureEngineRefusal(runtime)
   runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before, after }
+  if (probe.featureId && probe.state && probe.assertion.target === 'engine-refusal') {
+    await runtime.walkPersonaObservers?.observe('red-hat', 'observeRefusal', {
+      observed: true, visibleText: runtime.evidence.engineRefusal.observed,
+    })
+    await runtime.walkPersonaObservers?.observe('red-hat', 'after', after)
+  }
   assertions(after).toEqual(before)
 }
 
@@ -1490,6 +1568,13 @@ export async function setupHistoryFault(probe, runtime, assertions = expect, his
   runtime.cleanup.push(runtime.releaseHistoryFault)
   await history(probe, runtime, assertions)
   await assertions(page.getByRole('dialog', { name: 'Version history', exact: true }).getByRole('alert')).toBeVisible()
+  if (probe.featureId === 'action:bar-retry' && probe.state === 'retry-history') {
+    const alert = page.getByRole('dialog', { name: 'Version history', exact: true }).getByRole('alert')
+    await runtime.walkPersonaObservers?.observe('ops-sre', 'observeFailure', true)
+    // No wait was observed by this setup. Elapsed request time is not UI evidence.
+    await runtime.walkPersonaObservers?.observe('ops-sre', 'observeWait', { observed: false, progress: '', reason: '' })
+    await runtime.walkPersonaObservers?.observe('support', 'alert', { page, alert, errorObserved: true })
+  }
   assertions(fault.failed.length).toBe(1)
   await runtime.releaseHistoryFault()
   const observe = (request) => {
@@ -3599,6 +3684,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     }
     await expect(panel.getByRole('button', { name: spec.close, exact: true })).toBeVisible()
     if (target === 'cost-panel') await expect(panel.getByRole('heading', { name: spec.name, exact: true })).toBeVisible()
+    if (probe.featureId === 'control:version-history' && probe.state === 'ready'
+      && runtime.testInfo.project.name === 'desktop' && !before.visible) {
+      await runtime.walkPersonaObservers?.observe('end-user', 'observeEffect', 'version-history-open')
+    }
     return
   }
   if (target === 'scope-build-picker' || target === 'scope-picker') {
@@ -3946,7 +4035,15 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     else throw new Error(`No observable Escape oracle for ${rung}`)
     return
   }
-  if (target === 'retry:history') { await assertHistoryRecovery(runtime, assertions); return }
+  if (target === 'retry:history') {
+    await assertHistoryRecovery(runtime, assertions)
+    if (probe.featureId === 'action:bar-retry' && probe.state === 'retry-history') {
+      await runtime.walkPersonaObservers?.observe('ops-sre', 'observeRecovery', {
+        action: 'Retry', outcome: 'Versions restored', outcomeVisible: true,
+      })
+    }
+    return
+  }
   if (target.startsWith('viewer-')) {
     if (target === 'viewer-home') {
       // CadOverview rounds SVG coordinates to tenths of an overview unit.
@@ -4072,6 +4169,8 @@ export async function runProbe(probe, runtime) {
   const setupStartedAt = Date.now()
   let originalError
   try {
+    runtime.walkPersonaObservers = typeof createWalkPersonaObservers === 'function'
+      ? createWalkPersonaObservers({ probe, viewport: runtime.testInfo?.project?.name, evidence }) : null
     if (typeof observeProbeRequests === 'function' && typeof page.on === 'function') {
       runtime.cleanup.push(observeProbeRequests(page, evidence, setupStartedAt))
     }
@@ -4208,6 +4307,10 @@ export async function runProbe(probe, runtime) {
       }
     }
     const before = await captureBefore(probe, runtime)
+    if (probe.featureId && probe.state && probe.assertion.target === 'engine-refusal'
+      && typeof runtime.walkPersonaObservers?.observe === 'function') {
+      await runtime.walkPersonaObservers.observe('red-hat', 'before', before)
+    }
     const accessibilityCapture = typeof prepareAccessibilityCapture === 'function'
       ? await prepareAccessibilityCapture({ page, probe, viewport: runtime.testInfo.project.name,
         locator, evidence, cleanup: runtime.cleanup }) : null
@@ -4234,6 +4337,7 @@ export async function runProbe(probe, runtime) {
       evidence.oracleReached = probe.assertion.assertionId
       return assertEffect(probe, runtime, locator, before)
     })
+    if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
     if (typeof followAccessibilityCapture === 'function') {
       await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence,
         bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })

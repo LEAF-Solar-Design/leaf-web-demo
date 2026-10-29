@@ -29,7 +29,233 @@ import { setStudioDrawer, studioDrawerLocator, assertStudioDrawer, studioDrawerP
   setToolRail, railExpandLauncher, assertRailExpandFamily } from './fixtures.mjs'
 import { ACCESSIBILITY_DIALOG_SCOPE, accessibilityDialogTargets, mergeAccessibilityMeasurements, addPersonaFragment,
   prepareAccessibilityCapture, followAccessibilityCapture } from './fixtures.mjs'
-import { accessibility, mobileTouch } from './lenses/index.mjs'
+import { accessibility, mobileTouch, endUser, support, opsSre, redHat } from './lenses/index.mjs'
+import { createWalkPersonaObservers, protectedStateDigest } from './fixtures.mjs'
+
+function observerWalkFixture(persona, overrides = {}) {
+  const probe = persona === 'end-user' ? { featureId: 'control:version-history', state: 'ready' }
+    : persona === 'red-hat' ? { featureId: 'action:engine-delete', state: 'ready', assertion: { target: 'engine-refusal' } }
+      : { featureId: 'action:bar-retry', state: 'retry-history' }
+  const evidence = { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId, state: probe.state, viewport: 'desktop',
+    result: { result: 'passed', featureId: probe.featureId, state: probe.state } }
+  const observers = createWalkPersonaObservers({ probe, viewport: 'desktop', evidence, ...overrides })
+  return { probe, evidence, observers }
+}
+
+function supportAlertFixture(reachable = true) {
+  const title = { innerText: 'Couldn’t load versions' }, reason = { innerText: 'History request failed' }
+  const retry = { innerText: 'Retry', contains: node => node === retry,
+    getBoundingClientRect: () => ({ x: 0, y: 0, width: 60, height: 44 }) }
+  for (const node of [title, reason, retry]) Object.assign(node, {
+    isConnected: true, isVisible: async () => true, dispose: async () => {},
+  })
+  const locator = node => ({ count: async () => 1, isVisible: async () => true,
+    elementHandle: async () => node, ariaSnapshot: async () => '- button "Retry"' })
+  const alert = { locator: selector => {
+    assert.ok(['.pane-fail-title', '.pane-fail-reason'].includes(selector))
+    return locator(selector === '.pane-fail-title' ? title : reason)
+  }, getByRole: (role, options) => {
+    assert.deepEqual([role, options], ['button', { name: 'Retry', exact: true }])
+    return locator(retry)
+  } }
+  const page = { evaluate: async (callback, argument) => {
+    const descriptors = Object.getOwnPropertyDescriptors(globalThis)
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: { innerWidth: 1024, innerHeight: 768 } })
+    Object.defineProperty(globalThis, 'document', { configurable: true,
+      value: { elementFromPoint: () => reachable ? retry : null } })
+    try { return callback(argument) } finally {
+      for (const key of ['window', 'document']) {
+        if (descriptors[key]) Object.defineProperty(globalThis, key, descriptors[key])
+        else delete globalThis[key]
+      }
+    }
+  } }
+  return { page, alert, errorObserved: true }
+}
+
+const protectedSnapshot = () => ({ geometry: { entities: [{ id: 1, x: 4 }] }, selection: 'none',
+  history: [{ disabled: true }], clipboard: { disabled: true }, versions: [{ v: 1 }], dispatches: [] })
+
+async function observedPersonaTrace(fake, persona, violating = false) {
+  const { observers } = fake
+  if (persona === 'end-user') {
+    if (violating) await observers.observe(persona, 'manualApply')
+    await observers.observe(persona, 'observeEffect', 'version-history-open')
+  } else if (persona === 'support') {
+    await observers.observe(persona, 'alert', supportAlertFixture(!violating))
+  } else if (persona === 'ops-sre') {
+    await observers.observe(persona, 'observeFailure', true)
+    await observers.observe(persona, 'observeWait', { observed: false, progress: '', reason: '' })
+    await observers.observe(persona, 'observeRecovery', {
+      action: 'Retry', outcome: 'Versions restored', outcomeVisible: !violating,
+    })
+  } else {
+    await observers.observe(persona, 'before', protectedSnapshot())
+    await observers.observe(persona, 'observeRefusal', { observed: true, visibleText: 'Nothing selected' })
+    const after = protectedSnapshot()
+    if (violating) after.dispatches.push({ type: 'edit' })
+    await observers.observe(persona, 'after', after)
+  }
+  await observers.finish()
+}
+
+for (const lens of [endUser, support, opsSre, redHat]) {
+  test(`${lens.name} walk facts compose a real passing or finding lens fragment`, async () => {
+    for (const violating of [false, true]) {
+      const fake = observerWalkFixture(lens.name)
+      const result = structuredClone(fake.evidence.result)
+      await observedPersonaTrace(fake, lens.name, violating)
+      assert.equal(lens.evaluate(fake.evidence).status, violating ? 'finding' : 'pass')
+      assert.deepEqual(fake.evidence.result, result)
+      assert.deepEqual(fake.evidence.measurementSources, [{ persona: lens.name,
+        reference: `${lens.name}:${fake.probe.featureId}[${fake.probe.state}]@desktop`, missing: false }])
+      assert.equal(fake.evidence.measurements.reference, `walk:${fake.probe.featureId}[${fake.probe.state}]@desktop`)
+    }
+  })
+
+  test(`${lens.name} absent observed fact stays UNKNOWN and keeps the functional result`, async () => {
+    const fake = observerWalkFixture(lens.name)
+    const result = structuredClone(fake.evidence.result)
+    if (lens === support) await fake.observers.observe(lens.name, 'alert', { errorObserved: false })
+    if (lens === opsSre) {
+      await fake.observers.observe(lens.name, 'observeFailure', false)
+      await fake.observers.observe(lens.name, 'observeWait', { observed: false, progress: '', reason: '' })
+    }
+    if (lens === redHat) {
+      await fake.observers.observe(lens.name, 'before', protectedSnapshot())
+      await fake.observers.observe(lens.name, 'observeRefusal', { observed: false, visibleText: '' })
+      await fake.observers.observe(lens.name, 'after', protectedSnapshot())
+    }
+    await fake.observers.finish()
+    assert.equal(lens.evaluate(fake.evidence).status, 'unknown')
+    assert.equal(fake.evidence.personaFragments, undefined)
+    assert.deepEqual(fake.evidence.result, result)
+  })
+
+  test(`${lens.name} observer exception is value-free and preserves other fragments and result`, async () => {
+    const throwing = () => { throw new Error('private-observer-value') }
+    const factories = { endUser: throwing, support: throwing, opsSre: throwing, redHat: throwing }
+    const key = { 'end-user': 'endUser', support: 'support', 'ops-sre': 'opsSre', 'red-hat': 'redHat' }[lens.name]
+    const fake = observerWalkFixture(lens.name, { [key]: factories[key] })
+    const bundleReference = `walk:${fake.probe.featureId}[${fake.probe.state}]@desktop`
+    addPersonaFragment(fake.evidence, { persona: 'accessibility', bundleReference,
+      measurements: { reference: 'accessibility:other[ready]@desktop', overlay: { modal: true } } })
+    const result = structuredClone(fake.evidence.result), fragments = structuredClone(fake.evidence.personaFragments)
+    await observedPersonaTrace(fake, lens.name)
+    assert.equal(lens.evaluate(fake.evidence).status, 'unknown')
+    assert.deepEqual(fake.evidence.result, result)
+    assert.deepEqual(fake.evidence.personaFragments, fragments)
+    assert.deepEqual(fake.evidence.measurementDiagnostics, [{ persona: lens.name, message: 'Optional persona observation failed' }])
+    assert.equal(JSON.stringify(fake.evidence).includes('private-observer-value'), false)
+  })
+}
+
+test('observer scopes exclude unrelated features, states, viewports and assertion targets', async () => {
+  const unexpected = () => assert.fail('out-of-scope observer created')
+  for (const [probe, viewport] of [
+    [{ featureId: 'control:other', state: 'ready' }, 'desktop'],
+    [{ featureId: 'control:version-history', state: 'failed-load' }, 'desktop'],
+    [{ featureId: 'control:version-history', state: 'ready' }, 'phone'],
+    [{ featureId: 'action:bar-retry', state: 'ready' }, 'desktop'],
+    [{ featureId: 'action:other', state: 'retry-history' }, 'phone'],
+    [{ featureId: 'action:engine-delete', state: 'ready', assertion: { target: 'engine:delete' } }, 'desktop'],
+    [{ featureId: 'action:engine-delete', state: 'ready', assertion: { target: 'engine-refusal' } }, 'tablet'],
+  ]) {
+    const evidence = {}, observers = createWalkPersonaObservers({ probe, viewport, evidence,
+      endUser: unexpected, support: unexpected, opsSre: unexpected, redHat: unexpected })
+    for (const persona of ['end-user', 'support', 'ops-sre', 'red-hat']) {
+      await observers.observe(persona, 'alert', { errorObserved: true })
+    }
+    await observers.finish()
+    assert.deepEqual(evidence, {})
+  }
+})
+
+test('protected-state digests cover every captured boundary without retaining snapshot values', () => {
+  const before = protectedSnapshot(), digest = protectedStateDigest(before)
+  assert.match(digest, /^[a-f0-9]{64}$/)
+  assert.equal(protectedStateDigest(structuredClone(before)), digest)
+  for (const key of ['geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches']) {
+    assert.notEqual(protectedStateDigest({ ...before, [key]: 'changed' }), digest)
+  }
+})
+
+test('version-history oracle supplies only the panel opening it actually confirmed', async () => {
+  for (const visible of [true, false]) {
+    const fake = observerWalkFixture('end-user')
+    const probe = { ...fake.probe, kind: 'control', assertion: { target: 'version-history' } }
+    const runtime = { page: { getByRole: () => ({ visible, getByRole: () => ({ visible: true }) }) },
+      testInfo: { project: { name: 'desktop' } }, walkPersonaObservers: fake.observers }
+    const locator = { getAttribute: async () => 'true' }
+    if (visible) await assertEffect(probe, runtime, locator, { visible: false }, censusAssertions)
+    else await assert.rejects(assertEffect(probe, runtime, locator, { visible: false }, censusAssertions))
+    await fake.observers.finish()
+    assert.equal(endUser.evaluate(fake.evidence).status, visible ? 'pass' : 'unknown')
+  }
+})
+
+test('history setup collects support before releasing the fault and oracle supplies the visible recovery', async () => {
+  const fake = observerWalkFixture('support'), alertFacts = supportAlertFixture()
+  const probe = { ...fake.probe, assertion: { target: 'retry:history' } }
+  let handler, requestObserver, released = false
+  const alert = { ...alertFacts.alert, visible: true, countValue: 0 }
+  const row = { visible: true, first() { return this } }
+  const runtime = { page: { ...alertFacts.page,
+    route: async (_pattern, callback) => { handler = callback },
+    unroute: async () => {
+      assert.equal(released, false)
+      released = true
+      // Both title and recovery were read while the alert was still present.
+      assert.equal(alert.visible, true)
+      alert.visible = false
+    },
+    getByRole: () => ({ getByRole: role => role === 'alert' ? alert : row }),
+    on: (_event, callback) => { requestObserver = callback }, off: async () => {},
+  }, drawingId: 'private', evidence: fake.evidence, cleanup: [], walkPersonaObservers: fake.observers }
+  const history = async () => handler({ request: () => ({ url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' }),
+    abort: async () => {} })
+  await setupHistoryFault(probe, runtime, faultAssertions, history)
+  assert.equal(released, true)
+  requestObserver({ method: () => 'GET', url: () => 'http://walk/api/drawings/private/versions' })
+  await assertEffect(probe, runtime, {}, {}, faultAssertions)
+  await fake.observers.finish()
+  assert.equal(support.evaluate(fake.evidence).status, 'pass')
+  assert.equal(opsSre.evaluate(fake.evidence).status, 'pass')
+  assert.deepEqual(fake.evidence.measurements.wait, { observed: false, progress: '', reason: '' })
+  for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+})
+
+test('refusal oracle supplies its visible text and complete after snapshot to the observer', async () => {
+  const fake = observerWalkFixture('red-hat'), { runtime } = refusalRuntime()
+  const probe = { ...fake.probe, assertion: { target: 'engine-refusal', refusal: 'expected refusal' } }
+  runtime.evidence = fake.evidence
+  runtime.walkPersonaObservers = fake.observers
+  const before = await captureEngineRefusal(runtime)
+  await fake.observers.observe('red-hat', 'before', before)
+  await assertEngineRefusal(probe, runtime, before, oracleAssertions)
+  await fake.observers.finish()
+  assert.equal(redHat.evaluate(fake.evidence).status, 'pass')
+  assert.equal(fake.evidence.measurements.refusal.protectedBefore, protectedStateDigest(before))
+  assert.equal(fake.evidence.measurements.refusal.protectedAfter, protectedStateDigest(fake.evidence.engineRefusal.after))
+  assert.equal(fake.evidence.measurements.failure.visibleText, 'expected refusal')
+})
+
+test('late observer exceptions drop only that persona after other facts were collected', async () => {
+  for (const phase of ['observeRecovery', 'finish']) {
+    const capture = { observeFailure() {}, observeWait() {},
+      observeRecovery() { if (phase === 'observeRecovery') throw new Error('private-late-value') },
+      finish() { throw new Error('private-late-value') } }
+    const fake = observerWalkFixture('support', { opsSre: () => capture })
+    await fake.observers.observe('ops-sre', 'observeFailure', true)
+    await fake.observers.observe('ops-sre', 'observeRecovery', { action: 'Retry', outcome: 'Versions restored', outcomeVisible: true })
+    await observedPersonaTrace(fake, 'support')
+    assert.equal(support.evaluate(fake.evidence).status, 'pass')
+    assert.equal(opsSre.evaluate(fake.evidence).status, 'unknown')
+    assert.equal(fake.evidence.result.result, 'passed')
+    assert.deepEqual(fake.evidence.measurementDiagnostics, [{ persona: 'ops-sre', message: 'Optional persona observation failed' }])
+    assert.equal(JSON.stringify(fake.evidence).includes('private-late-value'), false)
+  }
+})
 
 function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal = true } = {}) {
   const calls = [], cleanup = [], child = {}, outside = {}
