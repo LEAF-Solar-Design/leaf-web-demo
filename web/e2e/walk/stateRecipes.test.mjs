@@ -143,6 +143,37 @@ test('a credential-shaped fragment is dropped without losing the other persona o
   assert.equal(JSON.stringify(evidence).includes('synthetic-private-value'), false)
 })
 
+test('a credential-shaped replacement preserves the previous fragment and its source', () => {
+  const evidence = {}, bundleReference = 'walk:control:linked-services[ready]@phone'
+  const measurements = { reference: 'mobile-touch:probe[ready]@phone', control: { reachable: true, clipped: false } }
+  addPersonaFragment(evidence, { persona: 'mobile-touch', measurements, bundleReference })
+  const fragments = evidence.personaFragments
+  const before = structuredClone(evidence)
+  assert.doesNotThrow(() => addPersonaFragment(evidence, { persona: 'mobile-touch', bundleReference,
+    measurements: { reference: 'mobile-touch:replacement[ready]@phone', control: { name: 'Bearer synthetic-private-value' } } }))
+  assert.equal(evidence.personaFragments, fragments)
+  assert.deepEqual(evidence.personaFragments, before.personaFragments)
+  assert.deepEqual(evidence.measurements, before.measurements)
+  assert.deepEqual(evidence.measurementSources, before.measurementSources)
+  assert.deepEqual(evidence.measurementConflicts, before.measurementConflicts)
+  assert.deepEqual(evidence.measurementDiagnostics, [{ message: 'Optional persona measurement fragment rejected' }])
+  assert.equal(JSON.stringify(evidence).includes('synthetic-private-value'), false)
+})
+
+test('a valid mobile-touch replacement updates the fragment, measurements, and source', () => {
+  const evidence = {}, bundleReference = 'walk:control:linked-services[ready]@phone'
+  addPersonaFragment(evidence, { persona: 'mobile-touch', bundleReference,
+    measurements: { reference: 'mobile-touch:probe[ready]@phone', control: { reachable: true, clipped: false } } })
+  const measurements = { reference: 'mobile-touch:replacement[ready]@phone', control: { reachable: false } }
+  assert.doesNotThrow(() => addPersonaFragment(evidence, { persona: 'mobile-touch', measurements, bundleReference }))
+  assert.deepEqual(evidence.personaFragments, [{ persona: 'mobile-touch', measurements }])
+  assert.deepEqual(evidence.measurements, { reference: bundleReference, control: { reachable: false } })
+  assert.deepEqual(evidence.measurementSources,
+    [{ persona: 'mobile-touch', reference: measurements.reference, missing: false }])
+  assert.deepEqual(evidence.measurementConflicts, [])
+  assert.equal(evidence.measurementDiagnostics, undefined)
+})
+
 test('a measured Tab leaving the dialog yields a real accessibility finding', async () => {
   const fake = accessibilityWalkFixture({ tabOutside: true })
   const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })

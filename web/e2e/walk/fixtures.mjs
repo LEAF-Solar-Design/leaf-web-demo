@@ -502,12 +502,10 @@ export function addPersonaFragment(evidence, { persona, measurements, bundleRefe
     fragments.push({ persona, measurements })
     let bundle = composePersonaMeasurementBundle({ reference: bundleReference, fragments })
     if (!bundle) {
-      fragments.pop()
       evidence.measurementDiagnostics ||= []
       evidence.measurementDiagnostics.push({ message: 'Optional persona measurement fragment rejected' })
-      bundle = composePersonaMeasurementBundle({ reference: bundleReference, fragments })
-    }
-    evidence.personaFragments = fragments
+      bundle = composePersonaMeasurementBundle({ reference: bundleReference, fragments: evidence.personaFragments || [] })
+    } else evidence.personaFragments = fragments
     evidence.measurements = bundle?.measurements ?? null
     evidence.measurementSources = bundle?.sources ?? []
     evidence.measurementConflicts = bundle?.conflicts ?? []
