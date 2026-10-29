@@ -46,6 +46,12 @@ REQUIRED_MODULES = ("fastapi", "uvicorn", "psycopg", "psycopg_pool", "jwt",
 REQUIRED_TEST_IDS = ("project_browser_create_import", "project_browser_bearer_required",
                      "project_settings_worker_readback")
 ENGINE_OUTPUTS = ("engine.js", "engine_bg.wasm")
+_RUN_ROOT_DIRECTORY_STORES = MappingProxyType({
+    "LEAF_STORE_DIR": "drawings", "LEAF_GUEST_STORE_DIR": "guest-drawings",
+    "LEAF_UPLOADS_DIR": "uploads", "LEAF_GRANTS_DIR": "grants", "LEAF_TENANTS_DIR": "tenants",
+    "LEAF_TENANT_GIT_DIR": "tenant-git", "LEAF_TENANT_MCP_DIR": "tenant-mcp",
+    "LEAF_MARATHON_RUNS_DIR": "marathon-runs", "LEAF_AGENT_STATE_DIR": "agent-state",
+})
 # The managed stack and injected browser client share this closed public contract.
 MANAGED_PUBLIC_UI_SETTINGS = MappingProxyType({
     "VITE_CAD_EDIT": "1", "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1",
@@ -951,13 +957,9 @@ def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
                     "BROKER_URL": f"http://127.0.0.1:{ports.broker}",
                     "WEB_PORT": str(ports.web), "APP_PORT": str(ports.app),
                     "BROKER_PORT": str(ports.broker), "HARNESS_PORT": str(ports.harness)})
-        stores = {"LEAF_STORE_DIR": "drawings", "LEAF_GUEST_STORE_DIR": "guest-drawings",
-                  "LEAF_UPLOADS_DIR": "uploads", "JOBS_DB": "jobs.db", "SESSIONS_DB": "sessions.db",
+        stores = {**_RUN_ROOT_DIRECTORY_STORES, "JOBS_DB": "jobs.db", "SESSIONS_DB": "sessions.db",
                   "LEAF_AGENT_LEDGER": "agent-ledger.jsonl", "BROKER_LEDGER": "broker-ledger.jsonl",
-                  "BROKER_TENANTS": "broker-tenants.json", "LEAF_GRANTS_DIR": "grants",
-                  "LEAF_GRANT_FILE": "no-legacy-grant.token", "LEAF_TENANTS_DIR": "tenants",
-                  "LEAF_TENANT_GIT_DIR": "tenant-git", "LEAF_TENANT_MCP_DIR": "tenant-mcp",
-                  "LEAF_MARATHON_RUNS_DIR": "marathon-runs"}
+                  "BROKER_TENANTS": "broker-tenants.json", "LEAF_GRANT_FILE": "no-legacy-grant.token"}
         env.update({key: str(root / relative) for key, relative in stores.items()})
         return env
     except ProofRefused:
@@ -2688,6 +2690,12 @@ class _Host:
             scope.own_reservation(reservation, keep_safe=config.keep_run_root)
         handles = []
         try:
+            # Reserve private directory stores from the same names used by the child environment.
+            for relative in _RUN_ROOT_DIRECTORY_STORES.values():
+                path = config.run_root / relative
+                if path == config.run_root or not path.is_relative_to(config.run_root) or not _path_safe(path):
+                    raise RuntimeError("unsafe directory store")
+                _private_directory(path)
             _private_directory(config.artifact_root)
             # Cargo may create a lockfile alongside Cargo.toml. Stage the exact
             # measured vendor inputs so even that output stays off the checkout.

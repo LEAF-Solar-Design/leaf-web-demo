@@ -1299,6 +1299,81 @@ def execution_refused(c, code):
     assert "fakedb" not in str(error.value) and "faketok" not in str(error.value)
 
 
+def _run_root_stores_case(tmp_path):
+    c = execution_case()
+    root = tmp_path / "run-test"
+    c.plan = replace(c.prepared.plan,
+        config=replace(c.prepared.plan.config, run_root=root, artifact_root=root / "artifacts"),
+        host=replace(c.prepared.plan.host, vendor_candidates=()))
+    lease = replace(c.prepared.identity_lease, jwks_path=root / "public-jwks.json",
+        profile={**dict(c.prepared.identity_lease.profile),
+                 "LEAF_PROOF_PROJECT_JWKS_FILE": str(root / "public-jwks.json")})
+    c.prepared = replace(c.prepared, plan=c.plan, identity_lease=lease)
+    return c
+
+
+def test_run_root_stores_created_before_launch(tmp_path, monkeypatch):
+    c = _run_root_stores_case(tmp_path)
+    root = c.plan.config.run_root
+    monkeypatch.setattr(p.socket, "socket", lambda: SimpleNamespace(
+        setsockopt=lambda *args: None, bind=lambda address: None, close=lambda: None))
+    host = p._Host()
+    reservation = host.reserve(c.plan)
+    try:
+        assert host._reservation is reservation
+        env = p.project_environment(c.plan, os_env=c.plan.host.environment, dsn=c.prepared.dsn,
+            profile_env=c.prepared.identity_lease.profile, organization_id=c.prepared.binding.organization_id)
+        for key in ("LEAF_STORE_DIR", "LEAF_GUEST_STORE_DIR", "LEAF_UPLOADS_DIR",
+                    "LEAF_GRANTS_DIR", "LEAF_TENANTS_DIR", "LEAF_TENANT_GIT_DIR",
+                    "LEAF_TENANT_MCP_DIR", "LEAF_MARATHON_RUNS_DIR", "LEAF_AGENT_STATE_DIR"):
+            path = Path(env[key])
+            assert path != root and path.is_relative_to(root) and path.is_dir()
+            assert p._path_safe(path)
+            if p.os.name != "nt":
+                assert path.stat().st_mode & 0o777 == 0o700
+        for key in ("JOBS_DB", "SESSIONS_DB", "LEAF_AGENT_LEDGER", "BROKER_LEDGER",
+                    "BROKER_TENANTS", "LEAF_GRANT_FILE"):
+            assert not Path(env[key]).exists()
+        assert c.launches == []
+    finally:
+        reservation.release_ports()
+
+
+def test_run_root_stores_agent_state_in_root(tmp_path):
+    c = _run_root_stores_case(tmp_path)
+    env = p.project_environment(c.plan, os_env=c.plan.host.environment, dsn=c.prepared.dsn,
+        profile_env=c.prepared.identity_lease.profile, organization_id=c.prepared.binding.organization_id)
+    path = Path(env["LEAF_AGENT_STATE_DIR"])
+    assert path == c.plan.config.run_root / "agent-state"
+    assert not path.is_relative_to(p.REPO)
+    assert not path.exists()
+
+
+def test_run_root_stores_refuse_link(tmp_path, monkeypatch):
+    c = _run_root_stores_case(tmp_path)
+    target = tmp_path / "foreign"
+    target.mkdir()
+    store = c.plan.config.run_root / "drawings"
+    private_directory = p._private_directory
+    def create_with_collision(path):
+        private_directory(path)
+        if path == c.plan.config.run_root:
+            try:
+                store.symlink_to(target, target_is_directory=True)
+            except OSError:
+                if p.os.name != "nt":
+                    raise
+                store.write_bytes(b"existing file")
+    monkeypatch.setattr(p, "_private_directory", create_with_collision)
+    monkeypatch.setattr(p.socket, "socket", lambda: pytest.fail("reserved ports for unsafe store"))
+    host = p._Host()
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        host.reserve(c.plan)
+    assert not hasattr(host, "_reservation")
+    assert c.launches == []
+    assert list(target.iterdir()) == []
+
+
 def canonical_case():
     import hashlib
     from uuid import UUID
