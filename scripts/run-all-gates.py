@@ -5615,7 +5615,28 @@ def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
     return results, attempts_by_id
 
 
-def _fingerprint_argv(argv: List[str]) -> List[str]:
+def _fingerprint_arg(arg: str, *, parent_relative: bool = False) -> str:
+    """Hash a target relative to the checkout, never through the checkout's own directory name or absolute
+    location: the relay clones each CI shard into a random /tmp/relay-src.* and the native gate into work/source,
+    so a raw `<checkout-name>/platform/...` target made every shard's fingerprint different. Flags, values and
+    targets outside the checkout hash unchanged."""
+    original = str(arg)
+    flag, value = "", original
+    if original.startswith("-") and "=" in original:
+        flag, value = original.split("=", 1)
+        flag += "="
+    normalized = value.replace("\\", "/")
+    repo_abs = str(REPO).replace("\\", "/")
+    name = REPO.name
+    for prefix in ((repo_abs, name) if parent_relative else (repo_abs,)):
+        if normalized == prefix:
+            return flag + "<REPO>"
+        if normalized.startswith(prefix + "/"):
+            return flag + "<REPO>/" + normalized[len(prefix) + 1:]
+    return original
+
+
+def _fingerprint_argv(argv: List[str], *, cwd=None) -> List[str]:
     """argv[0] is resolved from the ENVIRONMENT (sys.executable, shutil.which
     for npm/npx, Git Bash discovery), so its absolute path legitimately
     differs between jobs of one CI run: shard jobs run setup-node, the
@@ -5641,7 +5662,9 @@ def _fingerprint_argv(argv: List[str]) -> List[str]:
                 name = name[: -len(ext)]
         if name in ("npm", "npx", "bash"):
             head = f"<{name.upper()}>"
-    return [head] + [str(a) for a in argv[1:]]
+    return [head] + [_fingerprint_arg(
+        str(a), parent_relative=(cwd is not None and Path(cwd).absolute() == REPO_PARENT.absolute()))
+        for a in argv[1:]]
 
 
 def _fingerprint_cwd(cwd: Path) -> str:
@@ -5685,7 +5708,7 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
     a runner that hands every job its own checkout directory."""
     entries = [{
         "id": s.id, "label": s.label, "kind": s.kind, "cwd": _fingerprint_cwd(s.cwd),
-        "argv": _fingerprint_argv(s.argv), "expected": s.expected,
+        "argv": _fingerprint_argv(s.argv, cwd=s.cwd), "expected": s.expected,
         "allowed_skip_reasons": list(s.allowed_skip_reasons),
         "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
         "reset_authored": s.reset_authored, "db_gated": s.db_gated,
@@ -5712,7 +5735,7 @@ def selection_catalog(root: Path) -> dict:
             raise ValueError("duplicate_catalog_id")
         rows = []
         for suite in suites:
-            command = _fingerprint_argv(suite.argv)
+            command = _fingerprint_argv(suite.argv, cwd=suite.cwd)
             python_child = command[0] == "<PYTHON>" and "-I" not in command
             row = {
                 "id": suite.id, "label": suite.label, "kind": suite.kind,
