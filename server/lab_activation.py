@@ -12,6 +12,7 @@ import entitlements
 import lab_artifacts
 import lab_registry
 import lab_run_store
+import lab_tool_manifests
 import lab_tool_nodes
 from dependency_health import _source_revision
 from lab_canonical import graph_digest
@@ -105,10 +106,18 @@ def _cancel_committed(tenant, cancellations):
             logging.getLogger(__name__).warning("lab_activation_cancel_failed class=%s", type(error).__name__)
 
 
-def _admit_graph(graph):
+def _admit_graph(graph, tenant):
     for block in graph["blocks"]:
         ref = block["registry"]
+        tool = lab_tool_manifests.trusted_for(str(tenant), ref["id"], ref["version"])
         trusted = lab_registry.lookup(ref["id"], ref["version"])
+        # trusted_for returns the static entry itself when no tenant tool projects.
+        if tool is not None and tool is not trusted:
+            if not lab_tool_nodes.enabled():
+                raise Refused("lab_activation_tools_disabled", block=block["id"])
+            if not lab_tool_nodes.tool_block_admissible(tool, ("compute", "read", "simulate")):
+                raise Refused("lab_activation_effect_refused", block=block["id"])
+            continue
         if (trusted is None or trusted.residency == "host"
                 or trusted.effect not in ("pure", "read", "simulate")
                 or lab_registry.total_effect(trusted.capability, trusted.solar_adapter,
@@ -151,7 +160,7 @@ def readmit(row):
     if graph_digest({}) != row["input_digest"]:
         return "input_changed"
     try:
-        _admit_graph(artifact["graph"])
+        _admit_graph(artifact["graph"], row["tenant_id"])
     except Refused as error:
         return error.code
     return None
@@ -184,7 +193,7 @@ def create(tenant, doc_id, interval_s, principal, actor):
         if revision is None:
             raise Refused("lab_activation_unpublished", 409)
         artifact = lab_artifacts.get(tenant, doc_id, revision)
-        _admit_graph(artifact["graph"])
+        _admit_graph(artifact["graph"], tenant)
         count = sql.execute("SELECT COUNT(*) AS count FROM lab_activations WHERE tenant_id=?"
                             " AND state IN ('active','paused','expired')", (tenant,)).fetchone()["count"]
         if count >= 10:
