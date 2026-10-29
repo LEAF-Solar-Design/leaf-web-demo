@@ -24,7 +24,10 @@ export interface PortfolioProposalResult {
 export type PortfolioProposalErrorCode = "invalid_request" | "grant_unavailable" | "invalid_output" | "sdk_failure" | "timeout" | "aborted" | "settlement_failure";
 
 type FailureStage = "lease_support" | "acquisition" | "grant" | "sdk_import" | "sdk_query" | "settlement";
-type FailureCode = "lease_methods_missing" | "acquisition_rejected" | "grant_unusable" | "sdk_import_failed" | "sdk_query_failed" | "invalid_output" | "settlement_failed" | "timeout" | "aborted";
+type SdkFailureCode = "rate_limit" | "authentication_failed" | "oauth_org_not_allowed" | "billing_error" | "assistant_error" |
+  "output_token_limit" | "turn_limit" | "result_failed" | "result_shape_invalid" | "missing_result" | "event_after_result" |
+  "sdk_exception_before_event" | "sdk_exception_after_event";
+type FailureCode = "lease_methods_missing" | "acquisition_rejected" | "grant_unusable" | "sdk_import_failed" | "sdk_query_failed" | "invalid_output" | "settlement_failed" | "timeout" | "aborted" | SdkFailureCode;
 export interface PortfolioProposalFailure {
   event: "portfolio_proposal_failure";
   operation_id: string;
@@ -158,6 +161,8 @@ export class PortfolioProposalService {
     const check = () => { if (cancellation) throw cancellation; };
     let lease: GrantLease | undefined;
     let settled = false;
+    let sdkEventObserved = false;
+    let sdkFailure: { code: SdkFailureCode; error: PortfolioProposalError } | undefined;
     const usage: PortfolioProposalResult["usage"] = {};
     let reason: GrantSettlement["stop_reason"] = "error";
     const settle = async (selected: GrantLease) => {
@@ -198,6 +203,11 @@ export class PortfolioProposalService {
         stage = "sdk_query";
         let text = "";
         let complete = false;
+        const sdkFail = (code: SdkFailureCode): never => {
+          const error = new PortfolioProposalError("sdk_failure");
+          sdkFailure = { code, error };
+          throw error;
+        };
         const append = (part: string) => {
           text += part;
           if (Buffer.byteLength(text, "utf8") > 64 * 1024) return fail("invalid_output");
@@ -223,12 +233,22 @@ export class PortfolioProposalService {
           settingSources: [], permissionMode: "default",
           settings: { disableSkillShellExecution: true, disableAllHooks: true },
         } })) {
+          sdkEventObserved = true;
           check();
           if (!object(event)) continue;
-          if (complete) return fail("sdk_failure");
+          if (complete) return sdkFail("event_after_result");
           if (event.type === "assistant" && object(event.message) && Array.isArray(event.message.content)) {
             observeUsage(event.message.usage, true);
-            if (event.error !== undefined || event.message.stop_reason === "max_tokens") return fail("sdk_failure");
+            if (event.error !== undefined) {
+              switch (event.error) {
+                case "rate_limit": return sdkFail("rate_limit");
+                case "authentication_failed": return sdkFail("authentication_failed");
+                case "oauth_org_not_allowed": return sdkFail("oauth_org_not_allowed");
+                case "billing_error": return sdkFail("billing_error");
+                default: return sdkFail("assistant_error");
+              }
+            }
+            if (event.message.stop_reason === "max_tokens") return sdkFail("output_token_limit");
             for (const block of event.message.content) {
               if (object(block) && block.type === "text" && typeof block.text === "string") append(block.text);
             }
@@ -236,12 +256,15 @@ export class PortfolioProposalService {
           // Deliberately ignore stream deltas and result.result: assistant text is counted once.
           if (event.type === "result") {
             observeUsage(event.usage, false);
-            if (event.subtype !== "success" || event.is_error !== false) return fail("sdk_failure");
+            if (event.subtype !== "success" || event.is_error !== false) {
+              return sdkFail(event.subtype === "error_max_turns" ? "turn_limit" :
+                typeof event.subtype !== "string" || typeof event.is_error !== "boolean" ? "result_shape_invalid" : "result_failed");
+            }
             complete = true;
           }
         }
         check();
-        if (!complete) return fail("sdk_failure");
+        if (!complete) return sdkFail("missing_result");
         return parse(text, request, secrets);
       };
       const edits = await Promise.race([work(), cancelled]);
@@ -262,7 +285,9 @@ export class PortfolioProposalService {
       }
       if (!(failedStage === "grant" && error instanceof PortfolioProposalError && error.code === "invalid_request")) {
         const code = cancellation && error === cancellation ? (cancellation.code === "timeout" ? "timeout" : "aborted") :
-          failedStage === "sdk_query" && error instanceof PortfolioProposalError && error.code === "invalid_output" ? "invalid_output" : failureCodes[failedStage];
+          failedStage === "sdk_query" && error instanceof PortfolioProposalError && error.code === "invalid_output" ? "invalid_output" :
+          failedStage === "sdk_query" ? (sdkFailure && error === sdkFailure.error ? sdkFailure.code :
+            sdkEventObserved ? "sdk_exception_after_event" : "sdk_exception_before_event") : failureCodes[failedStage];
         warn(failedStage, code);
       }
       if (error instanceof PortfolioProposalError) throw error;
