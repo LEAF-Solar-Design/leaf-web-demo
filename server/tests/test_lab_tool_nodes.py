@@ -209,20 +209,42 @@ def test_default_tier_preserves_broker_record(rig, monkeypatch, tier):
     assert not platform_reads
 
 
-def test_default_tier_active_platform_org_submits(rig, monkeypatch):
+@pytest.mark.parametrize("capability,required", [("drawing.read", "run_read"), ("drawing.write", "run_write")])
+def test_default_tier_active_platform_org_preserves_tier(rig, monkeypatch, capability, required):
     import platform_link
 
+    # SEL-316j2: preserve padded tiers exactly as the API does to prevent elevation.
     reads = []
     def get_org(tenant):
         reads.append(tenant)
         return SimpleNamespace(status="active", tier=" hosted_pro ")
     monkeypatch.setattr(deps, "backedge_tier", lambda tenant: None)
     monkeypatch.setattr(platform_link, "platform_store", lambda: SimpleNamespace(get_org=get_org))
+    assert nodes.lab_tool_tier(TENANT) == " hosted_pro "
+    rig.tool["capabilities"] = [capability]
     rig.options["tier_of"] = None
-    assert rig.call() == {"outputs": {"result": 7}}
-    assert reads == [TENANT]
-    assert len(rig.calls) == 1
-    assert rig.calls[0][0][0] == TENANT
+    policy = nodes.entitlements.entitlements_for
+    tiers = []
+    def entitlements_for(resolved):
+        tiers.append(resolved)
+        return policy(resolved)
+    monkeypatch.setattr(nodes.entitlements, "entitlements_for", entitlements_for)
+    expected = ({"outputs": {"result": 7}} if policy(" hosted_pro ").get(required)
+                else {"error": "lab_tool_entitlement_required"})
+    assert rig.call() == expected
+    assert tiers == [" hosted_pro "]
+    assert reads == [TENANT, TENANT]
+    assert bool(rig.calls) == ("outputs" in expected)
+
+
+def test_default_tier_broker_error_fails_closed(rig, monkeypatch):
+    def broker_tier(tenant):
+        raise RuntimeError("unavailable")
+    monkeypatch.setattr(deps, "backedge_tier", broker_tier)
+    assert nodes.lab_tool_tier(TENANT) is None
+    rig.options["tier_of"] = None
+    assert rig.call() == {"error": "lab_tool_binding_unavailable"}
+    assert not rig.calls
 
 
 @pytest.mark.parametrize("authority", ["inactive", "missing", "store_error", "lookup_error"])

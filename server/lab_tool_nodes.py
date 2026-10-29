@@ -33,17 +33,17 @@ def enabled():
 
 def lab_tool_tier(tenant_id):
     # Broker record first, active platform org second; fail closed.
-    from deps import backedge_tier
-
-    tier = backedge_tier(tenant_id)
-    if tier is not None:
-        return tier
     try:
+        from deps import backedge_tier
+
+        tier = backedge_tier(tenant_id)
+        if tier is not None:
+            return tier
         import platform_link
 
         org = platform_link.platform_store().get_org(tenant_id)
         if org is not None and org.status == "active":
-            return org.tier.strip() if isinstance(org.tier, str) and org.tier.strip() else "restricted"
+            return org.tier if isinstance(org.tier, str) and org.tier.strip() else "restricted"
     except Exception:
         return None
     return None
