@@ -1716,7 +1716,539 @@ def assert_entry_error(scope, operation, error, stage=p.Stage.TEARDOWN):
     assert committed == [] and scope.failure is remembered
 
 
+G_START = "Wed Oct 28 19:35:00 2026"
+G_PS = b"  7  1  7 Ss  Wed Oct 28 19:35:00 2026\n"
+
+
+def g_ps(monkeypatch, raw=G_PS, code=0):
+    """Fake the ps child and readiness, including bounded reads and reaping."""
+    calls, reads, waits, killed = [], [], [], []
+    class Output(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 < size <= 1024
+            reads.append(size)
+            return super().read(size)
+    output = Output(raw)
+    def wait(timeout):
+        assert 0 <= timeout <= 2
+        waits.append(timeout)
+        return code
+    child = SimpleNamespace(stdout=output, poll=lambda: code, wait=wait,
+                            kill=lambda: killed.append(True))
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if child.stdout.closed:
+            child.stdout = Output(raw)
+        return child
+    monkeypatch.setattr(p, "_PLATFORM", "darwin")
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    monkeypatch.setattr(p, "select", SimpleNamespace(select=lambda readers, w, x, timeout: (readers, [], [])))
+    return SimpleNamespace(calls=calls, reads=reads, waits=waits, killed=killed, child=child, output=output)
+
+
+def g_runtime(monkeypatch, *, platform="darwin", exited=False):
+    c = lifetime_case()
+    c.calls = []
+    c.process = p._RuntimeProcess(p.ProcessSpec("stack-launcher", ("fake",), ROOT, {}, 1))
+    c.process.identity = p.ProcessIdentity("stack-launcher", 7, G_START, 1)
+    c.process.process = SimpleNamespace(pid=7, poll=lambda: 0 if exited else None,
+        terminate=lambda: c.calls.append("terminate"), kill=lambda: c.calls.append("kill"),
+        wait=lambda timeout: 0)
+    monkeypatch.setattr(p, "_PLATFORM", platform)
+    monkeypatch.setattr(p, "os", SimpleNamespace(name="posix", getpid=lambda: 1))
+    monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+    monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+    monkeypatch.setattr(p, "_signal_group", lambda pid, sig: c.calls.append((pid, sig)))
+    monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: True)
+    return c
+
+
+def g_group(monkeypatch, *, start=G_START, empty=True, pgid=7):
+    calls, observed, checked = [], [], []
+    monkeypatch.setattr(p, "_PLATFORM", "darwin")
+    monkeypatch.setattr(p, "time", SimpleNamespace(monotonic=lambda: 0.0))
+    monkeypatch.setattr(p, "signal", SimpleNamespace(SIGKILL=9))
+    def observe(pid, *, timeout=2):
+        observed.append((pid, timeout))
+        return None if start is None else p._PosixProcessRow(pid, 1, pgid, start)
+    monkeypatch.setattr(p, "_darwin_process_row", observe)
+    monkeypatch.setattr(p, "_signal_group", lambda pid, sig: calls.append((pid, sig)))
+    monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: (checked.append((pid, deadline)), empty)[1])
+    return SimpleNamespace(group=p._TransferredGroup(7, G_START, "stack-launcher"),
+                           calls=calls, observed=observed, checked=checked)
+
+
+def g_arm(monkeypatch, platform):
+    c = lifetime_case()
+    c.plan = replace(c.plan, reservation=replace(c.plan.reservation, root_identity=(1, 2)))
+    calls, sent = [], io.BytesIO()
+    child = SimpleNamespace(stdin=sent, stdout=io.BytesIO(b"OK\n"), poll=lambda: None)
+    def popen(argv, **kwargs):
+        calls.append((argv, kwargs))
+        return child
+    monkeypatch.setattr(p, "_PLATFORM", platform)
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    monkeypatch.setattr(p, "threading", SimpleNamespace(Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+    lease = p._GuardianLease(c.plan)
+    lease.arm()
+    return SimpleNamespace(lease=lease, calls=calls, sent=sent, child=child, plan=c.plan)
+
+
+def g_entry(monkeypatch, items, *, main=None):
+    c = lifetime_case()
+    c.private = False
+    files = ReceiptFiles()
+    root = files.root / "guardian"
+    root.mkdir()
+    info = root.stat()
+    initial = {"event": "init", "run_id": "run-test", "run_root": str(root),
+        "root_identity": [info.st_dev, info.st_ino], "deadline": 10}
+    output = io.StringIO()
+    monkeypatch.setattr(p, "_PLATFORM", "darwin")
+    monkeypatch.setattr(p, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+        b"".join((json.dumps(item) + "\n").encode() for item in [initial, *items]))), stdout=output))
+    monkeypatch.setattr(p, "threading", SimpleNamespace(RLock=p.threading.RLock,
+        Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+    monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+    real_path = p.Path
+    monkeypatch.setattr(p, "Path", lambda value: root if value == str(root) else real_path(value))
+    if main is not None:
+        monkeypatch.setattr(p, "guardian_main", main)
+    return c, output
+
+
 class TestProjectLifetime:
+    def test_g_ps_identity(self, monkeypatch):
+        c = g_ps(monkeypatch, G_PS.replace(b"Oct 28", b"Oct   28"))
+        assert p._darwin_process_row(7) == p._PosixProcessRow(7, 1, 7, G_START)
+        assert c.calls == [(["/bin/ps", "-o", "pid=,ppid=,pgid=,stat=,lstart=", "-p", "7"],
+            {"env": {"LC_ALL": "C", "TZ": "UTC"}, "stdin": subprocess.DEVNULL,
+             "stdout": subprocess.PIPE, "stderr": subprocess.STDOUT, "bufsize": 0})]
+        assert c.waits and c.output.closed
+
+    def test_g_ps_status_garbage(self, monkeypatch):
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "owner", 0))
+        g_ps(monkeypatch, b"7 1 7 Sgarbage Wed Oct 28 19:35:00 2026")
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+        with pytest.raises(RuntimeError):
+            p._process_child(owner, "app", 7)
+
+    def test_g_ps_status_invalid_flag(self, monkeypatch):
+        # Every documented live state and non-exiting flag remains usable.
+        for status in ("I", "R", "S", "T", "U", "S+<>ALNSsVWX"):
+            g_ps(monkeypatch, G_PS.replace(b"Ss", status.encode()))
+            assert p._darwin_process_row(7) == p._PosixProcessRow(7, 1, 7, G_START)
+        for status in ("S-", "S?", "Sl", "W", "X", "E", "SE", "Zs"):
+            g_ps(monkeypatch, G_PS.replace(b"Ss", status.encode()))
+            with pytest.raises(RuntimeError):
+                p._darwin_process_row(7)
+
+    def test_g_ps_zombie(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"Ss", b"Z+"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_exited(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"Ss", b"X"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_wrong_pid(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  7", b"  8", 1))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_lstart(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"Wed Oct 28", b"Wed Feb 30"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_timeout(self, monkeypatch):
+        c = g_ps(monkeypatch)
+        def wait(timeout):
+            raise subprocess.TimeoutExpired("fake-ps", timeout)
+        c.child.wait = wait
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+        assert c.output.closed
+
+    def test_g_ps_missing(self, monkeypatch):
+        g_ps(monkeypatch)
+        def missing(*args, **kwargs):
+            raise FileNotFoundError("fake missing ps")
+        monkeypatch.setattr(p.subprocess, "Popen", missing)
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_error_output(self, monkeypatch):
+        g_ps(monkeypatch, code=1)
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_decimal(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  01  7"))
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_overflow(self, monkeypatch):
+        c = g_ps(monkeypatch, b" " * 5000)
+        with pytest.raises(RuntimeError, match="exceeded bound"):
+            p._darwin_process_row(7)
+        assert sum(c.reads) == 4097 and c.output.closed and c.waits == []
+
+    def test_g_ps_read_deadline(self, monkeypatch):
+        c = g_ps(monkeypatch)
+        c.child.poll = lambda: None
+        monkeypatch.setattr(p, "select", SimpleNamespace(select=lambda *args: ([], [], [])))
+        with pytest.raises(RuntimeError, match="timed out"):
+            p._darwin_process_row(7)
+        assert c.killed == [True] and c.output.closed and c.waits
+
+    def test_g_ps_multiple_rows(self, monkeypatch):
+        g_ps(monkeypatch, G_PS + G_PS)
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_ps_empty_success(self, monkeypatch):
+        g_ps(monkeypatch, b"")
+        with pytest.raises(RuntimeError):
+            p._darwin_process_row(7)
+
+    def test_g_observe_gone(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        g_ps(monkeypatch, b"", code=1)
+        observed = []
+        def stop(request, **kwargs):
+            observed.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert c.process.stop(p.time.monotonic() + 1)
+        assert observed == [None]
+
+    def test_g_observe_live(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        g_ps(monkeypatch)
+        observed = []
+        def stop(request, **kwargs):
+            observed.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert c.process.stop(p.time.monotonic() + 1)
+        assert observed == [c.process.identity]
+
+    def test_g_start_darwin(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        seen = []
+        def popen(argv, **kwargs):
+            seen.append(kwargs)
+            return c.process.process
+        monkeypatch.setattr(p.subprocess, "Popen", popen)
+        monkeypatch.setattr(p, "_darwin_process_row", lambda pid: p._PosixProcessRow(pid, 1, pid, G_START))
+        process = p._RuntimeProcess(c.process.spec)
+        process.start()
+        assert process.identity == p.ProcessIdentity("stack-launcher", 7, G_START, 1)
+        assert seen[0]["start_new_session"] is True and seen[0]["creationflags"] == 0
+
+    def test_g_start_gone(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        monkeypatch.setattr(p.subprocess, "Popen", lambda *args, **kwargs: c.process.process)
+        monkeypatch.setattr(p, "_darwin_process_row", lambda pid: None)
+        process = p._RuntimeProcess(c.process.spec)
+        with pytest.raises(RuntimeError):
+            process.start()
+        assert process.identity is None and c.calls == [(7, 9)]
+
+    def test_g_custody_own_group(self, monkeypatch):
+        g_ps(monkeypatch)
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        assert p._process_child(owner, "app", 7) == p.ProcessIdentity("app", 7, G_START, 1)
+
+    def test_g_custody_launcher_group(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  1  1"))
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        assert p._process_child(owner, "app", 7) == p.ProcessIdentity("app", 7, G_START, 1)
+
+    def test_g_custody_parent(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  2  7"))
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        with pytest.raises(RuntimeError):
+            p._process_child(owner, "app", 7)
+
+    def test_g_custody_group(self, monkeypatch):
+        g_ps(monkeypatch, G_PS.replace(b"  1  7", b"  1  8"))
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        with pytest.raises(RuntimeError):
+            p._process_child(owner, "app", 7)
+
+    def test_g_darwin_group_stop(self, monkeypatch):
+        c = g_runtime(monkeypatch)
+        g_ps(monkeypatch)
+        observed, checked = [], []
+        def wait(timeout):
+            observed.append(timeout)
+            if len(observed) == 1:
+                raise subprocess.TimeoutExpired("fake", timeout)
+            return 0
+        c.process.process.wait = wait
+        monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: (checked.append(pid), True)[1])
+        assert c.process.stop(p.time.monotonic() + 1)
+        assert c.calls == ["terminate", (7, 9), (7, 9)] and checked == [7]
+
+    def test_g_darwin_exited_group(self, monkeypatch):
+        c = g_runtime(monkeypatch, exited=True)
+        checked = []
+        monkeypatch.setattr(p, "_group_empty", lambda pid, deadline: (checked.append(pid), False)[1])
+        assert c.process.stop(p.time.monotonic() + 1) is False
+        assert c.calls == [(7, 9)] and checked == [7] and not c.process._stopped
+
+    def test_g_guardian_arm_posix(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        argv, options = c.calls[0]
+        assert options["start_new_session"] is True and "creationflags" not in options
+        assert options["stdin"] == options["stdout"] == subprocess.PIPE
+        assert options["stderr"] == subprocess.DEVNULL and argv[1:3] == ("-B", "-c")
+        initial = json.loads(c.sent.getvalue())
+        assert set(initial) == {"event", "run_id", "run_root", "root_identity", "deadline"}
+        assert initial["event"] == "init" and initial["run_id"] == "run-test"
+        assert len(c.sent.getvalue()) <= 16384
+
+    def test_g_guardian_arm_handshake(self, monkeypatch):
+        monkeypatch.setattr(p._GuardianLease, "_response", lambda self: False)
+        with pytest.raises(p.ProofRefused) as error:
+            g_arm(monkeypatch, "linux")
+        assert error.value.failure == p.Failure(p.Stage.ALLOCATION, p.FailureCode.GUARDIAN)
+
+    def test_g_guardian_own_group(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        c.sent.seek(0)
+        c.sent.truncate()
+        monkeypatch.setattr(c.lease, "_response", lambda: True)
+        child = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 7, G_START, 1))
+        c.lease.own_process(child)
+        c.lease.own_process(child)
+        assert c.sent.getvalue() == (json.dumps({"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}, separators=(",", ":")) + "\n").encode()
+        assert c.lease.children == [child]
+
+    def test_g_guardian_identity_required(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        before = c.sent.getvalue()
+        monkeypatch.setattr(c.lease, "_response", lambda: True)
+        child = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 7, "", 1))
+        with pytest.raises(p.ProofRefused):
+            c.lease.own_process(child)
+        with pytest.raises(p.ProofRefused):
+            c.lease.own_process(SimpleNamespace())
+        assert c.sent.getvalue() == before and c.lease.children == []
+
+    def test_g_guardian_own_ack(self, monkeypatch):
+        c = g_arm(monkeypatch, "darwin")
+        monkeypatch.setattr(c.lease, "_response", lambda: False)
+        child = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 7, G_START, 1))
+        with pytest.raises(p.ProofRefused):
+            c.lease.own_process(child)
+        assert c.lease.sent_groups == set() and c.lease.children == []
+
+    def test_g_group_replacement(self, monkeypatch):
+        c = g_group(monkeypatch, start="replacement", empty=False)
+        assert c.group.stop(1) is False
+        assert c.calls == [] and c.observed == [(7, 1)] and c.checked == [(7, 1)]
+
+    def test_g_group_match(self, monkeypatch):
+        c = g_group(monkeypatch)
+        assert c.group.stop(1) is True
+        assert c.calls == [(7, 9)] and c.observed == [(7, 1)] and c.checked == [(7, 1)]
+        assert c.group.stop(1) is True and c.calls == [(7, 9)]
+
+    def test_g_group_lingers_recheck(self, monkeypatch):
+        c = g_group(monkeypatch, empty=False)
+        assert c.group.stop(1) is False and not c.group.stopped
+        monkeypatch.setattr(p, "_darwin_process_row",
+            lambda pid, **kwargs: p._PosixProcessRow(pid, 1, pid, "replacement"))
+        assert c.group.stop(1) is False
+        assert c.calls == [(7, 9)] and c.checked == [(7, 1), (7, 1)]
+
+    def test_g_group_gone(self, monkeypatch):
+        c = g_group(monkeypatch, start=None)
+        assert c.group.stop(1) is True
+        assert c.calls == [] and c.checked == [(7, 1)]
+
+    def test_g_group_observation_error(self, monkeypatch):
+        c = g_group(monkeypatch)
+        def denied(*args, **kwargs):
+            raise RuntimeError("fake denied ps")
+        monkeypatch.setattr(p, "_darwin_process_row", denied)
+        assert c.group.stop(1) is False and c.calls == [] and c.checked == []
+
+    def test_g_group_foreign_pgid(self, monkeypatch):
+        c = g_group(monkeypatch, pgid=8, empty=False)
+        assert c.group.stop(1) is False and c.calls == [] and c.checked == [(7, 1)]
+
+    def test_g_group_deadline(self, monkeypatch):
+        c = g_group(monkeypatch)
+        assert c.group.stop(0) is False and c.observed == [] and c.calls == []
+        def slow(pid, **kwargs):
+            monkeypatch.setattr(p, "time", SimpleNamespace(monotonic=lambda: 2.0))
+            return p._PosixProcessRow(pid, 1, pid, G_START)
+        monkeypatch.setattr(p, "_darwin_process_row", slow)
+        assert c.group.stop(1) is False and c.calls == [] and c.checked == []
+
+    def test_g_guardian_duplicate_keys(self, monkeypatch):
+        # Raw bytes retain ambiguity that json.dumps(dict) would erase.
+        messages = [
+            b'{"event":"group","pid":999,"pid":7,"start":"Wed Oct 28 19:35:00 2026","role":"stack-launcher"}',
+            b'{"event":"ignored","event":"disarm"}',
+            b'{"event":"job","handle":999,"handle":7}',
+        ]
+        owned = p._owned_public(lifetime_case().host.authority_inventory("run-test"))
+        authority = json.dumps({"event": "authority", "ownership": owned}).encode()
+        # Duplicate inside ownership and one level deeper inside labels.
+        messages.extend([
+            authority.replace(b'"run_id":', b'"run_id": "ignored", "run_id":', 1),
+            authority.replace(b'"leaf.proof-project.run":',
+                              b'"leaf.proof-project.run": "ignored", "leaf.proof-project.run":', 1),
+        ])
+        for raw in messages:
+            with monkeypatch.context() as patch:
+                group = g_group(patch)
+                _, output = g_entry(patch, [])
+                jobs = []
+                patch.setattr(p, "_TransferredJob", lambda handle: jobs.append(handle))
+                initial = p.sys.stdin.buffer.getvalue()
+                patch.setattr(p.sys.stdin, "buffer", io.BytesIO(
+                    initial + raw + b'\n{"event":"disarm"}\n'))
+                assert p._guardian_entry() == 1
+                assert output.getvalue() == "OK\n"
+                assert group.calls == [] and group.observed == [] and jobs == []
+
+    def test_g_guardian_duplicate_init(self, monkeypatch):
+        _, output = g_entry(monkeypatch, [{"event": "disarm"}])
+        raw = p.sys.stdin.buffer.getvalue().replace(
+            b'"event": "init"', b'"event":"ignored","event":"init"', 1)
+        monkeypatch.setattr(p.sys.stdin, "buffer", io.BytesIO(raw))
+        monkeypatch.setattr(p, "guardian_main", lambda *args, **kwargs: pytest.fail("ambiguous init dispatched"))
+        assert p._guardian_entry() == 1
+        assert output.getvalue() == ""
+
+    def test_g_entry_disarm(self, monkeypatch):
+        group = g_group(monkeypatch)
+        c, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}, {"event": "disarm"}])
+        assert p._guardian_entry() == 0
+        assert output.getvalue() == "OK\nOK\nOK\n" and group.calls == [(7, 9)]
+        assert c.teardown == []
+
+    def test_g_entry_parent_loss(self, monkeypatch):
+        group = g_group(monkeypatch)
+        c, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}])
+        assert p._guardian_entry() == 0
+        assert output.getvalue() == "OK\nOK\n" and group.calls == [(7, 9)]
+        assert c.teardown == ["authority", "private"]
+
+    def test_g_entry_exact_keys(self, monkeypatch):
+        group = g_group(monkeypatch)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher", "extra": True}])
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n"
+        assert group.calls == []
+
+    def test_g_entry_bounded_strings(self, monkeypatch):
+        group = g_group(monkeypatch, start="x" * 129)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": "x" * 129, "role": "stack-launcher"}])
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n" and group.calls == []
+
+    def test_g_entry_positive_pid(self, monkeypatch):
+        g_group(monkeypatch)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 0,
+            "start": G_START, "role": "stack-launcher"}])
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n"
+
+    def test_g_entry_windows_refuses_group(self, monkeypatch):
+        group = g_group(monkeypatch)
+        _, output = g_entry(monkeypatch, [{"event": "group", "pid": 7,
+            "start": G_START, "role": "stack-launcher"}])
+        monkeypatch.setattr(p, "_PLATFORM", "win32")
+        assert p._guardian_entry() == 1 and output.getvalue() == "OK\n" and group.calls == []
+
+    def test_g_linux_unchanged(self, monkeypatch):
+        c = g_runtime(monkeypatch, platform="linux")
+        parts = ["S", "1", "7", "7"] + ["0"] * 46
+        parts[19] = "123"
+        text = "7 (fake name) " + " ".join(parts)
+        paths = []
+        def path(value):
+            paths.append(value)
+            return SimpleNamespace(read_text=lambda: text)
+        monkeypatch.setattr(p, "Path", path)
+        monkeypatch.setattr(p.subprocess, "Popen", lambda *args, **kwargs: c.process.process)
+        monkeypatch.setattr(p, "_darwin_process_row", lambda *args, **kwargs: pytest.fail("Linux called ps"))
+        process = p._RuntimeProcess(c.process.spec)
+        process.start()
+        assert process.identity == p.ProcessIdentity("stack-launcher", 7, "123", 1)
+        owner = SimpleNamespace(identity=p.ProcessIdentity("stack-launcher", 1, "launcher", 0))
+        assert p._process_child(owner, "app", 7) == p.ProcessIdentity("app", 7, "123", 1)
+        seen = []
+        def stop(request, **kwargs):
+            seen.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert process.stop(p.time.monotonic() + 1)
+        assert seen == [process.identity] and paths == ["/proc/7/stat"] * 3
+
+    def test_g_linux_guardian(self, monkeypatch):
+        c = g_group(monkeypatch)
+        monkeypatch.setattr(p, "_PLATFORM", "linux")
+        parts = ["S", "1", "7", "7"] + ["0"] * 46
+        parts[19] = "123"
+        monkeypatch.setattr(p, "Path", lambda value: SimpleNamespace(read_text=lambda: "7 (fake) " + " ".join(parts)))
+        group = p._TransferredGroup(7, "123", "stack-launcher")
+        assert group.stop(1) is True and c.calls == [(7, 9)] and c.observed == []
+
+    def test_g_windows_unchanged(self, monkeypatch):
+        c = g_runtime(monkeypatch, platform="win32")
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt", getpid=lambda: 1))
+        calls, flags = [], []
+        job = SimpleNamespace(attach_and_resume=lambda child: (calls.append("attach"), "windows-start")[1],
+            stop=lambda deadline: (calls.append("job-stop"), True)[1], close=lambda: calls.append("close"))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: job)
+        monkeypatch.setattr(p.subprocess, "Popen", lambda *args, **kwargs: (flags.append(kwargs), c.process.process)[1])
+        monkeypatch.setattr(p, "_darwin_process_row", lambda *args, **kwargs: pytest.fail("Windows called ps"))
+        process = p._RuntimeProcess(c.process.spec)
+        process.start()
+        assert process.identity == p.ProcessIdentity("stack-launcher", 7, "windows-start", 1)
+        assert flags[0]["creationflags"] == 0x08000004 and flags[0]["start_new_session"] is False
+        seen = []
+        def stop(request, **kwargs):
+            seen.append(request.observe())
+            return True
+        monkeypatch.setattr(p, "stop_owned", stop)
+        assert process.stop(p.time.monotonic() + 1) and seen == [process.identity]
+        assert calls == ["attach", "job-stop", "close"] and c.calls == []
+        armed = g_arm(monkeypatch, "win32")
+        assert armed.calls[0][1]["creationflags"] == 0x08000000
+        assert "start_new_session" not in armed.calls[0][1]
+
+    def test_g_windows_job_message(self, monkeypatch):
+        c = g_arm(monkeypatch, "win32")
+        c.sent.seek(0)
+        c.sent.truncate()
+        c.child._handle = 77
+        monkeypatch.setattr(c.lease, "_response", lambda: True)
+        calls = []
+        def duplicate(owner, handle, recipient, output, access, inherit, options):
+            calls.append((owner, handle, recipient, access, inherit, options))
+            output._obj.value = 88
+            return True
+        kernel = SimpleNamespace(GetCurrentProcess=lambda: 66, DuplicateHandle=duplicate)
+        child = SimpleNamespace(job=SimpleNamespace(handle=55, kernel=kernel))
+        c.lease.own_process(child)
+        c.lease.own_process(child)
+        assert json.loads(c.sent.getvalue()) == {"event": "job", "handle": 88}
+        assert calls == [(66, 55, 77, 0, False, 2)] and c.lease.children == [child]
+
     def test_d_d_perform_deadline_after_completion(self):
         c = lifetime_case()
         clock = c.effects.clock
