@@ -4,11 +4,15 @@ from __future__ import annotations
 import logging
 import os
 import re
+import time
 from datetime import datetime, timezone
+from threading import Lock
 from typing import Any
 
+import requests
 from fastapi import APIRouter, Depends, HTTPException
 
+import broker_client
 import deps
 import entitlements
 import lab_run_store
@@ -104,6 +108,30 @@ def status(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
 
 _TOOL_ID = re.compile(r"[a-z][a-z0-9]*(-[a-z0-9]+)*")
 _TOOL_VERSION = re.compile(r"[0-9A-Za-z.+-]{1,64}")
+_broker_lab_sandbox_cache: tuple[float, str] | None = None
+_broker_lab_sandbox_lock = Lock()
+
+
+def _broker_lab_sandbox_tier() -> str:
+    # Fail closed on broker errors; cache valid tiers for 60 s and failures for 10 s.
+    global _broker_lab_sandbox_cache
+    with _broker_lab_sandbox_lock:
+        if (_broker_lab_sandbox_cache is not None
+                and time.monotonic() < _broker_lab_sandbox_cache[0]):
+            return _broker_lab_sandbox_cache[1]
+        tier, ttl = "invalid", 10
+        try:
+            response = requests.get(f"{broker_client.broker_url()}/broker/health", timeout=3,
+                                    headers={"Cache-Control": "no-cache"})
+            if response.status_code == 200:
+                data = response.json()
+                value = data.get("lab_sandbox_tier") if isinstance(data, dict) else None
+                if isinstance(value, str) and value in {"off", "subprocess", "microvm", "invalid"}:
+                    tier, ttl = value, 60
+        except Exception:
+            pass
+        _broker_lab_sandbox_cache = (time.monotonic() + ttl, tier)
+        return tier
 
 
 @router.get("/api/lab/tools")
@@ -126,16 +154,12 @@ def tools(tenant: Any = Depends(deps.require_tenant)) -> dict[str, Any]:
         if reason is None and os.environ.get("LEAF_LAB_TOOL_NODES") != "1":
             reason = "tool nodes off"
         if reason is None:
-            from broker import _authored_execution_enabled, _tool_sandbox_tier
+            from broker import _authored_execution_enabled
 
             if source == "tenant" and not _authored_execution_enabled():
                 reason = "authored execution not armed"
-            else:
-                try:
-                    if _tool_sandbox_tier() != "microvm":
-                        reason = "sandbox not armed"
-                except Exception:
-                    reason = "sandbox not armed"
+            elif _broker_lab_sandbox_tier() != "microvm":
+                reason = "sandbox not armed"
         result.append({
             "id": tool.name, "version": tool.version,
             "title": tool.manifest["title"] if tool.manifest is not None else tool.name,

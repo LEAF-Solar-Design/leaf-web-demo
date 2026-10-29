@@ -3,6 +3,7 @@ from __future__ import annotations
 
 from pathlib import Path
 import re
+from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -44,6 +45,9 @@ LAB_PATHS = [
 
 @pytest.fixture(autouse=True)
 def _environment(monkeypatch):
+    monkeypatch.setattr(lab_surface, "_broker_lab_sandbox_cache", None)
+    monkeypatch.setattr(lab_surface.requests, "get", lambda *a, **k: _health_response({
+        "lab_sandbox_tier": "off"}))
     monkeypatch.delenv("LEAF_ENTITLEMENTS_FILE", raising=False)
     monkeypatch.setattr(lab_surface.lab_run_store, "worker_status", lambda age: [])
     monkeypatch.setattr(lab_surface.lab_run_store, "paused", lambda: False)
@@ -52,6 +56,10 @@ def _environment(monkeypatch):
     monkeypatch.setenv("LEAF_RUNTIME_ENV", "staging")
     monkeypatch.setenv("LEAF_DEPLOYMENT_ENVIRONMENT", "")
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+
+
+def _health_response(body, status=200):
+    return SimpleNamespace(status_code=status, json=lambda: body)
 
 
 def _client(tenant_override=True):
@@ -365,7 +373,9 @@ def test_tools_contract_and_availability(monkeypatch, flag, source, authored, ti
         return (tool,)
     monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", projection)
     monkeypatch.setattr(broker, "_authored_execution_enabled", lambda: authored)
-    monkeypatch.setattr(broker, "_tool_sandbox_tier", lambda: tier)
+    # SEL-316h: sandbox availability comes from broker health, not the app environment.
+    monkeypatch.setattr(lab_surface.requests, "get", lambda *a, **k: _health_response({
+        "lab_sandbox_tier": tier}))
     response = _client().get("/api/lab/tools")
     assert response.status_code == 200
     body = response.json()
@@ -384,23 +394,100 @@ def test_tools_contract_and_availability(monkeypatch, flag, source, authored, ti
 
 
 def test_tools_availability_reads_environment_per_request(monkeypatch):
-    import broker
     from test_lab_tool_manifests import read_tool
 
     tool = lab_surface.lab_tool_manifests.project_tool(read_tool(), "catalog_seed")
     monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", lambda tenant: (tool,))
-    monkeypatch.setattr(broker, "_tool_sandbox_tier", lambda: "microvm")
+    # SEL-316h: local flags remain fresh while the sandbox tier uses cached broker health.
+    now = [100.0]
+    monkeypatch.setattr(lab_surface, "time", SimpleNamespace(monotonic=lambda: now[0]))
+    monkeypatch.setattr(lab_surface.requests, "get", lambda *a, **k: _health_response({
+        "lab_sandbox_tier": "microvm"}))
     monkeypatch.delenv("LEAF_LAB_TOOL_NODES", raising=False)
     client = _client()
     assert client.get("/api/lab/tools").json()["tools"][0]["reason"] == "tool nodes off"
     monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
     assert client.get("/api/lab/tools").json()["tools"][0]["available"] is True
-    def fail():
+    def fail(*args, **kwargs):
         raise RuntimeError("private sandbox path")
-    monkeypatch.setattr(broker, "_tool_sandbox_tier", fail)
+    monkeypatch.setattr(lab_surface.requests, "get", fail)
+    now[0] += 60
     response = client.get("/api/lab/tools")
     assert response.json()["tools"][0]["reason"] == "sandbox not armed"
     assert "private sandbox path" not in response.text
+
+
+@pytest.mark.parametrize("case,available", [
+    ("microvm", True), ("subprocess", False), ("off", False), ("invalid", False),
+    ("missing", False), ("unknown", False), ("500", False), ("timeout", False),
+    ("non-json", False), ("non-object", False), ("non-string", False),
+])
+def test_tools_uses_broker_sandbox_health_fail_closed(monkeypatch, case, available):
+    from test_lab_tool_manifests import read_tool
+
+    tool = lab_surface.lab_tool_manifests.project_tool(read_tool(), "catalog_seed")
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", lambda tenant: (tool,))
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    # The app's sandbox environment must not override the broker's answer.
+    monkeypatch.setenv("LEAF_TOOL_SANDBOX_PROVIDER", "off" if available else "e2b")
+    calls = []
+    monkeypatch.setattr(lab_surface.broker_client, "broker_url", lambda: "http://broker:8140")
+
+    def health(url, *, timeout, headers):
+        calls.append((url, timeout, headers))
+        if case == "timeout":
+            raise lab_surface.requests.Timeout("private broker detail")
+        if case == "non-json":
+            def bad_json():
+                raise ValueError("private broker detail")
+            return SimpleNamespace(status_code=200, json=bad_json)
+        if case == "500":
+            return _health_response({"lab_sandbox_tier": "microvm"}, 500)
+        if case == "missing":
+            return _health_response({})
+        if case == "non-object":
+            return _health_response([{"lab_sandbox_tier": "microvm"}])
+        return _health_response({"lab_sandbox_tier": [] if case == "non-string" else case})
+
+    monkeypatch.setattr(lab_surface.requests, "get", health)
+    response = _client().get("/api/lab/tools")
+    assert response.status_code == 200
+    entry, = response.json()["tools"]
+    assert entry["available"] is available
+    assert entry["reason"] == (None if available else "sandbox not armed")
+    assert calls == [("http://broker:8140/broker/health", 3, {"Cache-Control": "no-cache"})]
+    assert "private broker detail" not in response.text
+
+
+@pytest.mark.parametrize("failure,ttl", [(False, 60), (True, 10)])
+def test_tools_caches_broker_health_and_retries_at_expiry(monkeypatch, failure, ttl):
+    from dataclasses import replace
+    from test_lab_tool_manifests import read_tool
+
+    tool = lab_surface.lab_tool_manifests.project_tool(read_tool(), "catalog_seed")
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection",
+                        lambda tenant: (tool, replace(tool, name="another-tool")))
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    now, calls = [100.0], []
+    monkeypatch.setattr(lab_surface, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def health(*args, **kwargs):
+        calls.append(now[0])
+        if failure and len(calls) == 1:
+            raise lab_surface.requests.Timeout()
+        return _health_response({"lab_sandbox_tier": "microvm"})
+
+    monkeypatch.setattr(lab_surface.requests, "get", health)
+    client = _client()
+    first = client.get("/api/lab/tools").json()
+    assert all(entry["available"] is (not failure) for entry in first["tools"])
+    now[0] += ttl - 0.1
+    client.app.dependency_overrides[deps.require_tenant] = lambda: "tenant-b"
+    assert client.get("/api/lab/tools").json()["tools"] == first["tools"]
+    assert calls == [100.0]
+    now[0] = 100.0 + ttl
+    assert all(entry["available"] for entry in client.get("/api/lab/tools").json()["tools"])
+    assert calls == [100.0, 100.0 + ttl]
 
 
 def test_tools_never_list_a_raw_name_or_version(monkeypatch):
