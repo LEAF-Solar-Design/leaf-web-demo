@@ -1216,7 +1216,7 @@ test('batch three semantic oracles precede generic handlers and use real interac
     assert.ok(setup.includes(target), target + ' initial setup')
     assert.ok(oracle.indexOf(target) < oracle.indexOf("effect.kind === 'navigates'"), target + ' semantic oracle')
   }
-  for (const text of ['Session · provenance', 'Claude accounts', 'Linked services', 'Version history',
+  for (const text of ['Session details', 'Claude accounts', 'Linked services', 'Version history',
     'Close cost panel', 'rooftop_demo', 'Return to drawing', 'No matching object in this drawing.',
     'You hold the edit lock', 'slash-menu-listbox', 'aria-selected']) assert.ok(source.includes(text), text)
   assert.match(setup, /index\.resolve\(recipe\.control\.inputValue\)\.status/)
@@ -1247,7 +1247,7 @@ test('batch three corrections use the default shell demo, inbox disclosure and s
   const session = setup.slice(setup.indexOf("if (target === 'session-provenance')"),
     setup.indexOf("if (target === 'notification-inbox-collapsed')"))
   assert.match(session, /expect\(locator\)\.toHaveCount\(1\)/)
-  assert.match(session, /Session · provenance.*toBeHidden\(\)/)
+  assert.match(session, /Session details.*toBeHidden\(\)/)
   assert.doesNotMatch(session, /setDrawer|Workspace panels/)
   const panels = oracle.slice(oracle.indexOf('if (probe.kind === \'control\' && baselineThreePanels[target])'),
     oracle.indexOf("if (target === 'scope-build-picker'"))

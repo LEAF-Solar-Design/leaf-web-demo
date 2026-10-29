@@ -20,6 +20,20 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('unavailable Quick access declarations carry the current product reasons', () => {
+  for (const [id, label, reason] of [
+    ['control:new-drawing', 'New drawing', "Start a new drawing from the project board's Start button"],
+    ['control:print', 'Print', "Printing isn't available yet"],
+  ]) {
+    const entry = entryFor(id)
+    for (const state of entry.states) {
+      assert.equal(entry.state_contexts[state].name, `${label} (unavailable: ${reason})`)
+      assert.equal(entry.state_contexts[state].tooltip, `${label}: ${reason}`)
+      assert.equal(entry.expected_effect[state].reason, reason)
+    }
+  }
+})
+
 test('WL16 project-open declares a private PostgreSQL fixture while retaining the Escape oracle', () => {
   const entry = entryFor('action:bar-escape')
   assert.equal(entry.state_contexts['project-open'].openProjectId, 'walk-project')

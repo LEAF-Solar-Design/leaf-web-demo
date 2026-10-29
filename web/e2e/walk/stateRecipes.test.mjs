@@ -863,7 +863,7 @@ test('only the declared desktop dialog states can create an accessibility captur
   for (const [featureId, name, states] of [
     ['control:linked-services', 'Linked services', ['ready', 'failed-load']],
     ['control:claude-accounts', 'Claude accounts', ['ready', 'failed-load']],
-    ['control:session-details', 'Session · provenance', ['ready', 'failed-load']],
+    ['control:session-details', 'Session details', ['ready', 'failed-load']],
     ['control:version-history', 'Version history', ['ready']],
   ]) {
     assert.deepEqual(ACCESSIBILITY_DIALOG_SCOPE[featureId].states, states)
@@ -2578,10 +2578,10 @@ test('phone Escape drawer recipes use Studio and oracles require both panels clo
   }
 })
 
-test('Studio rail features contain exactly the three rail controls', () => {
+test('Studio rail features contain exactly the four rail controls', () => {
   assert.equal(Object.isFrozen(STUDIO_RAIL_FEATURES), true)
   assert.deepEqual([...STUDIO_RAIL_FEATURES].sort(), [
-    'control:job-monitor-expand', 'control:linked-services', 'control:notification-collapse',
+    'control:job-monitor-expand', 'control:linked-services', 'control:notification-collapse', 'control:objects',
   ])
 })
 
@@ -2681,6 +2681,44 @@ test('reloadAndReenter reloads once without entry clicks on builds without an en
   assert.deepEqual(events, ['reload'])
 })
 
+test('session-details and sign-out oracles require the current Session details dialog', async () => {
+  for (const dialogName of ['Session details', 'Session · provenance']) {
+    for (const target of ['session-provenance', 'signed-out-session']) {
+      const workspace = workspaceEnvironmentFake({ entered: 'true' })
+      let open = target === 'session-provenance'
+      const panel = { visible: () => open && dialogName === 'Session details',
+        getByTestId: id => {
+          assert.equal(id, 'diagnostics-block')
+          return { text: 'session signed out' }
+        },
+        getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.deepEqual(options, { name: target === 'session-provenance' ? 'Close details' : 'Refresh', exact: true })
+          return { visible: panel.visible }
+        },
+      }
+      const page = { ...workspace.page, getByRole: (role, options) => {
+        if (role === 'dialog') {
+          assert.deepEqual(options, { name: 'Session details', exact: true })
+          return panel
+        }
+        assert.equal(role, 'button')
+        if (options.name === 'Sign out') return { count: 0 }
+        assert.deepEqual(options, { name: 'Details', exact: true })
+        return { count: 1, click: async () => { open = true } }
+      } }
+      const assertions = value => ({
+        toHaveCount: async expected => assert.equal(value.count, expected),
+        toBeVisible: async () => assert.equal(value.visible(), true),
+        toHaveText: async expected => assert.match(value.text, expected),
+      })
+      const check = () => assertEffect({ kind: 'control', assertion: { target } }, { page }, null, {}, assertions)
+      if (dialogName === 'Session details') await check()
+      else await assert.rejects(check, assert.AssertionError)
+    }
+  }
+})
+
 test('signed-out session enters the chooser before Details without clicking Sign in', async () => {
   const { page, events } = workspaceEnvironmentFake({ resume: false })
   const getByRole = page.getByRole
@@ -2699,7 +2737,7 @@ test('signed-out session enters the chooser before Details without clicking Sign
   page.getByRole = (role, options) => {
     if (role === 'navigation') return getByRole(role, options)
     if (role === 'dialog') {
-      assert.deepEqual(options, { name: 'Session · provenance', exact: true })
+      assert.deepEqual(options, { name: 'Session details', exact: true })
       return panel
     }
     assert.equal(role, 'button')
@@ -3522,9 +3560,50 @@ const censusAssertions = (value) => ({
 
 const fixtureSource = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
 
+test('only Objects census disclosure reveals Studio before its summary and restores it', async () => {
+  const map = buildFeatureMap()
+  for (const visible of [true, false]) {
+    for (const featureId of ['control:objects', 'control:linked-services']) {
+      for (const state of ['closed', 'open', 'failed-load']) {
+        const fake = studioRailFake({ visible })
+        const objects = featureId === 'control:objects'
+        const probe = resolveProbe(map.entries.find(entry => entry.id === 'control:objects'), state)
+        probe.featureId = featureId
+        const recipe = probe.setup.steps.find(step => step.kind === 'census-disclosure')
+        assert.ok(recipe)
+        let open = false
+        const summary = { visible: true, click: async () => { open = !open; fake.events.push('Objects click') } }
+        const body = { evaluate: async read => read({ open }) }
+        const studioLocator = fake.page.locator
+        fake.page.locator = selector => {
+          if (selector === '#project-workspace-activity') return studioLocator(selector)
+          if (visible && objects) assert.equal(fake.expanded(), 'true', 'Objects requires open Studio')
+          if (selector === 'details.drawing-objects-panel > summary') {
+            fake.events.push('Objects summary')
+            return summary
+          }
+          assert.equal(selector, 'details.drawing-objects-panel')
+          return body
+        }
+        const runtime = { page: fake.page, cleanup: [], evidence: {} }
+        await prepareStudioRail(probe, runtime, recipe, { enter: async () => {} })
+        assert.equal(runtime.cleanup.length, visible && objects ? 1 : 0)
+        await setupCensusDisclosure(runtime, recipe, censusAssertions)
+        assert.equal(open, recipe.expanded)
+        assert.equal(fake.events.filter(event => event === 'Studio click').length, visible && objects ? 1 : 0)
+        if (visible && objects) assert.ok(fake.events.indexOf('Studio click') < fake.events.indexOf('Objects summary'))
+        for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+        assert.equal(open, false)
+        assert.equal(fake.expanded(), 'false')
+        assert.equal(runtime.evidence.censusDisclosure.cleaned, true)
+      }
+    }
+  }
+})
+
 test('rail recipes reveal Studio before their control and restore only panels they opened', async () => {
   const map = buildFeatureMap()
-  for (const featureId of [...STUDIO_RAIL_FEATURES, 'control:session-details']) {
+  for (const featureId of [...STUDIO_RAIL_FEATURES].filter(id => id !== 'control:objects').concat('control:session-details')) {
     for (const state of ['ready', 'failed-load']) {
       for (const initiallyOpen of [false, true]) {
         const fake = studioRailFake({ expanded: String(initiallyOpen) })

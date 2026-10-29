@@ -364,26 +364,26 @@
       "state_contexts": {
         "unavailable": {
           "toolbar": "Quick access",
-          "name": "New drawing (unavailable: new drawings start on the project board (Start tab))",
-          "tooltip": "New drawing: new drawings start on the project board (Start tab)",
+          "name": "New drawing (unavailable: Start a new drawing from the project board's Start button)",
+          "tooltip": "New drawing: Start a new drawing from the project board's Start button",
           "failedLoad": false
         },
         "failed-load": {
           "toolbar": "Quick access",
-          "name": "New drawing (unavailable: new drawings start on the project board (Start tab))",
-          "tooltip": "New drawing: new drawings start on the project board (Start tab)",
+          "name": "New drawing (unavailable: Start a new drawing from the project board's Start button)",
+          "tooltip": "New drawing: Start a new drawing from the project board's Start button",
           "failedLoad": true
         }
       },
       "expected_effect": {
         "unavailable": {
           "kind": "disabled_with_reason",
-          "reason": "new drawings start on the project board (Start tab)",
+          "reason": "Start a new drawing from the project board's Start button",
           "reason_code": "control:new-drawing:unavailable"
         },
         "failed-load": {
           "kind": "disabled_with_reason",
-          "reason": "new drawings start on the project board (Start tab)",
+          "reason": "Start a new drawing from the project board's Start button",
           "reason_code": "control:new-drawing:unavailable"
         }
       },
@@ -407,26 +407,26 @@
       "state_contexts": {
         "unavailable": {
           "toolbar": "Quick access",
-          "name": "Print (unavailable: printing is not in the browser engine)",
-          "tooltip": "Print: printing is not in the browser engine",
+          "name": "Print (unavailable: Printing isn't available yet)",
+          "tooltip": "Print: Printing isn't available yet",
           "failedLoad": false
         },
         "failed-load": {
           "toolbar": "Quick access",
-          "name": "Print (unavailable: printing is not in the browser engine)",
-          "tooltip": "Print: printing is not in the browser engine",
+          "name": "Print (unavailable: Printing isn't available yet)",
+          "tooltip": "Print: Printing isn't available yet",
           "failedLoad": true
         }
       },
       "expected_effect": {
         "unavailable": {
           "kind": "disabled_with_reason",
-          "reason": "printing is not in the browser engine",
+          "reason": "Printing isn't available yet",
           "reason_code": "control:print:unavailable"
         },
         "failed-load": {
           "kind": "disabled_with_reason",
-          "reason": "printing is not in the browser engine",
+          "reason": "Printing isn't available yet",
           "reason_code": "control:print:unavailable"
         }
       },
