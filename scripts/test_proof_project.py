@@ -1,6 +1,7 @@
 """Records A/B/C; authority and execution rows use fake effects only."""
 from dataclasses import replace
 from datetime import datetime, timezone
+import errno
 import importlib.util
 import io
 import json
@@ -148,7 +149,8 @@ class TestProjectBoundary:
             "MIGRATION_EXIT", "MIGRATION_RESULT", "SCHEMA", "IDENTITY", "BINDING",
             "LAUNCH", "OWNERSHIP", "READINESS", "HEARTBEAT", "AUTH", "BROWSER_EXIT",
             "BROWSER_EVIDENCE", "CANONICAL", "CANCELLED", "GUARDIAN", "CLEANUP_PROCESS",
-            "CLEANUP_IDENTITY", "CLEANUP_POOL", "CLEANUP_AUTHORITY", "CLEANUP_PRIVATE"}
+            "CLEANUP_IDENTITY", "CLEANUP_POOL", "CLEANUP_AUTHORITY", "CLEANUP_PRIVATE",
+            "RECEIPT", "INTERNAL", "USAGE"}
 
     def test_deployed_posture(self):
         for facts in ({"posture": "production"}, {"legacy_posture": "staging"}, {"synthetic": True}):
@@ -2881,3 +2883,926 @@ class TestProjectLifetime:
             return c.effects.clock.now >= 0.1
         c.scope._pending.append(SimpleNamespace(done=done))
         assert c.scope.close().ok and c.teardown == ["late-pool"]
+
+
+# E: every external operation, including receipt filesystem operations, is fake.
+class ReceiptFiles:
+    def __init__(self):
+        self.files, self.directories, self.next_inode = {}, {}, 0
+        self.root = ReceiptPath(self, ROOT / "receipt-files")
+        for path in reversed((self.root.path, *self.root.path.parents)):
+            self.next_inode += 1
+            self.directories[path] = self.next_inode
+
+    def install(self, monkeypatch):
+        monkeypatch.setattr(p, "_private_directory", lambda path: path.mkdir())
+        real_lexists, real_rmtree = p.os.path.lexists, p.shutil.rmtree
+        monkeypatch.setattr(p.os.path, "lexists", lambda path: path.exists() if isinstance(path, ReceiptPath) else real_lexists(path))
+        def remove(root):
+            if not isinstance(root, ReceiptPath):
+                return real_rmtree(root)
+            assert root.path.is_relative_to(self.root.path) and root.path != self.root.path
+            self.files = {path: value for path, value in self.files.items() if not path.is_relative_to(root.path)}
+            self.directories = {path: value for path, value in self.directories.items() if not path.is_relative_to(root.path)}
+        monkeypatch.setattr(p.shutil, "rmtree", remove)
+        rename, overwrite = p.os.rename, p.os.replace
+        def move(source, target, *, replace=False):
+            if not isinstance(source, ReceiptPath):
+                return (overwrite if replace else rename)(source, target)
+            if target.exists() and not replace:
+                raise FileExistsError("fake collision")
+            self.files[target.path] = self.files.pop(source.path)
+        monkeypatch.setattr(p.os, "rename", move)
+        monkeypatch.setattr(p.os, "replace", lambda source, target: move(source, target, replace=True))
+        real_renameat2 = p._renameat2_noreplace
+        def rename_noreplace(source, target):
+            if not isinstance(source, ReceiptPath):
+                return real_renameat2(source, target)
+            if target.exists():
+                return errno.EEXIST
+            move(source, target)
+            return True
+        monkeypatch.setattr(p, "_renameat2_noreplace", rename_noreplace)
+        monkeypatch.setattr(p.os, "fsync", lambda fd: None)
+
+
+class ReceiptPath:
+    def __init__(self, files, path):
+        self.files, self.path = files, path
+    def __str__(self):
+        return str(self.path)
+    def __fspath__(self):
+        return str(self.path)
+    def __repr__(self):
+        return "<fake receipt path>"
+    def __hash__(self):
+        return hash(self.path)
+    def __eq__(self, other):
+        return self.path == (other.path if isinstance(other, ReceiptPath) else other)
+    def __truediv__(self, part):
+        return ReceiptPath(self.files, self.path / part)
+    def __getattr__(self, name):
+        return getattr(self.path, name)
+    @property
+    def parent(self):
+        return ReceiptPath(self.files, self.path.parent)
+    @property
+    def parents(self):
+        return tuple(ReceiptPath(self.files, path) for path in self.path.parents)
+    def with_name(self, name):
+        return ReceiptPath(self.files, self.path.with_name(name))
+    def exists(self):
+        return self.path in self.files.files or self.path in self.files.directories
+    def stat(self):
+        if self.path in self.files.directories:
+            return SimpleNamespace(st_dev=1, st_ino=self.files.directories[self.path],
+                st_mode=p.stat.S_IFDIR, st_file_attributes=0, st_size=0)
+        if self.path in self.files.files:
+            return SimpleNamespace(st_dev=1, st_ino=1000, st_mode=p.stat.S_IFREG,
+                st_file_attributes=0, st_size=len(self.files.files[self.path]))
+        raise FileNotFoundError("fake missing")
+    lstat = stat
+    def mkdir(self, **kwargs):
+        if self.exists() or self.path.parent not in self.files.directories:
+            raise FileExistsError("fake collision")
+        self.files.next_inode += 1
+        self.files.directories[self.path] = self.files.next_inode
+    def unlink(self, *, missing_ok=False):
+        if self.path not in self.files.files and not missing_ok:
+            raise FileNotFoundError("fake missing")
+        self.files.files.pop(self.path, None)
+    def write_bytes(self, value):
+        self.files.files[self.path] = value
+    def read_bytes(self):
+        if self.path not in self.files.files:
+            raise FileNotFoundError("fake missing")
+        return self.files.files[self.path]
+    def write_text(self, value, **kwargs):
+        self.write_bytes(value.encode("utf-8"))
+    def open(self, mode):
+        if mode == "rb":
+            return io.BytesIO(self.read_bytes())
+        assert mode == "xb"
+        if self.exists():
+            raise FileExistsError("fake collision")
+        path = self
+        class Stream(io.BytesIO):
+            def fileno(self):
+                return 7
+            def close(self):
+                if not self.closed:
+                    path.write_bytes(self.getvalue())
+                super().close()
+        return Stream()
+
+
+def receipt_case():
+    from contextlib import nullcontext
+    c = execution_case()
+    c.allocated, c.private = False, True
+    c.published.clear()
+    c.launches.clear()
+    c.events.clear()
+    c.journals.clear()
+    c.receipts, c.leases, c.retained = {}, [], []
+    c.on_publish = lambda: None
+    c.host.begin_operation = ImmediateOperation
+    def cancellation(scope):
+        c.run_scope = scope
+        return nullcontext()
+    c.host.cancellation = cancellation
+    def scrub(reservation, *, keep_safe):
+        c.events.append("scrub")
+        c.private = False
+        c.published.clear()
+        c.retained.clear()
+        return True
+    c.host.scrub = scrub
+    c.host.private_absent = lambda reservation: not c.private
+    def remove(run_id):
+        c.events.append("remove-authority")
+        c.allocated = False
+    c.host.cleanup_authority = remove
+    c.host.cleanup_owned_authority = lambda run_id, ownership: remove(run_id)
+    def close_identity(lease):
+        c.events.append("close-identity")
+        c.leases.append(lease)
+        object.__setattr__(lease, "issuer", None)
+        c.published.discard(lease.jwks_path)
+    c.host.close_identity = close_identity
+    def disarm():
+        c.events.append("disarm")
+        return not c.private and not c.allocated
+    c.guardian = SimpleNamespace(arm=lambda: c.events.append("arm"), disarm=disarm,
+        own_process=lambda child: c.events.append("own-process"),
+        observe=lambda ownership: c.events.append("guardian-authority"))
+    c.host.guardian = lambda plan: c.guardian
+    c.host.receipt_binding = lambda run_id, path, writer: p.ReceiptBinding(run_id, c.plan.source, "fakekey")
+    original_launcher = c.effects.process_launcher
+    def launch(spec, *, scope):
+        if spec.role == "stack-launcher":
+            return original_launcher(spec, scope=scope)
+        c.launches.append(spec)
+        kind = p.ResourceKind.MIGRATION_PROCESS if spec.role == "migration-child" else p.ResourceKind.RUNTIME_PROCESS
+        scope.acquire(kind, lambda: c.events.append("stop:" + spec.role))
+        return SimpleNamespace(poll=lambda: 0, stop=lambda deadline: True)
+    def canonical(request):
+        return c.descriptor if request.purpose == "descriptor" else c.canonical
+    def journal(path, value):
+        c.journals.append((path, value))
+        c.events.append("intent" if type(value) is p.PublicationIntent else path.stem)
+        if type(value) is p.PublicationIntent:
+            c.intent = value
+    def publish(path, publication):
+        c.events.append("publish-prepare")
+        c.on_publish()
+        def commit():
+            c.events.append("publish-commit")
+            if path in c.receipts:
+                raise FileExistsError("fake")
+            c.receipts[path] = json.loads(json.dumps(publication.document))
+        publication.commit(commit)
+    def read(path):
+        if path not in c.receipts:
+            raise FileNotFoundError("fake")
+        return c.receipts[path]
+    c.effects = replace(c.effects, process_launcher=launch, canonical_reader=canonical,
+        receipt_writer=SimpleNamespace(ownership=journal, publish=publish, read=read))
+    return c
+
+
+def successful_receipt():
+    c = receipt_case()
+    c.outcome = p.supervise(c.config, effects=c.effects)
+    assert c.outcome.exit_code == 0, c.outcome
+    c.document = c.receipts[c.outcome.receipt_path]
+    c.expected = p.ReceiptBinding(c.config.run_id, c.plan.source, "fakekey")
+    assert p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects).ok
+    return c
+
+
+def verify_document(c, value):
+    c.receipts[c.outcome.receipt_path] = value
+    return p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects)
+
+
+def clone_document(value):
+    return json.loads(json.dumps(value))
+
+
+def disk_publication(c, tmp_path, monkeypatch):
+    root = tmp_path / "owned-run"
+    root.mkdir()
+    (root / "artifacts").mkdir()
+    info = root.stat()
+    reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+    intent = replace(c.intent, reservation=reservation,
+        journal=replace(c.intent.journal, run_root=root, artifact_root=root / "artifacts"))
+    writer = p._ReceiptWriter()
+    writer.ownership(root / "publication-intent.json", intent)
+    assert p._Host.scrub(reservation, keep_safe=False)
+    return writer, root / "artifacts" / p.RECEIPT_NAME
+
+
+def canary_world(value, capsys):
+    from urllib.parse import quote
+    c = receipt_case()
+    c.retained.append(value)
+    c.host.facts = replace(c.host.facts, environment={"PATH": "fake", "PGPASSWORD": value,
+        "UNUSED_DATABASE_URL": value, "TOKEN": value, "CHECKOUT": value})
+    allocate = c.effects.authority_factory
+    def authority(run_id):
+        result = allocate(run_id)
+        result.dsn = lambda: value
+        return result
+    c.effects = replace(c.effects, authority_factory=authority)
+    c.host.database_module = lambda environment: c.db
+    c.issuer.private_key = value
+    result = p.supervise(c.config, effects=c.effects)
+    assert result.exit_code == 0 and not c.private and not c.retained
+    event = p._RetainedOutput(p._approved_event)
+    raw = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "diagnostic": value}).encode()
+    event.feed(raw)
+    retained = event.finish()
+    assert retained == b""
+    assert value not in repr(event)
+    good = p._RetainedOutput(p._approved_event)
+    good.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+    assert json.loads(good.finish()) == {"stage": "browser", "fixed_code": "BROWSER_EXIT"}
+    spec = p.ProcessSpec("runtime-build", ("fake",), ROOT,
+        {"DATABASE_URL": value, "TOKEN": value, "CHECKOUT": value, "KEY": value}, 1)
+    objects = (spec, spec.environment, p._SecretToken(value),
+        p.CanonicalRequest(environment={"DATABASE_URL": value}),
+        p.ReceiptBinding("run-test", c.plan.source, value))
+    rendered = repr(objects) + repr(spec.argv) + repr(c.journals) + json.dumps(list(c.receipts.values()))
+    assert value not in rendered and quote(value, safe="") not in rendered
+    # The parser must not echo arbitrary subcommands, options, values or an
+    # unambiguous prefix. Injection remains a Python API, not a CLI switch.
+    for argv in ([value], ["supervise", "--run-id", "run-test", "--run-root", str(ROOT), "--effects", value],
+                 ["supervise", "--run", value], ["verify-receipt", "--receipt", value]):
+        assert p.main(argv, effects=c.effects) == 2
+        output = capsys.readouterr()
+        assert output.out == "" and output.err == "USAGE: Invalid project proof command.\n"
+    # Raw exceptions can originate at any seam; no diagnostic string is kept.
+    failed = receipt_case()
+    failed.stack_ready["ports"] = dict(web=5275, app=8230, broker=8240, harness=8250)
+    def crash(*args, **kwargs):
+        raise RuntimeError(value)
+    failed.effects = replace(failed.effects, browser_runner=crash)
+    assert p.main(["supervise", "--run-id", "run-test", "--run-root", str(ROOT)], effects=failed.effects) == 1
+    output = capsys.readouterr()
+    assert output.out == "BROWSER_EXIT: Project proof command failed.\n" and output.err == ""
+    assert value not in repr(failed.journals) + json.dumps(list(failed.receipts.values()))
+    assert not failed.private and not failed.retained
+
+
+def correction_disk_case(monkeypatch):
+    c = receipt_case()
+    files = ReceiptFiles()
+    files.install(monkeypatch)
+    root = files.root / "corrected-run"
+    root.mkdir()
+    (root / "artifacts").mkdir()
+    info = root.stat()
+    c.config = replace(c.config, run_root=root, artifact_root=root / "artifacts")
+    c.profile = dict(c.profile, LEAF_PROOF_PROJECT_JWKS_FILE=str(root / "public-jwks.json"))
+    c.host.reserve = lambda plan: p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+    scrub = c.host.scrub
+    def remove(reservation, *, keep_safe):
+        return scrub(reservation, keep_safe=keep_safe) and p._Host.scrub(reservation, keep_safe=keep_safe)
+    c.host.scrub = remove
+    def cancellation(scope):
+        c.run_scope = scope
+        return p._Cancellation(scope)
+    c.host.cancellation = cancellation
+    writer = p._ReceiptWriter()
+    journal = c.effects.receipt_writer.ownership
+    def ownership(path, value):
+        journal(path, value)
+        if type(value) is p.PublicationIntent:
+            writer.ownership(path, value)
+    c.effects = replace(c.effects, receipt_writer=SimpleNamespace(
+        ownership=ownership, publish=writer.publish, read=writer.read))
+    c.files = files
+    return c
+
+
+class TestProjectReceipt:
+    def test_success_after_cleanup(self, monkeypatch):
+        c = successful_receipt()
+        assert c.events.index("intent") < c.events.index("scrub") < c.events.index("disarm") < c.events.index("publish-commit")
+        assert c.document["ok"] is True and c.document["failure"] is None
+        assert all(c.document["rows"].values())
+        assert all(c.document["cleanup"][name] for name in p._CLEANUP_FIELDS)
+        assert not c.allocated and not c.private and all(lease.issuer is None for lease in c.leases)
+        c = receipt_case()
+        c.on_publish = lambda: c.run_scope.cancel()
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert outcome.receipt_path is None and c.receipts == {} and not c.private
+        c = receipt_case()
+        c.host.facts = replace(c.host.facts, output_owned=False)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code != 0 and not c.journals and not c.receipts
+        assert c.events == []
+        # The private guardian entry receives only public ownership over a
+        # fake pipe. Its adapter must actually reach D's guardian_main.
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        root = files.root / "guardian"
+        root.mkdir()
+        info = root.stat()
+        messages = [{"event": "init", "run_id": "run-test", "run_root": str(root),
+            "root_identity": [info.st_dev, info.st_ino], "deadline": 10}, {"event": "disarm"}]
+        output = io.StringIO()
+        monkeypatch.setattr(p, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+            b"".join((json.dumps(item) + "\n").encode() for item in messages))), stdout=output))
+        monkeypatch.setattr(p, "threading", SimpleNamespace(Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        real_path = p.Path
+        monkeypatch.setattr(p, "Path", lambda value: root if value == str(root) else real_path(value))
+        calls = []
+        def guardian(request, *, effects):
+            calls.append(request.run_id)
+            assert request.channel.receive(1) == "disarm"
+            request.channel.acknowledge()
+            return 0
+        monkeypatch.setattr(p, "guardian_main", guardian)
+        assert p._guardian_entry() == 0 and calls == ["run-test"] and output.getvalue() == "OK\nOK\n"
+
+    def test_receipt_missing(self, capsys):
+        c = successful_receipt()
+        c.receipts.clear()
+        result = p.verify_receipt(c.outcome.receipt_path, expected=c.expected, effects=c.effects)
+        assert result == p.Verification(False, p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT))
+        with pytest.raises(Exception):
+            result.ok = True
+        assert p.main(["verify-receipt", "--run-id", "run-test", "--receipt", str(c.outcome.receipt_path)], effects=c.effects) == 1
+        assert capsys.readouterr().out == "RECEIPT: Project proof command failed.\n"
+
+    def test_receipt_malformed(self, monkeypatch):
+        c = successful_receipt()
+        for malformed in (None, [], {}, {"schema": p.SCHEMA}):
+            assert not verify_document(c, malformed).ok
+        for field, value in (("checkout_fence", "1"), ("settings_readback_sha256", "bad")):
+            malformed = clone_document(c.document)
+            malformed["canonical"][field] = value
+            assert not verify_document(c, malformed).ok
+        malformed = clone_document(c.document)
+        malformed["timings"]["migration"] = float("nan")
+        assert not verify_document(c, malformed).ok
+        malformed = clone_document(c.document)
+        malformed["stack"]["owned_process_identities"][1]["parent_pid"] = 999
+        assert not verify_document(c, malformed).ok
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        path = files.root / "receipt.json"
+        for raw in (b"{broken", b'{"ok":true,"ok":false}', b"x" * (p.RECEIPT_LIMIT + 1)):
+            path.write_bytes(raw)
+            effects = replace(c.effects, receipt_writer=p._ReceiptWriter())
+            assert not p.verify_receipt(path, expected=c.expected, effects=effects).ok
+
+    def test_receipt_binding(self):
+        c = successful_receipt()
+        expected = (replace(c.expected, run_id="run-other"), replace(c.expected, profile="account"),
+            replace(c.expected, schema=p.MIGRATION_SCHEMA), replace(c.expected, public_key_thumbprint="otherkey"),
+            replace(c.expected, source=replace(c.plan.source, commit="d" * 40)),
+            replace(c.expected, source=replace(c.plan.source, dirty_tree_sha256=OTHER_HASH)),
+            replace(c.expected, source=replace(c.plan.source, tested_source_manifest_sha256=HASH)))
+        for binding in expected:
+            assert not p.verify_receipt(c.outcome.receipt_path, expected=binding, effects=c.effects).ok
+
+    def test_receipt_unknown_fields(self, monkeypatch):
+        c = successful_receipt()
+        assert set(c.document) == p._RECEIPT_FIELDS
+        for key in (None, "source", "identity", "database", "stack", "worker", "playwright", "rows", "canonical", "timings", "cleanup"):
+            malformed = clone_document(c.document)
+            (malformed if key is None else malformed[key])["diagnostic"] = "raw@key"
+            assert not verify_document(c, malformed).ok
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        malformed = dict(c.document, diagnostic="raw@key")
+        with pytest.raises(p.ProofRefused):
+            writer.publish(path, p._Publication(malformed, lambda commit: commit()))
+        assert not path.exists()
+
+    def test_receipt_no_clobber(self, monkeypatch):
+        c = successful_receipt()
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        events = []
+        sync = p.os.fsync
+        def fsync(fd):
+            events.append("fsync")
+            sync(fd)
+        monkeypatch.setattr(p.os, "fsync", fsync)
+        def race(commit):
+            assert len(events) == 3  # Recreated intent, absence marker, sibling temp.
+            path.write_bytes(b"older")
+            events.append("race")
+            return commit()
+        with pytest.raises((OSError, p.ProofRefused)):
+            writer.publish(path, p._Publication(c.document, race))
+        assert path.read_bytes() == b"older" and events[-1] == "race"
+        assert not path.with_name(path.name + ".pending").exists()
+        with pytest.raises(p.ProofRefused):
+            writer.publish(path.parent / "foreign.json", p._Publication(c.document, lambda commit: commit()))
+        # The same production decision path uses fake no-replace filesystem effects.
+        other = files.root / "control"
+        other.mkdir()
+        writer, path = disk_publication(c, other, monkeypatch)
+        writer.publish(path, p._Publication(c.document, lambda commit: commit()))
+        assert p.verify_receipt(path, expected=c.expected, effects=replace(c.effects, receipt_writer=writer)).ok
+
+    def test_receipt_failed_rows(self):
+        c = successful_receipt()
+        for name in p.REQUIRED_ROWS:
+            malformed = clone_document(c.document)
+            malformed["rows"][name] = False
+            assert not verify_document(c, malformed).ok
+        for name in p._CLEANUP_FIELDS:
+            malformed = clone_document(c.document)
+            malformed["cleanup"][name] = False
+            assert not verify_document(c, malformed).ok
+        for key in ("runtime", "database", "stack", "worker", "playwright", "canonical"):
+            malformed = clone_document(c.document)
+            malformed[key] = None
+            assert not verify_document(c, malformed).ok
+        for status in ("skipped", "flaky", "failed"):
+            malformed = clone_document(c.document)
+            malformed["playwright"]["outcomes"][0]["status"] = status
+            assert not verify_document(c, malformed).ok
+        failed = receipt_case()
+        def browser(*args, **kwargs):
+            raise p.ProofRefused(p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT))
+        failed.effects = replace(failed.effects, browser_runner=browser)
+        failed.host.scrub = lambda *args, **kwargs: False
+        outcome = p.supervise(failed.config, effects=failed.effects)
+        assert outcome.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT)
+        assert [item.fixed_code for item in outcome.cleanup_failures] == [p.FailureCode.CLEANUP_PRIVATE, p.FailureCode.GUARDIAN]
+        assert not failed.receipts
+
+    def test_migration_not_project(self):
+        c = receipt_case()
+        def forbidden(*args, **kwargs):
+            pytest.fail("migration-only command acquired identity or a stack")
+        c.effects = replace(c.effects, issuer_factory=forbidden, seed_operation=forbidden, browser_runner=forbidden)
+        result = p.measure_migration(c.config, effects=c.effects)
+        assert result.exit_code == 0 and result.receipt_path.name == p.MIGRATION_RECEIPT_NAME
+        document = c.receipts[result.receipt_path]
+        assert document["schema"] == p.MIGRATION_SCHEMA and document["ok"] is True
+        assert document["rows"]["P04"] and document["rows"]["P10"] and not document["rows"]["P09"]
+        assert document["identity"] is None and document["runtime"] is None
+        assert all(spec.role == "migration-child" for spec in c.launches)
+        assert not p.verify_receipt(result.receipt_path,
+            expected=p.ReceiptBinding(c.config.run_id, c.plan.source, "fakekey"), effects=c.effects).ok
+        assert not c.private and not c.allocated and c.mints == []
+
+    def test_raw_dsn_canary(self, capsys):
+        canary_world("db@:/pw", capsys)
+
+    def test_encoded_dsn_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("db@:/pw", safe=""), capsys)
+
+    def test_bearer_canary(self, capsys):
+        canary_world("br+/?x", capsys)
+
+    def test_encoded_bearer_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("br+/?x", safe=""), capsys)
+
+    def test_capability_canary(self, capsys):
+        canary_world("cp+/?x", capsys)
+
+    def test_encoded_capability_canary(self, capsys):
+        from urllib.parse import quote
+        canary_world(quote("cp+/?x", safe=""), capsys)
+
+    def test_private_key_canary(self, capsys):
+        canary_world("key+/=", capsys)
+        c = receipt_case()
+        c.issuer.private_key = "key+/="
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code == 0 and c.leases and all(lease.issuer is None for lease in c.leases)
+        assert "key+/=" not in json.dumps(list(c.receipts.values())) + repr(c.journals)
+
+    def test_split_chunk_canaries(self, capsys):
+        from urllib.parse import quote
+        values = ("db@:/pw", "br+/?x", "cp+/?x", "key+/=")
+        for value in (*values, *(quote(item, safe="") for item in values)):
+            payload = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "diagnostic": value}).encode()
+            for split in range(1, len(value)):
+                boundary = payload.index(value.encode()) + split
+                output = p._RetainedOutput(p._approved_event)
+                output.feed(payload[:boundary])
+                output.feed(payload[boundary:])
+                retained = output.finish()
+                assert value.encode() not in retained
+                assert retained == b""
+                assert not output._raw
+            canary_world(value, capsys)
+
+    def test_bounded_output(self, monkeypatch):
+        output = p._RetainedOutput(p._approved_event, limit=64)
+        for _ in range(10000):
+            output.feed(b"x" * 32)
+            assert len(output._raw) <= 64
+        assert output.overflow and output.finish() == b"" and not output._raw
+        # Overflow cannot recover by accepting a later valid suffix.
+        output.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+        assert output.finish() == b""
+        output = p._RetainedOutput(p._approved_event)
+        output.feed(b'{"stage":"browser","fixed_code":"BROWSER_EXIT"}')
+        assert len(output.finish()) <= p.MAX_OUTPUT_BYTES
+        # Exercise the production launcher wiring with fake handles and pipes.
+        sinks = []
+        class Pipe:
+            def __init__(self, spec):
+                self.capture = p._RetainedOutput(lambda raw: p._child_public(spec, raw))
+                self.closed, self.retained, self.launched_count = False, None, 0
+                sinks.append(self)
+            def launched(self):
+                self.launched_count += 1
+            def close(self):
+                if not self.closed:
+                    self.retained = self.capture.finish()
+                    self.closed = True
+        def spawn(argv, **kwargs):
+            assert kwargs["stdout"] is sinks[0] and kwargs["stderr"] == p.subprocess.DEVNULL
+            kwargs["stdout"].capture.feed(b'{"diagnostic":"db@:/pw"}')
+            return SimpleNamespace(pid=77, poll=lambda: 0)
+        monkeypatch.setattr(p, "_OutputPipe", Pipe)
+        monkeypatch.setattr(p.subprocess, "Popen", spawn)
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt", getpid=lambda: 66))
+        monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(attach_and_resume=lambda child: "start77"))
+        child = p._RuntimeProcess(p.ProcessSpec("migration-child", ("fake",), ROOT, {}, 5, ROOT / "result.json"))
+        child.start()
+        assert child.poll() == 0 and sinks[0].launched_count == 1 and sinks[0].retained == b""
+
+    def test_safe_retention(self, monkeypatch):
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        for keep in (False, True):
+            for fail in (False, True):
+                c = receipt_case()
+                c.config = replace(c.config, keep_run_root=keep)
+                c.retained.extend(("db@:/pw", "br+/?x", "cp+/?x", "key+/="))
+                if fail:
+                    def crash(*args, **kwargs):
+                        raise RuntimeError("key+/=")
+                    c.effects = replace(c.effects, browser_runner=crash)
+                outcome = p.supervise(c.config, effects=c.effects)
+                assert (outcome.exit_code != 0) == fail
+                assert not c.private and not c.retained and all(lease.issuer is None for lease in c.leases)
+                assert outcome.receipt_path in c.receipts and len(c.receipts) == 1
+                assert c.receipts[outcome.receipt_path]["ok"] is (not fail)
+                assert all("key+/=" not in json.dumps(value) for value in c.receipts.values())
+                root = files.root / (str(keep) + str(fail))
+                root.mkdir()
+                (root / "artifacts").mkdir()
+                (root / "artifacts" / "raw.json").write_text("key+/=", encoding="utf-8")
+                info = root.stat()
+                reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+                assert p._SupervisorHost().scrub(reservation, keep_safe=keep)
+                assert not root.exists()
+        c = receipt_case()
+        c.host.recovery = lambda run_id, root: (c.plan.reservation, c.host.authority_inventory(run_id))
+        c.host.recovery_processes_absent = lambda run_id, root: True
+        proof = p.cleanup("run-test", run_root=ROOT, effects=c.effects)
+        assert proof.ok and not c.private and not c.allocated and c.receipts == {}
+        c = receipt_case()
+        c.host.recovery = lambda run_id, root: (c.plan.reservation, c.host.authority_inventory(run_id))
+        c.host.recovery_processes_absent = lambda run_id, root: False
+        proof = p.cleanup("run-test", run_root=ROOT, effects=c.effects)
+        assert not proof.ok and proof.failures[0].fixed_code == p.FailureCode.CLEANUP_PROCESS
+        assert c.private and c.receipts == {} and "remove-authority" not in c.events
+
+    def test_e_b_rename_fallback_link(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EINVAL)
+        assert p._rename_noreplace(source, target) is None
+        assert calls == [("link", source, target), ("unlink", source)]
+
+    def test_e_b_rename_fallback_no_clobber(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        def link(source, target):
+            calls.append(("link", source, target))
+            raise FileExistsError("fake")
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix", link=link,
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.ENOSYS)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == [("link", source, target)]
+
+    def test_e_b_rename_eexist_refused(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EEXIST)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == []
+
+    def test_e_b_rename_other_errno_refused(self, monkeypatch):
+        source, target = ROOT / "receipt.pending", ROOT / "receipt.json"
+        calls = []
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="posix",
+            link=lambda source, target: calls.append(("link", source, target)),
+            unlink=lambda source: calls.append(("unlink", source))))
+        monkeypatch.setattr(p, "_renameat2_noreplace", lambda source, target: errno.EIO)
+        with pytest.raises(p.ProofRefused) as error:
+            p._rename_noreplace(source, target)
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert calls == []
+
+    def test_e_c1_signal_during_commit(self, monkeypatch):
+        import signal
+        c = correction_disk_case(monkeypatch)
+        stat = ReceiptPath.stat
+        delivered = []
+        def interrupt(path):
+            result = stat(path)
+            if path == c.config.artifact_root and any(name.name.endswith(".pending") for name in c.files.files):
+                delivered.append(True)
+                signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+            return result
+        monkeypatch.setattr(ReceiptPath, "stat", interrupt)
+        previous = signal.getsignal(signal.SIGINT)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert delivered and c.run_scope._cancelled
+        assert outcome.exit_code != 0 and outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert outcome.receipt_path is None
+        assert not any(path.name in {p.RECEIPT_NAME, p.RECEIPT_NAME + ".pending"} for path in c.files.files)
+        assert signal.getsignal(signal.SIGINT) == previous
+        # Also exercise the narrow window after the final check, before rename.
+        monkeypatch.setattr(ReceiptPath, "stat", stat)
+        with monkeypatch.context() as patch:
+            c = correction_disk_case(patch)
+            rename = p._rename_noreplace
+            def interrupted_rename(source, target):
+                signal.getsignal(signal.SIGINT)(signal.SIGINT, None)
+                return rename(source, target)
+            patch.setattr(p, "_rename_noreplace", interrupted_rename)
+            outcome = p.supervise(c.config, effects=c.effects)
+            assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+            assert outcome.receipt_path is None
+            assert not any(path.name == p.RECEIPT_NAME for path in c.files.files)
+
+    def test_e_c1_cancel_before_rename(self, monkeypatch):
+        c = correction_disk_case(monkeypatch)
+        stat = ReceiptPath.stat
+        cancelled = []
+        def cancel(path):
+            result = stat(path)
+            if path == c.config.artifact_root and any(name.name.endswith(".pending") for name in c.files.files):
+                cancelled.append(True)
+                c.run_scope.cancel()
+            return result
+        monkeypatch.setattr(ReceiptPath, "stat", cancel)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert cancelled and outcome.exit_code != 0
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.CANCELLED)
+        assert outcome.receipt_path is None and not any(path.name == p.RECEIPT_NAME for path in c.files.files)
+
+    def test_e_c1_boolean_types(self):
+        c = successful_receipt()
+        paths = []
+        def visit(value, path=()):
+            if type(value) is bool:
+                paths.append(path)
+            elif isinstance(value, (dict, list)):
+                for key, item in (value.items() if isinstance(value, dict) else enumerate(value)):
+                    visit(item, (*path, key))
+        visit(c.document)
+        assert ("stack", "app_readiness", "dependencies", "broker", "required") in paths
+        for path in paths:
+            document = clone_document(c.document)
+            target = document
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = int(target[path[-1]])
+            assert verify_document(c, document) == p.Verification(False, p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)), path
+
+    def test_e_c1_integer_types(self):
+        c = successful_receipt()
+        paths = []
+        def visit(value, path=()):
+            if type(value) is int:
+                paths.append(path)
+            elif isinstance(value, (dict, list)):
+                for key, item in (value.items() if isinstance(value, dict) else enumerate(value)):
+                    visit(item, (*path, key))
+        visit(c.document)
+        assert ("canonical", "checkout_fence") in paths
+        assert ("database", "schema_status", "migration_count") in paths
+        for path in paths:
+            document = clone_document(c.document)
+            target = document
+            for key in path[:-1]:
+                target = target[key]
+            target[path[-1]] = True
+            assert verify_document(c, document) == p.Verification(False, p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)), path
+
+    def test_e_c1_transport_exception(self, capsys):
+        c = receipt_case()
+        def crash(operation):
+            raise RuntimeError("PRIVATE_DETAIL")
+        c.host.begin_operation = crash
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.PREFLIGHT, p.FailureCode.INTERNAL)
+        assert outcome.exit_code != 0 and c.run_scope.failure == outcome.failure
+        assert p.main(["supervise", "--run-id", "run-test", "--run-root", str(ROOT)], effects=c.effects) == 1
+        output = capsys.readouterr()
+        assert output.out == "INTERNAL: Project proof command failed.\n" and output.err == ""
+        assert "PRIVATE_DETAIL" not in repr(outcome) + repr(c.journals) + json.dumps(list(c.receipts.values()))
+
+    def test_e_c1_adapter_baseexception(self, capsys):
+        c = receipt_case()
+        class AdapterCrash(BaseException):
+            pass
+        def crash(*args, **kwargs):
+            raise AdapterCrash("PRIVATE_DETAIL")
+        c.effects = replace(c.effects, browser_runner=crash)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT)
+        assert outcome.exit_code != 0 and c.run_scope.failure == outcome.failure
+        assert outcome.receipt_path in c.receipts
+        assert c.receipts[outcome.receipt_path]["failure"] == {"stage": "browser", "fixed_code": "BROWSER_EXIT"}
+        assert "PRIVATE_DETAIL" not in repr(outcome) + repr(c.journals) + json.dumps(list(c.receipts.values()))
+        assert capsys.readouterr() == ("", "")
+
+    def test_e_c1_split_private_identifier(self):
+        password = "PasswordCanary7"
+        request = {"run_id": "run-test", "subject": "leaf-proof-project|run-test", "deadline": 5,
+            "result_path": str(ROOT / "binding-result.json")}
+        spec = p.ProcessSpec("seed-child", ("fake",), ROOT, {
+            "DATABASE_URL": "postgresql://leaf:" + password + "@localhost/leaf",
+            "LEAF_PROJECT_CHILD_REQUEST": json.dumps(request)}, 5)
+        raw = json.dumps({"organization_id": password, "binding_id": "binding", "subject": request["subject"],
+            "tier": "hosted_pro", "authority": "auth0", "role": "owner", "status": "active"}).encode()
+        for split in range(1, len(password)):
+            output = p._RetainedOutput(lambda raw: p._child_public(spec, raw))
+            boundary = raw.index(password.encode()) + split
+            output.feed(raw[:boundary])
+            output.feed(raw[boundary:])
+            assert output.finish() == b"" and not output._raw
+            assert output.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+
+    def test_e_c1_private_receipt(self):
+        c = receipt_case()
+        password = "PasswordCanary7"
+        allocate = c.effects.authority_factory
+        def authority(run_id):
+            result = allocate(run_id)
+            result.dsn = lambda: "postgresql://leaf:" + password + "@localhost/leaf"
+            return result
+        c.effects = replace(c.effects, authority_factory=authority)
+        c.host.database_module = lambda environment: c.db
+        c.org.org_id = c.row.platform_tenant_id = password
+        c.binding = replace(c.binding, organization_id=password)
+        c.auth = (200, password, "hosted_pro", "active")
+        c.evidence = replace(c.evidence, organization_id=password)
+        c.result = replace(c.result, canonical=c.evidence)
+        c.canonical = replace(c.canonical, evidence=c.evidence)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code != 0 and outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert outcome.receipt_path is None and c.receipts == {}
+        assert not c.private and not c.allocated
+        assert password not in repr(c.journals)
+
+    def test_e_c1_known_private_values(self):
+        from urllib.parse import quote
+        c = receipt_case()
+        private = p._PrivateValues()
+        key, capability = "SigningKeyCanary+/=", "CheckoutCanary+/?"
+        c.issuer.private_key = key
+        bound = p._private_effects(c.effects, private)
+        issuer = bound.issuer_factory("run-test")
+        first = issuer.mint("run-test")
+        second = issuer.mint("run-test")
+        dsn = "postgresql://leaf:Password%2BCanary@localhost/leaf"
+        private.dsn(dsn)
+        private.capabilities(SimpleNamespace(checkout_capability=capability))
+        for secret in (dsn, "Password+Canary", first, second, key, capability):
+            for value in (secret, quote(secret, safe="")):
+                private.rejected = False
+                token = p._RUN_PRIVATE.set(private)
+                try:
+                    output = p._RetainedOutput(json.loads)
+                finally:
+                    p._RUN_PRIVATE.reset(token)
+                raw = json.dumps({"permitted": ["prefix" + value + "suffix"]}).encode()
+                output.feed(raw[:len(raw) // 2])
+                output.feed(raw[len(raw) // 2:])
+                assert output.finish() == b"" and not output._raw
+                assert output.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert first not in repr(private) and key not in repr(private)
+
+    def test_e_c1_failure_receipt(self, monkeypatch):
+        c = correction_disk_case(monkeypatch)
+        def crash(*args, **kwargs):
+            raise RuntimeError("PRIVATE_DETAIL")
+        c.effects = replace(c.effects, browser_runner=crash)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.BROWSER, p.FailureCode.BROWSER_EXIT)
+        assert outcome.exit_code != 0 and outcome.cleanup_failures == ()
+        assert outcome.receipt_path is not None and outcome.receipt_path.exists()
+        document = json.loads(outcome.receipt_path.read_bytes())
+        assert document["ok"] is False
+        assert document["failure"] == {"stage": "browser", "fixed_code": "BROWSER_EXIT"}
+        assert all(document["cleanup"][name] is True for name in p._CLEANUP_FIELDS)
+        assert "PRIVATE_DETAIL" not in json.dumps(document)
+
+    def test_e_c1_pipe_private_failure(self, monkeypatch):
+        private = p._PrivateValues()
+        private.add("PasswordCanary7")
+        token = p._RUN_PRIVATE.set(private)
+        try:
+            capture = p._RetainedOutput(json.loads)
+        finally:
+            p._RUN_PRIVATE.reset(token)
+        capture.feed(b'{"organization_id":"PasswordCanary7"}')
+        pipe = object.__new__(p._OutputPipe)
+        pipe.closed, pipe.writer = False, None
+        pipe.done = SimpleNamespace(wait=lambda timeout: True)
+        pipe.capture = capture
+        pipe.spec = p.ProcessSpec("seed-child", ("fake",), ROOT, {}, 5, ROOT / "output.json")
+        writes = []
+        monkeypatch.setattr(p, "_write_synced", lambda *args: writes.append(args))
+        with pytest.raises(p.ProofRefused) as error:
+            pipe.close()
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert not writes and not capture._raw
+
+    def test_e_c1_publication_private_value(self, monkeypatch):
+        c = successful_receipt()
+        files = ReceiptFiles()
+        files.install(monkeypatch)
+        writer, path = disk_publication(c, files.root, monkeypatch)
+        private = p._PrivateValues()
+        private.add("PasswordCanary7")
+        document = clone_document(c.document)
+        document["identity"]["organization_id"] = "PasswordCanary7"
+        with pytest.raises(p.ProofRefused) as error:
+            writer.publish(path, p._Publication(document, lambda action: action(), private_values=private))
+        assert error.value.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert not path.exists() and not path.with_name(path.name + ".pending").exists()
+        assert not any(b"PasswordCanary7" in raw for raw in files.files.values())
+
+    def test_e_c1_bearers_in_receipt(self):
+        for leaked in ("ReadinessBearerCanary", "BrowserBearerCanary"):
+            c = receipt_case()
+            tokens = iter(("ReadinessBearerCanary", "BrowserBearerCanary"))
+            c.issuer.mint = lambda *args, **kwargs: next(tokens)
+            c.evidence = replace(c.evidence, project_id=leaked)
+            c.result = replace(c.result, canonical=c.evidence)
+            c.canonical = replace(c.canonical, evidence=c.evidence)
+            outcome = p.supervise(c.config, effects=c.effects)
+            assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+            assert outcome.exit_code != 0 and outcome.receipt_path is None and not c.receipts
+            assert not c.private
+
+    def test_e_c1_signing_key_receipt(self):
+        c = receipt_case()
+        c.issuer.private_key = "SigningKeyCanary"
+        c.evidence = replace(c.evidence, drawing_id="SigningKeyCanary")
+        c.result = replace(c.result, canonical=c.evidence)
+        c.canonical = replace(c.canonical, evidence=c.evidence)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert outcome.exit_code != 0 and outcome.receipt_path is None and not c.receipts
+        assert all(lease.issuer is None for lease in c.leases)
+
+    def test_e_c1_checkout_receipt(self):
+        c = receipt_case()
+        capability = "CheckoutCapabilityCanary"
+        browser = c.effects.browser_runner
+        def run(request, *, scope):
+            handle = browser(request, scope=scope)
+            poll = handle.poll
+            def result():
+                handle.checkout_capability = capability
+                return poll()
+            handle.poll = result
+            return handle
+        c.effects = replace(c.effects, browser_runner=run)
+        c.evidence = replace(c.evidence, job_id=capability)
+        c.result = replace(c.result, canonical=c.evidence)
+        c.canonical = replace(c.canonical, evidence=c.evidence)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+        assert outcome.exit_code != 0 and outcome.receipt_path is None and not c.receipts
+        assert not c.private and not c.allocated
