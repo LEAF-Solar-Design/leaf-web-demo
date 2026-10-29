@@ -524,6 +524,7 @@ export async function requireNoDrawing(page, assertions = expect) {
 }
 async function requireWorkspace(runtime) {
   const { page } = runtime
+  await enterWorkspaceEnvironment(page)
   await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
   if (runtime.failedDrawing) {
     await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ })).toBeVisible()
