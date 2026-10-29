@@ -2553,7 +2553,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_org_export_scope_static.py",  # P-153 export ownership scope
                  f"{repo_name}/platform/tests/test_campaign_plan_policy_static.py",
                  f"{repo_name}/platform/tests/test_web_page_template_static.py",
-                 ], 265,  # +11 portable Next page template cases
+                 f"{repo_name}/platform/tests/test_drawing_import_contract_static.py",  # UI import source kind contract
+                 ], 268,  # +3 import source kind contract
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or

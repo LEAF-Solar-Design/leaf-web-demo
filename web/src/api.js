@@ -546,7 +546,7 @@ export async function importUploadedDrawingVersion(projectId, { drawingId, versi
     const headers = { 'Content-Type': 'application/json', 'X-Tenant-Id': TENANT, ...orgHeaders(), ...authHeaders(), 'Idempotency-Key': idempotencyKey }
     const res = await apiFetch(`${API_BASE}${path}`, {
       method: 'POST', headers, signal: controller.signal,
-      body: JSON.stringify({ source: { drawing_id: drawingId, version }, name }),
+      body: JSON.stringify({ source: { kind: 'account_upload', drawing_id: drawingId, version }, name }),
     }, path)
     const invalid = () => Object.assign(new Error('invalid_response'), { status: res.status, code: 'invalid_response' })
     const successful = res.status >= 200 && res.status < 300

@@ -129,7 +129,7 @@ def test_sip_r1_gate_registration():
         assert suite.db_gated is gated
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
-    assert suites["platform-static"].expected == 265  # +11 portable page template cases.
+    assert suites["platform-static"].expected == 268  # +3 import source kind contract.
     assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
     assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
@@ -492,7 +492,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # Added test_acceptance_schema_readiness_contract on 2026-10-19: 211 -> 212.
     # Added +26 SP2 invite-only org gate on 2026-10-19: 212 -> 238.
     # Added demo inventory/migration contract regression: 238 -> 239.
-    assert static.expected == 265
+    assert static.expected == 268  # +3 import source kind contract.
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv

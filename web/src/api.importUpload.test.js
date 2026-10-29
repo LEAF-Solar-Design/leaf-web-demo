@@ -27,8 +27,16 @@ it('B3 row6 sends the import contract and preserves success and server errors', 
   expect(url).toBe(`${config.apiBase}/api/projects/p1/drawing-versions/import`)
   expect(init.method).toBe('POST')
   expect(init.headers).toMatchObject({ 'Idempotency-Key': options.idempotencyKey, 'X-Tenant-Id': config.tenant, 'X-Org-Id': 'org-test', Authorization: 'Bearer test-token', 'Content-Type': 'application/json' })
-  expect(JSON.parse(init.body)).toEqual({ source: { drawing_id: source.drawingId, version: 2 }, name: 'site.dwg' })
+  expect(JSON.parse(init.body)).toEqual({ source: { kind: 'account_upload', drawing_id: source.drawingId, version: 2 }, name: 'site.dwg' })
   await expect(importUploadedDrawingVersion('p1', source, options)).rejects.toMatchObject({ message: 'This key was already used.', status: 409 })
+})
+
+it('sends the account upload source kind the server schema requires', async () => {
+  const fetch = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ drawing_version: { version: 2, name: 'site.dwg' }, replayed: false }), { status: 201 }))
+  vi.stubGlobal('fetch', fetch)
+  await importUploadedDrawingVersion('p1', source, options)
+  const [, init] = fetch.mock.calls[0]
+  expect(JSON.parse(init.body).source).toEqual({ kind: 'account_upload', drawing_id: 'u-0123456789', version: 2 })
 })
 
 it('rejects malformed and oversized response bodies', async () => {
