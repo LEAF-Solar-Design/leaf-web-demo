@@ -335,6 +335,7 @@ class TestProjectBoundary:
                     "LEAF_GUEST_DXF_EXTRACT": "local", "LEAF_CANONICAL_WORKER_TOOL": "solar-settings",
                     "LEAF_EXPECTED_WORKER_REVISION": "sha256:" + OTHER_HASH,
                     "LEAF_CANONICAL_WORKER_ID": "project:run-test", "LEAF_AGENT_STORE": "postgres",
+                    "LEAF_DRAWING_STORE": "postgres", "LEAF_UPLOAD_STORE": "postgres",
                     "LEAF_HARNESS_SESSION_STORE": "postgres", "LEAF_TENANT_CLAIM_NS": "https://leafdesign.ai/"}
         assert {key: env.get(key) for key in expected} == expected
         assert p.TIER == "hosted_pro" and p.PROFILE == "project"
