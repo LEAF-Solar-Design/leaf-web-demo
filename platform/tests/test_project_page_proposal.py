@@ -203,9 +203,9 @@ def test_live_identity_uses_server_actor_despite_forged_dev_headers(client, save
     monkeypatch.setattr(deps, '_verified_identity', identity)
     calls, _ = install_transport(monkeypatch, lambda payload: Response(encoded(result(payload))))
     response = client.post(saved['url'] + '/proposals', json=request_body(saved), headers={
-        **headers(uuid.uuid4(), uuid.uuid4()), 'Authorization': 'Bearer test-verified-elsewhere'})
+        **headers(uuid.uuid4(), uuid.uuid4()), 'Authorization': 'Bearer fixture'})
     assert response.status_code == 200, response.text
-    assert seen == ['Bearer test-verified-elsewhere']
+    assert seen == ['Bearer fixture']
     assert calls[0][2]['tenant_id'] == str(saved['org'])
 
 
