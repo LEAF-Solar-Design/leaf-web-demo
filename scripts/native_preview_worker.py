@@ -27,10 +27,33 @@ MAX_PNG = 16 * 1024 * 1024
 MAX_BODY = 4 * ((MAX_PNG + 2) // 3) + 17408
 SAFE = re.compile(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}\Z')
 SHA = re.compile(r'[0-9a-f]{64}\Z')
+ERROR_CODES = frozenset({
+    'invalid-protocol', 'invalid-identity', 'invalid-json', 'source-integrity',
+    'unsafe-archive', 'source-bounds', 'document-integrity', 'producer-conflict',
+    'source-unavailable', 'stdin-required', 'invalid-auth', 'invalid-origin',
+    'request-bounds', 'response-bounds', 'http-denied', 'http-unavailable',
+    'authority-lost', 'heartbeat-drift', 'invalid-screenshot', 'invalid-native-facts',
+    'native-failed', 'cleanup-unconfirmed', 'screenshot-integrity', 'screenshot-readback',
+    'completion-unknown', 'windows-worker-required', 'invalid-granted-simulator',
+    'invalid-ticket', 'mac-transport-failed', 'invalid-remote-clock',
+    'screenshot-bounds', 'cleanup-release-unconfirmed',
+})
+AUTHORITY_FAILURES = frozenset({'none', 'heartbeat-request', 'heartbeat-contract',
+                              'permit-refresh', 'deadline', 'ack-expired',
+                              'allocator-lost', 'unexpected'})
+EXECUTION_STAGES = frozenset({'source', 'mac-bootstrap', 'mac-permit-refresh',
+                              'mac-producer', 'evidence', 'completion'})
 
 
 class WorkerError(RuntimeError):
     """Only fixed safe diagnostic codes cross the CLI boundary."""
+
+
+def error_code(error):
+    if (type(error) is WorkerError and len(error.args) == 1
+            and type(error.args[0]) is str and error.args[0] in ERROR_CODES):
+        return error.args[0]
+    return 'unexpected'
 
 
 def require(condition, code='invalid-protocol'):
@@ -191,36 +214,66 @@ class Authority:
         self.refresh = None
         self.held = None
         self.thread = None
+        self.authority_failure = 'none'
+        self.execution_stage = 'source'
+
+    def fail(self, cause):
+        with self.lock:
+            if self.authority_failure == 'none':
+                self.authority_failure = cause if cause in AUTHORITY_FAILURES - {'none'} else 'unexpected'
+            self.cancelled.set()
+
+    def stage(self, stage):
+        require(stage in EXECUTION_STAGES)
+        # Only the foreground advances this; background refreshes never do.
+        self.execution_stage = stage
 
     @property
     def identity(self):
         return {k: self.job[k] for k in ('lease_owner', 'attempt')}
 
     def check(self):
-        if (self.cancelled.is_set() or self.clock() >= self.deadline or self.monotonic() >= self.end
-                or self.monotonic() - self.ack >= 12
-                or (self.held is not None and self.held.lost)):
-            self.cancelled.set()
+        cause = None
+        if self.cancelled.is_set():
+            cause = 'unexpected'
+        elif self.clock() >= self.deadline or self.monotonic() >= self.end:
+            cause = 'deadline'
+        elif self.monotonic() - self.ack >= 12:
+            cause = 'ack-expired'
+        elif self.held is not None and self.held.lost:
+            cause = 'allocator-lost'
+        if cause is not None:
+            self.fail(cause)
             raise WorkerError('authority-lost')
 
     def beat(self):
         with self.lock:
+            cause = 'unexpected'
             try:
-                require(not self.cancelled.is_set() and self.clock() < self.deadline
-                        and self.monotonic() < self.end, 'authority-lost')
+                active = (not self.cancelled.is_set() and self.clock() < self.deadline
+                          and self.monotonic() < self.end)
+                if not active and not self.cancelled.is_set():
+                    cause = 'deadline'
+                require(active, 'authority-lost')
                 sent = self.monotonic()
-                reply = parse(self.http.request('POST', self.job['job_id'] + '/heartbeat', self.identity))
+                cause = 'heartbeat-request'
+                raw = self.http.request('POST', self.job['job_id'] + '/heartbeat', self.identity)
+                cause = 'heartbeat-contract'
+                reply = parse(raw)
                 expected = {**self.identity, 'job_id': self.job['job_id'], 'deadline': self.deadline}
                 require(type(reply) is dict and set(reply) == set(expected)
                         and all(type(reply[k]) is type(v) and reply[k] == v for k, v in expected.items()), 'heartbeat-drift')
                 # Start validity at request send, not receipt; delayed replies cannot renew it.
                 self.ack = sent
+                cause = 'unexpected'
                 self.check()
                 if self.refresh is not None:
+                    cause = 'permit-refresh'
                     self.refresh(min(self.ack + 10, self.end))
+                cause = 'unexpected'
                 self.check()
             except BaseException:
-                self.cancelled.set()
+                self.fail(cause)
                 raise
 
     def start(self):
@@ -281,6 +334,7 @@ def run_once(scope, http, native, output, *, clock=time.time):
         return {'stage': 'empty', 'result': 'empty'}
     guard = Authority(http, job, clock=clock)
     settling = False
+    failure_settlement = 'not-attempted-authority-lost'
     try:
         guard.start()
         raw = http.request('GET', job['job_id'] + '/source?' + urllib.parse.urlencode(guard.identity),
@@ -289,6 +343,7 @@ def run_once(scope, http, native, output, *, clock=time.time):
         verify_source(raw, job['descriptor'])
         guard.check()
         facts, image = native(raw, job, guard)
+        guard.stage('evidence')
         guard.check()
         receipt = make_receipt(job, scope, facts, image)
         output = Path(output)
@@ -297,21 +352,34 @@ def run_once(scope, http, native, output, *, clock=time.time):
         with artifact.open('xb') as stream:
             stream.write(image)
         require(artifact.read_bytes() == image, 'screenshot-readback')
+        guard.stage('completion')
         guard.beat()
         guard.check()
         settling = True
-        reply = parse(http.request('POST', job['job_id'] + '/complete',
+        failure_settlement = 'request-failed'
+        raw = http.request('POST', job['job_id'] + '/complete',
             {**guard.identity, 'outcome': 'complete', 'receipt': receipt,
-             'screenshot_base64': base64.b64encode(image).decode('ascii')}))
+             'screenshot_base64': base64.b64encode(image).decode('ascii')})
+        failure_settlement = 'response-unconfirmed'
+        reply = parse(raw)
         require(reply == {'job_id': job['job_id'], 'status': 'complete'}, 'completion-unknown')
         return {'stage': 'settled', 'result': 'complete', 'job_id': job['job_id'],
                 'archive_sha256': job['descriptor']['archive_sha256'], 'screenshot_sha256': facts['screenshot_sha256']}
-    except BaseException:
+    except BaseException as error:
+        failure_stage = guard.execution_stage
+        code = error_code(error)
         if not settling:
             try:
                 guard.beat()
                 guard.check()
-                http.request('POST', job['job_id'] + '/complete', {**guard.identity, 'outcome': 'failed'})
+                failure_settlement = 'request-failed'
+                raw = http.request('POST', job['job_id'] + '/complete', {**guard.identity, 'outcome': 'failed'})
+                failure_settlement = 'response-unconfirmed'
+                reply = parse(raw)
+                if (type(reply) is dict and set(reply) == {'job_id', 'status'}
+                        and type(reply['job_id']) is str and reply['job_id'] == job['job_id']
+                        and type(reply['status']) is str and reply['status'] == 'failed'):
+                    failure_settlement = 'accepted'
             except BaseException:
                 pass
         result = {'stage': 'completion' if settling else 'execution',
@@ -319,7 +387,10 @@ def run_once(scope, http, native, output, *, clock=time.time):
                   'archive_sha256': job['descriptor']['archive_sha256']}
         try:
             report = getattr(native, 'report', {})
-            local = {**result, **{k: report[k] for k in ('cleanup_complete', 'allocator_release_confirmed')
+            local = {**result, 'execution_stage': failure_stage, 'error_code': code,
+                     'authority_failure': guard.authority_failure,
+                     'failure_settlement': failure_settlement,
+                     **{k: report[k] for k in ('cleanup_complete', 'allocator_release_confirmed')
                                  if type(report.get(k)) is bool}}
             Path(output).mkdir(parents=True, exist_ok=True)
             with (Path(output) / (job['job_id'] + '-' + str(job['attempt']) + '-failure.json')).open('x') as stream:
