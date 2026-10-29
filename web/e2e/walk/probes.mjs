@@ -202,7 +202,10 @@ export function locatorRecipe(entry, state) {
     if (action.surface === 'bar') {
       // The registry declares keyboard-only actions. Their reachable control
       // is the command bar; do not invent a clickable Escape or Retry button.
-      return { ...role('combobox', 'Command bar'), trigger: 'keyboard', key: action.kbd, actionLabel: action.label }
+      return { ...role('combobox', 'Command bar'), trigger: 'keyboard', key: action.kbd, actionLabel: action.label,
+        ...(entry.id === 'action:bar-escape' && state === 'drawer-open' ? {
+          phone: { ...role('button', 'Studio', role('navigation', 'Workspace controls')), phonePanel: 'Jobs' },
+        } : {}) }
     }
     if (action.surface === 'slash') return { ...role('option', new RegExp(`^/${action.label}(?:\\s|$)`)), trigger: 'click' }
     const property = ['setColor', 'setLinetype', 'setLineweight'].includes(action.op)
@@ -231,7 +234,10 @@ export function locatorRecipe(entry, state) {
       role('toolbar', 'Drafting tools')), trigger: property ? 'select' : 'click',
     ...(effect.kind === 'disabled_with_reason' ? { unavailableName: new RegExp(`^${escapePattern(property ? action.text : action.label)}(?: \\(unavailable: .+\\))?$`) } : {}),
     ...(state === 'no-drawing' ? { availableName: property ? action.text : action.label } : {}),
-    ...(action.panel || action.cluster || action.group ? { group: action.panel || action.cluster || action.group } : {}) }
+    ...(action.panel || action.cluster || action.group ? { group: action.panel || action.cluster || action.group } : {}),
+    ...(entry.id === 'action:properties-pane' && ['ready', 'pane-open'].includes(state) ? {
+      phone: { ...role('button', 'properties', role('toolbar', 'Drafting tools')), phonePanel: 'Plan' },
+    } : {}) }
   }
   if (entry.kind === 'surface') {
     const record = PRODUCT_SURFACES.find((surface) => surface.id === entry.source_id)
@@ -258,10 +264,16 @@ export function locatorRecipe(entry, state) {
     }
     if (entry.source_id === 'jobs') return {
       ...role('button', state === 'open' ? 'Collapse the job monitor to a spine' : /^Expand the job monitor \([0-9]+ live\)$/), trigger: 'click',
-      phone: { ...role('button', 'Jobs', role('group', 'Workspace panels')), trigger: 'click' },
+      phone: { ...role('button', 'Studio', role('navigation', 'Workspace controls')), trigger: 'click', phonePanel: 'Jobs',
+        legacy: { ...role('button', 'Jobs', role('group', 'Workspace panels')), trigger: 'click' } },
     }
     return { ...role('button', drawerNames[entry.source_id], role('group', 'Workspace panels')),
-      trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape' }
+      trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape',
+      ...(entry.source_id === 'plan' ? {
+        phone: { ...role('button', 'properties', role('toolbar', 'Drafting tools')), phonePanel: 'Plan' },
+      } : entry.source_id === 'none' ? {
+        phone: { ...role('button', 'Studio', role('navigation', 'Workspace controls')), phonePanel: 'Jobs' },
+      } : {}) }
   }
   if (entry.kind === 'tool') {
     const record = tools.find((tool) => tool.name === entry.source_id)

@@ -494,6 +494,77 @@ export async function discloseControlPanel(page, recipe) {
   }
 }
 
+async function disclosePhonePlan(page) {
+  const tab = page.getByRole('tablist', { name: 'Ribbon', exact: true })
+    .getByRole('tab', { name: 'View', exact: true })
+  if (await tab.getAttribute('aria-selected') !== 'true') await tab.click()
+  await discloseControlPanel(page, { group: 'view' })
+}
+
+export async function readPhonePanel(page, panel) {
+  if (!['Jobs', 'Plan'].includes(panel)) throw new Error(`Unknown phone panel: ${panel}`)
+  if (!await studioRailButton(page).isVisible()) return await panelButton(page, panel).getAttribute('aria-expanded') === 'true'
+  if (panel === 'Plan') return await page.getByRole('region', { name: 'Entitlements', exact: true }).isVisible()
+  return await page.getByRole('region', { name: 'Studio sidebar', exact: true }).isVisible()
+    && await page.getByRole('heading', { name: /Job monitor/ }).isVisible()
+    && await page.locator('aside.rail .rail-ledger').isVisible()
+}
+
+export async function assertPhonePanel(page, panel, open, assertions = expect) {
+  if (!['Jobs', 'Plan'].includes(panel)) throw new Error(`Unknown phone panel: ${panel}`)
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) {
+    await assertions(panelButton(page, panel)).toHaveAttribute('aria-expanded', String(open))
+    return
+  }
+  if (panel === 'Plan') {
+    await assertions(page.locator('.app')).toHaveAttribute('data-drawer', open ? 'plan' : 'none')
+    await assertions(page.getByRole('region', { name: 'Entitlements', exact: true }))[open ? 'toBeVisible' : 'toBeHidden']()
+    return
+  }
+  await assertions(studio).toHaveAttribute('aria-expanded', String(open))
+  await assertions(page.getByRole('region', { name: 'Studio sidebar', exact: true }))[open ? 'toBeVisible' : 'toBeHidden']()
+  if (open) {
+    await assertions(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
+    await assertions(page.locator('aside.rail .rail-ledger')).toBeVisible()
+  }
+}
+
+export async function setPhonePanel(page, panel, open, assertions = expect) {
+  if (!['Jobs', 'Plan'].includes(panel)) throw new Error(`Unknown phone panel: ${panel}`)
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) {
+    const button = panelButton(page, panel)
+    await assertions(button).toBeVisible()
+    if ((await button.getAttribute('aria-expanded') === 'true') !== open) await button.click()
+  } else if (panel === 'Jobs') {
+    if (open) await revealStudioRail(page)
+    else if (await studio.getAttribute('aria-expanded') === 'true') await studio.click()
+  } else if ((await page.locator('.app').getAttribute('data-drawer') === 'plan') !== open) {
+    await disclosePhonePlan(page)
+    await page.getByRole('toolbar', { name: 'Drafting tools', exact: true })
+      .getByRole('button', { name: 'properties', exact: true }).click()
+  }
+  await assertPhonePanel(page, panel, open, assertions)
+}
+
+async function phoneProbeLocator(page, probe) {
+  const recipe = probe.locator.phone
+  if (!recipe?.phonePanel) return null
+  if (!await studioRailButton(page).isVisible()) return recipe.legacy || probe.locator
+  if (recipe.phonePanel === 'Plan') await disclosePhonePlan(page)
+  return recipe
+}
+
+async function assertPhoneDrawersClosed(page, assertions) {
+  if (await studioRailButton(page).isVisible()) {
+    await assertPhonePanel(page, 'Jobs', false, assertions)
+    await assertPhonePanel(page, 'Plan', false, assertions)
+  } else {
+    for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await assertions(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
+  }
+}
+
 export function absenceNamePattern(locator) {
   if (locator?.unavailableName !== undefined) {
     if (locator.unavailableName instanceof RegExp
@@ -794,7 +865,7 @@ async function setDrawer(page, name, open) {
   await expect(button).toHaveAttribute('aria-expanded', String(open))
 }
 export async function setJobRail(page, open, phone = false, assertions = expect) {
-  if (phone) { await setDrawer(page, 'Jobs', open); return }
+  if (phone) { await setPhonePanel(page, 'Jobs', open, assertions); return }
   const expand = page.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })
   const collapse = page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })
   if (open ? await expand.isVisible() : await collapse.isVisible()) await (open ? expand : collapse).click()
@@ -2832,12 +2903,20 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       await page.getByRole('toolbar', { name: 'Drafting tools', exact: true }).getByRole('group', { name: 'Clipboard', exact: true })
         .getByRole('button', { name: ACTIONS.find((action) => action.op === 'copyClip').label, exact: true }).click()
       return
-    case 'drawer-state': await setDrawer(page, recipe.name, recipe.open); return
+    case 'drawer-state':
+      if (runtime.testInfo?.project.name === 'phone' && (probe.featureId === 'drawer:none'
+        || probe.featureId === 'action:bar-escape' && probe.state === 'drawer-open') && await studioRailButton(page).isVisible()) {
+        await setPhonePanel(page, 'Plan', false, assertions)
+        await setPhonePanel(page, 'Jobs', recipe.open, assertions)
+      } else if (runtime.testInfo?.project.name === 'phone' && ['Jobs', 'Plan'].includes(recipe.name)) {
+        await setPhonePanel(page, recipe.name, recipe.open, assertions)
+      } else await setDrawer(page, recipe.name, recipe.open)
+      return
     case 'job-rail-state': await setJobRail(page, recipe.open, runtime.testInfo.project.name === 'phone', assertions); return
     case 'tool-rail-state': await setToolRail(page, recipe.open, runtime.testInfo.project.name === 'phone'); return
     case 'properties-state': {
       if (runtime.testInfo?.project.name === 'phone') {
-        await setDrawer(page, 'Plan', recipe.open)
+        await setPhonePanel(page, 'Plan', recipe.open, assertions)
         evidence.phoneProperties = { host: 'Plan', open: recipe.open }
         return
       }
@@ -3241,8 +3320,11 @@ async function captureBefore(probe, runtime) {
   if (probe.featureId === 'control:view-back' && probe.state === 'empty-history') return viewState(page)
   if (target.startsWith('viewer-')) return { viewport: await viewportBounds(page) }
   if (target === 'properties-pane') return { visible: runtime.testInfo.project.name === 'phone'
-    ? await panelButton(page, 'Plan').getAttribute('aria-expanded') === 'true'
+    ? await readPhonePanel(page, 'Plan')
     : await page.getByRole('complementary', { name: 'Properties', exact: true }).isVisible() }
+  if (target === 'escape:drawer' && runtime.testInfo.project.name === 'phone') return {
+    command: await page.getByRole('combobox', { name: 'Command bar', exact: true }).inputValue(),
+  }
   if (target === 'version-history') return { visible: await page.getByRole('dialog', { name: 'Version history', exact: true }).isVisible() }
   if (target.startsWith('engine:') || target === 'browser-clipboard-cut') return { count: await engineCount(page) }
   if (target.startsWith('drawing-version-')) {
@@ -3297,6 +3379,10 @@ async function activate(probe, runtime, locator) {
       const bar = page.getByRole('combobox', { name: 'Command bar', exact: true })
       await expect(bar).toBeFocused()
       await bar.press('Escape')
+    }
+    else if (probe.featureId === 'action:bar-escape' && probe.state === 'drawer-open'
+      && runtime.testInfo.project.name === 'phone') {
+      await page.getByRole('combobox', { name: 'Command bar', exact: true }).press('Escape')
     }
     else {
       // Focus a real non-text control without clicking outside a drawer.
@@ -3598,7 +3684,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   if (target === 'properties-pane') {
     if (runtime.testInfo?.project.name === 'phone') {
       if (effect.value === false) expect(before.visible).toBe(true)
-      await expect(panelButton(page, 'Plan')).toHaveAttribute('aria-expanded', String(!before.visible))
+      await assertPhonePanel(page, 'Plan', !before.visible, assertions)
       runtime.evidence.phoneProperties = { host: 'Plan', before: before.visible, after: !before.visible }
       return
     }
@@ -3617,6 +3703,14 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target.startsWith('drawer:')) {
+    if (runtime.testInfo.project.name === 'phone' && ['drawer:plan', 'drawer:jobs'].includes(target)) {
+      await assertPhonePanel(page, target === 'drawer:plan' ? 'Plan' : 'Jobs', effect.value !== 'none', assertions)
+      return
+    }
+    if (runtime.testInfo.project.name === 'phone' && target === 'drawer:none') {
+      await assertPhoneDrawersClosed(page, assertions)
+      return
+    }
     if (target === 'drawer:jobs' && runtime.testInfo.project.name !== 'phone') {
       const open = effect.value !== 'none'
       await expect(page.getByRole('button', { name: open ? 'Collapse the job monitor to a spine' : /^Expand the job monitor \([0-9]+ live\)$/ })).toBeVisible()
@@ -3650,7 +3744,10 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       await expect(bar).toBeFocused()
       runtime.evidence.escapeOwner.dismissed = true
     } else if (rung === 'drawer') {
-      for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await expect(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
+      if (runtime.testInfo.project.name === 'phone') {
+        await assertPhoneDrawersClosed(page, assertions)
+        await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toHaveValue(before.command)
+      } else for (const label of ['Catalog', 'Jobs', 'Result', 'Plan']) await expect(panelButton(page, label)).toHaveAttribute('aria-expanded', 'false')
     } else if (rung === 'history') await expect(page.getByRole('dialog', { name: 'Version history', exact: true })).toBeHidden()
     else if (rung === 'start') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeHidden()
     else if (rung === 'route') await expect(page.getByRole('button', { name: /^Run / })).toHaveCount(0)
@@ -3884,9 +3981,11 @@ export async function runProbe(probe, runtime) {
     // Source-extracted fake runners may omit module dependencies.
     if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, targetRecipe)
     if (typeof phoneRailAvailability === 'function') await phoneRailAvailability(probe, runtime)
+    const phoneRecipe = runtime.testInfo.project.name === 'phone' && typeof phoneProbeLocator === 'function'
+      ? await phoneProbeLocator(page, probe) : null
     const locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
       ? (await resolveSurfaceControl(page, probe)).locator
-      : control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
+      : control(page, phoneRecipe || (runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe))
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
       if (observations.length) Object.assign(evidence, packUxEvidence([...(evidence.ux_observations || []), ...observations]))

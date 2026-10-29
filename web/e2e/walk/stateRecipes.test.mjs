@@ -24,7 +24,7 @@ import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErr
 import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled,
   enterWorkspaceIfChooser, enterWorkspaceEnvironment, reloadAndReenter, openSolarCadProfile, STUDIO_RAIL_FEATURES, revealStudioRail, prepareStudioRail } from './fixtures.mjs'
 import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
-import { absenceNamePattern, resolveSurfaceControl, assertSurfaceState } from './fixtures.mjs'
+import { absenceNamePattern, resolveSurfaceControl, assertSurfaceState, setPhonePanel, readPhonePanel, assertPhonePanel } from './fixtures.mjs'
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
 const stagingIds = [1, 2, 3, 4, 5, 6].map(id => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
@@ -1251,6 +1251,186 @@ test('Studio rail reveal tolerates builds without Workspace controls', async () 
   const fake = studioRailFake({ visible: false })
   assert.equal(await revealStudioRail(fake.page), false)
   assert.deepEqual(fake.events, [])
+})
+
+function phonePanelFake({ modern = true, studio = false, content = true, drawer = 'none' } = {}) {
+  const events = [], legacy = { Jobs: false, Plan: false }
+  let view = false, more = false
+  class Locator {
+    constructor(kind) { this.kind = kind; this._apiName = 'Locator' }
+    async isVisible() {
+      if (this.kind === 'Studio') return modern
+      if (['sidebar', 'heading', 'ledger'].includes(this.kind)) return studio && content
+      if (this.kind === 'Entitlements') return drawer === 'plan' && content
+      if (this.kind === 'View panel') return view && more
+      if (this.kind === 'More panels') return view
+      return true
+    }
+    async count() { return 1 }
+    async inputValue() { assert.equal(this.kind, 'Command bar'); return 'keep this command' }
+    async getAttribute(name) {
+      if (name === 'data-drawer') return drawer
+      if (this.kind === 'Studio') return String(studio)
+      if (this.kind === 'View tab') return String(view)
+      if (this.kind === 'More panels') return String(more)
+      return String(legacy[this.kind])
+    }
+    async click() {
+      events.push(this.kind)
+      if (this.kind === 'Studio') studio = !studio
+      else if (this.kind === 'View tab') view = true
+      else if (this.kind === 'More panels') more = !more
+      else if (this.kind === 'properties') {
+        assert.ok(view && more, 'properties must be disclosed before activation')
+        drawer = drawer === 'plan' ? 'none' : 'plan'
+      } else legacy[this.kind] = !legacy[this.kind]
+    }
+    async _expect(expression, options) {
+      if (expression === 'to.be.visible') assert.equal(await this.isVisible(), true)
+      else {
+        assert.ok(['to.have.attribute', 'to.have.attribute.value'].includes(expression))
+        assert.equal(await this.getAttribute(options.expressionArg), options.expectedText[0].string)
+      }
+      return { matches: true, log: [] }
+    }
+  }
+  const locator = kind => new Locator(kind)
+  const toolbar = { getByRole: (role, options) => {
+    if (role === 'group') { assert.equal(options.name, 'View'); return locator('View panel') }
+    assert.ok(['More panels', 'properties'].includes(options.name))
+    return locator(options.name)
+  } }
+  const page = {
+    getByRole: (role, options) => {
+      if (role === 'navigation') {
+        assert.equal(options.name, 'Workspace controls')
+        return { getByRole: (role, options) => { assert.equal(options.name, 'Studio'); return locator('Studio') } }
+      }
+      if (role === 'toolbar') { assert.equal(options.name, 'Drafting tools'); return toolbar }
+      if (role === 'combobox') { assert.equal(options.name, 'Command bar'); return locator('Command bar') }
+      if (role === 'tablist') {
+        assert.equal(options.name, 'Ribbon')
+        return { getByRole: (role, options) => { assert.equal(options.name, 'View'); return locator('View tab') } }
+      }
+      if (role === 'group') {
+        assert.equal(options.name, 'Workspace panels')
+        assert.equal(modern, false, 'modern panels must never use legacy tabs')
+        return { getByRole: (role, options) => locator(options.name) }
+      }
+      if (role === 'region') {
+        assert.ok(['Studio sidebar', 'Entitlements'].includes(options.name))
+        return locator(options.name === 'Studio sidebar' ? 'sidebar' : 'Entitlements')
+      }
+      assert.equal(role, 'heading'); assert.match('Job monitor', options.name)
+      return locator('heading')
+    },
+    locator: selector => {
+      assert.ok(['.app', '#project-workspace-activity', 'aside.rail .rail-ledger'].includes(selector))
+      return locator(selector === '.app' ? 'app' : selector === '#project-workspace-activity' ? 'sidebar' : 'ledger')
+    },
+  }
+  const assertions = value => ({
+    toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+    toBeVisible: async () => assert.equal(await value.isVisible(), true),
+    toBeHidden: async () => assert.equal(await value.isVisible(), false),
+    toHaveValue: async expected => assert.equal(await value.inputValue(), expected),
+  })
+  return { page, events, assertions }
+}
+
+test('phone Jobs transitions are idempotent and require visible Studio content', async () => {
+  const fake = phonePanelFake()
+  for (const open of [true, true, false, false]) {
+    await setPhonePanel(fake.page, 'Jobs', open, fake.assertions)
+    assert.equal(await readPhonePanel(fake.page, 'Jobs'), open)
+  }
+  assert.deepEqual(fake.events, ['Studio', 'Studio'])
+})
+
+test('expanded Studio with hidden content cannot prove Jobs open', async () => {
+  const fake = phonePanelFake({ studio: true, content: false })
+  assert.equal(await readPhonePanel(fake.page, 'Jobs'), false)
+  await assert.rejects(assertPhonePanel(fake.page, 'Jobs', true, fake.assertions), assert.AssertionError)
+  await assert.rejects(setPhonePanel(fake.page, 'Jobs', true, fake.assertions), assert.AssertionError)
+  assert.deepEqual(fake.events, [])
+})
+
+test('phone Plan discloses View and More panels and checks both content and drawer state', async () => {
+  const fake = phonePanelFake()
+  for (const open of [true, true, false, false]) {
+    await setPhonePanel(fake.page, 'Plan', open, fake.assertions)
+    assert.equal(await readPhonePanel(fake.page, 'Plan'), open)
+  }
+  assert.deepEqual(fake.events, ['View tab', 'More panels', 'properties', 'properties'])
+  const hidden = phonePanelFake({ drawer: 'plan', content: false })
+  await assert.rejects(assertPhonePanel(hidden.page, 'Plan', true, hidden.assertions), assert.AssertionError)
+  await assert.rejects(assertPhonePanel(hidden.page, 'Plan', false, hidden.assertions), assert.AssertionError)
+  const stale = phonePanelFake()
+  const wrongDrawer = { ...stale.page, locator: () => ({ getAttribute: async () => 'plan' }) }
+  await assert.rejects(assertPhonePanel(wrongDrawer, 'Plan', false, stale.assertions), assert.AssertionError)
+  const visible = phonePanelFake({ drawer: 'plan' })
+  const wrongOpenDrawer = { ...visible.page, locator: () => ({ getAttribute: async () => 'none' }) }
+  await assert.rejects(assertPhonePanel(wrongOpenDrawer, 'Plan', true, visible.assertions), assert.AssertionError)
+})
+
+test('phone panels retain legacy Workspace panels transitions without Workspace controls', async () => {
+  const fake = phonePanelFake({ modern: false })
+  for (const panel of ['Jobs', 'Plan']) {
+    for (const open of [true, true, false, false]) {
+      await setPhonePanel(fake.page, panel, open, fake.assertions)
+      assert.equal(await readPhonePanel(fake.page, panel), open)
+    }
+  }
+  assert.deepEqual(fake.events, ['Jobs', 'Jobs', 'Plan', 'Plan'])
+})
+
+test('desktop drawer-state uses legacy Jobs and Plan buttons even with Studio available', async () => {
+  const legacy = phonePanelFake({ modern: false })
+  const modern = phonePanelFake()
+  const page = { ...modern.page, getByRole: (role, options) =>
+    (role === 'group' ? legacy.page : modern.page).getByRole(role, options) }
+  const runtime = { page, evidence: {}, testInfo: { project: { name: 'desktop' } } }
+  for (const name of ['Jobs', 'Plan']) {
+    for (const open of [true, true, false, false]) {
+      await setupStep({ featureId: `drawer:${name.toLowerCase()}` }, runtime,
+        { kind: 'drawer-state', name, open }, legacy.assertions)
+    }
+  }
+  assert.deepEqual(legacy.events, ['Jobs', 'Jobs', 'Plan', 'Plan'])
+  assert.deepEqual(modern.events, [], 'desktop must never click Studio or properties')
+})
+
+test('phone Properties oracle requires the inverse Plan content state on modern builds', async () => {
+  for (const visible of [false, true]) {
+    const fake = phonePanelFake({ drawer: visible ? 'none' : 'plan' })
+    const runtime = { page: fake.page, evidence: {}, testInfo: { project: { name: 'phone' } } }
+    const probe = { assertion: { target: 'properties-pane' } }
+    await assertEffect(probe, runtime, null, { visible }, fake.assertions)
+    assert.deepEqual(runtime.evidence.phoneProperties, { host: 'Plan', before: visible, after: !visible })
+    await assert.rejects(assertEffect(probe, runtime, null, { visible: !visible }, fake.assertions), assert.AssertionError)
+  }
+})
+
+test('phone Escape drawer recipes use Studio and oracles require both panels closed', async () => {
+  for (const featureId of ['drawer:none', 'action:bar-escape']) {
+    const fake = phonePanelFake()
+    const runtime = { page: fake.page, evidence: {}, testInfo: { project: { name: 'phone' } } }
+    const probe = { featureId, state: 'drawer-open', assertion: {
+      target: featureId === 'drawer:none' ? 'drawer:none' : 'escape:drawer', value: 'none',
+    } }
+    await setupStep(probe, runtime, { kind: 'drawer-state', name: 'Catalog', open: true }, fake.assertions)
+    assert.deepEqual(fake.events, ['Studio'])
+    const before = { command: 'keep this command' }
+    await assert.rejects(assertEffect(probe, runtime, null, before, fake.assertions), assert.AssertionError)
+    await setPhonePanel(fake.page, 'Jobs', false, fake.assertions)
+    await assertEffect(probe, runtime, null, before, fake.assertions)
+    await setPhonePanel(fake.page, 'Plan', true, fake.assertions)
+    await assert.rejects(assertEffect(probe, runtime, null, before, fake.assertions), assert.AssertionError)
+    await setPhonePanel(fake.page, 'Plan', false, fake.assertions)
+    if (featureId === 'action:bar-escape') {
+      await assert.rejects(assertEffect(probe, runtime, null, { command: 'changed' }, fake.assertions), assert.AssertionError)
+    }
+  }
 })
 
 test('Studio rail features contain exactly the three rail controls', () => {
@@ -3211,6 +3391,7 @@ test('phone Properties oracle follows Plan drawer state for both toggle directio
   for (const visible of [false, true]) {
     const runtime = { evidence: {}, testInfo: { project: { name: 'phone' } }, page: {
       getByRole: (role, options) => {
+        if (role === 'navigation') return { getByRole: () => ({ isVisible: async () => false }) }
         assert.equal(role, 'group'); assert.equal(options.name, 'Workspace panels')
         return { getByRole: (role, options) => { assert.equal(options.name, 'Plan'); return { expanded: String(!visible) } } }
       },

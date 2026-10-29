@@ -1463,10 +1463,36 @@ test('Jobs uses desktop spine controls and preserves the phone drawer locator', 
       assert.doesNotMatch('Expand the job monitor (unknown live)', probe.locator.name)
     } else assert.equal(probe.locator.name, 'Collapse the job monitor to a spine')
     assert.equal(probe.locator.scope, undefined)
-    assert.equal(probe.locator.phone.name, 'Jobs')
-    assert.equal(probe.locator.phone.scope.name, 'Workspace panels')
+    assert.equal(probe.locator.phone.name, 'Studio')
+    assert.equal(probe.locator.phone.scope.name, 'Workspace controls')
     assert.deepEqual(probe.setup.steps.at(-1), { kind: 'job-rail-state', name: 'Jobs', open: state === 'open' })
   }
+})
+
+test('phone panel overrides preserve legacy locators and use the redesigned disclosures', () => {
+  const jobs = resolveProbe(map.entries.find(entry => entry.id === 'drawer:jobs'), 'closed')
+  assert.equal(jobs.locator.phone.legacy.name, 'Jobs')
+  assert.equal(jobs.locator.phone.legacy.scope.name, 'Workspace panels')
+  for (const [id, states, name, scope] of [
+    ['drawer:plan', ['closed', 'open'], 'properties', 'Drafting tools'],
+    ['action:properties-pane', ['ready', 'pane-open'], 'properties', 'Drafting tools'],
+    ['drawer:none', ['drawer-open', 'drawers-closed'], 'Studio', 'Workspace controls'],
+    ['action:bar-escape', ['drawer-open'], 'Studio', 'Workspace controls'],
+  ]) {
+    for (const state of states) {
+      const probe = resolveProbe(map.entries.find(entry => entry.id === id), state)
+      assert.equal(probe.locator.phone.name, name)
+      assert.equal(probe.locator.phone.scope.name, scope)
+      if (id === 'action:bar-escape') {
+        assert.equal(probe.locator.name, 'Command bar')
+        assert.equal(probe.locator.trigger, 'keyboard')
+        assert.equal(probe.locator.key, 'Escape')
+      }
+    }
+  }
+  const result = resolveProbe(map.entries.find(entry => entry.id === 'drawer:result'), 'closed')
+  assert.equal(result.locator.phone, undefined)
+  assert.equal(result.locator.name, 'Result')
 })
 
 test('Explode selects a known multi-segment polyline only in its ready recipe', () => {
