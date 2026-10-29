@@ -3884,7 +3884,7 @@ export async function runProbe(probe, runtime) {
     // Source-extracted fake runners may omit module dependencies.
     if (typeof discloseControlPanel === 'function') await discloseControlPanel(page, targetRecipe)
     if (typeof phoneRailAvailability === 'function') await phoneRailAvailability(probe, runtime)
-    const locator = probe.kind === 'surface' && probe.locator.role === 'tab'
+    const locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
       ? (await resolveSurfaceControl(page, probe)).locator
       : control(page, runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe)
     try {
@@ -3906,7 +3906,7 @@ export async function runProbe(probe, runtime) {
         else await expect(failedDrawingGroup).toHaveCount(0)
         // Check the action globally as well: an absent scope alone would
         // make every scoped locator empty, even if the action moved elsewhere.
-        await expect(page.getByRole(probe.locator.role, { name: absenceNamePattern(probe.locator), includeHidden: true })).toHaveCount(0)
+        await expect(page.getByRole(probe.locator.role, { name: typeof absenceNamePattern === 'function' ? absenceNamePattern(probe.locator) : probe.locator.unavailableName, includeHidden: true })).toHaveCount(0)
       })
       evidence.failedDrawing.actionAvailability = 'unavailable_not_rendered'
       evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }

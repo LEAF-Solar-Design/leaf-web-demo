@@ -1040,6 +1040,11 @@ const workspaceOracleAssertions = locator => ({
   toHaveAttribute: async (name, expected) => assert.equal(await locator.getAttribute(name), expected),
 })
 
+test('WL23 runProbe helpers are exported functions for the production guarded paths', () => {
+  assert.equal(typeof absenceNamePattern, 'function')
+  assert.equal(typeof resolveSurfaceControl, 'function')
+})
+
 test('WL23 absence identity ignores unrelated buttons and catches moved or hidden actions', () => {
   const buttons = Array.from({ length: 122 }, (_, index) => ({ name: `Other ${index}` }))
   for (const name of ['New drawing', 'Print', 'Save version', 'Save [version].+']) {
