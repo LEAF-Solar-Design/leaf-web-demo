@@ -27,6 +27,18 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     catalog = db.required_catalog_for_selected_authorities({})
     assert "account_class" in columns["orgs"]
     assert "org_id" in columns["unit_economics_observations"]
+    assert columns["org_invitations"] == {
+        "id", "org_id", "token_hash", "role", "label", "created_by_binding_id",
+        "created_at", "expires_at", "accepted_at", "accepted_binding_id",
+        "revoked_at", "revoked_by_binding_id",
+    }
+    assert columns["org_invitation_receipts"] == {
+        "id", "invitation_id", "org_id", "event", "actor_binding_id", "at",
+    }
+    assert catalog["constraints"]["org_invitations_token_hash_key"] == db._catalog_contract(
+        "org_invitations", "UNIQUE (token_hash)")
+    assert catalog["constraints"]["org_invitations_role_check"] == db._catalog_contract(
+        "org_invitations", "CHECK", "role = 'editor'")
     assert "org_account_class" in columns["unit_economics_observations"]
     assert columns['project_materials'] == {
         'material_id', 'org_id', 'project_id', 'actor_binding_id', 'name',
@@ -44,8 +56,8 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0094_project_solve_async.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0094"
+    assert manifest[-1]["name"] == "0095_org_invitations.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0095"
 
     class Schema:
         absent = None
@@ -87,6 +99,9 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     monkeypatch.setattr(db, "required_catalog_for_selected_authorities", lambda: catalog)
     assert db.schema_status()["ok"]
     for table, column in (("orgs", "account_class"), ("unit_economics_observations", "org_id"),
+                          ("org_invitations", "token_hash"),
+                          ("org_invitations", "accepted_binding_id"),
+                          ("org_invitation_receipts", "event"),
                           ("unit_economics_observations", "org_account_class"),
                           ("demo_sessions", "revoked_at"),
                           ("project_solve_exchanges", "grid_id"),
@@ -101,6 +116,8 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         assert not status["ok"]
         assert column in status["missing"][table]
     for constraint in ("orgs_account_class_check", "unit_economics_observations_org_class_check",
+                       "org_invitations_token_hash_key", "org_invitations_role_check",
+                       "org_invitation_receipts_invitation_id_fkey",
                        "project_solve_exchanges_async_shape_check",
                        "demo_sessions_subject_key", "demo_sessions_tenant_id_key",
                        "demo_sessions_subject_check", "demo_sessions_tenant_id_check",
@@ -115,6 +132,10 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     status = db.schema_status()
     assert not status["ok"]
     assert "project_solve_exchanges_async_guard:missing-or-wrong-relation" in status["invalid_triggers"]
+    schema.absent = "org_invitation_receipts_immutable"
+    assert "org_invitation_receipts_immutable:missing-or-wrong-relation" in db.schema_status()["invalid_triggers"]
+    schema.absent = "org_invitations_pending_org_idx"
+    assert "org_invitations_pending_org_idx:missing-or-wrong-relation" in db.schema_status()["invalid_indexes"]
     for constraint in ('project_materials_pkey', 'project_materials_org_id_project_id_sha256_key',
                        'project_materials_org_id_project_id_fkey', 'project_materials_org_id_actor_binding_id_fkey'):
         schema.absent = constraint
@@ -142,7 +163,7 @@ def test_runner_registry(monkeypatch):
     columns = db.required_columns_for_selected_authorities({})
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 95)]
+    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 96)]
     assert [item["name"][:4] for item in manifest] == inventory["scope"]["migration_ids"]
     assert len(ADDONS) == 12
     assert "-- expand-contract: contract-of=0083" in sql
@@ -293,9 +314,9 @@ def test_sip_r1_schema_contract_complete():
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 95)]
+    ids = [f"{n:04d}" for n in range(1, 96)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0094_project_solve_async.sql"
+    assert db.migration_manifest()[-1]["name"] == "0095_org_invitations.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
@@ -304,7 +325,7 @@ def test_sip_r1_migration_registration_complete():
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 95)" in source
+        assert "range(1, 96)" in source
         assert "range(1, 74)" not in source
 
 
@@ -489,12 +510,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0094_project_solve_async.sql",
+        manifest_names[-1], "0095_org_invitations.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0094",
+        inventory["scope"]["migration_ids"][-1], "0095",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )

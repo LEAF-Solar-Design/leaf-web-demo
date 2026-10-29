@@ -32,6 +32,7 @@ from .mutation_fence import drawing_mutation_refusal_guard, fence_refusal_messag
 from .offboard import OrgNotFound, PurgeHook, offboard_org
 from . import org_export
 from . import billing_statement, db, tenant_cost_store
+from . import org_invitations
 from .pricebook import load_pricebook
 
 router = APIRouter(prefix="/api", tags=["platform"])
@@ -64,6 +65,28 @@ class CreateOrgBody(BaseModel):
 
 class CreateProjectBody(BaseModel):
     name: str = Field(min_length=1, max_length=200)
+
+
+class CreateOrgInvitationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    label: Optional[str] = Field(default=None, max_length=80)
+
+    @field_validator("label")
+    @classmethod
+    def validate_label(cls, value):
+        return org_invitations.validate_label(value)
+
+
+class AcceptOrgInvitationBody(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    token: str
+
+    @field_validator("token", mode="before")
+    @classmethod
+    def validate_token(cls, value):
+        if not org_invitations.valid_token(value):
+            raise HTTPException(400, "invalid invitation token")
+        return value
 
 
 class EnsureProjectRepositoryAuthorityBody(BaseModel):
@@ -281,6 +304,70 @@ def get_org_identities(org_id: uuid.UUID, caller_org: uuid.UUID = Depends(get_or
     if org_id != caller_org or store.get_org(org_id) is None:
         raise HTTPException(status_code=404, detail="org not found")
     return {"identities": project_lifecycle.list_org_identities(org_id)}
+
+
+def _invitation_response(operation):
+    try:
+        return operation()
+    except org_invitations.InvitationUnavailable:
+        raise HTTPException(404, "invitation_unavailable") from None
+    except org_invitations.InvitationForbidden:
+        raise HTTPException(403, "owner role required") from None
+    except org_invitations.InvitationConflict as exc:
+        raise HTTPException(409, str(exc)) from None
+    except ValueError:
+        raise HTTPException(400, "invalid invitation token") from None
+
+
+def _invitation_scope(org_id, actor):
+    if org_id != actor.org_id or store.get_org(org_id) is None:
+        raise HTTPException(404, "org not found")
+
+
+async def _invitation_body(request, model):
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > 1024:
+            raise HTTPException(413, "invitation request is too large")
+        raw.extend(chunk)
+    try:
+        return model.model_validate_json(bytes(raw))
+    except ValidationError:
+        raise HTTPException(422, "invalid invitation request") from None
+
+
+@router.post("/orgs/{org_id}/invitations", status_code=201)
+async def create_org_invitation(org_id: uuid.UUID, request: Request,
+                                actor=Depends(platform_deps.get_write_actor)):
+    await run_in_threadpool(_invitation_scope, org_id, actor)
+    body = await _invitation_body(request, CreateOrgInvitationBody)
+    result = await run_in_threadpool(_invitation_response, lambda: org_invitations.create(
+        org_id, actor.binding_id, body.label))
+    return JSONResponse(result, status_code=201, headers={"Cache-Control": "no-store"})
+
+
+@router.get("/orgs/{org_id}/invitations")
+def list_org_invitations(org_id: uuid.UUID, actor=Depends(platform_deps.get_write_actor)):
+    _invitation_scope(org_id, actor)
+    return {"invitations": _invitation_response(lambda: org_invitations.list_pending(
+        org_id, actor.binding_id))}
+
+
+@router.delete("/orgs/{org_id}/invitations/{invitation_id}", status_code=204)
+def revoke_org_invitation(org_id: uuid.UUID, invitation_id: uuid.UUID,
+                          actor=Depends(platform_deps.get_write_actor)):
+    _invitation_scope(org_id, actor)
+    _invitation_response(lambda: org_invitations.revoke(org_id, actor.binding_id, invitation_id))
+    return Response(status_code=204)
+
+
+@router.post("/invitations/accept")
+async def accept_org_invitation(request: Request,
+                                identity=Depends(platform_deps.get_verified_external_identity)):
+    body = await _invitation_body(request, AcceptOrgInvitationBody)
+    result = await run_in_threadpool(_invitation_response, lambda: org_invitations.accept(
+        body.token, *identity))
+    return JSONResponse(result, headers={"Cache-Control": "no-store"})
 
 
 @router.get("/orgs/{org_id}/addons")

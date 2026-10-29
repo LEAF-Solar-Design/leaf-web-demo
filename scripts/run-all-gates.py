@@ -1826,6 +1826,10 @@ def build_suites() -> List[Suite]:
         Suite("server-unit-economics-ops",
               "server tests/test_unit_economics_ops.py", "pytest", SERVER,
               _py_pytest("tests/test_unit_economics_ops.py"), 5),  # +1 org attribution
+        Suite("platform-org-invitations", "platform single-use org invitations", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_org_invitations.py"), 30,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         # Explicit file target keeps 19 pure tests running without DATABASE_URL.
         Suite("platform-tenant-cost-store", "platform tenant cost ledger and add-on settings", "pytest",
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_tenant_cost_store.py"), 19,

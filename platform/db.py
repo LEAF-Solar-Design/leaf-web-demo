@@ -50,6 +50,14 @@ _MIGRATION_LEDGER_COLUMNS = {"name", "sha256", "applied_at"}
 # compatibility contract, not a provider choice. Additions stay additive so an
 # older application can continue to read a database prepared by a newer image.
 _REQUIRED_COLUMNS = {
+    "org_invitations": {
+        "id", "org_id", "token_hash", "role", "label", "created_by_binding_id",
+        "created_at", "expires_at", "accepted_at", "accepted_binding_id",
+        "revoked_at", "revoked_by_binding_id",
+    },
+    "org_invitation_receipts": {
+        "id", "invitation_id", "org_id", "event", "actor_binding_id", "at",
+    },
     "project_solve_exchanges": {
         "job_id", "org_id", "project_id", "drawing_id", "input_version_id",
         "parent_intake_sha256", "graph_revision", "graph_sha256", "frame_id", "phase",
@@ -747,6 +755,26 @@ def _catalog_contract(relation: str, *definition_fragments: str) -> Dict[str, An
 # stores, the project lifecycle is part of the canonical platform API whenever
 # this application image is running.
 _REQUIRED_CONSTRAINTS = {
+    "org_invitations_pkey": _catalog_contract("org_invitations", "PRIMARY KEY (id)"),
+    "org_invitations_token_hash_key": _catalog_contract("org_invitations", "UNIQUE (token_hash)"),
+    "org_invitations_role_check": _catalog_contract("org_invitations", "CHECK", "role = 'editor'"),
+    "org_invitations_org_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
+    "org_invitations_created_by_binding_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (created_by_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitations_accepted_binding_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (accepted_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitations_revoked_by_binding_id_fkey": _catalog_contract(
+        "org_invitations", "FOREIGN KEY (revoked_by_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitation_receipts_pkey": _catalog_contract("org_invitation_receipts", "PRIMARY KEY (id)"),
+    "org_invitation_receipts_invitation_id_fkey": _catalog_contract(
+        "org_invitation_receipts", "FOREIGN KEY (invitation_id)", "REFERENCES org_invitations(id)"),
+    "org_invitation_receipts_org_id_fkey": _catalog_contract(
+        "org_invitation_receipts", "FOREIGN KEY (org_id)", "REFERENCES orgs(org_id)"),
+    "org_invitation_receipts_actor_binding_id_fkey": _catalog_contract(
+        "org_invitation_receipts", "FOREIGN KEY (actor_binding_id)", "REFERENCES identity_bindings(binding_id)"),
+    "org_invitation_receipts_event_check": _catalog_contract(
+        "org_invitation_receipts", "CHECK", "event", "'created'", "'accepted'", "'revoked'"),
     "tenant_cost_events_pkey": _catalog_contract(
         "tenant_cost_events", "PRIMARY KEY (id)"),
     "tenant_cost_events_org_id_fkey": _catalog_contract(
@@ -1159,6 +1187,8 @@ _REQUIRED_CONSTRAINTS = {
 }
 
 _REQUIRED_INDEXES = {
+    "org_invitations_pending_org_idx": _catalog_contract(
+        "org_invitations", "(org_id)", "WHERE", "accepted_at IS NULL", "revoked_at IS NULL"),
     "idx_tenant_cost_events_org_period": _catalog_contract(
         "tenant_cost_events", "(org_id, occurred_at)"),
     "idx_tenant_cost_events_org_addon_period": _catalog_contract(
@@ -1209,6 +1239,9 @@ _REQUIRED_INDEXES = {
 }
 
 _REQUIRED_TRIGGERS = {
+    "org_invitation_receipts_immutable": _catalog_contract(
+        "org_invitation_receipts", "BEFORE DELETE OR UPDATE", "FOR EACH ROW",
+        "EXECUTE FUNCTION reject_org_invitation_receipt_mutation()"),
     "project_web_page_revisions_immutable": _catalog_contract(
         "project_web_page_revisions", "BEFORE UPDATE", "FOR EACH ROW",
         "EXECUTE FUNCTION leaf_web_page_revision_immutable()"),

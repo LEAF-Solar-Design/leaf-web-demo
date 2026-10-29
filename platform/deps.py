@@ -98,6 +98,23 @@ def _verified_org(authorization: Optional[str]) -> uuid.UUID:
     return _verified_identity(authorization).platform_tenant_id
 
 
+def get_verified_external_identity(
+    authorization: str | None = Header(default=None),
+    x_demo_session: str | None = Header(default=None),
+    request: Request = None,
+) -> tuple[str, str]:
+    """Verify a platform JWT without requiring membership, only for invite accept.
+
+    Always verifies, including auth-off development; headers cannot invent subjects.
+    """
+    _check_demo(x_demo_session, authorization, request, deny=True)
+    payload = _server_auth().verify_platform_token(authorization)
+    subject = payload.get("sub")
+    if not subject:
+        raise HTTPException(status_code=403, detail="token verified but carries no external subject")
+    return "auth0", str(subject)
+
+
 def _demo_sessions():
     """Load the ONE shared resolver without a platform/server deps collision."""
     module = sys.modules.get("demo_sessions")
