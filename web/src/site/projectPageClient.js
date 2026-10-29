@@ -130,18 +130,18 @@ export function portfolioTextChanges(saved, proposed) {
     if (copy.resume.length !== proposed.resume.length || copy.categories.length !== proposed.categories.length) proposalInvalid()
     copy.resume.forEach((section, index) => {
       const next = proposed.resume[index], prefix = `Resume section ${index + 1}: ${section.heading}`
-      text(section, next, 'heading', `${prefix} — heading`)
+      text(section, next, 'heading', `${prefix}: heading`)
       if (section.entries.length !== next.entries.length) proposalInvalid()
       section.entries.forEach((entry, entryIndex) => {
-        for (const field of ['title', 'subtitle', 'dates', 'description']) text(entry, next.entries[entryIndex], field, `${prefix}, entry ${entryIndex + 1} — ${field}`)
+        for (const field of ['title', 'subtitle', 'dates', 'description']) text(entry, next.entries[entryIndex], field, `${prefix}, entry ${entryIndex + 1}: ${field}`)
       })
     })
     copy.categories.forEach((category, index) => {
       const next = proposed.categories[index], prefix = `Gallery ${index + 1}: ${category.title}`
-      for (const field of ['title', 'description']) text(category, next, field, `${prefix} — ${field}`)
+      for (const field of ['title', 'description']) text(category, next, field, `${prefix}: ${field}`)
       if (category.images.length !== next.images.length) proposalInvalid()
       category.images.forEach((image, imageIndex) => {
-        for (const [field, label] of [['title', 'caption'], ['alt', 'alt text']]) text(image, next.images[imageIndex], field, `${prefix}, photo ${imageIndex + 1} — ${label}`)
+        for (const [field, label] of [['title', 'caption'], ['alt', 'alt text']]) text(image, next.images[imageIndex], field, `${prefix}, photo ${imageIndex + 1}: ${label}`)
       })
     })
     if (canonical(copy) !== canonical(proposed)) proposalInvalid()

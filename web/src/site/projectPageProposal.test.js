@@ -174,10 +174,10 @@ describe('text-only portfolio invariants', () => {
     next.contact.location = 'Oregon'
     const changes = portfolioTextChanges(original, next)
     expect(changes).toEqual(expect.arrayContaining([
-      { label: 'Resume section 1: Experience — heading', before: 'Experience', after: 'Work' },
-      { label: 'Resume section 1: Experience, entry 1 — title', before: 'Baker', after: 'Pastry chef' },
-      { label: 'Gallery 1: Cakes — title', before: 'Cakes', after: 'Celebrations' },
-      { label: 'Gallery 1: Cakes, photo 2 — caption', before: 'Cake', after: 'Bread' },
+      { label: 'Resume section 1: Experience: heading', before: 'Experience', after: 'Work' },
+      { label: 'Resume section 1: Experience, entry 1: title', before: 'Baker', after: 'Pastry chef' },
+      { label: 'Gallery 1: Cakes: title', before: 'Cakes', after: 'Celebrations' },
+      { label: 'Gallery 1: Cakes, photo 2: caption', before: 'Cake', after: 'Bread' },
     ]))
     expect(original.categories[0].title).toBe('Cakes')
   })
