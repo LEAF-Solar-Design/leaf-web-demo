@@ -24,6 +24,7 @@ import {
 const DOMAIN = import.meta.env.VITE_AUTH0_DOMAIN || ''
 const CLIENT_ID = import.meta.env.VITE_AUTH0_CLIENT_ID || ''
 const AUDIENCE = import.meta.env.VITE_AUTH0_AUDIENCE || ''
+const API_BASE = import.meta.env?.VITE_API_BASE ?? ''
 const JWT_KEY = 'leaf.jwt'
 const INFLIGHT_AUTHOR_KEY = 'leaf.inflightAuthor.v1'
 const AUTH_SEEN_KEY = 'leaf.auth.completed_before'
@@ -81,16 +82,49 @@ function storeToken(token) {
   return true
 }
 
+let _audienceP = null
+function resolveAudience() {
+  if (!_audienceP) {
+    _audienceP = (async () => {
+      const controller = new AbortController()
+      let timer
+      const deadline = new Promise((resolve) => {
+        timer = setTimeout(() => {
+          resolve(AUDIENCE)
+          controller.abort()
+        }, 1000)
+      })
+      try {
+        const runtime = (async () => {
+          const response = await fetch(`${API_BASE}/api/site/auth-config`, { signal: controller.signal })
+          if (!response.ok) return AUDIENCE
+          const body = await response.json()
+          return typeof body?.audience === 'string' && body.audience.startsWith('https://')
+            ? body.audience : AUDIENCE
+        })()
+        // The deadline covers both the HTTP response and its body parse. Only
+        // the race's result is memoized; a late response cannot change it.
+        return await Promise.race([runtime, deadline])
+      } catch {
+        return AUDIENCE
+      } finally {
+        clearTimeout(timer)
+      }
+    })()
+  }
+  return _audienceP
+}
+
 let _clientP = null
 async function client() {
   if (!authConfigured) return null
   if (!_clientP) {
     // Dynamic import so a build without the vars never pulls the SDK.
-    _clientP = import('@auth0/auth0-spa-js').then(({ createAuth0Client }) =>
+    _clientP = Promise.all([import('@auth0/auth0-spa-js'), resolveAudience()]).then(([{ createAuth0Client }, audience]) =>
       createAuth0Client({
         domain: DOMAIN,
         clientId: CLIENT_ID,
-        authorizationParams: { audience: AUDIENCE, redirect_uri: window.location.origin },
+        authorizationParams: { audience, redirect_uri: window.location.origin },
         cacheLocation: 'localstorage',
       })).catch((error) => { _clientP = null; throw error })
   }
@@ -109,10 +143,11 @@ export async function loginWithPopupFromClick() {
     popup = window.open('', 'leaf-auth', 'popup,width=480,height=680')
     if (!popup) return { ok: false, reason: 'blocked' }
     const c = await client()
+    const audience = await resolveAudience()
     await c.loginWithPopup({
-      authorizationParams: { audience: AUDIENCE, redirect_uri: window.location.origin },
+      authorizationParams: { audience, redirect_uri: window.location.origin },
     }, { popup, timeoutInSeconds: 120 })
-    const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
+    const token = await c.getTokenSilently({ authorizationParams: { audience } })
     if (!token || !storeToken(token)) throw new Error('Token storage failed')
     return { ok: true }
   } catch (error) {
@@ -131,7 +166,7 @@ export async function login() {
     const returnTo = `${window.location.pathname}${window.location.search}${window.location.hash}`
     stageCheckoutAuthReturn()
     try {
-      await c.loginWithRedirect({ appState: { returnTo }, openUrl: (url) => {
+      await c.loginWithRedirect({ authorizationParams: { audience: await resolveAudience() }, appState: { returnTo }, openUrl: (url) => {
         if (isCurrent()) window.location.assign(url)
       } })
     } catch (error) {
@@ -179,7 +214,7 @@ export async function handleRedirectCallback() {
     const result = await c.handleRedirectCallback()
     if (!isCurrent()) return false
     returnTo = result?.appState?.returnTo || returnTo
-    const token = await c.getTokenSilently({ authorizationParams: { audience: AUDIENCE } })
+    const token = await c.getTokenSilently({ authorizationParams: { audience: await resolveAudience() } })
     if (!isCurrent()) return false
     if (token) storeToken(token)
     if (token) completeCheckoutAuthReturn()

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from typing import Any, Dict, List
 
 from fastapi import APIRouter, Depends, HTTPException, Request, Response
@@ -39,6 +40,16 @@ CACHE_CONTROL = "public, max-age=300, stale-while-revalidate=3600"
 
 def _cache_headers(etag: str) -> Dict[str, str]:
     return {"ETag": etag, "Cache-Control": CACHE_CONTROL}
+
+
+def _auth_audience() -> str:
+    return os.environ.get("LEAF_AUTH0_AUDIENCE", "https://api.leafdesign.ai")
+
+
+@router.get("/api/site/auth-config")
+def site_auth_config():
+    return JSONResponse(content={"audience": _auth_audience()},
+                        headers={"Cache-Control": "no-store"})
 
 
 @router.post("/api/site/demo-session")
