@@ -3,6 +3,7 @@ from datetime import timedelta
 import threading
 import time
 from types import SimpleNamespace
+import uuid
 
 import pytest
 
@@ -165,7 +166,7 @@ def test_git_tick_colour_guards_and_thirty_second_cadence(rig, monkeypatch, mode
     assert calls == ([1234, 1264] if mode == 'active' else [])
 
 
-def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
+def test_activation_run_uses_compute_read_simulate_adapter(rig, monkeypatch):
     monkeypatch.setattr(worker.lab_activation, "holds_run", lambda tenant, run_id: True)
     from test_lab_tool_nodes import tool_graph
     tool = tool_graph(monkeypatch)
@@ -173,7 +174,7 @@ def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
     adapters = []
     def evaluate(graph, registry, *, tool_adapter, **kwargs):
         adapters.append(tool_adapter)
-        assert not tool_adapter.admissible(tool.trusted)  # worker => compute
+        assert tool_adapter.admissible(tool.trusted)  # SEL-316g: activations admit compute tools.
         from dataclasses import replace
         assert tool_adapter.admissible(replace(tool.trusted, effect="read", execution_class="inline"))
         assert tool_adapter.admissible(replace(tool.trusted, effect="simulate", execution_class="inline", capability="simulate.value"))
@@ -182,7 +183,84 @@ def test_activation_run_uses_read_simulate_adapter(rig, monkeypatch):
                  "b" * 64, "lab-activation.v1", "abc1234")
     rig.make().tick()
     terminal(rig)
-    assert len(adapters) == 1 and adapters[0].effects == ("read", "simulate")
+    assert len(adapters) == 1 and adapters[0].effects == ("compute", "read", "simulate")
+
+
+@pytest.mark.parametrize("revision", ["lab-activation.v1", "adapter-1"])
+@pytest.mark.parametrize("budget", ["available", "jobs", "sandbox"])
+def test_projected_compute_dispatch_uses_shared_adapter_caps(rig, monkeypatch, revision, budget):
+    from test_lab_tool_nodes import projected_graph
+    projected = projected_graph(monkeypatch)
+    rig.tenant = str(uuid.uuid4())
+    rig.artifact["graph"] = projected.graph
+    monkeypatch.setattr(worker.lab_tool_manifests, "registry_for", rig.projection_registry_for)
+    monkeypatch.setattr(worker.lab_activation, "holds_run", lambda tenant, run_id: True)
+    monkeypatch.setattr(worker.lab_activation, "tick", lambda now: None)
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    for name in ("LEAF_ENTITLEMENTS_FILE", "LEAF_LAB_TOOL_DAILY_JOBS",
+                 "LEAF_LAB_TOOL_DAILY_SANDBOX_S", "LEAF_LAB_TOOL_TIMEOUT_S"):
+        monkeypatch.delenv(name, raising=False)
+    adapters, calls, ledger_tenants = [], [], []
+    real_adapter = worker.lab_tool_nodes.ToolNodeAdapter
+
+    def submit(*args, **kwargs):
+        calls.append((args, kwargs))
+        return "job"
+
+    def list_jobs(tenant, limit):
+        assert tenant == rig.tenant and limit == 200
+        return [{"idempotency_key": f"lab:other:{index}:1", "created_at": store._now()}
+                for index in range(100)] if budget == "jobs" else []
+
+    def sandbox_seconds(tenant, midnight):
+        ledger_tenants.append(tenant)
+        return 3600 if budget == "sandbox" else 0
+
+    def adapter(tenant, run_id, **kwargs):
+        assert (tenant, run_id) == (rig.tenant, "run")
+        if revision == "lab-activation.v1":
+            assert kwargs["effects"] == ("compute", "read", "simulate")
+        else:
+            assert set(kwargs) == {"cancelled"}
+        result = real_adapter(tenant, run_id, **kwargs, submit=submit,
+                              get_job=lambda job: {"status": "complete", "result": {"result": 7}},
+                              list_jobs=list_jobs, sandbox_seconds_today=sandbox_seconds,
+                              tier_of=lambda tenant: "hosted_pro")
+        adapters.append(result)
+        return result
+
+    monkeypatch.setattr(worker.lab_tool_nodes, "ToolNodeAdapter", adapter)
+    store.create(rig.tenant, "doc", "run", 1, "a" * 64, worker.OPS_REVISION,
+                 "b" * 64, revision, "abc1234")
+    instance = rig.make()
+    try:
+        instance.tick()
+        terminal(rig)
+        assert len(adapters) == 1
+        assert adapters[0].effects == (("compute", "read", "simulate")
+                                       if revision == "lab-activation.v1" else ("compute", "read"))
+        values = [event for event in events(rig) if event["kind"] == "value"]
+        assert len(values) == 1
+        if budget == "available":
+            assert values[0]["payload"]["result"]["data"] == 7
+            assert len(calls) == 1
+            args, kwargs = calls[0]
+            assert args[0] == rig.tenant
+            assert args[1]["lab_execution"] == {"run_id": "run", "block_id": "node", "attempt": 1}
+            assert kwargs["org_id"] == rig.tenant
+            assert kwargs["idempotency_key"] == "lab:run:node:1"
+        else:
+            assert not calls
+            code = "daily_jobs_exhausted" if budget == "jobs" else "daily_sandbox_exhausted"
+            assert values[0]["payload"]["result"]["error"] == {"code": "lab_tool_" + code}
+        assert ledger_tenants == ([] if budget == "jobs" else [rig.tenant])
+    finally:
+        instance.stop()
+        eventually(lambda: all(run.future.done() for run in instance._runs.values()))
+        def cleanup(sql):
+            sql.execute("DELETE FROM lab_run_events WHERE tenant_id=?", (rig.tenant,))
+            sql.execute("DELETE FROM lab_runs WHERE tenant_id=?", (rig.tenant,))
+        store._run(rig.tenant, cleanup, write=True)
 
 
 @pytest.mark.parametrize("state", ["paused", "stopped", "expired", "off", "missing", "wrong_run"])
@@ -235,7 +313,8 @@ def test_executing_activation_read_stops_when_cancellation_refresh_loses_hold(ri
         admissible = staticmethod(worker.lab_tool_nodes.tool_block_admissible)
 
         def __init__(self, tenant, run_id, *, cancelled, effects):
-            assert (tenant, run_id, effects) == (rig.tenant, "run", ("read", "simulate"))
+            # SEL-316g: activation cancellation also covers compute tools.
+            assert (tenant, run_id, effects) == (rig.tenant, "run", ("compute", "read", "simulate"))
             self.cancelled = cancelled
 
         def __call__(self, *args, **kwargs):
