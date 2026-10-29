@@ -8,7 +8,7 @@ function invitationError(error) {
   return error.message || 'The invitation action could not be completed.'
 }
 
-function InvitationControls({ orgId }) {
+function InvitationControls({ orgId, onForbidden }) {
   const [label, setLabel] = useState('')
   const [invitations, setInvitations] = useState([])
   const [loading, setLoading] = useState(true)
@@ -25,12 +25,17 @@ function InvitationControls({ orgId }) {
       try {
         const data = await listOrgInvitations(orgId)
         if (!cancelled) setInvitations(data.invitations || [])
-      } catch (e) { if (!cancelled) setError(invitationError(e)) }
+      } catch (e) {
+        if (!cancelled) {
+          if (e.status === 403) onForbidden(true)
+          else setError(invitationError(e))
+        }
+      }
       finally { if (!cancelled) setLoading(false) }
     }
     void load()
     return () => { cancelled = true; current.current = false }
-  }, [orgId])
+  }, [orgId, onForbidden])
 
   async function run(action) {
     if (pending.current) return
@@ -85,9 +90,10 @@ function InvitationControls({ orgId }) {
 
 export default function OrgInvitations({ orgId }) {
   const [open, setOpen] = useState(false)
-  if (!orgId) return null
+  const [forbidden, setForbidden] = useState(false)
+  if (!orgId || forbidden) return null
   return <section aria-label="Invite to organization">
     <button type="button" aria-expanded={open} onClick={() => setOpen(value => !value)}>Invite to organization</button>
-    {open && <InvitationControls key={orgId} orgId={orgId} />}
+    {open && <InvitationControls key={orgId} orgId={orgId} onForbidden={setForbidden} />}
   </section>
 }

@@ -67,6 +67,20 @@ describe('organization invitation links', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('This organization already has 20 pending invitations.')
   })
 
+  it('renders nothing when listing invitations is forbidden', async () => {
+    listOrgInvitations.mockRejectedValue({ status: 403, message: 'owner role required' })
+    const { container } = await open()
+    await waitFor(() => expect(container).toBeEmptyDOMElement())
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('shows an alert when listing invitations fails with a server error', async () => {
+    listOrgInvitations.mockRejectedValue({ status: 500, message: 'Invitations could not be loaded.' })
+    await open()
+    expect(await screen.findByRole('alert')).toHaveTextContent('Invitations could not be loaded.')
+    expect(screen.getByRole('region', { name: 'Invite to organization' })).toBeTruthy()
+  })
+
   it('keeps the token out of localStorage and the current URL', async () => {
     const stored = vi.spyOn(Storage.prototype, 'setItem')
     const originalUrl = window.location.href

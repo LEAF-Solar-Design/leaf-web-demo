@@ -160,7 +160,7 @@ export default function ProjectLifecyclePanel({
               </button>
             )}
             {identitiesError && <p role="alert">{identitiesError}</p>}
-            {(lifecycle.authority?.role === 'owner' || (!lifecycle.authority?.role && lifecycle.authority?.can_invite)) && (
+            {lifecycle.project?.org_id && (
               <OrgInvitations key={lifecycle.project?.org_id} orgId={lifecycle.project?.org_id} />
             )}
           </div>
