@@ -126,7 +126,7 @@ def _broker_lab_sandbox_tier() -> str:
             if response.status_code == 200:
                 data = response.json()
                 value = data.get("lab_sandbox_tier") if isinstance(data, dict) else None
-                if isinstance(value, str) and value in {"off", "subprocess", "microvm", "invalid"}:
+                if isinstance(value, str) and value in {"off", "subprocess", "microvm"}:
                     tier, ttl = value, 60
         except Exception:
             pass

@@ -490,6 +490,35 @@ def test_tools_caches_broker_health_and_retries_at_expiry(monkeypatch, failure, 
     assert calls == [100.0, 100.0 + ttl]
 
 
+@pytest.mark.parametrize("tier,ttl", [
+    ("invalid", 10), ("unknown", 10), ("off", 60), ("subprocess", 60),
+])
+def test_tools_caches_unavailable_broker_tiers_until_expiry(monkeypatch, tier, ttl):
+    from test_lab_tool_manifests import read_tool
+
+    tool = lab_surface.lab_tool_manifests.project_tool(read_tool(), "catalog_seed")
+    monkeypatch.setattr(lab_surface.lab_tool_manifests, "tenant_tool_projection", lambda tenant: (tool,))
+    monkeypatch.setenv("LEAF_LAB_TOOL_NODES", "1")
+    now, calls = [100.0], []
+    monkeypatch.setattr(lab_surface, "time", SimpleNamespace(monotonic=lambda: now[0]))
+
+    def health(*args, **kwargs):
+        calls.append(now[0])
+        return _health_response({"lab_sandbox_tier": tier if len(calls) == 1 else "microvm"})
+
+    monkeypatch.setattr(lab_surface.requests, "get", health)
+    client = _client()
+    first = client.get("/api/lab/tools").json()
+    assert first["tools"][0]["available"] is False
+    assert first["tools"][0]["reason"] == "sandbox not armed"
+    now[0] += ttl - 0.1
+    assert client.get("/api/lab/tools").json() == first
+    assert calls == [100.0]
+    now[0] = 100.0 + ttl
+    assert client.get("/api/lab/tools").json()["tools"][0]["available"] is True
+    assert calls == [100.0, 100.0 + ttl]
+
+
 def test_tools_never_list_a_raw_name_or_version(monkeypatch):
     from dataclasses import replace
     from test_lab_tool_manifests import read_tool
