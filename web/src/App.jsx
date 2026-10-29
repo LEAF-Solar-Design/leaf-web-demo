@@ -1,4 +1,5 @@
 import './structural.css'
+import InviteAccept from './invites/InviteAccept.jsx'
 import { useSolarGraphOverlay, SOLAR_OVERLAY_REASONS } from './solar/useSolarGraphOverlay.js'
 import { solarOverlayCanvasIntake } from './solar/solarGraphOverlay.js'
 import './site/studioShell.css'
@@ -4895,6 +4896,7 @@ export default function App() {
         if (event.target instanceof Element && event.target.closest('.drafting-ribbon, .cockpit-quick, #cockpit-import-pane input[type="file"]')) returnToDrawing()
       }}
     >
+      <InviteAccept signedIn={signedIn} onAccepted={async ({ org_id }) => { adoptOrgId(org_id); await workspaceController.loadProjects() }} />
       <header className="top">
         <div className="mark" role="img" aria-label="Leaf Automation"><img className="mark-lockup mark-lockup-light" src="/brand/leaf-automation-horizontal-on-light.svg" alt="" aria-hidden="true" height="20" /><img className="mark-lockup mark-lockup-dark" src="/brand/leaf-automation-horizontal-on-dark.svg" alt="" aria-hidden="true" height="20" /></div>
         {/* W4e: on the studio's drafting surfaces the header IS the

@@ -14,6 +14,10 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 
 vi.mock('./api.js', () => ({
+  acceptOrgInvitation: vi.fn(),
+  createOrgInvitation: vi.fn(),
+  listOrgInvitations: vi.fn(),
+  revokeOrgInvitation: vi.fn(),
   createBlankProject: vi.fn(),
   cloneProject: vi.fn(),
   deleteProject: vi.fn(),
@@ -26,13 +30,14 @@ vi.mock('./api.js', () => ({
   setIdentityDisplayName: vi.fn(),
 }))
 
-import { getProjectLifecycle } from './api.js'
+import { getProjectLifecycle, listOrgInvitations } from './api.js'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
 import Membership from './Membership.jsx'
 import ExportDialog from './ExportDialog.jsx'
 import CloneDialog from './CloneDialog.jsx'
 import DangerZone from './DangerZone.jsx'
 import ReceiptPanel from './ReceiptPanel.jsx'
+import OrgInvitations from './OrgInvitations.jsx'
 
 afterEach(cleanup)
 
@@ -40,6 +45,30 @@ const noop = () => {}
 const PROJECT_ID = '11111111-2222-4333-8444-555555555555'
 
 const COMPONENT_REGISTRY = [
+  {
+    name: 'OrgInvitations',
+    async loading() {
+      listOrgInvitations.mockReturnValue(new Promise(() => {}))
+      const utils = render(<OrgInvitations orgId="org-1" />)
+      fireEvent.click(screen.getByRole('button', { name: 'Invite to organization' }))
+      await waitFor(() => expect(screen.getByRole('status', { name: 'Loading invitations' })).toBeTruthy())
+      return utils
+    },
+    async empty() {
+      listOrgInvitations.mockResolvedValue({ invitations: [] })
+      const utils = render(<OrgInvitations orgId="org-1" />)
+      fireEvent.click(screen.getByRole('button', { name: 'Invite to organization' }))
+      await waitFor(() => expect(screen.getByText('No pending invitations.')).toBeTruthy())
+      return utils
+    },
+    async error() {
+      listOrgInvitations.mockRejectedValue(new Error('Invitations could not be loaded.'))
+      const utils = render(<OrgInvitations orgId="org-1" />)
+      fireEvent.click(screen.getByRole('button', { name: 'Invite to organization' }))
+      await waitFor(() => expect(screen.getByRole('alert').textContent).toBe('Invitations could not be loaded.'))
+      return utils
+    },
+  },
   {
     name: 'ProjectLifecyclePanel',
     async loading() {

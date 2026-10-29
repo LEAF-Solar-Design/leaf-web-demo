@@ -199,6 +199,28 @@ export async function getOrgIdentities(orgId) {
   return request(`/api/orgs/${id}/identities`, { orgId: id })
 }
 
+export function createOrgInvitation(orgId, label) {
+  const id = requireUuid(orgId, 'organization')
+  return request(`/api/orgs/${id}/invitations`, {
+    ...mutation('POST', { label: String(label ?? '').trim() || undefined }), orgId: id,
+  })
+}
+
+export function listOrgInvitations(orgId) {
+  const id = requireUuid(orgId, 'organization')
+  return request(`/api/orgs/${id}/invitations`, { orgId: id })
+}
+
+export function revokeOrgInvitation(orgId, invitationId) {
+  const id = requireUuid(orgId, 'organization')
+  const invitation = requireUuid(invitationId, 'invitation')
+  return request(`/api/orgs/${id}/invitations/${invitation}`, { ...mutation('DELETE'), orgId: id })
+}
+
+export function acceptOrgInvitation(token) {
+  return request('/api/invitations/accept', mutation('POST', { token }))
+}
+
 // PUT an owner-entered label on an existing organization binding.
 export async function setIdentityDisplayName(orgId, bindingId, displayName) {
   const org = requireUuid(orgId, 'organization')
