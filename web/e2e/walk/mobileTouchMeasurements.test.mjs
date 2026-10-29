@@ -1,8 +1,8 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { runInNewContext } from 'node:vm'
-import { readFileSync } from 'node:fs'
 import { evaluateLenses } from './lenses/index.mjs'
+import { addPersonaFragment } from './fixtures.mjs'
 import { collectMobileTouchMeasurements, activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
 
 const reference = 'mobile-touch:open-drawing[ready]@phone'
@@ -23,7 +23,7 @@ function phone({ box = { x: 10, y: 20, width: 44, height: 44 }, connected = true
   const page = { evaluate: async (callback, argument) => {
     calls.push('evaluate')
     if (evaluateError) throw new Error('page unavailable')
-    return runInNewContext(`(${callback.toString()})(argument)`, {
+    return structuredClone(runInNewContext(`(${callback.toString()})(argument)`, {
       argument,
       window: { innerWidth: 390, innerHeight: 844, devicePixelRatio: 3,
         matchMedia: (query) => {
@@ -35,7 +35,7 @@ function phone({ box = { x: 10, y: 20, width: 44, height: 44 }, connected = true
         calls.push([x, y])
         return hit ? hit(x, y, handle, descendant) : handle
       } },
-    })
+    }))
   } }
   const locator = { count: async () => 1, elementHandle: async () => { calls.push('handle'); return handle } }
   return { page, handle, locator, calls }
@@ -116,9 +116,13 @@ test('locator descriptions are optional and non-string names are not serialized'
 test('the call-site helper captures before activation, measures after, and preserves existing evidence', async () => {
   const fake = phone()
   const result = { result: 'passed', receipt: 'untouched' }
-  const evidence = { ...evidenceFor(), result, measurements: { unrelated: { value: 7 },
-    input: { otherInput: true }, control: { otherControl: true, rect: { otherRect: true } } } }
+  const evidence = { ...evidenceFor(), result }
+  const bundleReference = 'walk:open-drawing[ready]@phone'
+  addPersonaFragment(evidence, { persona: 'accessibility', bundleReference,
+    measurements: { reference: 'accessibility:open-drawing[ready]@phone', unrelated: { value: 7 },
+      input: { otherInput: true }, control: { otherControl: true, rect: { otherRect: true } } } })
   await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence,
+    addFragment: (persona, measurements) => addPersonaFragment(evidence, { persona, measurements, bundleReference }),
     activate: async () => { fake.calls.push('activate') } })
   assert.deepEqual(fake.calls.slice(0, 3), ['handle', 'activate', 'evaluate'])
   assert.equal(evidence.result, result)
@@ -127,9 +131,11 @@ test('the call-site helper captures before activation, measures after, and prese
   assert.equal(evidence.measurements.control.otherControl, true)
   assert.equal(evidence.measurements.control.rect.otherRect, true)
   assert.equal(mobileResult(evidence.measurements).status, 'pass')
-  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
-  assert.match(source, /typeof activateWithMobileTouchMeasurements === 'function'/)
-  assert.match(source, /evidence, activate: \(\) => activate\(probe, runtime, locator\)/)
+  assert.equal(evidence.measurements.reference, bundleReference)
+  assert.deepEqual(evidence.measurementSources, [
+    { persona: 'accessibility', reference: 'accessibility:open-drawing[ready]@phone', missing: false },
+    { persona: 'mobile-touch', reference, missing: false },
+  ])
 })
 
 test('non-click, disabled, navigation, ambiguous and desktop activations collect nothing', async () => {
@@ -145,6 +151,7 @@ test('non-click, disabled, navigation, ambiguous and desktop activations collect
     const evidence = { result: { result: 'passed' } }
     let activations = 0
     await activateWithMobileTouchMeasurements({ ...fake, viewport: changes.viewport || 'phone', evidence,
+      addFragment: () => assert.fail('unsupported activation must not add a fragment'),
       probe: { ...probe, locator: { ...probe.locator, ...changes.locator },
         assertion: { ...probe.assertion, ...changes.assertion } }, activate: async () => { activations++ } })
     assert.equal(activations, 1)
@@ -159,12 +166,14 @@ test('measurement and handle failures preserve the verdict; activation failures 
     if (failCapture) fake.locator.elementHandle = async () => { throw new Error('handle unavailable') }
     const evidence = { result: { result: 'passed' }, measurements: { existing: true } }
     const before = structuredClone(evidence)
-    await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence, activate: async () => {} })
+    await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence,
+      addFragment: () => assert.fail('failed measurement must not add a fragment'), activate: async () => {} })
     assert.deepEqual(evidence, before)
   }
   const fake = phone()
   const error = new Error('functional failure')
   await assert.rejects(activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence: {},
+    addFragment: () => assert.fail('failed activation must not add a fragment'),
     activate: async () => { throw error } }), (caught) => caught === error)
   assert.deepEqual(fake.calls, ['handle'])
 })
