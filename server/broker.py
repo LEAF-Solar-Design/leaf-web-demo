@@ -2113,9 +2113,16 @@ def _live_script_is_nonempty(tool: Dict[str, Any], da: Any) -> bool:
 
 @app.get("/broker/health")
 def health() -> Dict[str, Any]:
+    import tool_loader
+
+    try:
+        lab_sandbox_tier = tool_loader._sandbox_tier()
+    except Exception:
+        lab_sandbox_tier = "invalid"
     return with_envelope_fields({
         "ok": True,
         "role": "aps-broker",
+        "lab_sandbox_tier": lab_sandbox_tier,
         "aps_endpoint": APS_ENDPOINT,
         "ledger": str(LEDGER_PATH),
         # Through the authoritative reader, not a second truthiness/`.get` scan:

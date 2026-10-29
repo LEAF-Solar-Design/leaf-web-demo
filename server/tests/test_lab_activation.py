@@ -76,6 +76,70 @@ def test_tools_require_flag(rig, monkeypatch, effect, enabled):
             rig.create()
 
 
+@pytest.mark.parametrize("enabled", [True, False])
+def test_projected_compute_creation_requires_flag(rig, monkeypatch, enabled):
+    from test_lab_tool_nodes import projected_graph
+    projected = projected_graph(monkeypatch)
+    rig.artifact["graph"] = projected.graph
+    # A tenant projection must take precedence even over an unrelated static entry.
+    trusted_for = activation.lab_tool_manifests.trusted_for
+    tenants = []
+    def lookup(tenant, block_id, version):
+        tenants.append(tenant)
+        assert tenant == str(rig.tenant)
+        assert (block_id, version) == (projected.descriptor.name, projected.descriptor.version)
+        return trusted_for(tenant, block_id, version)
+    monkeypatch.setattr(activation.lab_tool_manifests, "trusted_for", lookup)
+    if enabled:
+        assert rig.create()["state"] == "active"
+    else:
+        monkeypatch.delenv("LEAF_LAB_TOOL_NODES", raising=False)
+        with pytest.raises(activation.Refused) as error:
+            rig.create()
+        assert (error.value.code, error.value.block) == ("lab_activation_tools_disabled", "node")
+    assert tenants == [str(rig.tenant)] * (2 if enabled else 1)
+
+
+@pytest.mark.parametrize("change", [{"capability": "drawing.write"}, {"residency": "host"},
+                                  {"capability": "solve.child"}, {"capability": "cloud-proposal"},
+                                  {"aps_live": True}])
+def test_projected_tool_creation_refuses_unsafe_authority(rig, monkeypatch, change):
+    from test_lab_tool_nodes import projected_graph
+    projected = projected_graph(monkeypatch)
+    rig.artifact["graph"] = projected.graph
+    tenants = []
+    def lookup(tenant, block_id, version):
+        tenants.append(tenant)
+        assert (block_id, version) == (projected.descriptor.name, projected.descriptor.version)
+        return replace(projected.trusted, **change)
+    monkeypatch.setattr(activation.lab_tool_manifests, "trusted_for", lookup)
+    with pytest.raises(activation.Refused) as error:
+        rig.create()
+    assert (error.value.code, error.value.block) == ("lab_activation_effect_refused", "node")
+    assert tenants == [str(rig.tenant)]
+
+
+@pytest.mark.parametrize("change,expected", [
+    ({}, None), ({"disabled": True}, "lab_activation_tools_disabled"),
+    ({"capability": "drawing.write"}, "lab_activation_effect_refused"),
+    ({"residency": "host"}, "lab_activation_effect_refused")])
+def test_projected_tool_readmission(rig, monkeypatch, change, expected):
+    from test_lab_tool_nodes import projected_graph
+    projected = projected_graph(monkeypatch)
+    rig.artifact["graph"] = projected.graph
+    row = rig.create()
+    row["principal"] = "tenant:local"
+    if change.get("disabled"):
+        monkeypatch.delenv("LEAF_LAB_TOOL_NODES", raising=False)
+    else:
+        def lookup(tenant, block_id, version):
+            assert tenant == str(row["tenant_id"])
+            assert (block_id, version) == (projected.descriptor.name, projected.descriptor.version)
+            return replace(projected.trusted, **change)
+        monkeypatch.setattr(activation.lab_tool_manifests, "trusted_for", lookup)
+    assert activation.readmit(row) == expected
+
+
 @pytest.mark.parametrize("interval", [59, 86401, 0, True, 60.0, "60"])
 def test_interval_refused(rig, interval):
     with pytest.raises(activation.Refused, match="invalid_lab_activation_interval"):

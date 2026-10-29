@@ -33,6 +33,38 @@ function Modal() {
 const environment = container => container.querySelector('.workspace-environment')
 const select = profile => fireEvent.change(screen.getByLabelText('Workspace profile'), { target: { value: profile } })
 
+it('offers sign-in without entering and hides and inerts it after entering', () => {
+  const onSignIn = vi.fn()
+  const onEnter = vi.fn()
+  const onPanel = vi.fn()
+  const { container } = render(<WorkspaceEnvironment scopeKey="scope" onPanel={onPanel}
+    onEnter={onEnter} onSignIn={onSignIn} hasContent />)
+  const chooser = container.querySelector('.environment-chooser')
+  const signIn = screen.getByRole('button', { name: 'Sign in' })
+  expect(chooser.lastElementChild).toBe(signIn)
+  expect(signIn.tabIndex).toBe(0)
+  expect(chooser.hasAttribute('inert')).toBe(false)
+  onPanel.mockClear()
+  fireEvent.click(signIn)
+  expect(onSignIn).toHaveBeenCalledExactlyOnceWith()
+  expect(onEnter).not.toHaveBeenCalled()
+  expect(onPanel).not.toHaveBeenCalled()
+  expect(environment(container).dataset.entered).toBe('false')
+  fireEvent.click(screen.getByRole('button', { name: 'Continue workspace' }))
+  expect(environment(container).dataset.entered).toBe('true')
+  expect(screen.queryByRole('button', { name: 'Sign in' })).toBeNull()
+  expect(chooser.getAttribute('aria-hidden')).toBe('true')
+  expect(chooser.hasAttribute('inert')).toBe(true)
+  expect(signIn.tabIndex).toBe(-1)
+})
+
+it('omits sign-in unless a handler is provided', () => {
+  const { rerender } = render(<WorkspaceEnvironment scopeKey="scope" onPanel={vi.fn()} />)
+  expect(screen.queryByText('Sign in')).toBeNull()
+  rerender(<WorkspaceEnvironment scopeKey="scope" onPanel={vi.fn()} onSignIn={true} />)
+  expect(screen.queryByText('Sign in')).toBeNull()
+})
+
 it('enters each profile independently and preserves the project input and entered tabs', () => {
   const { container } = render(<Host />)
   for (const profile of profiles) {

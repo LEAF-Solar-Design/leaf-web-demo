@@ -281,7 +281,7 @@ class LabWorker:
 
             tool_options = {}
             if lab_tool_nodes.enabled():
-                effects = ({"effects": ("read", "simulate")}
+                effects = ({"effects": ("compute", "read", "simulate")}
                            if row["adapter_revision"] == "lab-activation.v1" else {})
                 tool_options["tool_adapter"] = lab_tool_nodes.ToolNodeAdapter(
                     row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run), **effects)

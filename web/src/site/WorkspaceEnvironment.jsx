@@ -14,7 +14,7 @@ export const ENVIRONMENT_OCCLUDERS = Object.freeze([
 
 // Session memory belongs to this mounted authority scope, never to storage.
 export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', profiles = [], onSelect,
-  panel = 'none', onPanel, hasContent = false, activation = 0, chooseRequest = 0, onEnter, onDescribe, children }) {
+  panel = 'none', onPanel, hasContent = false, activation = 0, chooseRequest = 0, onEnter, onDescribe, onSignIn, children }) {
   const [memory, setMemory] = useState(() => ({ scopeKey, entered: {} }))
   if (memory.scopeKey !== scopeKey) setMemory({ scopeKey, entered: {} })
   const entered = memory.scopeKey === scopeKey && memory.entered[profile] === true
@@ -73,6 +73,7 @@ export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', pr
         <button type="button" tabIndex={entered ? -1 : undefined} onClick={() => enter('project')}>Open project or material</button>
         <button type="button" tabIndex={entered ? -1 : undefined} onClick={() => { onDescribe?.(); enter('studio') }}>Describe what to create</button>
         {hasContent && <button type="button" tabIndex={entered ? -1 : undefined} onClick={() => enter()}>Continue workspace</button>}
+        {typeof onSignIn === 'function' && <button type="button" tabIndex={entered ? -1 : undefined} onClick={() => onSignIn()}>Sign in</button>}
       </div>
       <nav className="environment-strip" aria-label="Workspace controls">
         <button ref={projectToggle} type="button" aria-expanded={panel === 'project'} aria-controls="environment-project-panel"

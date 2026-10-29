@@ -1114,7 +1114,7 @@ def build_suites() -> List[Suite]:
                 _py_pytest("tests/test_native_preview_job.py"), 41, uses_database=True,
                 database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
           Suite("server-native-preview-remote", "server tests/test_native_preview_remote.py", "pytest", SERVER,
-                _py_pytest("tests/test_native_preview_remote.py"), 47, uses_database=True,
+                _py_pytest("tests/test_native_preview_remote.py"), 20, uses_database=True,
                 database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
           Suite("server-campaign-transform-admission", "server tests/test_campaign_transform_admission.py", "pytest", SERVER,
                 _py_pytest("tests/test_campaign_transform_admission.py"), 12),
@@ -3220,7 +3220,8 @@ def build_suites() -> List[Suite]:
               # 2026-10-19: su-a4a adds one production proof registration row (238 -> 239).
               # W1C-3 adds the commit suite registration contract.
               # SEL-303b adds the mirror/stage-policy registration contract.
-              ["test_studio_walk_regression_gate.py"], 244),
+              # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
+              ["test_studio_walk_regression_gate.py"], 272),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
