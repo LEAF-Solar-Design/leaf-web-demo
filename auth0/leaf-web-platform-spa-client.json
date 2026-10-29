@@ -1,0 +1,72 @@
+{
+  "schema": "leaf.auth0-spa-client.v1",
+  "note": "Checked-in record of the Leaf Web Platform SPA client (P-160). The drift check compares these declared fields with the live Auth0 client; URL lists compare as sets.",
+  "client_id": "zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O",
+  "declared": {
+    "name": "Leaf Web Platform",
+    "app_type": "spa",
+    "callbacks": [
+      "http://localhost:8080",
+      "https://leafdesign.ai",
+      "https://www.leafdesign.ai",
+      "https://leaf-platform-web.vercel.app",
+      "https://leaf-platform-web-evan-haugs-projects.vercel.app",
+      "http://localhost:8081",
+      "https://platform-staging.leafdesign.ai",
+      "https://platform.leafdesign.ai",
+      "https://studio.leafautomation.ai"
+    ],
+    "allowed_logout_urls": [
+      "http://localhost:8080",
+      "https://leafdesign.ai",
+      "https://www.leafdesign.ai",
+      "https://leaf-platform-web.vercel.app",
+      "https://leaf-platform-web-evan-haugs-projects.vercel.app",
+      "https://platform-staging.leafdesign.ai",
+      "https://platform.leafdesign.ai",
+      "https://studio.leafautomation.ai"
+    ],
+    "web_origins": [
+      "http://localhost:8080",
+      "https://leafdesign.ai",
+      "https://www.leafdesign.ai",
+      "https://leaf-platform-web.vercel.app",
+      "https://leaf-platform-web-evan-haugs-projects.vercel.app",
+      "https://platform-staging.leafdesign.ai",
+      "https://platform.leafdesign.ai",
+      "https://studio.leafautomation.ai"
+    ],
+    "allowed_origins": [
+      "http://localhost:8080",
+      "https://leafdesign.ai",
+      "https://www.leafdesign.ai",
+      "https://leaf-platform-web.vercel.app",
+      "https://leaf-platform-web-evan-haugs-projects.vercel.app",
+      "https://platform-staging.leafdesign.ai",
+      "https://platform.leafdesign.ai",
+      "https://studio.leafautomation.ai"
+    ],
+    "grant_types": [
+      "authorization_code"
+    ],
+    "token_endpoint_auth_method": "none",
+    "oidc_conformant": true,
+    "is_first_party": true,
+    "cross_origin_authentication": false,
+    "initiate_login_uri": "https://leafdesign.ai",
+    "refresh_token": {
+      "rotation_type": "non-rotating",
+      "expiration_type": "non-expiring",
+      "leeway": 0,
+      "token_lifetime": 2592000,
+      "infinite_token_lifetime": true,
+      "infinite_idle_token_lifetime": true,
+      "idle_token_lifetime": 1296000
+    },
+    "jwt_configuration": {
+      "secret_encoded": false,
+      "alg": "RS256",
+      "lifetime_in_seconds": 36000
+    }
+  }
+}
