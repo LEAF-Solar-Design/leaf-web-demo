@@ -19,6 +19,7 @@ import math
 import os
 from pathlib import Path
 import re
+import select
 import shutil
 import signal
 import socket
@@ -32,6 +33,7 @@ from typing import Any, Callable, Mapping, Protocol
 
 
 REPO = Path(__file__).resolve().parent.parent
+_PLATFORM = sys.platform
 PROFILE = "project"
 SCHEMA = "leaf.project-proof.v1"
 WORKER_TOOL = "solar-settings"
@@ -1777,8 +1779,107 @@ def _posix_child_identity(stat_text, owner_pid, role, pid):
     return ProcessIdentity(role, pid, parts[19], parent)
 
 
+@dataclass(frozen=True)
+class _PosixProcessRow:
+    pid: int
+    ppid: int
+    pgid: int
+    start: str
+
+
+def _read_ps(pid, timeout):
+    """Read at most 4 KiB, plus an unretained overflow probe, within two seconds."""
+    deadline = time.monotonic() + min(2.0, timeout)
+    process = subprocess.Popen(
+        ["/bin/ps", "-o", "pid=,ppid=,pgid=,stat=,lstart=", "-p", str(pid)],
+        env={"LC_ALL": "C", "TZ": "UTC"}, stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+    try:
+        raw = bytearray()
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0 or not select.select([process.stdout], [], [], remaining)[0]:
+                raise RuntimeError("process observation timed out")
+            chunk = process.stdout.read(min(1024, MAX_OUTPUT_BYTES - len(raw)) or 1)
+            if len(raw) + len(chunk) > MAX_OUTPUT_BYTES:
+                raise RuntimeError("process observation exceeded bound")
+            if not chunk:
+                break
+            raw.extend(chunk)
+        return process.wait(timeout=max(0.0, deadline - time.monotonic())), bytes(raw)
+    finally:
+        try:
+            if process.poll() is None:
+                process.kill()
+                try:
+                    process.wait(timeout=max(0.0, deadline - time.monotonic()))
+                except subprocess.TimeoutExpired:
+                    pass
+        finally:
+            process.stdout.close()
+
+
+def _darwin_process_row(pid, *, timeout=2.0):
+    """Strict, locale-independent ps identity; only exit 1 with no output is gone."""
+    try:
+        if type(pid) is not int or pid <= 0 or not 0 < timeout <= 2.0:
+            raise ValueError
+        code, raw = _read_ps(pid, timeout)
+        if code == 1 and raw == b"":
+            return None
+        if code != 0 or len(raw) > MAX_OUTPUT_BYTES:
+            raise ValueError
+        text = raw.decode("ascii")
+        # macOS ps(1): I/R/S/T/U/Z followed only by documented state flags.
+        match = re.fullmatch(
+            r"[ \t]*([0-9]+)[ \t]+([0-9]+)[ \t]+([0-9]+)[ \t]+"
+            r"([IRSTUZ][+<>AELNSsVWX]*)[ \t]+"
+            r"(Mon|Tue|Wed|Thu|Fri|Sat|Sun)[ \t]+"
+            r"(Jan|Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec)[ \t]+"
+            r"([1-9]|[12][0-9]|3[01])[ \t]+([0-9]{2}):([0-9]{2}):([0-9]{2})"
+            r"[ \t]+([0-9]{4})[ \t]*\n?", text)
+        if match is None:
+            raise ValueError
+        actual, parent, group, state, weekday, month, day, hour, minute, second, year = match.groups()
+        if _proc_decimal(actual) != pid or state[0] == "Z" or "E" in state:
+            raise ValueError
+        parent, group = _proc_decimal(parent), _proc_decimal(group)
+        months = ("Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec")
+        started = datetime(int(year), months.index(month) + 1, int(day),
+                           int(hour), int(minute), int(second), tzinfo=timezone.utc)
+        if ("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun")[started.weekday()] != weekday:
+            raise ValueError
+        start = f"{weekday} {month} {day} {hour}:{minute}:{second} {year}"
+        return _PosixProcessRow(pid, parent, group, start)
+    except (OSError, subprocess.TimeoutExpired, ValueError, TypeError, OverflowError):
+        raise RuntimeError("process identity unavailable") from None
+
+
+def _posix_process_row(pid, *, timeout=2.0):
+    """Guardian observation shares macOS identities with the runtime owner."""
+    if _PLATFORM == "darwin":
+        return _darwin_process_row(pid, timeout=timeout)
+    try:
+        text = Path(f"/proc/{pid}/stat").read_text()
+    except FileNotFoundError:
+        return None
+    head, opened, _ = text.partition(" (")
+    _, closed, tail = text.rpartition(")")
+    parts = tail.split()
+    if (not opened or not closed or _proc_decimal(head) != pid
+            or len(parts) < _PROC_STAT_FIELDS or parts[0] in {"Z", "X"}):
+        raise RuntimeError("process identity unavailable")
+    _proc_decimal(parts[19])
+    return _PosixProcessRow(pid, _proc_decimal(parts[1]), _proc_decimal(parts[2]), parts[19])
+
+
 def _process_child(owner, role, pid):
     """Observe live OS identities; a JSON PID alone never establishes custody."""
+    if _PLATFORM == "darwin":
+        row = _darwin_process_row(pid)
+        if row is None or row.ppid != owner.identity.pid or row.pgid not in {owner.identity.pid, pid}:
+            raise RuntimeError("child custody unavailable")
+        return ProcessIdentity(role, pid, row.start, row.ppid)
     if os.name != "nt":
         return _posix_child_identity(Path(f"/proc/{pid}/stat").read_text(), owner.identity.pid, role, pid)
     import ctypes
@@ -2521,8 +2622,13 @@ class _RuntimeProcess:
                 self.process = process
             if self.job is not None:
                 start_id = self.job.attach_and_resume(self.process)
+            elif _PLATFORM == "darwin":
+                row = _darwin_process_row(self.process.pid)
+                if row is None:
+                    raise RuntimeError("child identity unavailable")
+                start_id = row.start
             else:
-                # Linux's OS start tick; fail closed on unsupported POSIX hosts.
+                # Linux's OS start tick; other POSIX hosts still fail closed.
                 start_id = Path(f"/proc/{self.process.pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
             with self._lock:
                 self.identity = ProcessIdentity(spec.role, self.process.pid, start_id, os.getpid())
@@ -2580,6 +2686,10 @@ class _RuntimeProcess:
                 if os.name == "nt":
                     # Popen's retained kernel handle cannot target a reused PID.
                     return self.identity
+                if _PLATFORM == "darwin":
+                    row = _darwin_process_row(self.process.pid)
+                    return None if row is None else ProcessIdentity(
+                        self.spec.role, self.process.pid, row.start, row.ppid)
                 try:
                     parts = Path(f"/proc/{self.process.pid}/stat").read_text().rsplit(")", 1)[1].split()
                 except FileNotFoundError:
@@ -4097,7 +4207,7 @@ class _SupervisorHost(_Host):
 
 
 class _GuardianLease:
-    """Private inherited pipes and duplicated Windows job handles, never PIDs.
+    """Private pipes carry Windows job handles or start-bound POSIX groups.
 
     No listener or network endpoint is used. The host fault experiment remains
     separate from fake-only receipt tests.
@@ -4105,6 +4215,7 @@ class _GuardianLease:
     def __init__(self, plan):
         self.plan, self.process = plan, None
         self.sent_jobs = set()
+        self.sent_groups = set()
         self.responses = None
         self.children = []
 
@@ -4128,16 +4239,16 @@ class _GuardianLease:
             return False
 
     def arm(self):
-        if os.name != "nt":
-            _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
         import queue
         self.responses = queue.Queue(maxsize=4)
         code = "import runpy,sys; m=runpy.run_path(sys.argv[1]); sys.exit(m['_guardian_entry']())"
         environment = _PrivateEnvironment(_clean_libpq(_essential_environment(self.plan.host.environment)))
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        options = ({"creationflags": 0x08000000} if _PLATFORM == "win32"
+                   else {"start_new_session": True})
         self.process = subprocess.Popen((sys.executable, "-B", "-c", code, str(REPO / "scripts/proof_project.py")),
             cwd=REPO.parent, env=dict(environment), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL, creationflags=0x08000000)
+            stderr=subprocess.DEVNULL, **options)
         def read():
             try:
                 while True:
@@ -4161,6 +4272,21 @@ class _GuardianLease:
             _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
 
     def own_process(self, child):
+        if _PLATFORM != "win32":
+            identity = getattr(child, "identity", None)
+            if (type(identity) is not ProcessIdentity
+                    or not _group_fields(identity.pid, identity.start_id, identity.role)):
+                _refuse(FailureCode.GUARDIAN, Stage.STACK)
+            key = (identity.pid, identity.start_id)
+            if key in self.sent_groups:
+                return
+            self._send({"event": "group", "pid": identity.pid,
+                        "start": identity.start_id, "role": identity.role})
+            if not self._response():
+                _refuse(FailureCode.GUARDIAN, Stage.STACK)
+            self.sent_groups.add(key)
+            self.children.append(child)
+            return
         job = getattr(child, "job", None)
         if job is None or not job.handle:
             _refuse(FailureCode.GUARDIAN, Stage.STACK)
@@ -4195,6 +4321,42 @@ class _GuardianLease:
             return False
 
 
+def _group_fields(pid, start, role):
+    return (type(pid) is int and 0 < pid <= 2147483647
+            and type(start) is str and re.fullmatch(r"[ -~]{1,128}", start) is not None
+            and type(role) is str and re.fullmatch(r"[a-z][a-z0-9-]{0,63}", role) is not None)
+
+
+class _TransferredGroup:
+    def __init__(self, pid, start, role):
+        if not _group_fields(pid, start, role):
+            raise RuntimeError("group identity unavailable")
+        self.pid, self.start, self.role = pid, start, role
+        self.stopped = False
+
+    def __repr__(self):
+        return "<transferred owned group>"
+
+    def stop(self, deadline):
+        if self.stopped:
+            return True
+        try:
+            remaining = deadline - time.monotonic()
+            if not math.isfinite(remaining) or remaining <= 0:
+                return False
+            row = _posix_process_row(self.pid, timeout=min(2.0, remaining))
+            if time.monotonic() >= deadline:
+                return False
+            if row is not None and row.start == self.start and row.pgid == self.pid:
+                _signal_group(self.pid, signal.SIGKILL)
+            # A gone/replaced leader never authorizes a signal. Group absence,
+            # not a stale PID or a successful kill, is the completion evidence.
+            self.stopped = _group_empty(self.pid, deadline)
+            return self.stopped
+        except Exception:
+            return False
+
+
 class _TransferredJob:
     def __init__(self, handle):
         self.job = _WindowsJob()
@@ -4211,6 +4373,16 @@ class _TransferredJob:
         return self.stopped
 
 
+def _guardian_object(pairs):
+    """Refuse ambiguous objects at every nesting level of the private protocol."""
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("duplicate guardian message key")
+        result[key] = value
+    return result
+
+
 def _guardian_entry():
     """Fixed private child entry, deliberately absent from the public parser."""
     import queue
@@ -4223,7 +4395,13 @@ def _guardian_entry():
                     break
                 if len(raw) > 16384:
                     break
-                messages.put_nowait(json.loads(raw))
+                try:
+                    item = json.loads(raw, object_pairs_hook=_guardian_object)
+                except ValueError:
+                    # Invalid input is not a clean EOF and must never be acknowledged.
+                    messages.put_nowait({})
+                    break
+                messages.put_nowait(item)
         except BaseException:
             pass
         finally:
@@ -4272,6 +4450,10 @@ def _guardian_entry():
                 elif (set(item) == {"event", "handle"} and item["event"] == "job"
                         and type(item["handle"]) is int and item["handle"] > 0):
                     jobs.append(_TransferredJob(item["handle"]))
+                elif (_PLATFORM != "win32" and set(item) == {"event", "pid", "start", "role"}
+                        and item["event"] == "group"
+                        and _group_fields(item["pid"], item["start"], item["role"])):
+                    jobs.append(_TransferredGroup(item["pid"], item["start"], item["role"]))
                 else:
                     return "invalid"
                 acknowledge()
