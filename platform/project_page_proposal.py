@@ -3,9 +3,11 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 import os
 import re
 from time import monotonic
+from uuid import uuid4
 
 import requests
 
@@ -20,13 +22,35 @@ CONNECT_SECONDS = 3
 READ_SECONDS = 35
 _USAGE_KEYS = {'input_tokens', 'output_tokens', 'cache_creation_tokens',
                'cache_read_tokens', 'cost_tokens'}
+logger = logging.getLogger(__name__)
+_DIAGNOSTICS = {
+    'configuration': ('unavailable',),
+    'transport': ('upstream_status', 'timeout', 'connection_error', 'request_error',
+                  'deadline', 'content_encoding', 'response_size'),
+    'response': ('invalid_bytes', 'invalid_json', 'invalid_schema', 'source_mismatch', 'invalid_edits'),
+    'document': ('invalid_document',),
+}
+
+
+def _diagnostic(stage, code, upstream_status):
+    # Return our own literals, never caller-owned strings or string subclasses.
+    safe_stage, safe_code = 'response', 'invalid_schema'
+    if type(stage) is str and type(code) is str:
+        for known_stage, codes in _DIAGNOSTICS.items():
+            if stage == known_stage:
+                for known_code in codes:
+                    if code == known_code:
+                        safe_stage, safe_code = known_stage, known_code
+    safe_status = upstream_status if type(upstream_status) is int and 100 <= upstream_status <= 599 else 0
+    return safe_stage, safe_code, safe_status
 
 
 class ProposalError(Exception):
     """Only fixed public messages; never retain provider bodies or exceptions."""
 
-    def __init__(self, status):
+    def __init__(self, status, *, stage='response', code='invalid_schema', upstream_status=0):
         self.status = status
+        self.stage, self.code, self.upstream_status = _diagnostic(stage, code, upstream_status)
         super().__init__({413: 'Portfolio proposal request is too large.',
                           422: 'Invalid portfolio proposal request.',
                           502: 'Invalid portfolio proposal response.',
@@ -119,7 +143,7 @@ def _transport(payload):
     base = os.environ.get('LEAF_AUTHOR_HARNESS_URL', '').strip().rstrip('/')
     headers = broker_client.harness_headers()
     if not base or not headers.get('X-Harness-Secret'):
-        raise ProposalError(503)
+        raise ProposalError(503, stage='configuration', code='unavailable')
     headers = {**headers, 'X-Tenant-Id': payload['tenant_id'], 'Content-Type': 'application/json',
                'Accept-Encoding': 'identity'}
     encoded = json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
@@ -131,19 +155,33 @@ def _transport(payload):
         response = requests.post(base + '/internal/portfolio/proposals', data=encoded,
                                  headers=headers, timeout=(CONNECT_SECONDS, READ_SECONDS),
                                  allow_redirects=False, stream=True)
-        if (response.status_code != 200 or monotonic() >= deadline
-                or response.headers.get('Content-Encoding', 'identity').lower() != 'identity'):
-            raise ProposalError(502)
+        if response.status_code != 200:
+            raise ProposalError(502, stage='transport', code='upstream_status',
+                                upstream_status=response.status_code)
+        if monotonic() >= deadline:
+            raise ProposalError(502, stage='transport', code='deadline', upstream_status=response.status_code)
+        if response.headers.get('Content-Encoding', 'identity').lower() != 'identity':
+            raise ProposalError(502, stage='transport', code='content_encoding',
+                                upstream_status=response.status_code)
         raw = bytearray()
         for chunk in response.iter_content(chunk_size=1):
-            if monotonic() >= deadline or len(raw) + len(chunk) > MAX_RESPONSE_BYTES:
-                raise ProposalError(502)
+            if monotonic() >= deadline:
+                raise ProposalError(502, stage='transport', code='deadline', upstream_status=response.status_code)
+            if len(raw) + len(chunk) > MAX_RESPONSE_BYTES:
+                raise ProposalError(502, stage='transport', code='response_size', upstream_status=response.status_code)
             raw.extend(chunk)
         if monotonic() >= deadline:
-            raise ProposalError(502)
+            raise ProposalError(502, stage='transport', code='deadline', upstream_status=response.status_code)
         return bytes(raw)
+    except requests.Timeout:
+        raise ProposalError(502, stage='transport', code='timeout',
+                            upstream_status=response.status_code if response is not None else 0) from None
+    except requests.ConnectionError:
+        raise ProposalError(502, stage='transport', code='connection_error',
+                            upstream_status=response.status_code if response is not None else 0) from None
     except requests.RequestException:
-        raise ProposalError(502) from None
+        raise ProposalError(502, stage='transport', code='request_error',
+                            upstream_status=response.status_code if response is not None else 0) from None
     finally:
         if response is not None:
             response.close()
@@ -151,29 +189,37 @@ def _transport(payload):
 
 def _result(raw, source, targets):
     if type(raw) is not bytes or len(raw) > MAX_RESPONSE_BYTES:
-        raise ProposalError(502)
-    result = _json(raw, 502)
+        raise ProposalError(502, code='invalid_bytes')
+    try:
+        result = _json(raw, 502)
+    except ProposalError:
+        raise ProposalError(502, code='invalid_json') from None
     if (not _closed(result, 'source model edits usage')
             or not _closed(result['source'], 'project_id revision digest64hex')
-            or type(result['source']['revision']) is not int or result['source'] != source
+            or type(result['source']['revision']) is not int
+            or type(result['source']['project_id']) is not str
+            or type(result['source']['digest64hex']) is not str
             or type(result['model']) is not str
             or re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}', result['model']) is None
             or type(result['usage']) is not dict or not set(result['usage']) <= _USAGE_KEYS
             or any(type(v) is not int or not 0 <= v <= 9007199254740991
                    for v in result['usage'].values())
             or type(result['edits']) is not list or len(result['edits']) > 32):
-        raise ProposalError(502)
+        raise ProposalError(502, code='invalid_schema')
+    if result['source'] != source:
+        raise ProposalError(502, code='source_mismatch')
     seen = set()
     for edit in result['edits']:
         if (not _closed(edit, 'id value') or type(edit['id']) is not str
                 or edit['id'] not in targets or edit['id'] in seen
                 or type(edit['value']) is not str or len(edit['value']) > targets[edit['id']][2]):
-            raise ProposalError(502)
+            raise ProposalError(502, code='invalid_edits')
         seen.add(edit['id'])
     return result
 
 
 def propose(org_id, project_id, actor_id, *, expected_revision, expected_digest, instruction):
+    correlation_id = str(uuid4())
     # Also enforce the closed input contract for direct service callers.
     body = {'expected_revision': expected_revision, 'expected_digest': expected_digest, 'instruction': instruction}
     try:
@@ -194,15 +240,25 @@ def propose(org_id, project_id, actor_id, *, expected_revision, expected_digest,
     if len(json.dumps(payload, ensure_ascii=False, separators=(',', ':')).encode('utf-8')) > MAX_REQUEST_BYTES:
         raise ProposalError(422)
     # All page transactions have completed before the synchronous network call.
-    result = _result(_transport(payload), source, targets)
-    for edit in result['edits']:
-        container, key, _ = targets[edit['id']]
-        container[key] = edit['value']
     try:
-        document = validate_document(document)
-        digest = document_digest(document)
-    except (ValueError, UnicodeError):
-        raise ProposalError(502) from None
+        result = _result(_transport(payload), source, targets)
+        for edit in result['edits']:
+            container, key, _ = targets[edit['id']]
+            container[key] = edit['value']
+        try:
+            document = validate_document(document)
+            digest = document_digest(document)
+        except (ValueError, UnicodeError):
+            raise ProposalError(502, stage='document', code='invalid_document') from None
+    except ProposalError as error:
+        stage, code, upstream_status = _diagnostic(error.stage, error.code, error.upstream_status)
+        try:
+            logger.warning('portfolio_proposal_failed correlation_id=%s stage=%s code=%s upstream_status=%s',
+                           correlation_id, stage, code, upstream_status)
+        except Exception:
+            # A failing logging handler must not change the fixed service result.
+            pass
+        raise
     lifecycle.require_project_role(org_id, project_id, actor_id, write=True)
     latest = project_web_page.read(org_id, project_id, actor_id)
     if latest is None or latest['revision'] != page['revision'] or latest['digest'] != page['digest']:
