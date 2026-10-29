@@ -206,6 +206,96 @@ def test_staging_audience_rejects_production_token():
             os.environ["LEAF_AUTH0_AUDIENCE"] = saved_audience
 
 
+def test_accepted_audience_admits_transitional_token():
+    saved = {key: os.environ.get(key) for key in
+             ("LEAF_AUTH0_AUDIENCE", "LEAF_AUTH0_ACCEPTED_AUDIENCES")}
+    try:
+        os.environ["LEAF_AUTH0_AUDIENCE"] = "https://api.leafdesign.ai"
+        os.environ["LEAF_AUTH0_ACCEPTED_AUDIENCES"] = "https://api-staging.leafdesign.ai"
+        for aud in ("https://api-staging.leafdesign.ai", "https://api.leafdesign.ai"):
+            payload = auth.verify_platform_token(bearer(mint(aud=aud)))
+            assert payload["aud"] == aud
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_accepted_audience_unset_keeps_single_audience():
+    saved = {key: os.environ.get(key) for key in
+             ("LEAF_AUTH0_AUDIENCE", "LEAF_AUTH0_ACCEPTED_AUDIENCES")}
+    try:
+        os.environ["LEAF_AUTH0_AUDIENCE"] = "https://api.leafdesign.ai"
+        os.environ.pop("LEAF_AUTH0_ACCEPTED_AUDIENCES", None)
+        with pytest.raises(HTTPException) as ei:
+            auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
+        assert ei.value.status_code == 401
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_malformed_accepted_audiences_fail_closed():
+    saved = {key: os.environ.get(key) for key in
+             ("LEAF_AUTH0_AUDIENCE", "LEAF_AUTH0_ACCEPTED_AUDIENCES")}
+    try:
+        os.environ["LEAF_AUTH0_AUDIENCE"] = "https://api.leafdesign.ai"
+        os.environ["LEAF_AUTH0_ACCEPTED_AUDIENCES"] = (
+            "https://api-staging.leafdesign.ai, http://insecure.example")
+        with pytest.raises(HTTPException) as ei:
+            auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
+        assert ei.value.status_code == 401
+        payload = auth.verify_platform_token(bearer(mint(aud="https://api.leafdesign.ai")))
+        assert payload["aud"] == "https://api.leafdesign.ai"
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_too_many_accepted_audiences_fail_closed():
+    saved = {key: os.environ.get(key) for key in
+             ("LEAF_AUTH0_AUDIENCE", "LEAF_AUTH0_ACCEPTED_AUDIENCES")}
+    try:
+        os.environ["LEAF_AUTH0_AUDIENCE"] = "https://api.leafdesign.ai"
+        os.environ["LEAF_AUTH0_ACCEPTED_AUDIENCES"] = (
+            "https://api-staging.leafdesign.ai,https://one.example,"
+            "https://two.example,https://three.example")
+        with pytest.raises(HTTPException) as ei:
+            auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
+        assert ei.value.status_code == 401
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
+def test_accepted_audiences_order_and_dedup():
+    saved = {key: os.environ.get(key) for key in
+             ("LEAF_AUTH0_AUDIENCE", "LEAF_AUTH0_ACCEPTED_AUDIENCES")}
+    try:
+        os.environ["LEAF_AUTH0_AUDIENCE"] = AUD
+        transitional = "https://api-staging.leafdesign.ai"
+        os.environ["LEAF_AUTH0_ACCEPTED_AUDIENCES"] = (
+            f" {transitional} , {AUD}, {transitional} ,")
+        assert auth.accepted_audiences() == [AUD, transitional]
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+
+
 def test_wrong_issuer_rejected():
     with pytest.raises(HTTPException) as ei:
         auth.verify_platform_token(bearer(mint(iss="https://evil.example/")))

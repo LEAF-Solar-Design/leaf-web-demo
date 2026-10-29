@@ -27,7 +27,9 @@ from __future__ import annotations
 
 import json
 import importlib.util
+import logging
 import os
+import re
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -56,6 +58,21 @@ def issuer() -> str:
 
 def audience() -> str:
     return os.environ.get("LEAF_AUTH0_AUDIENCE", DEFAULT_AUDIENCE)
+
+
+def accepted_audiences() -> list[str]:
+    """fails closed: a malformed list accepts only the primary audience"""
+    primary = audience()
+    entries = [entry.strip() for entry in
+               os.environ.get("LEAF_AUTH0_ACCEPTED_AUDIENCES", "").split(",")
+               if entry.strip()]
+    extras = list(dict.fromkeys(entry for entry in entries if entry != primary))
+    if (any(re.fullmatch(r"https://[a-z0-9.-]+(/[A-Za-z0-9._~/-]*)?", entry) is None
+            for entry in entries) or len(extras) > 3):
+        logging.getLogger(__name__).warning(
+            "Ignoring accepted audience list (%d entries)", len(entries))
+        return [primary]
+    return [primary, *extras]
 
 
 def jwks_url() -> str:
@@ -199,7 +216,7 @@ def verify_platform_token(authorization: Optional[str]) -> Dict[str, Any]:
             token,
             key,
             algorithms=["RS256"],
-            audience=audience(),
+            audience=accepted_audiences(),
             issuer=issuer(),
             options={"require": ["exp", "iat"]},
         )
