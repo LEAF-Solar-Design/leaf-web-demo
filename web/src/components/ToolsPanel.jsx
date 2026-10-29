@@ -1,5 +1,6 @@
 import { useId, useState } from 'react'
 import ToolHistory from './ToolHistory.jsx'
+import ToolExplanation from './ToolExplanation.jsx'
 import { isWriteTool } from '../lib/toolRecord.js'
 import SchemaForm, { defaultsOf, sentence } from './SchemaForm.jsx'
 import './panels.css'
@@ -86,6 +87,7 @@ export default function ToolsPanel({ tools, error, running, selectedTool, onRequ
               </button>
               {open && (
                 <div className="tool-body" id={regionId}>
+                  <ToolExplanation tool={t} />
                   <SchemaForm
                     schema={t.params}
                     values={params}
