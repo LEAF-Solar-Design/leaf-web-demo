@@ -642,6 +642,7 @@
     "server-tenant-mcp-fake-oauth",
     "server-tool-publication-policy",
     "server-tool-record-fields",
+    "server-tool-envelopes",
     "server-tool-validate-structural",
     "server-turn-queue",
     "server-cost-publish-api",
