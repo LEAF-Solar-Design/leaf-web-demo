@@ -705,6 +705,19 @@ if [[ -n "${CODEBUILD_BUILD_ID:-}" && -f /tmp/gate-results/gate-result.json ]]; 
     --content-type application/json --if-none-match '*' >/dev/null \
     || echo 'WARNING: result_write_failed; reuse evidence absent for this build' >&2
 fi
+# Reuse donor pointer (plan ci-test-selection-20260925 S1b): only a green, full, main-push shard names itself.
+if [[ -n "${CODEBUILD_BUILD_ID:-}" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" == refs/heads/main \
+      && "${CODEBUILD_WEBHOOK_EVENT:-}" == PUSH && "$selection_mode" == full \
+      && "$trusted_sha_override" != 1 && "$gate_status" == 0 && "$postgres_status" == 0 \
+      && "$HEAD_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+  printf '{"build_id":"%s","schema":"leaf.ci.main-shard-pointer.v1","sha":"%s","shard_index":%d,"shard_total":%d}\n' \
+    "$CODEBUILD_BUILD_ID" "$HEAD_SHA" "$CI_SHARD_INDEX_N" "$CI_SHARD_TOTAL_N" > "$selection_dir/main-shard-pointer.json"
+  aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+    --key "mq/leaf-web-demo/selection/main/${HEAD_SHA}/shard-${CI_SHARD_INDEX_N}-of-${CI_SHARD_TOTAL_N}.json" \
+    --body "$selection_dir/main-shard-pointer.json" \
+    --content-type application/json --if-none-match '*' >/dev/null \
+    || echo 'WARNING: pointer_write_failed; this shard is not a reuse donor' >&2
+fi
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
   tail -n 200 /tmp/gate-results/gate-result.json || true
   # BEGIN GATE FAIL NAMES
