@@ -4342,7 +4342,7 @@ def _child_public(spec, raw):
             _exact(value, ("worker_id", "tool_name", "runtime", "source_revision", "source_sha256", "observed_at"))
             if (value["worker_id"] != request["worker_id"] or value["tool_name"] != WORKER_TOOL
                     or not _hash_ok(value["source_sha256"]) or value["source_revision"] != "sha256:" + value["source_sha256"]
-                    or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["runtime"]) is None):
+                    or re.fullmatch(r"python-[0-9]+\.[0-9]+\.[0-9]+", value["runtime"]) is None):
                 return None
             beat = HeartbeatProof(**dict(value, observed_at=datetime.fromisoformat(value["observed_at"])))
             return _heartbeat_public(beat)

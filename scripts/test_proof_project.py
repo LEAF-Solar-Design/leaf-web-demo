@@ -5398,3 +5398,15 @@ def test_h_a1b_docker_progressive_unchanged(tmp_path, monkeypatch):
     assert state.events == ["alive", "alive", "disarm"] and validated == [partial, full]
     assert state.snapshots == [partial, full, full] and state.request.ownership == full
     assert state.contexts == [None, None, None] and c.teardown == []
+
+
+def test_contract_heartbeat_runtime_python_form():
+    request = {"purpose": "heartbeat", "worker_id": "project:run-test"}
+    spec = p.ProcessSpec("canonical-child", ("fake",), ROOT,
+        {"LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(request)}, 5)
+    heartbeat = {"worker_id": request["worker_id"], "tool_name": p.WORKER_TOOL,
+        "runtime": "python-3.12.14", "source_revision": "sha256:" + HASH,
+        "source_sha256": HASH, "observed_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()}
+    assert p._child_public(spec, json.dumps(heartbeat).encode()) == heartbeat
+    for runtime in ("3.12.14", "python-3.12"):
+        assert p._child_public(spec, json.dumps(dict(heartbeat, runtime=runtime)).encode()) is None
