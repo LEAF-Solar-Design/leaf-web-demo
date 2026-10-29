@@ -174,6 +174,24 @@ def test_wrong_audience_rejected():
     assert ei.value.status_code == 401
 
 
+def test_production_audience_rejects_staging_token(monkeypatch):
+    monkeypatch.delenv("LEAF_AUTH0_AUDIENCE", raising=False)
+    with pytest.raises(HTTPException) as ei:
+        auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
+    assert ei.value.status_code == 401
+    payload = auth.verify_platform_token(bearer(mint(aud="https://api.leafdesign.ai")))
+    assert payload["aud"] == "https://api.leafdesign.ai"
+
+
+def test_staging_audience_rejects_production_token(monkeypatch):
+    monkeypatch.setenv("LEAF_AUTH0_AUDIENCE", "https://api-staging.leafdesign.ai")
+    with pytest.raises(HTTPException) as ei:
+        auth.verify_platform_token(bearer(mint(aud="https://api.leafdesign.ai")))
+    assert ei.value.status_code == 401
+    payload = auth.verify_platform_token(bearer(mint(aud="https://api-staging.leafdesign.ai")))
+    assert payload["aud"] == "https://api-staging.leafdesign.ai"
+
+
 def test_wrong_issuer_rejected():
     with pytest.raises(HTTPException) as ei:
         auth.verify_platform_token(bearer(mint(iss="https://evil.example/")))
