@@ -3,8 +3,40 @@ import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 
 // Actual Next.js rendering with fixture-backed APIs. No live account mutations.
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*' }
+// Match the standalone catalog's leaf.solar-tool-view.v1 metadata and the
+// eleven Rooftop positions in solarFlowModel.test.js's live catalog.
+const ROOFTOP_ROWS = [
+  ['solar-settings', 'stringing', 1, 10],
+  ['solar-panels-from-drawing', 'placement', 1, 15],
+  ['solar-size-strings', 'stringing', 1, 20],
+  ['solar-panel-groups', 'stringing', 1, 30],
+  ['solar-solve-proposal', 'stringing', 1, 40],
+  ['solar-commit-solve', 'stringing', 1, 50],
+  ['solar-correct-string', 'stringing', 1, 60],
+  ['solar-assign-equipment', 'stringing', 1, 70],
+  ['solar-string-conductors', 'stringing', 2, 85],
+  ['solar-homeruns', 'stringing', 1, 80],
+  ['solar-schedule', 'stringing', 1, 90],
+]
+const SOLAR_FAMILIES = ['stringing', 'placement'].map(family => ({
+  family_id: family, label: family, description: 'Solar design steps for this drawing.',
+  capabilities: ROOFTOP_ROWS.filter(([, f]) => f === family).map(([name, , wave, order]) => {
+    const ready = ['solar-settings', 'solar-solve-proposal'].includes(name)
+    return {
+      name, version: '1.0.0', description: name, kind: 'builtin',
+      capabilities: [name === 'solar-solve-proposal' ? 'drawing.read' : 'drawing.write'],
+      params: { type: 'object', properties: {} },
+      solar: { schema: 'leaf.solar-tool-view.v1', name, family, wave, order,
+        entitlement: name === 'solar-solve-proposal' ? 'solve' : 'run_write', interaction: { mode: 'form' } },
+      availability: { entitled: true, implemented: true, engine_ready: true,
+        input_ready: ready, refusal_reasons: ready ? [] : ['persisted_graph_unavailable'] },
+    }
+  }),
+}))
+
 async function backend(page) {
   const state = makeCatProofState()
+  const mutations = []
   await page.addInitScript(() => {
     localStorage.setItem('leaf.jwt', 'fixture-token')
     localStorage.setItem('leaf.coach.dismissed.v1', '1')
@@ -12,10 +44,19 @@ async function backend(page) {
   await page.route('http://leaf-proof.invalid/api/**', async route => {
     const req = route.request(), url = new URL(req.url())
     if (req.method() === 'OPTIONS') return route.fulfill({ status: 204, headers: CORS })
+    if (!['GET', 'HEAD'].includes(req.method()) && url.pathname !== '/api/telemetry') {
+      mutations.push(`${req.method()} ${url.pathname}`)
+    }
     const reply = catProofResponse({ method: req.method(), path: url.pathname,
       query: Object.fromEntries(url.searchParams), body: req.postData() ? req.postDataJSON() : {} }, state)
+    // Extend only this spec's catalog, keeping the real cat intake and all
+    // existing routes. The session drawing has no project binding.
+    if (req.method() === 'GET' && url.pathname === '/api/capabilities' && reply.status === 200) {
+      reply.body = { ...reply.body, families: [...reply.body.families, ...SOLAR_FAMILIES] }
+    }
     await route.fulfill({ status: reply.status, headers: CORS, contentType: 'application/json', body: JSON.stringify(reply.body ?? null) })
   })
+  return mutations
 }
 
 async function expectCenterHit(control) {
@@ -23,9 +64,76 @@ async function expectCenterHit(control) {
   await expect.poll(() => control.evaluate(el => {
     const b = el.getBoundingClientRect()
     const hit = document.elementFromPoint(b.x + b.width / 2, b.y + b.height / 2)
+    // Probe the edges as well: a full-size box can be clipped by its row.
+    // Hit testing also respects fixed descendants that escape ancestor clips.
+    const edges = [[b.x + b.width / 2, b.top + 1], [b.x + b.width / 2, b.bottom - 1],
+      [b.left + 1, b.y + b.height / 2], [b.right - 1, b.y + b.height / 2]]
+    if (!edges.every(([x, y]) => {
+      const edgeHit = document.elementFromPoint(x, y)
+      return edgeHit === el || el.contains(edgeHit)
+    })) return false
     return b.width > 0 && b.height > 0 && b.x >= 0 && b.y >= 0
       && b.right <= innerWidth && b.bottom <= innerHeight && (hit === el || el.contains(hit))
   })).toBe(true)
+}
+
+async function expectPopulatedSolar(page, info, phone) {
+  const rail = page.locator('.solar-flow-host [data-testid="solar-flow-rail"]')
+  await expect(rail).toHaveAttribute('data-flow', 'rooftop')
+  await expect(rail).not.toHaveAttribute('data-demo', 'true')
+  await expect(rail.locator('.solar-flow-step')).toHaveCount(11)
+  await expect(rail.locator('.solar-flow-label')).toHaveText(ROOFTOP_ROWS.map(([name]) => name))
+  await expect(rail.locator('.solar-flow-step[data-status="ready"]')).toHaveCount(2)
+  const blocked = rail.locator('.solar-flow-step[data-status="blocked"]')
+  await expect(blocked).toHaveCount(9)
+  for (const row of await blocked.all()) {
+    const button = row.locator('button')
+    await expect(button).toBeDisabled()
+    await expect(button).toHaveAccessibleDescription('This drawing has no saved solar design yet')
+  }
+  if (!phone) return
+  await expect(rail).toBeVisible()
+  await expect(page.locator('[data-testid="project-solar-flow-reason"]')).toHaveCount(0)
+  const host = page.locator('.solar-flow-host')
+  const seat = page.locator('.solar-flow-seat')
+  const scroll = await seat.count() ? seat : host
+  const initial = await scroll.evaluate(el => el.scrollTop)
+  await expect.poll(() => scroll.evaluate(el => {
+    const s = getComputedStyle(el)
+    return ['auto', 'scroll'].includes(s.overflowY) && el.clientHeight > 0 && el.scrollHeight > el.clientHeight
+  })).toBe(true)
+  // Scroll the owning region, never the page; disabled steps remain readable.
+  const expectInside = async row => {
+    await expect.poll(() => row.evaluate(el => {
+      const owner = el.closest('.solar-flow-seat') || el.closest('.solar-flow-host')
+      const b = el.getBoundingClientRect(), p = owner.getBoundingClientRect()
+      const top = p.top + owner.clientTop
+      return b.top >= top && b.bottom <= top + owner.clientHeight
+        && b.top >= 0 && b.bottom <= innerHeight
+    })).toBe(true)
+  }
+  const first = rail.locator('.solar-flow-step').first()
+  const last = rail.locator('.solar-flow-step').last()
+  await first.evaluate(el => {
+    const owner = el.closest('.solar-flow-seat') || el.closest('.solar-flow-host')
+    owner.scrollTop += el.getBoundingClientRect().top - (owner.getBoundingClientRect().top + owner.clientTop)
+  })
+  await expectInside(first)
+  await scroll.evaluate(el => { el.scrollTop = el.scrollHeight })
+  // Workspace tools follow the rail, so align the last row within the viewport.
+  await last.evaluate(el => {
+    const owner = el.closest('.solar-flow-seat') || el.closest('.solar-flow-host')
+    owner.scrollTop += el.getBoundingClientRect().bottom
+      - (owner.getBoundingClientRect().top + owner.clientTop + owner.clientHeight)
+  })
+  await expectInside(last)
+  await info.attach('solar-phone-flow-scroll', { body:JSON.stringify(await scroll.evaluate(el => ({
+    height:el.clientHeight, contentHeight:el.scrollHeight, scrollTop:el.scrollTop,
+    first:el.querySelector('.solar-flow-step').textContent,
+    last:[...el.querySelectorAll('.solar-flow-step')].at(-1).textContent,
+  })), null, 2), contentType:'application/json' })
+  await scroll.evaluate((el, top) => { el.scrollTop = top }, initial)
+  await expect.poll(() => scroll.evaluate(el => el.scrollTop)).toBe(initial)
 }
 
 async function expectPhoneViewControls(page, info, phase) {
@@ -34,10 +142,17 @@ async function expectPhoneViewControls(page, info, phase) {
       const b = document.querySelector(selector).getBoundingClientRect()
       return { x:b.x, y:b.y, right:b.right, bottom:b.bottom, width:b.width, height:b.height }
     }
+    const canvas = rect('.viewer-canvas'), viewer = rect('.viewer-wrap'), command = rect('.bar-dock')
     return { width:innerWidth, height:innerHeight, scroll:document.documentElement.scrollWidth,
       profile:rect('.environment-strip'), view:rect('.cockpit-view'), find:rect('.drawing-navigation'),
       overview:rect('.cad-overview'),
-      command:rect('.bar-dock'), input:rect('.bar-command-line .bar-field'),
+      canvas, viewer, canvasVisibleHeight:Math.max(0,
+        Math.min(canvas.bottom, viewer.bottom, command.y, innerHeight) - Math.max(canvas.y, viewer.y, 0)),
+      solarFlow:document.querySelector('.solar-flow-host') ? {
+        host:rect('.solar-flow-host'),
+        viewport:rect(document.querySelector('.solar-flow-seat') ? '.solar-flow-seat' : '.solar-flow-host'),
+      } : null,
+      command, input:rect('.bar-command-line .bar-field'),
       commandControls:rect('.bar-command-line .bar-controls') }
   })
   await info.attach(`${phase}-phone-view-initial-geometry`, { body:JSON.stringify(await measure(), null, 2), contentType:'application/json' })
@@ -50,6 +165,9 @@ async function expectPhoneViewControls(page, info, phase) {
   const geometry = await measure()
   await info.attach(`${phase}-phone-view-geometry`, { body:JSON.stringify(geometry, null, 2), contentType:'application/json' })
   expect(geometry.scroll).toBeLessThanOrEqual(geometry.width)
+  expect(geometry.canvas.height).toBeGreaterThanOrEqual(100)
+  expect(geometry.canvasVisibleHeight).toBeGreaterThanOrEqual(100)
+  expect(geometry.canvas.width).toBeGreaterThan(0)
   for (const b of [geometry.view, geometry.find, geometry.overview, geometry.command, geometry.input, geometry.commandControls]) {
     expect(b.width).toBeGreaterThan(0)
     expect(b.height).toBeGreaterThan(0)
@@ -197,7 +315,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
     test.setTimeout(120_000)
     page.setDefaultTimeout(15_000)
     await page.setViewportSize(viewport)
-    await backend(page)
+    const mutations = await backend(page)
     await page.goto('/app?surface=browser')
     const controls = page.getByRole('navigation', { name: 'Workspace controls' })
     await controls.getByRole('button', { name: 'Studio', exact: true }).click()
@@ -249,6 +367,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
       await close.click()
     }
     await expectDraftingBands(page, info, 'solar')
+    await expectPopulatedSolar(page, info, size === 'phone')
     if (size === 'phone') await exercisePhoneViewControls(page, info, 'solar')
     await controls.getByRole('combobox', { name:'Workspace profile', exact:true }).selectOption('cad')
     await controls.getByRole('button', { name:'Studio', exact:true }).click()
@@ -328,5 +447,6 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
     if (size === 'phone') await exercisePhoneOverview(page, info, 'cad-collapsed')
     await page.screenshot({ path:info.outputPath(`docked-${size}-cad.png`) })
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width)
+    expect(mutations.filter(request => /\/api\/(run|drawings\/.*\/(undo|redo|intake)|projects\/.*\/versions)/.test(request))).toEqual([])
   })
 }

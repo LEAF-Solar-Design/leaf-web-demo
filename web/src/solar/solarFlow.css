@@ -29,6 +29,27 @@
 .solar-workspace-panel { width: 100%; min-width: 0; padding: 6px; box-sizing: border-box; background: var(--accent-tint); }
 .solar-workspace-announce { margin: 0; min-height: 1em; font-size: var(--leaf-size-caption); color: var(--muted); }
 
+@media (max-width: 599px) {
+/* The populated flow precedes the measured viewer toolbar. Keep its entire
+   seat (including open forms) scrollable in a small band so Find still clears
+   the overview on a phone with a wrapped header. Do not use the canvas edge
+   here: that edge is itself measured below this band. */
+.studio-shell .app[data-surface="solar"] .workspace-card :is(.solar-flow-seat, .solar-flow-host) {
+  display: block; box-sizing: border-box; min-width: 0; min-height: 0;
+  max-height: min(64px, calc(100dvh - var(--drawer-top, 88px) - var(--environment-controls-bottom, 190px)));
+  overflow: auto; overscroll-behavior: contain; overflow-wrap: anywhere;
+}
+.studio-shell .app[data-surface="solar"] .workspace-card .solar-flow-seat-content { display: block; }
+/* One scrollbar owns both the rail and its editors when the seat is present. */
+.studio-shell .app[data-surface="solar"] .workspace-card .solar-flow-seat .solar-flow-host {
+  max-height: none; overflow: visible;
+}
+.studio-shell .app[data-surface="solar"] .workspace-card :is(.solar-flow-seat, .solar-flow-host) :is(input, select, textarea) {
+  box-sizing: border-box; max-width: 100%;
+}
+.studio-shell .app[data-surface="solar"] .workspace-card .solar-flow-button { flex-wrap: wrap; }
+}
+
 @media (min-width: 1024px) {
 .studio-shell .workspace-card .solar-flow-seat {
   padding: 10px 12px; border-radius: var(--leaf-radius-control);
