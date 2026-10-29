@@ -22,6 +22,8 @@ import { collectSupportMeasurements } from './supportMeasurements.mjs'
 import { createOpsSreMeasurementCapture } from './opsSreMeasurements.mjs'
 import { createRedHatMeasurementCapture } from './redHatMeasurements.mjs'
 import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
+import { createQcDevMeasurementCapture } from './qcDevMeasurements.mjs'
+import { collectUiUxMeasurements } from './uiUxMeasurements.mjs'
 import { composePersonaMeasurementBundle } from './personaMeasurementBundle.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
@@ -667,7 +669,8 @@ export function addPersonaFragment(evidence, { persona, measurements, bundleRefe
 // Optional observers consume only facts supplied at the existing assertion sites.
 export function createWalkPersonaObservers({ probe, viewport, evidence,
   endUser = createEndUserMeasurementCapture, support = collectSupportMeasurements,
-  opsSre = createOpsSreMeasurementCapture, redHat = createRedHatMeasurementCapture }) {
+  opsSre = createOpsSreMeasurementCapture, redHat = createRedHatMeasurementCapture,
+  qcDev = createQcDevMeasurementCapture, uiUx = collectUiUxMeasurements }) {
   const captures = new Map(), observed = new Set()
   const suffix = `${probe.featureId}[${probe.state}]@${viewport}`
   const retry = probe.featureId === 'action:bar-retry' && probe.state === 'retry-history'
@@ -686,6 +689,13 @@ export function createWalkPersonaObservers({ probe, viewport, evidence,
   if (viewport === 'desktop' && probe.featureId === 'control:version-history' && probe.state === 'ready') {
     create('end-user', endUser, { expectedEffect: 'version-history-open' })
     try { captures.get('end-user')?.start() } catch { diagnostic('end-user') }
+    create('qc-dev', qcDev, { action: 'control:version-history', expectedResult: 'version-history-open',
+      expectedOrder: ['control:version-history', 'version-history-open'] })
+    captures.set('ui-ux-dev', uiUx)
+  }
+  if (retry && viewport === 'desktop') {
+    create('qc-dev', qcDev, { action: 'action:bar-retry', expectedResult: 'Versions restored',
+      expectedOrder: ['action:bar-retry', 'history-recovery-request', 'Versions restored'] })
   }
   if (retry && ['desktop', 'phone'].includes(viewport)) {
     create('ops-sre', opsSre)
@@ -698,7 +708,15 @@ export function createWalkPersonaObservers({ probe, viewport, evidence,
       const capture = captures.get(persona)
       if (!capture) return
       try {
-        if (persona === 'support') {
+        if (persona === 'ui-ux-dev') {
+          if (event !== 'completion') return
+          const measurements = await capture({ ...value, reference: `ui-ux-dev:${suffix}` })
+          if (measurements) {
+            captures.set(persona, { ...measurements, coverage: { kind: 'automated-proxy',
+              predicates: ['ui-ux-dev.completion-proxy'] } })
+            observed.add(persona)
+          }
+        } else if (persona === 'support') {
           if (event !== 'alert' || value.errorObserved !== true) return
           const { page, alert } = value
           const measurements = await capture({ page, errorObserved: true, reference: `support:${suffix}`,
@@ -709,6 +727,7 @@ export function createWalkPersonaObservers({ probe, viewport, evidence,
           if (persona === 'red-hat' && ['before', 'after'].includes(event)) value = protectedStateDigest(value)
           await capture[event](value)
           if ((persona === 'end-user' && event === 'observeEffect')
+            || (persona === 'qc-dev' && event === 'start')
             || (persona === 'ops-sre' && event === 'observeFailure' && value === true)
             || (persona === 'red-hat' && event === 'observeRefusal' && value.observed === true)) observed.add(persona)
         }
@@ -718,7 +737,7 @@ export function createWalkPersonaObservers({ probe, viewport, evidence,
       for (const persona of observed) {
         try {
           const capture = captures.get(persona)
-          const measurements = persona === 'support' ? capture
+          const measurements = ['support', 'ui-ux-dev'].includes(persona) ? capture
             : persona === 'red-hat' ? await capture.result() : await capture.finish()
           if (measurements) addPersonaFragment(evidence, { persona, measurements, bundleReference: `walk:${suffix}` })
         } catch { diagnostic(persona) }
@@ -726,6 +745,20 @@ export function createWalkPersonaObservers({ probe, viewport, evidence,
       observed.clear()
     },
   }
+}
+
+export async function prepareQcDevHistory(probe, runtime, locator, before, assertions = expect) {
+  if (probe.featureId !== 'control:version-history' || probe.state !== 'ready'
+    || runtime.testInfo?.project?.name !== 'desktop') return
+  try {
+    // The private fixture must already be loaded; this observer never opens it.
+    if (!runtime.drawingId || runtime.evidence.drawingId !== runtime.drawingId || runtime.failedDrawing
+      || before.visible !== false) return
+    await assertions(canvas(runtime.page)).toBeVisible()
+    await assertions(runtime.page.getByRole('dialog', { name: 'Version history', exact: true })).toBeHidden()
+    await assertions(locator).toHaveAttribute('aria-expanded', 'false')
+    await runtime.walkPersonaObservers?.observe('qc-dev', 'start')
+  } catch { /* A failed precondition cannot produce a QC PASS. */ }
 }
 
 export function mergeAccessibilityMeasurements(existing, result) {
@@ -1678,10 +1711,14 @@ export async function setupHistoryFault(probe, runtime, assertions = expect, his
   assertions(fault.failed.length).toBe(1)
   await runtime.releaseHistoryFault()
   const observe = (request) => {
-    if (request.method() === 'GET' && new URL(request.url()).pathname === path) fault.recovery.push(request.url())
+    if (request.method() === 'GET' && new URL(request.url()).pathname === path) {
+      fault.recovery.push(request.url())
+      void runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'history-recovery-request')
+    }
   }
   page.on('request', observe)
   runtime.cleanup.push(async () => page.off('request', observe))
+  await runtime.walkPersonaObservers?.observe('qc-dev', 'start')
 }
 
 export async function assertHistoryRecovery(runtime, assertions = expect) {
@@ -3738,8 +3775,14 @@ async function activate(probe, runtime, locator) {
       const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true }).getByRole('button', { name: 'Project', exact: true })
       if (await project.isVisible()) await project.focus()
       else await page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab').first().focus()
-      if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(() => page.keyboard.press(recipe.key))
-      else await page.keyboard.press(recipe.key)
+      const press = async () => {
+        if (probe.featureId === 'action:bar-retry' && probe.state === 'retry-history') {
+          await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'action:bar-retry')
+        }
+        return page.keyboard.press(recipe.key)
+      }
+      if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(press)
+      else await press()
     }
   } else if (recipe.trigger === 'navigate') await page.goto(recipe.url)
   else if (recipe.trigger === 'select') {
@@ -3748,8 +3791,16 @@ async function activate(probe, runtime, locator) {
     const choice = choices.find((value) => value !== current && value !== 'index...')
     expect(choice, 'a property change must offer another real value').toBeDefined()
     await locator.selectOption(choice)
-  } else if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(() => locator.click())
-  else await locator.click()
+  } else {
+    const click = async () => {
+      if (probe.featureId === 'control:version-history' && probe.state === 'ready') {
+        await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'control:version-history')
+      }
+      return locator.click()
+    }
+    if (runtime.panelPerformanceCapture) await runtime.panelPerformanceCapture.dispatch(click)
+    else await click()
+  }
 }
 
 export async function assertEffect(probe, runtime, locator, before, assertions = expect) {
@@ -3789,6 +3840,12 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     if (probe.featureId === 'control:version-history' && probe.state === 'ready'
       && runtime.testInfo.project.name === 'desktop' && !before.visible) {
       await runtime.walkPersonaObservers?.observe('end-user', 'observeEffect', 'version-history-open')
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'version-history-open')
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeResult', 'version-history-open')
+      await runtime.walkPersonaObservers?.observe('ui-ux-dev', 'completion', { page,
+        controls: [{ id: 'history-trigger', locator },
+          { id: 'history-close', locator: panel.getByRole('button', { name: spec.close, exact: true }) }],
+        completionLocator: panel, completionObserved: true })
     }
     return
   }
@@ -4140,6 +4197,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   if (target === 'retry:history') {
     await assertHistoryRecovery(runtime, assertions)
     if (probe.featureId === 'action:bar-retry' && probe.state === 'retry-history') {
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeEvent', 'Versions restored')
+      await runtime.walkPersonaObservers?.observe('qc-dev', 'observeResult', 'Versions restored')
       await runtime.walkPersonaObservers?.observe('ops-sre', 'observeRecovery', {
         action: 'Retry', outcome: 'Versions restored', outcomeVisible: true,
       })
@@ -4409,6 +4468,7 @@ export async function runProbe(probe, runtime) {
       }
     }
     const before = await captureBefore(probe, runtime)
+    if (typeof prepareQcDevHistory === 'function') await prepareQcDevHistory(probe, runtime, locator, before)
     if (probe.featureId && probe.state && probe.assertion.target === 'engine-refusal'
       && typeof runtime.walkPersonaObservers?.observe === 'function') {
       await runtime.walkPersonaObservers.observe('red-hat', 'before', before)
