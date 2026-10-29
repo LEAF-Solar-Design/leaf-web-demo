@@ -31,7 +31,7 @@ import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readCont
 export { expect }
 
 export const STUDIO_RAIL_FEATURES = Object.freeze(new Set([
-  'control:linked-services', 'control:job-monitor-expand', 'control:notification-collapse',
+  'control:linked-services', 'control:job-monitor-expand', 'control:notification-collapse', 'control:objects',
 ]))
 
 const studioRailButton = page => page.getByRole('navigation', { name: 'Workspace controls', exact: true })
@@ -782,7 +782,7 @@ export const ACCESSIBILITY_DIALOG_SCOPE = Object.freeze({
   'control:claude-accounts': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Claude accounts',
     initialFocus: Object.freeze({ role: 'button', name: 'Close Claude account panel', key: 'close-claude-accounts' }),
     expectedModal: false, expectedEscapeClosed: true }),
-  'control:session-details': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Session · provenance' }),
+  'control:session-details': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Session details' }),
   'control:version-history': Object.freeze({ states: Object.freeze(['ready']), name: 'Version history',
     initialFocus: Object.freeze({ key: 'control:version-history' }), expectedModal: false, expectedEscapeClosed: true }),
   'action:bar-shortcuts': Object.freeze({ states: Object.freeze(['ready']), name: 'Keyboard shortcuts',
@@ -1266,7 +1266,7 @@ export async function setToolRail(page, open, phone, assertions = expect, detect
 const baselineThreePanels = Object.freeze({
   'claude-accounts-panel': { role: 'dialog', name: 'Claude accounts', close: 'Close Claude account panel' },
   'linked-services-panel': { role: 'dialog', name: 'Linked services', close: 'Close linked services panel' },
-  'session-provenance': { role: 'dialog', name: 'Session · provenance', close: 'Close details' },
+  'session-provenance': { role: 'dialog', name: 'Session details', close: 'Close details' },
   'version-history': { role: 'dialog', name: 'Version history', close: 'Close version history' },
   'cost-panel': { role: 'region', name: 'What Leaf costs to operate', close: 'Close cost panel' },
 })
@@ -2675,7 +2675,7 @@ async function baselineThreeState(probe, runtime, recipe) {
   if (target === 'session-provenance') {
     await expect(locator).toHaveCount(1)
     await expect(locator).toBeVisible()
-    await expect(page.getByRole('dialog', { name: 'Session · provenance', exact: true })).toBeHidden()
+    await expect(page.getByRole('dialog', { name: 'Session details', exact: true })).toBeHidden()
   }
   if (target === 'notification-inbox-collapsed') {
     await expect(locator).toBeVisible()
@@ -2714,7 +2714,7 @@ async function baselineThreeState(probe, runtime, recipe) {
   if (target === 'signed-out-session') {
     await expect(locator).toHaveCount(1)
     await expect(locator).toBeVisible()
-    await expect(page.getByRole('dialog', { name: 'Session · provenance', exact: true })).toBeHidden()
+    await expect(page.getByRole('dialog', { name: 'Session details', exact: true })).toBeHidden()
   }
 }
 
@@ -2970,7 +2970,8 @@ export async function seedSolarChain(runtime, recipe) {
 export async function prepareStudioRail(probe, runtime, recipe, { enter = requireWorkspace, reveal = revealStudioRail } = {}) {
   const { page } = runtime
   if (STUDIO_RAIL_FEATURES.has(probe.featureId)
-    && ['baseline-three-state', 'job-monitor-collapsed'].includes(recipe.kind)) {
+    && (['baseline-three-state', 'job-monitor-collapsed'].includes(recipe.kind)
+      || (probe.featureId === 'control:objects' && recipe.kind === 'census-disclosure'))) {
     await enter(runtime)
     if (await reveal(page)) runtime.cleanup.push(async () => {
       const button = studioRailButton(page)
@@ -3895,7 +3896,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     const details = page.getByRole('button', { name: 'Details', exact: true })
     await expect(details).toHaveCount(1)
     await details.click()
-    const panel = page.getByRole('dialog', { name: 'Session · provenance', exact: true })
+    const panel = page.getByRole('dialog', { name: 'Session details', exact: true })
     await expect(panel).toBeVisible()
     await expect(panel.getByTestId('diagnostics-block')).toHaveText(/(?:^|\n)session signed out(?:\n|$)/)
     await expect(panel.getByRole('button', { name: 'Refresh', exact: true })).toBeVisible()
