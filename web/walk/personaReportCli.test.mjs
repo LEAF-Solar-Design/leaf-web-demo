@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
+import { existsSync, mkdtempSync, mkdirSync, readFileSync, writeFileSync, rmSync, symlinkSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
@@ -217,17 +217,36 @@ test('input files and aggregate decoded evidence enforce byte bounds', (t) => {
   assert.match(run().stderr, /Total decoded evidence exceeds byte bound/)
 })
 
-test('an oversized persona output is rejected before writing', (t) => {
+test('a persona output between 1 MiB and 16 MiB is written', (t) => {
   const { directory, run } = fixture(t)
   const path = join(directory, 'feature-map.json')
   const featureMap = JSON.parse(readFileSync(path, 'utf8'))
   featureMap.entries.push(...Array.from({ length: 700 }, (_, i) => ({ id: `action:feature-${i}`,
     states: ['ready'], viewports: ['phone'] })))
   writeJson(path, featureMap)
+  const result = run()
+  assert.equal(result.status, 0, result.stderr)
+  const output = readFileSync(join(directory, 'out.json'))
+  assert.ok(output.length > MAX_RECEIPT_BYTES)
+  assert.ok(output.length <= 16 * 1024 * 1024)
+  assert.equal(JSON.parse(output.toString('utf8')).denominator, 7020)
+})
+
+test('a persona output over 16 MiB is rejected before creating or overwriting output', (t) => {
+  const { directory, run } = fixture(t)
+  const path = join(directory, 'feature-map.json')
+  const featureMap = JSON.parse(readFileSync(path, 'utf8'))
+  featureMap.entries.push(...Array.from({ length: 6000 }, (_, i) => ({ id: `action:feature-${i}`,
+    states: ['ready'], viewports: ['phone'] })))
+  writeJson(path, featureMap)
+  const refused = run()
+  assert.equal(refused.status, 2, refused.stderr)
+  assert.match(refused.stderr, /Persona output exceeds 16 MiB bound/)
+  assert.equal(existsSync(join(directory, 'out.json')), false)
   writeFileSync(join(directory, 'out.json'), 'previous-output')
   const result = run()
-  assert.notEqual(result.status, 0)
-  assert.match(result.stderr, /output exceeds 1 MiB/)
+  assert.equal(result.status, 2, result.stderr)
+  assert.match(result.stderr, /Persona output exceeds 16 MiB bound/)
   assert.equal(readFileSync(join(directory, 'out.json'), 'utf8'), 'previous-output')
 })
 
