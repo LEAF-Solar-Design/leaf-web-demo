@@ -68,7 +68,7 @@ def test_pp3a_gate_registration():
     assert suite.cwd == SCRIPTS
     assert suite.argv == runner._py_pytest("test_proof_project.py")
     assert suite.label == "scripts test_proof_project.py"
-    assert suite.kind == "pytest" and suite.expected == 302
+    assert suite.kind == "pytest" and suite.expected == 313
     assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
     assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
@@ -4798,11 +4798,11 @@ def test_pp3b_gate_registration():
     assert len(suites) == 1
     suite = suites[0]
     assert suite.cwd == runner.WEB and suite.kind == "script" and suite.expected is None
-    assert suite.argv == ["node", "--input-type=module", "-e", "import { startVitest } from 'vitest/node'; const ctx = await startVitest('test', ['e2e/project/projectProof.test.mjs'], { config: false, run: true, environment: 'node', include: ['e2e/project/projectProof.test.mjs'], exclude: ['node_modules/**'], reporters: ['verbose'] }); if (!ctx) process.exitCode = 1; else { const rows = ctx.state.getFiles().flatMap(file => file.tasks); if (rows.length !== 21 || rows.some(row => row.type !== 'test' || row.result?.state !== 'pass')) process.exitCode = 1; await ctx.close(); }"]
+    assert suite.argv == ["node", "--input-type=module", "-e", "import { startVitest } from 'vitest/node'; const ctx = await startVitest('test', ['e2e/project/projectProof.test.mjs'], { config: false, run: true, environment: 'node', include: ['e2e/project/projectProof.test.mjs'], exclude: ['node_modules/**'], reporters: ['verbose'] }); if (!ctx) process.exitCode = 1; else { const rows = ctx.state.getFiles().flatMap(file => file.tasks); if (rows.length !== 22 || rows.some(row => row.type !== 'test' || row.result?.state !== 'pass')) process.exitCode = 1; await ctx.close(); }"]
     assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
     source = (runner.WEB / "e2e/project/projectProof.test.mjs").read_text(encoding="utf-8")
-    assert len(re.findall(r"^it\('", source, re.MULTILINE)) == 21
+    assert len(re.findall(r"^it\('", source, re.MULTILINE)) == 22
     assert runner.serial_suite_reason(suite)
     assert runner.conflict_resources(suite) == frozenset({"web-tree"})

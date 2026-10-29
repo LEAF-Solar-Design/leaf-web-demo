@@ -14,7 +14,7 @@ const equalDocument = (left, right) => left && right && (left.schema || right.sc
 
 export function PagePreview({ document, onSelectField, projectId }) {
   if (!document) return null
-  if (document.schema === 'leaf.portfolio.v1') return <PortfolioPreview document={document} projectId={projectId} />
+  if (document.schema === 'leaf.portfolio.v1') return <PortfolioPreview document={document} projectId={projectId} onSelectField={onSelectField} />
   const text = field => onSelectField
     ? <button type="button" className="project-page__edit" aria-label={`Edit ${field}`} onClick={() => onSelectField(field)}>{document[field]}</button>
     : document[field]
@@ -40,6 +40,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   const [notice, setNotice] = useState('')
   const [suspended, setSuspended] = useState(false)
   const [native, setNative] = useState(null)
+  const [reviewRequest, setReviewRequest] = useState(0)
+  const actionRow = useRef(null)
+  const editor = useRef(null)
   const nativeSession = useRef(null)
   const live = useRef(false)
   const operation = useRef(null)
@@ -104,7 +107,24 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     }
   }, [accountScope])
 
-  useEffect(() => { fields.current[typeof selectedField === 'string' ? selectedField : selectedField?.field]?.focus() }, [selectedField, draft !== null])
+  useEffect(() => {
+    const field = typeof selectedField === 'string' ? selectedField : selectedField?.field
+    if (TEXT_FIELDS.some(([name]) => name === field)) fields.current[field]?.focus()
+  }, [selectedField, draft !== null])
+  useEffect(() => {
+    if (!draft || !actionRow.current) return
+    const heading = editor.current.closest('.browser-project-panel')?.querySelector('.browser-panel-heading')
+    const measure = () => {
+      editor.current?.style.setProperty('--page-actions-height', `${actionRow.current.getBoundingClientRect().height}px`)
+      editor.current?.style.setProperty('--page-sticky-top', `${heading?.getBoundingClientRect().height || 0}px`)
+    }
+    measure()
+    if (!globalThis.ResizeObserver) return
+    const observer = new ResizeObserver(measure)
+    observer.observe(actionRow.current)
+    if (heading) observer.observe(heading)
+    return () => observer.disconnect()
+  }, [draft !== null])
 
   const show = document => preview.current?.({ document, name: document.name || document.label || 'Page' })
   const create = () => {
@@ -261,7 +281,12 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   const nativeLabel = nativeStatus === 'complete' ? native.url ? 'Ready' : native.active ? 'Building' : 'Screenshot unavailable'
     : ({ queued: 'Queued', running: 'Building', failed: 'Failed', cancelled: 'Cancelled' })[nativeStatus]
 
-  return <section className="project-page-editor" aria-label="Page editor">
+  return <section className="project-page-editor" aria-label="Page editor" ref={editor} onFocusCapture={event => {
+    const row = actionRow.current
+    if (row && !row.contains(event.target) && event.target.getBoundingClientRect().top < row.getBoundingClientRect().bottom) {
+      event.target.scrollIntoView?.({ block: 'nearest' })
+    }
+  }}>
     <h2>Page</h2>
     <p className="project-page-editor__note">Create a coming-soon page or photo portfolio. Saving keeps a draft in this project; it does not publish a site.</p>
     {!enabled && <p role="status">Sign in and choose a project to edit a page.</p>}
@@ -272,10 +297,17 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     </div>
     <label><span>Import portfolio content</span><input type="file" accept=".json,application/json" disabled={!enabled || Boolean(busy)} onChange={importContent} /></label>
     {draft && <>
-      <p role="status" aria-live="polite">{state}</p>
+      <div className="project-page-editor__save-row" ref={actionRow}>
+        <button type="button" onClick={save} disabled={!enabled || Boolean(busy) || !dirty || Boolean(validation) || error?.conflict}>Save page</button>
+        <p role="status" aria-live="polite">{state}</p>
+      </div>
+      {validation && <div className="project-page-editor__validation">
+        <p className="project-page-editor__error" role="alert">{validation}</p>
+        {draft.schema === 'leaf.portfolio.v1' && <button type="button" onClick={() => setReviewRequest(value => value + 1)}>Show all fields to review errors</button>}
+      </div>}
       <fieldset disabled={Boolean(busy) || !enabled}>
         <legend className="project-page-editor__legend">Page content</legend>
-        {draft.schema === 'leaf.portfolio.v1' ? <PortfolioEditor document={draft} onChange={changePortfolio} projectId={projectId} /> : <>{TEXT_FIELDS.map(([field, label, limit]) => <label key={field} htmlFor={`${id}-${field}`}>
+        {draft.schema === 'leaf.portfolio.v1' ? <PortfolioEditor document={draft} onChange={changePortfolio} projectId={projectId} reviewRequest={reviewRequest} selectedField={enabled ? selectedField : null} /> : <>{TEXT_FIELDS.map(([field, label, limit]) => <label key={field} htmlFor={`${id}-${field}`}>
           <span>{label}</span>
           {field === 'description'
             ? <textarea id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} rows={4} onChange={event => change(field, event.target.value)} />
@@ -289,9 +321,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
         </select></label>
         </>}
       </fieldset>
-      {validation && <p className="project-page-editor__error" role="alert">{validation}</p>}
       <div className="project-page-editor__actions">
-        <button type="button" onClick={save} disabled={!enabled || Boolean(busy) || !dirty || Boolean(validation) || error?.conflict}>Save page</button>
         <button type="button" onClick={() => download()} disabled={!enabled || Boolean(busy) || dirty || !saved}>{busy === 'exporting' ? 'Downloading…' : 'Download Next.js source'}</button>
         {draft.schema === 'leaf.portfolio.v1' && <button type="button" onClick={() => download('ios')} disabled={!enabled || Boolean(busy) || dirty || !saved}>Download native iOS source</button>}
       </div>

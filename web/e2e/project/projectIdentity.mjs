@@ -31,7 +31,7 @@ export function validateMetadata(input) {
   requireValue(source && /^[a-f0-9]{40}$/.test(source.commit))
   for (const key of ['dirty_tree_sha256', 'tested_source_manifest_sha256']) requireValue(HEX.test(source[key]))
   const pathOK = value => typeof value === 'string' && value.length <= 512 &&
-    /^(?:[A-Za-z0-9_.-]+\/)*[A-Za-z0-9_.-]+$/.test(value) && !value.split('/').some(p => p === '..' || p === '.')
+    !/[\u0000-\u001f\u007f\\]/.test(value) && value.split('/').every(p => p !== '' && p !== '.' && p !== '..')
   requireValue(Array.isArray(source.files) && source.files.length > 0 && source.files.length <= 20000)
   const files = source.files.map(file => {
     requireValue(pathOK(file.path) && HEX.test(file.sha256) && Number.isSafeInteger(file.size) && file.size >= 0)

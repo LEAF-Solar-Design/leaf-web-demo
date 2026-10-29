@@ -451,3 +451,14 @@ it('PP3B-21 bundle output is nonempty single-file and bounded by UTF-8 byte size
   const limit = 'x'.repeat(MAX_BUNDLE_BYTES)
   expect(await createProjectApiBundle({}, async () => ({ outputFiles: [{ text: limit }] }))()).toBe(limit)
 })
+
+it('PP3B-22 metadata accepts real repository paths', () => {
+  const input = metadata()
+  const path = 'web/src/app/[[...slug]]/page.jsx'
+  input.source_binding.files[0].path = path
+  expect(validateMetadata(input).source_binding.files[0].path).toBe(path)
+  for (const invalid of ['a/../b', 'a//b', 'a\\b', 'a/\u0001b']) {
+    input.source_binding.files[0].path = invalid
+    expect(() => validateMetadata(input)).toThrow(/^PP3B_METADATA$/)
+  }
+})
