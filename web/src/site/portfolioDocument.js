@@ -6,9 +6,9 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 const EMAIL = /^[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+$/
 const clone = value => JSON.parse(JSON.stringify(value))
 const fullMatch = (pattern, value) => typeof value === 'string' && pattern.exec(value)?.[0] === value
-function exact(value, keys) {
+function exact(value, keys, optional = []) {
   if (!value || typeof value !== 'object' || Array.isArray(value)
-    || Object.keys(value).sort().join(' ') !== keys.split(' ').sort().join(' ')) throw new Error('Unsupported portfolio fields.')
+    || Object.keys(value).filter(key => !optional.includes(key)).sort().join(' ') !== keys.split(' ').sort().join(' ')) throw new Error('Unsupported portfolio fields.')
 }
 function text(value, low, high, label) {
   if (typeof value !== 'string' || Array.from(value).length < low || Array.from(value).length > high || (low && !value.trim())
@@ -22,7 +22,8 @@ function items(value, low, high) {
 }
 
 export function validatePortfolioDocument(document, importing = false) {
-  exact(document, 'schema name headline introduction about contact resume categories theme')
+  exact(document, 'schema name headline introduction about contact resume categories theme', ['galleryLayout'])
+  if (Object.hasOwn(document, 'galleryLayout') && !['grid', 'single'].includes(document.galleryLayout)) throw new Error('Unsupported photo layout.')
   if (document.schema !== (importing ? 'leaf.portfolio.import.v1' : PORTFOLIO_SCHEMA) || document.theme !== 'light') throw new Error('Unsupported portfolio schema or theme.')
   for (const [field, low, high] of [['name', 1, 120], ['headline', 1, 240], ['introduction', 0, 2400], ['about', 0, 8000]]) text(document[field], low, high, field)
   exact(document.contact, 'email location')
