@@ -47,6 +47,7 @@ import { createHash, timingSafeEqual } from "node:crypto";
 import { createServer as createHttpServer } from "node:http";
 import type { IncomingMessage, Server, ServerResponse } from "node:http";
 import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
+import { PortfolioProposalError, PortfolioProposalService, type PortfolioProposalRequest } from "./agent/portfolioProposal.js";
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
 import { redactTokens } from "./redact.js";
@@ -817,6 +818,7 @@ export interface Harness {
 export function createHarness(ports: HarnessPorts, opts?: {
   auth?: HarnessAuthConfig;
   projectRepositoryEdits?: CampaignSourceService;
+  portfolioProposals?: Pick<PortfolioProposalService, "propose">;
   standardServicesApproval?: {
     dispatchSecret: string;
     host: LeafStandardServicesHumanApprovalHost;
@@ -943,10 +945,54 @@ export function createHarness(ports: HarnessPorts, opts?: {
         return send(res, 404, { error: { code: "not_found", message: "route not found" } });
       }
 
+      const auth = explicitAuth ?? resolveHarnessAuth();
+      if (method === "POST" && path === "/internal/portfolio/proposals") {
+        res.setHeader("cache-control", "private, no-store");
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        const tenant = authorityHeader(req, "x-tenant-id");
+        if (!tenant?.trim()) return send(res, 400, { error: { code: "invalid_request" } });
+        const service = opts?.portfolioProposals;
+        if (!service) return send(res, 503, { error: { code: "unavailable" } });
+        const abort = new AbortController();
+        const onAbort = (): void => { abort.abort(); };
+        const onClose = (): void => { if (!res.writableEnded) abort.abort(); };
+        req.on("aborted", onAbort);
+        res.on("close", onClose);
+        try {
+          let body: unknown;
+          try {
+            body = await readJsonBody(req, 256 * 1024, true, false, true);
+          } catch {
+            if (!res.destroyed) return send(res, abort.signal.aborted ? 499 : 400,
+              { error: { code: abort.signal.aborted ? "aborted" : "invalid_request" } });
+            return;
+          }
+          if (!isRecord(body) || body.tenant_id !== tenant) {
+            return send(res, 400, { error: { code: "invalid_request" } });
+          }
+          if (req.aborted || res.destroyed) abort.abort();
+          const result = await service.propose(body as unknown as PortfolioProposalRequest, abort.signal);
+          if (!res.destroyed) return send(res, 200, result);
+        } catch (error) {
+          if (res.destroyed) return;
+          if (error instanceof PortfolioProposalError) {
+            const code = error.code === "grant_unavailable" || error.code === "sdk_failure" || error.code === "settlement_failure"
+              ? "unavailable" : error.code;
+            const status = { invalid_request: 400, invalid_output: 502, unavailable: 503, timeout: 504, aborted: 499 }[code];
+            return send(res, status, { error: { code } });
+          }
+          return send(res, 500, { error: { code: "internal_error" } });
+        } finally {
+          req.off("aborted", onAbort);
+          res.off("close", onClose);
+        }
+        return;
+      }
+
       // F5 caller-auth gate: every non-health route requires the shared secret when the
       // gate is enabled. Rejected BEFORE any body read, tenant resolution, or store touch,
       // so an unauthed caller can neither author, run, nor read/overwrite/delete a grant.
-      const auth = explicitAuth ?? resolveHarnessAuth();
       const denial = harnessAuthDenial(req, auth);
       if (denial) return send(res, 401, denial);
 
@@ -1812,6 +1858,7 @@ export async function startReal(port = 8130): Promise<Server> {
   }) : undefined;
   const server = createHarness(ports, {
     ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
+    portfolioProposals: new PortfolioProposalService({ oauth }),
     readiness,
   }).listen(port);
   if (sessionStore) {
