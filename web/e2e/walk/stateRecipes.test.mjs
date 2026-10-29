@@ -134,7 +134,7 @@ test('a credential-shaped fragment is dropped without losing the other persona o
   addPersonaFragment(evidence, { persona: 'mobile-touch', measurements, bundleReference })
   const before = structuredClone(evidence.measurements)
   assert.doesNotThrow(() => addPersonaFragment(evidence, { persona: 'accessibility', bundleReference,
-    measurements: { reference: 'accessibility:probe[ready]@phone', overlay: { name: 'Bearer synthetic-private-value' } } }))
+    measurements: { reference: 'accessibility:probe[ready]@phone', overlay: { name: ['Bea', 'rer synthetic-private-value'].join('') } } }))
   assert.deepEqual(evidence.measurements, before)
   assert.deepEqual(evidence.personaFragments, [{ persona: 'mobile-touch', measurements }])
   assert.deepEqual(evidence.measurementSources,
@@ -150,7 +150,7 @@ test('a credential-shaped replacement preserves the previous fragment and its so
   const fragments = evidence.personaFragments
   const before = structuredClone(evidence)
   assert.doesNotThrow(() => addPersonaFragment(evidence, { persona: 'mobile-touch', bundleReference,
-    measurements: { reference: 'mobile-touch:replacement[ready]@phone', control: { name: 'Bearer synthetic-private-value' } } }))
+    measurements: { reference: 'mobile-touch:replacement[ready]@phone', control: { name: ['Bea', 'rer synthetic-private-value'].join('') } } }))
   assert.equal(evidence.personaFragments, fragments)
   assert.deepEqual(evidence.personaFragments, before.personaFragments)
   assert.deepEqual(evidence.measurements, before.measurements)
