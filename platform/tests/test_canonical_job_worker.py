@@ -241,14 +241,14 @@ def test_retry_is_bounded_and_expired_owner_cannot_release(make_org):
 
 def test_worker_health_is_short_lived():
     observed = datetime(2026, 7, 21, 12, 0, tzinfo=timezone.utc)
+    # worker_health reads the newest heartbeat for a tool, so this test owns its tool name: a real
+    # string-autofill-opt worker that heartbeat on the same database would otherwise be newer and win.
+    tool, worker = f"health-tool-{store.new_uuid()}", f"health-worker-{store.new_uuid()}"
     canonical_jobs.record_worker_heartbeat(
-        "health-worker", "string-autofill-opt", "python-test", "revision-test", "c" * 64,
-        now=observed)
-    health = canonical_jobs.worker_health(
-        "string-autofill-opt", now=observed + timedelta(seconds=5))
-    assert health["worker_id"] == "health-worker"
-    assert canonical_jobs.worker_health(
-        "string-autofill-opt", now=observed + timedelta(seconds=16)) is None
+        worker, tool, "python-test", "revision-test", "c" * 64, now=observed)
+    health = canonical_jobs.worker_health(tool, now=observed + timedelta(seconds=5))
+    assert health["worker_id"] == worker
+    assert canonical_jobs.worker_health(tool, now=observed + timedelta(seconds=16)) is None
 
 
 def test_worker_heartbeat_is_exact_and_fresh():
