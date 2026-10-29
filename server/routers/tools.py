@@ -10,15 +10,51 @@ from __future__ import annotations
 from typing import Any, Dict
 
 from fastapi import APIRouter, Depends
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse, Response
 
 import customization_service
 import deps
 import entitlements
+import tool_envelopes
 from customization_flags import enabled as customization_enabled
 from envelopes import ErrorCode, error_obj, with_envelope_fields
 
 router = APIRouter()
+
+_PUBLISHED_CACHE = {"Cache-Control": "private, max-age=300"}
+
+
+@router.get("/api/tool-envelopes")
+def published_tools(tenant=Depends(deps.require_active_tenant)) -> Response:
+    return JSONResponse({"tools": tool_envelopes.published_catalog().list()}, headers=_PUBLISHED_CACHE)
+
+
+@router.get("/api/tool-envelopes/revocations")
+def published_revocations(tenant=Depends(deps.require_active_tenant)) -> Response:
+    raw = tool_envelopes.published_catalog().revocations_bytes()
+    if raw is None:
+        return JSONResponse({"detail": "no_revocation_list"}, status_code=404, headers=_PUBLISHED_CACHE)
+    return Response(raw, media_type="application/json", headers=_PUBLISHED_CACHE)
+
+
+@router.get("/api/tool-envelopes/{name:path}/{version}/envelope")
+def published_envelope(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not tool_envelopes.valid_identity(name, version):
+        return JSONResponse({"detail": "invalid_tool_identity"}, status_code=400, headers=_PUBLISHED_CACHE)
+    raw = tool_envelopes.published_catalog().envelope_bytes(name, version)
+    if raw is None:
+        return JSONResponse({"detail": "tool_not_published"}, status_code=404, headers=_PUBLISHED_CACHE)
+    return Response(raw, media_type="application/json", headers=_PUBLISHED_CACHE)
+
+
+@router.get("/api/tool-envelopes/{name:path}/{version}/package")
+def published_package(name: str, version: str, tenant=Depends(deps.require_active_tenant)) -> Response:
+    if not tool_envelopes.valid_identity(name, version):
+        return JSONResponse({"detail": "invalid_tool_identity"}, status_code=400, headers=_PUBLISHED_CACHE)
+    path = tool_envelopes.published_catalog().package_path(name, version)
+    if path is None:
+        return JSONResponse({"detail": "tool_not_published"}, status_code=404, headers=_PUBLISHED_CACHE)
+    return FileResponse(path, media_type="application/zip", headers=_PUBLISHED_CACHE)
 
 
 def _catalog_error(exc: customization_service.CustomizationServiceError) -> JSONResponse:
