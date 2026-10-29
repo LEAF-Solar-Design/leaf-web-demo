@@ -17,6 +17,7 @@ import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
 import { createAccessibilityMeasurementCapture } from './accessibilityMeasurements.mjs'
+import { composePersonaMeasurementBundle } from './personaMeasurementBundle.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
@@ -495,6 +496,22 @@ export async function discloseControlPanel(page, recipe) {
   }
 }
 
+export function addPersonaFragment(evidence, { persona, measurements, bundleReference }) {
+  try {
+    const fragments = (evidence.personaFragments || []).filter(fragment => fragment.persona !== persona)
+    fragments.push({ persona, measurements })
+    let bundle = composePersonaMeasurementBundle({ reference: bundleReference, fragments })
+    if (!bundle) {
+      evidence.measurementDiagnostics ||= []
+      evidence.measurementDiagnostics.push({ message: 'Optional persona measurement fragment rejected' })
+      bundle = composePersonaMeasurementBundle({ reference: bundleReference, fragments: evidence.personaFragments || [] })
+    } else evidence.personaFragments = fragments
+    evidence.measurements = bundle?.measurements ?? null
+    evidence.measurementSources = bundle?.sources ?? []
+    evidence.measurementConflicts = bundle?.conflicts ?? []
+  } catch { /* Optional evidence never changes the functional verdict. */ }
+}
+
 export function mergeAccessibilityMeasurements(existing, result) {
   const merge = (previous, observed) => {
     const merged = { ...previous }
@@ -554,7 +571,8 @@ export async function prepareAccessibilityCapture({ page, probe, viewport, locat
   } catch { accessibilityDiagnostic(evidence, 'prepare'); return null }
 }
 
-export async function followAccessibilityCapture({ capture, page, evidence }) {
+export async function followAccessibilityCapture({ capture, page, evidence,
+  bundleReference = `walk:${evidence.featureId}[${evidence.state}]@${evidence.viewport}` }) {
   if (!capture) return
   let phase = 'opened'
   try {
@@ -568,7 +586,9 @@ export async function followAccessibilityCapture({ capture, page, evidence }) {
   } catch { accessibilityDiagnostic(evidence, phase) }
   try {
     const result = capture.result()
-    evidence.measurements = mergeAccessibilityMeasurements(evidence.measurements, result)
+    const measurements = Object.fromEntries(['reference', 'overlay', 'focus']
+      .filter(key => result?.[key] !== undefined).map(key => [key, result[key]]))
+    addPersonaFragment(evidence, { persona: 'accessibility', measurements, bundleReference })
     evidence.accessibilityDiagnostics ||= []
     if (result.diagnostics) evidence.accessibilityDiagnostics.push({ phase: 'observations', ...result.diagnostics })
   } catch { accessibilityDiagnostic(evidence, 'result') }
@@ -4121,6 +4141,10 @@ export async function runProbe(probe, runtime) {
     if (probe.assertion.kind !== 'disabled_with_reason' || probe.locator?.keyboardAction === 'engine:repeat') {
       await test.step(`Activate ${probe.featureId}`, () => typeof activateWithMobileTouchMeasurements === 'function'
         ? activateWithMobileTouchMeasurements({ page, locator, probe, viewport: runtime.testInfo.project.name,
+          addFragment: (persona, measurements) => {
+            if (typeof addPersonaFragment === 'function') addPersonaFragment(evidence, { persona, measurements,
+              bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })
+          },
           evidence, activate: () => activate(probe, runtime, locator) })
         : activate(probe, runtime, locator))
     }
@@ -4129,7 +4153,8 @@ export async function runProbe(probe, runtime) {
       return assertEffect(probe, runtime, locator, before)
     })
     if (typeof followAccessibilityCapture === 'function') {
-      await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence })
+      await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence,
+        bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })
     }
     if (runtime.failedDrawing) evidence.failedDrawing.actionAvailability = probe.assertion.kind === 'disabled_with_reason'
       ? 'disabled_with_reason' : 'available'

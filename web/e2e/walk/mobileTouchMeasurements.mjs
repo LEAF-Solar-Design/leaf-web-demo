@@ -42,17 +42,8 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
   } catch { return null }
 }
 
-function mergeMeasurements(existing, measured) {
-  const merged = { ...existing }
-  for (const [key, value] of Object.entries(measured)) {
-    merged[key] = value && typeof value === 'object' && !Array.isArray(value)
-      ? mergeMeasurements(existing?.[key], value) : value
-  }
-  return merged
-}
-
 // Keep activation outside the optional-evidence catches so its verdict is preserved.
-export async function activateWithMobileTouchMeasurements({ page, locator, probe, viewport, evidence, activate }) {
+export async function activateWithMobileTouchMeasurements({ page, locator, probe, viewport, addFragment, activate }) {
   let handle
   try {
     if (viewport === 'phone' && (!probe.locator.trigger || probe.locator.trigger === 'click')
@@ -67,6 +58,6 @@ export async function activateWithMobileTouchMeasurements({ page, locator, probe
     const measurements = await collectMobileTouchMeasurements({ page, handle, viewport,
       reference: `mobile-touch:${probe.featureId}[${probe.state}]@${viewport}`,
       locatorDescription: probe.locator.phone || probe.locator })
-    if (measurements) evidence.measurements = mergeMeasurements(evidence.measurements, measurements)
+    if (measurements) addFragment('mobile-touch', measurements)
   } catch { /* Optional evidence never changes the functional verdict. */ }
 }
