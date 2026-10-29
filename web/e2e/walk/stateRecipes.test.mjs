@@ -30,7 +30,8 @@ import { setStudioDrawer, studioDrawerLocator, assertStudioDrawer, studioDrawerP
 import { ACCESSIBILITY_DIALOG_SCOPE, accessibilityDialogTargets, mergeAccessibilityMeasurements, addPersonaFragment,
   prepareAccessibilityCapture, followAccessibilityCapture } from './fixtures.mjs'
 import { accessibility, mobileTouch, endUser, support, opsSre, redHat, performance as performanceLens } from './lenses/index.mjs'
-import { createWalkPersonaObservers, protectedStateDigest } from './fixtures.mjs'
+import { createWalkPersonaObservers, protectedStateDigest, prepareQcDevHistory } from './fixtures.mjs'
+import { qcDev, uiUxDev } from './lenses/index.mjs'
 import { PANEL_PERFORMANCE_BUDGETS, PANEL_PERFORMANCE_BUDGET_SOURCE, PANEL_PERFORMANCE_VIEWPORTS,
   preparePanelPerformanceCapture } from './fixtures.mjs'
 import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
@@ -180,6 +181,175 @@ function observerWalkFixture(persona, overrides = {}) {
   const observers = createWalkPersonaObservers({ probe, viewport: 'desktop', evidence, ...overrides })
   return { probe, evidence, observers }
 }
+
+test('WL31 History uses the declared QC order and never supplies a missing result event', async () => {
+  for (const resultEvent of [true, false]) {
+    const fake = observerWalkFixture('end-user')
+    const verdict = structuredClone(fake.evidence.result)
+    await fake.observers.observe('qc-dev', 'start')
+    await fake.observers.observe('qc-dev', 'observeEvent', 'control:version-history')
+    if (resultEvent) await fake.observers.observe('qc-dev', 'observeEvent', 'version-history-open')
+    await fake.observers.observe('qc-dev', 'observeResult', 'version-history-open')
+    await fake.observers.finish()
+    const fragment = fake.evidence.personaFragments.find(({ persona }) => persona === 'qc-dev')
+    assert.deepEqual(fragment.measurements, {
+      reference: 'qc-dev:control:version-history[ready]@desktop', sequence: {
+        action: 'control:version-history', expectedResult: 'version-history-open',
+        expectedOrder: ['control:version-history', 'version-history-open'],
+        observedOrder: resultEvent ? ['control:version-history', 'version-history-open'] : ['control:version-history'],
+        observedResult: 'version-history-open',
+      },
+    })
+    assert.equal(qcDev.evaluate(fake.evidence).status, resultEvent ? 'pass' : 'finding')
+    assert.deepEqual(fake.evidence.result, verdict)
+  }
+})
+
+test('WL31 History failed private-drawing preconditions and failed opening cannot produce QC PASS', async () => {
+  for (const ready of [true, false]) {
+    const fake = observerWalkFixture('end-user')
+    const runtime = { evidence: { ...fake.evidence, drawingId: 'private' }, drawingId: 'private',
+      testInfo: { project: { name: 'desktop' } }, walkPersonaObservers: fake.observers,
+      page: { getByRole: role => role === 'region' ? { locator: () => ({ visible: ready }) }
+        : { visible: false } } }
+    const assertions = target => ({
+      toBeVisible: async () => assert.equal(target.visible, true),
+      toBeHidden: async () => assert.equal(target.visible, false),
+      toHaveAttribute: async (_key, value) => assert.equal(target.expanded, value),
+    })
+    await prepareQcDevHistory(fake.probe, runtime, { expanded: 'false' }, { visible: false }, assertions)
+    await fake.observers.observe('qc-dev', 'observeEvent', 'control:version-history')
+    // A failed functional opening never reaches the result assertion hook.
+    await fake.observers.finish()
+    assert.notEqual(qcDev.evaluate(fake.evidence).status, 'pass')
+    if (!ready) assert.equal(fake.evidence.personaFragments, undefined)
+  }
+})
+
+test('WL31 Retry records each actual recovery GET and retains duplicate order for the real lens', async () => {
+  for (const count of [1, 2]) {
+    const fake = observerWalkFixture('ops-sre')
+    const verdict = structuredClone(fake.evidence.result)
+    let handler, listener, released = false
+    const alert = { visible: true, countValue: 0 }, row = { visible: true, first() { return this } }
+    const runtime = { evidence: fake.evidence, drawingId: 'private', cleanup: [], walkPersonaObservers: fake.observers,
+      page: { route: async (_pattern, callback) => { handler = callback },
+        unroute: async () => { released = true },
+        getByRole: () => ({ getByRole: role => role === 'alert' ? alert : row }),
+        on: (_event, callback) => { assert.equal(released, true); listener = callback }, off: () => {} } }
+    await setupHistoryFault(fake.probe, runtime, faultAssertions, async () => handler({
+      request: () => ({ url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' }),
+      abort: async () => {},
+    }))
+    await fake.observers.observe('qc-dev', 'observeEvent', 'action:bar-retry')
+    for (let index = 0; index < count; index++) listener({ method: () => 'GET',
+      url: () => 'http://walk/api/drawings/private/versions?include_deltas=1' })
+    listener({ method: () => 'POST', url: () => 'http://walk/api/drawings/private/versions' })
+    listener({ method: () => 'GET', url: () => 'http://walk/api/drawings/other/versions' })
+    const probe = { ...fake.probe, assertion: { target: 'retry:history' } }
+    if (count === 1) await assertEffect(probe, runtime, {}, {}, faultAssertions)
+    else await assert.rejects(assertEffect(probe, runtime, {}, {}, faultAssertions), assert.AssertionError)
+    await fake.observers.finish()
+    const fragment = fake.evidence.personaFragments.find(({ persona }) => persona === 'qc-dev')
+    assert.equal(fragment.measurements.reference, 'qc-dev:action:bar-retry[retry-history]@desktop')
+    assert.deepEqual(fragment.measurements.sequence.expectedOrder,
+      ['action:bar-retry', 'history-recovery-request', 'Versions restored'])
+    assert.deepEqual(fragment.measurements.sequence.observedOrder,
+      ['action:bar-retry', ...Array(count).fill('history-recovery-request'), ...(count === 1 ? ['Versions restored'] : [])])
+    assert.equal(qcDev.evaluate(fake.evidence).status, count === 1 ? 'pass' : 'unknown')
+    assert.deepEqual(fake.evidence.result, verdict)
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+  }
+})
+
+test('WL31 the QC lens evaluates a supplied duplicate trace without normalizing it', async () => {
+  const fake = observerWalkFixture('ops-sre')
+  const received = ['action:bar-retry', 'history-recovery-request', 'history-recovery-request', 'Versions restored']
+  await fake.observers.observe('qc-dev', 'start')
+  for (const event of received) await fake.observers.observe('qc-dev', 'observeEvent', event)
+  await fake.observers.observe('qc-dev', 'observeResult', 'Versions restored')
+  await fake.observers.finish()
+  assert.deepEqual(fake.evidence.measurements.sequence.observedOrder, received)
+  const evaluated = qcDev.evaluate(fake.evidence)
+  assert.equal(evaluated.status, 'finding')
+  assert.deepEqual(evaluated.results[0].finding.evidence.evidence['sequence.observedOrder'], received)
+})
+
+test('WL31 History emits a labelled automated UI/UX proxy without participant feedback', async () => {
+  const fake = observerWalkFixture('end-user')
+  const node = x => ({ isConnected: true, innerText: 'Version history', isVisible: async () => true,
+    dispose: async () => {}, getBoundingClientRect: () => ({ x, y: 0, width: 80, height: 40 }) })
+  const triggerNode = node(0), closeNode = node(100), panelNode = node(200)
+  const locator = handle => ({ count: async () => 1, elementHandle: async () => handle, visible: true })
+  const close = locator(closeNode), panel = { ...locator(panelNode), getByRole: () => close }
+  const trigger = { ...locator(triggerNode), getAttribute: async () => 'true' }
+  let samples = 0
+  const runtime = { walkPersonaObservers: fake.observers, testInfo: { project: { name: 'desktop' } },
+    page: { getByRole: () => panel, evaluate: async (callback, argument) => {
+      samples++
+      assert.deepEqual(argument.targets, [triggerNode, closeNode])
+      assert.equal(argument.completion, panelNode)
+      const descriptors = Object.getOwnPropertyDescriptors(globalThis)
+      Object.defineProperty(globalThis, 'window', { configurable: true, value: { innerWidth: 1440, innerHeight: 1000,
+        getComputedStyle: () => ({ display: 'block', visibility: 'visible', opacity: '1' }) } })
+      Object.defineProperty(globalThis, 'document', { configurable: true,
+        value: { elementFromPoint: () => panelNode } })
+      try { return callback(argument) } finally {
+        for (const key of ['window', 'document']) {
+          if (descriptors[key]) Object.defineProperty(globalThis, key, descriptors[key])
+          else delete globalThis[key]
+        }
+      }
+    } } }
+  await assertEffect({ ...fake.probe, kind: 'control', assertion: { target: 'version-history' } },
+    runtime, trigger, { visible: false }, censusAssertions)
+  await fake.observers.finish()
+  assert.equal(samples, 1)
+  const fragment = fake.evidence.personaFragments.find(({ persona }) => persona === 'ui-ux-dev')
+  assert.equal(fragment.measurements.reference, 'ui-ux-dev:control:version-history[ready]@desktop')
+  assert.deepEqual(fragment.measurements.coverage,
+    { kind: 'automated-proxy', predicates: ['ui-ux-dev.completion-proxy'] })
+  assert.equal(Object.hasOwn(fragment.measurements, 'humanFeedback'), false)
+  assert.equal(Object.hasOwn(fake.evidence.measurements, 'humanFeedback'), false)
+  const result = uiUxDev.evaluate(fake.evidence)
+  assert.equal(result.status, 'unknown')
+  assert.equal(result.results.find(entry => entry.assertion_id === 'ui-ux-dev.completion-proxy').status, 'pass')
+})
+
+test('WL31 optional QC and UI/UX errors leave personas absent and preserve the functional verdict', async () => {
+  for (const persona of ['qc-dev', 'ui-ux-dev']) {
+    for (const late of [false, true]) {
+      const throwing = () => { throw new Error('private-observer-value') }
+      const fake = observerWalkFixture('end-user', persona === 'ui-ux-dev' ? { uiUx: throwing }
+        : { qcDev: late ? () => ({ start() {}, observeEvent: throwing }) : throwing })
+      const verdict = structuredClone(fake.evidence.result)
+      await fake.observers.observe('qc-dev', 'start')
+      await fake.observers.observe('qc-dev', 'observeEvent', 'control:version-history')
+      await fake.observers.observe('ui-ux-dev', 'completion', {})
+      await fake.observers.finish()
+      assert.equal(fake.evidence.personaFragments?.some(fragment => fragment.persona === persona) ?? false, false)
+      assert.deepEqual(fake.evidence.result, verdict)
+      assert.equal(JSON.stringify(fake.evidence).includes('private-observer-value'), false)
+    }
+  }
+})
+
+test('WL31 undeclared features, states and viewports create no QC or UI/UX capture', async () => {
+  const unexpected = () => assert.fail('out-of-scope observer created')
+  for (const [featureId, state, viewport] of [
+    ['control:version-history', 'ready', 'phone'], ['control:version-history', 'closed', 'desktop'],
+    ['action:bar-retry', 'retry-history', 'phone'], ['action:bar-retry', 'ready', 'desktop'],
+    ['control:linked-services', 'ready', 'desktop'],
+  ]) {
+    const evidence = {}, observers = createWalkPersonaObservers({ probe: { featureId, state }, viewport,
+      evidence, qcDev: unexpected, uiUx: unexpected })
+    await observers.observe('qc-dev', 'start')
+    await observers.observe('ui-ux-dev', 'completion', {})
+    await observers.finish()
+    assert.equal(evidence.personaFragments, undefined)
+    assert.equal(evidence.measurementDiagnostics, undefined)
+  }
+})
 
 function supportAlertFixture(reachable = true) {
   const title = { innerText: 'Couldn’t load versions' }, reason = { innerText: 'History request failed' }
