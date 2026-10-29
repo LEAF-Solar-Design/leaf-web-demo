@@ -645,6 +645,17 @@ def native_inventory(run_id, run_root, port, *, process_table=None):
         raise RuntimeError("proof native database identity refused") from None
 
 
+def native_tombstone_present(run_root):
+    """True when a removal tombstone may exist; a missing root has none, any other listing error counts as one (fails closed)."""
+    try:
+        with os.scandir(run_root) as entries:
+            return any(entry.name.startswith("postgres.removing-") for entry in entries)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 def _remove_native_directory(run_id, run_root, port):
     owned, data, marker = _native_paths(run_root)
     validated = owned.lstat()
@@ -672,7 +683,7 @@ def cleanup_native(run_id, run_root, port, ownership, *, binaries=None, runner=N
         observed = native_inventory(run_id, run_root, port, process_table=table)
         if observed is None:
             # Recheck a captured PID even if the directory was removed externally.
-            if any(Path(run_root).glob("postgres.removing-*")):
+            if native_tombstone_present(run_root):
                 return False
             return _stop_native_process(ownership, process_table=table)
         if not ownership or observed != ownership:

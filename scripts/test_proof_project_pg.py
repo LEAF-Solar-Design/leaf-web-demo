@@ -1474,3 +1474,37 @@ def test_h_c1_server_major(tmp_path, monkeypatch):
     assert sum("start" in argv for argv, kwargs in c.calls) == 1
     assert sum("stop" in argv for argv, kwargs in c.calls) == 1
     assert not list(tmp_path.glob("postgres*"))
+
+
+def test_h_a1d_missing_root_no_tombstone(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    root = tmp_path / "missing"
+    owned = dict(pid=12345, start_id=c.identity["start_id"], started_at=c.epoch)
+    reads = []
+    def absent(pid):
+        reads.append(pid)
+        return c.table(pid)
+    monkeypatch.setattr(pg.os, "kill", lambda *args: pytest.fail("signal forbidden"))
+    assert not root.exists()
+    assert pg.native_tombstone_present(root) is False
+    assert pg.cleanup_native(RUN, root, 55432, owned, binaries=c.binaries,
+        runner=c.runner, process_table=absent) is True
+    assert reads == [12345] and c.calls == []
+
+
+def test_h_a1d_unreadable_root_refuses(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.alive = True
+    owned = dict(pid=12345, start_id=c.identity["start_id"], started_at=c.epoch)
+    scandir = pg.os.scandir
+    def unreadable(path):
+        if Path(path) == tmp_path:
+            raise PermissionError("fake")
+        return scandir(path)
+    monkeypatch.setattr(pg.os, "scandir", unreadable)
+    monkeypatch.setattr(pg, "native_inventory", lambda *args, **kwargs: None)
+    monkeypatch.setattr(pg.os, "kill", lambda *args: pytest.fail("signal forbidden"))
+    assert pg.native_tombstone_present(tmp_path) is True
+    assert pg.cleanup_native(RUN, tmp_path, 55432, owned, binaries=c.binaries,
+        runner=c.runner, process_table=c.table) is False
+    assert c.calls == []
