@@ -3310,6 +3310,109 @@ def test_verify_gate_proof_refuses_every_forgery(tmp_path, capsys):
     assert rc == 1 and "unreadable proof file" in out
 
 
+def _emitted_proof_for_mode_tests(tmp_path):
+    g = _load_runner()
+    repo = _scratch_git_checkout(tmp_path)
+    out = tmp_path / "gate-proof.json"
+    assert g.emit_gate_proof(
+        out, fingerprint=g.catalog_fingerprint(g.build_suites()), total=1,
+        repo=repo, suite_statuses={s.id: "PASS" for s in g.build_suites()
+                                  if s.kind == "npm-audit"}) == ""
+    tree, _, _ = g.checkout_tree_identity(repo)
+    return g, out, tree, json.loads(out.read_text(encoding="utf-8"))
+
+
+def _wellformed_reused_from():
+    return {
+        "project": "leaf-ci-leaf-web-demo",
+        "source_revision": "a" * 40,
+        "builds": [f"leaf-ci-leaf-web-demo:00000000-0000-4000-a000-{i:012x}"
+                   for i in range(3)],
+        "result_sha256": [f"{i:064x}" for i in range(3)],
+        "receipt_sha256": [f"{i:064x}" for i in range(3, 6)],
+    }
+
+
+def test_verify_gate_proof_accepts_a_wellformed_reused_proof(tmp_path, capsys):
+    g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
+    data.update(mode="reused", reused_from=_wellformed_reused_from())
+    out.write_text(json.dumps(data), encoding="utf-8")
+
+    assert g.verify_gate_proof(out, tree) == 0
+    assert "VERIFIED mode: reused from 3 CI builds" in capsys.readouterr().out
+
+
+def test_verify_gate_proof_keeps_mode_run_and_absent_unchanged(tmp_path, capsys):
+    g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
+    for explicit_mode in (False, True):
+        if explicit_mode:
+            data["mode"] = "run"
+        out.write_text(json.dumps(data), encoding="utf-8")
+
+        assert g.verify_gate_proof(out, tree) == 0
+        output = capsys.readouterr().out
+        assert "VERIFIED: gate proof binds tree" in output
+        assert "VERIFIED mode: run" in output
+
+
+@pytest.mark.parametrize("mutate", [
+    pytest.param(lambda d: d.update(mode="skipped"), id="unknown-mode"),
+    pytest.param(lambda d: d.pop("reused_from"), id="missing-donor"),
+    pytest.param(lambda d: d["reused_from"].update(project="other-project"),
+                 id="wrong-project"),
+    pytest.param(lambda d: d["reused_from"].update(source_revision="a" * 39),
+                 id="short-revision"),
+    pytest.param(lambda d: d["reused_from"].update(source_revision="A" * 40),
+                 id="uppercase-revision"),
+    pytest.param(lambda d: d["reused_from"].update(builds=[]), id="zero-builds"),
+    pytest.param(lambda d: d["reused_from"].update(
+        builds=[f"leaf-ci-leaf-web-demo:00000000-0000-4000-a000-{i:012x}"
+                for i in range(9)]), id="nine-builds"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(
+        1, d["reused_from"]["builds"][0]), id="duplicate-build"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(
+        0, "other-project:00000000-0000-4000-a000-000000000000"),
+        id="other-project-build"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(
+        0, "leaf-ci-leaf-web-demo:not-a-uuid"), id="non-uuid-build"),
+    pytest.param(lambda d: d["reused_from"]["result_sha256"].pop(),
+                 id="short-result-list"),
+    pytest.param(lambda d: d["reused_from"]["receipt_sha256"].__setitem__(
+        0, "z" * 64), id="non-hex-receipt"),
+    pytest.param(lambda d: d["reused_from"].update(extra="unexpected"),
+                 id="extra-donor-key"),
+    pytest.param(lambda d: d["reused_from"].update(builds=None),
+                 id="null-builds"),
+    pytest.param(lambda d: d["reused_from"]["builds"].__setitem__(0, []),
+                 id="non-string-build"),
+    pytest.param(lambda d: d["reused_from"].update(result_sha256=None),
+                 id="null-result-list"),
+    pytest.param(lambda d: d["reused_from"]["receipt_sha256"].__setitem__(0, None),
+                 id="non-string-receipt"),
+])
+def test_verify_gate_proof_refuses_malformed_reused_proofs(tmp_path, capsys, mutate):
+    g, out, tree, data = _emitted_proof_for_mode_tests(tmp_path)
+    data.update(mode="reused", reused_from=_wellformed_reused_from())
+    mutate(data)
+    out.write_text(json.dumps(data), encoding="utf-8")
+
+    assert g.verify_gate_proof(out, tree) == 1
+    assert capsys.readouterr().out.startswith("NOT VERIFIED:")
+
+
+@pytest.mark.parametrize("reused_from", [
+    None, [], "x", {"builds": None},
+    {key: None for key in ("project", "source_revision", "builds",
+                           "result_sha256", "receipt_sha256")},
+])
+def test_reused_from_problem_never_raises(reused_from):
+    g = _load_runner()
+
+    problem = g.reused_from_problem(reused_from)
+
+    assert isinstance(problem, str) and problem
+
+
 def test_proof_cli_rejects_incoherent_flag_combinations(tmp_path):
     """Same silence class as the shard CLI guards: each of these would
     otherwise answer a different question than the one typed. All must exit 2

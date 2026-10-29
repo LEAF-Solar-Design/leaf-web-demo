@@ -5886,6 +5886,40 @@ def emit_gate_proof(path: Path, *, fingerprint: str, total: int,
     return ""
 
 
+_REUSED_FROM_KEYS = frozenset({"project", "source_revision", "builds", "result_sha256", "receipt_sha256"})
+_REUSED_BUILD_ID = re.compile(r"leaf-ci-leaf-web-demo:[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}")
+_HEX64 = re.compile(r"[0-9a-f]{64}")
+
+
+def reused_from_problem(reused_from) -> str:
+    """Pure: '' when `reused_from` is a well-formed donor record, else the first problem (never raises)."""
+    if not isinstance(reused_from, dict):
+        return "must be a dict"
+    if set(reused_from) != _REUSED_FROM_KEYS:
+        return "must contain exactly the donor record keys"
+    if reused_from["project"] != "leaf-ci-leaf-web-demo":
+        return "wrong project"
+    revision = reused_from["source_revision"]
+    if not isinstance(revision, str) or not _HEX40.fullmatch(revision):
+        return "source_revision must be 40 lowercase hex characters"
+    builds = reused_from["builds"]
+    if not isinstance(builds, list) or not 1 <= len(builds) <= 8:
+        return "builds must be a list of 1 to 8 build ids"
+    if any(not isinstance(build, str) or not _REUSED_BUILD_ID.fullmatch(build)
+           for build in builds):
+        return "builds must contain valid project build ids"
+    if len(set(builds)) != len(builds):
+        return "builds must be unique"
+    for key in ("result_sha256", "receipt_sha256"):
+        digests = reused_from[key]
+        if not isinstance(digests, list) or len(digests) != len(builds):
+            return f"{key} must be a list matching builds in length"
+        if any(not isinstance(digest, str) or not _HEX64.fullmatch(digest)
+               for digest in digests):
+            return f"{key} must contain 64 lowercase hex characters per digest"
+    return ""
+
+
 def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
     """Exit code for --verify-gate-proof: 0 only when the document is a
     schema-2 tree-bound gate proof whose tree equals `expect_tree`, whose
@@ -5963,12 +5997,22 @@ def verify_gate_proof(proof_path: Path, expect_tree: str) -> int:
               f"evidence-free proof is never reused as a green skip, the "
               f"next build must re-run the gate")
         return 1
+    mode = data.get("mode", "run")
+    if mode not in ("run", "reused"):
+        print(f"NOT VERIFIED: unknown proof mode {mode!r}; only run and reused are accepted")
+        return 1
+    if mode == "reused":
+        problem = reused_from_problem(data.get("reused_from"))
+        if problem:
+            print(f"NOT VERIFIED: reused proof has a malformed reused_from ({problem})")
+            return 1
     src = data.get("source") if isinstance(data.get("source"), dict) else {}
     print(f"VERIFIED: gate proof binds tree {tree} on catalog fingerprint "
           f"{fingerprint} (self-reported mint: run {src.get('run_id') or '?'} "
           f"attempt {src.get('run_attempt') or '?'}, event "
           f"{src.get('event') or '?'} — informational; provenance comes from "
           f"the artifact's workflow_run metadata)")
+    print(f"VERIFIED mode: {mode}" + (f" from {len(data['reused_from']['builds'])} CI builds" if mode == "reused" else ""))
     return 0
 
 
