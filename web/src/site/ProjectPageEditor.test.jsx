@@ -1,6 +1,6 @@
 import React from 'react'
 import { Blob as NativeBlob } from 'node:buffer'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
 import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot } from './projectPageClient.js'
@@ -31,6 +31,8 @@ const document = { label: 'A page', headline: 'Coming soon', description: 'A lit
 const page = (revision = 1, changes = {}) => ({ revision, digest: 'a'.repeat(64), document: { ...document, ...changes } })
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no }); return { promise, resolve, reject } }
 const button = name => screen.getByRole('button', { name })
+const disclose = name => fireEvent.click(screen.getByText(name, { selector: 'summary' }))
+const reveal = name => { if (!screen.getByText(name, { selector: 'summary' }).parentElement.open) disclose(name) }
 const setup = props => render(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" {...props} />)
 const openSaved = async () => { fireEvent.click(button('Open page')); await screen.findByDisplayValue('A page') }
 
@@ -70,6 +72,83 @@ const importDraft = () => {
 }
 
 describe('portfolio project document', () => {
+  it('keeps 94 photos compact and disclosure neutral, then saves only explicit caption and hero edits', async () => {
+    const original = portfolioDraft()
+    original.categories = [32, 31, 31].map((length, ci) => ({ slug: `gallery-${ci}`, title: `Gallery name ${ci}`, description: '', hero: 0,
+      images: Array.from({ length }, (_, ii) => ({ ...imageRef(PHOTO), material_id: `33333333-3333-4333-8333-${String(ci * 32 + ii).padStart(12, '0')}`, title: `Photo name ${ci}-${ii}` })) }))
+    original.resume = [{ heading: 'Experience', entries: [] }]
+    const bytes = JSON.stringify(original), onPreview = vi.fn()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: original })
+    const view = setup({ onPreview })
+    fireEvent.click(button('Open page'))
+    await screen.findByLabelText('Name')
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+    expect(screen.getAllByText(/Gallery name .*photos/, { selector: 'summary' })).toHaveLength(3)
+    expect(screen.getAllByRole('button', { name: 'Save page' })).toHaveLength(1)
+    disclose('Gallery name 2 · 31 photos')
+    disclose('Photo 31: Photo name 2-30')
+    disclose('Photo 31: Photo name 2-30')
+    disclose('Gallery name 2 · 31 photos')
+    expect(JSON.stringify(original)).toBe(bytes)
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(listProjectPhotos).not.toHaveBeenCalled()
+    expect(readProjectPhotoPreview).not.toHaveBeenCalled()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+    reveal('Gallery name 2 · 31 photos')
+    reveal('Photo 31: Photo name 2-30')
+    const gallery = screen.getByRole('region', { name: 'Gallery 3', exact: true })
+    expect(within(gallery).getByLabelText('Caption 31').value).toBe('Photo name 2-30')
+    fireEvent.change(within(gallery).getByLabelText('Caption 31'), { target: { value: 'Edited caption' } })
+    fireEvent.change(within(gallery).getByLabelText('Hero image'), { target: { value: '30' } })
+    const expected = JSON.parse(bytes)
+    expected.categories[2].images[30].title = 'Edited caption'; expected.categories[2].hero = 30
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).toHaveBeenCalledWith(PROJECT, expected, 7, { signal: expect.any(AbortSignal) })
+    expect(JSON.stringify(original)).toBe(bytes)
+  })
+
+  it('keeps expansion with the material after reorder and removal and resets it on project switch', async () => {
+    const view = setup()
+    await openPortfolio()
+    reveal('Cakes · 2 photos'); reveal('Photo 2: Bread.jpg')
+    fireEvent.click(button('Move image 2 up'))
+    expect(screen.getByText('Photo 1: Bread.jpg', { selector: 'summary' }).parentElement.open).toBe(true)
+    expect(screen.getByText('Photo 2: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(false)
+    fireEvent.click(button('Remove image 1'))
+    expect(screen.getByText('Photo 1: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(false)
+    view.rerender(<ProjectPageEditor projectId={OTHER} accountScope="account-a" />)
+    await openPortfolio()
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+  })
+
+  it('reveals new fields and lets validation reopen hidden invalid photo fields without changing the draft', async () => {
+    const onPreview = vi.fn()
+    setup({ onPreview })
+    await openPortfolio()
+    reveal('Cakes · 2 photos'); reveal('Photo 1: Cake.jpg')
+    fireEvent.change(screen.getByLabelText('Alt text 1'), { target: { value: '' } })
+    disclose('Photo 1: Cake.jpg'); disclose('Cakes · 2 photos')
+    expect(button('Save page').disabled).toBe(true)
+    expect(screen.getByRole('alert').textContent).toContain('image alt text')
+    const changes = onPreview.mock.calls.length
+    fireEvent.click(button('Show all fields to review errors'))
+    expect(screen.getByText('Photo 1: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(true)
+    expect(screen.getByText('Cakes · 2 photos', { selector: 'summary' }).parentElement.open).toBe(true)
+    expect(onPreview).toHaveBeenCalledTimes(changes)
+    fireEvent.change(screen.getByLabelText('Alt text 1'), { target: { value: 'Cake' } })
+    fireEvent.click(button('Add gallery'))
+    expect(screen.getByText('New gallery · 0 photos', { selector: 'summary' }).parentElement.open).toBe(true)
+    fireEvent.click(button('Add resume section'))
+    expect(screen.getByText('Experience', { selector: 'summary' }).parentElement.open).toBe(true)
+    fireEvent.click(button('Add resume entry'))
+    expect(screen.getByLabelText('Entry title')).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
   it('exports native source only from the exact saved portfolio revision', async () => {
     loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
     const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
@@ -92,6 +171,7 @@ describe('portfolio project document', () => {
     fireEvent.click(button('Load project photos'))
     await screen.findByRole('option', { name: 'Cake.jpg' })
     fireEvent.change(screen.getByLabelText('Add project photo to Selected work'), { target: { value: PHOTO.material_id } })
+    expect(screen.getByText('Photo 1: Cake.jpg', { selector: 'summary' }).parentElement.open).toBe(true)
     fireEvent.click(button('Save page'))
     await screen.findByText('Saved')
     expect(saveProjectPage.mock.lastCall[2]).toBe(4)
@@ -103,22 +183,31 @@ describe('portfolio project document', () => {
     listProjectPhotos.mockResolvedValueOnce({ materials: [PHOTO], next_cursor: 'next' }).mockResolvedValueOnce({ materials: [PHOTO_TWO] })
     setup({ onPreview })
     fireEvent.change(screen.getByLabelText('Import portfolio content'), { target: { files: [importFile(importDraft())] } })
-    await screen.findByLabelText('Caption 1')
+    await screen.findByText('Cakes · 2 photos', { selector: 'summary' })
+    disclose('Cakes · 2 photos')
+    disclose('Photo 1: Cake.jpg')
     expect(listProjectPhotos.mock.calls[1]).toEqual([PROJECT, expect.objectContaining({ cursor: 'next', expectedScope: 'account-a' })])
     expect(saveProjectPage).not.toHaveBeenCalled()
     expect(onPreview.mock.lastCall[0].document.categories[0].images[0]).toEqual(imageRef(PHOTO))
     fireEvent.change(screen.getByLabelText('Caption 1'), { target: { value: 'Chocolate celebration' } })
     fireEvent.change(screen.getByLabelText('Hero image'), { target: { value: '1' } })
+    disclose('Photo 2: Bread.jpg')
     fireEvent.click(button('Move image 2 up'))
     expect(onPreview.mock.lastCall[0].document.categories[0]).toMatchObject({ hero: 0, images: [imageRef(PHOTO_TWO), { ...imageRef(PHOTO), title: 'Chocolate celebration' }] })
     fireEvent.click(button('Save page'))
     await screen.findByText('Saved')
     expect(saveProjectPage.mock.lastCall[1].schema).toBe('leaf.portfolio.v1')
     const saved = saveProjectPage.mock.lastCall[1]
+    // A saved response may replace document object identities; reopen real controls.
+    reveal('Cakes · 2 photos')
+    reveal('Photo 1: Bread.jpg')
     loadProjectPage.mockResolvedValueOnce({ revision: 1, digest: 'a'.repeat(64), document: saved })
     fireEvent.change(screen.getByLabelText('Caption 1'), { target: { value: 'Temporary edit' } })
     fireEvent.click(button('Reload saved page'))
-    await waitFor(() => expect(screen.getByLabelText('Caption 1').value).toBe('Bread.jpg'))
+    await screen.findByRole('button', { name: 'Reload saved page' })
+    reveal('Cakes · 2 photos')
+    reveal('Photo 1: Bread.jpg')
+    expect(screen.getByRole('textbox', { name: 'Caption 1' }).value).toBe('Bread.jpg')
     expect(button('Download Next.js source').disabled).toBe(false)
   })
 

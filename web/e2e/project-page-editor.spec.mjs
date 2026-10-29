@@ -155,6 +155,102 @@ async function expectInsideViewport(locator, viewport) {
 }
 
 for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`large portfolio disclosures and reachable Save at ${size}`, async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    const editorViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
+    await page.setViewportSize(editorViewport)
+    const backend = await installBackend(page)
+    const original = portfolioImport()
+    original.schema = 'leaf.portfolio.v1'
+    original.categories = [24, 24, 23, 23].map((length, ci) => ({
+      slug: `gallery-${ci + 1}`, title: `Gallery ${ci + 1} selected pastry photographs`, description: `Collection ${ci + 1}`, hero: 0,
+      images: Array.from({ length }, (_, ii) => ({ ...PHOTOS[0], material_id: `33333333-3333-4333-8333-${String(ci * 24 + ii).padStart(12, '0')}`,
+        title: `Pastry ${ci + 1}-${ii + 1}`, alt: `Pastry photograph ${ci + 1}-${ii + 1}` })).map(({ name, ...image }) => image),
+    }))
+    backend.revisions.push({ revision: 7, digest: digest(original), document: structuredClone(original) })
+    await page.goto('/app?surface=browser')
+    let editor = await openProject(page)
+    await editor.getByRole('button', { name: 'Open page', exact: true }).click()
+    await expect(page.locator('[data-ground="browser-asset"] .portfolio').getByRole('heading', { name: original.headline })).toBeVisible()
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+    const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
+    const save = editor.getByRole('button', { name: 'Save page', exact: true })
+    const state = editor.locator('.project-page-editor__save-row').getByRole('status')
+    const reachable = async () => {
+      await expect(save).toHaveCount(1)
+      await expect(state).toBeVisible()
+      await expect.poll(() => save.evaluate(button => {
+        const box = button.getBoundingClientRect(), panel = button.closest('.browser-project-panel').getBoundingClientRect()
+        const row = button.closest('.project-page-editor__save-row').getBoundingClientRect()
+        const heading = button.closest('.browser-project-panel').querySelector('.browser-panel-heading').getBoundingClientRect()
+        const editor = button.closest('.project-page-editor').getBoundingClientRect()
+        return box.height >= 44 && box.top >= heading.bottom - 1 && box.bottom <= panel.bottom
+          && box.left >= panel.left && box.right <= panel.right && row.top >= editor.top && row.bottom <= editor.bottom
+          && button.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+      })).toBe(true)
+      expect(await sidebar.evaluate(node => node.scrollWidth <= node.clientWidth)).toBe(true)
+      expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true)
+    }
+    await editor.getByRole('textbox', { name: 'Name', exact: true }).scrollIntoViewIfNeeded()
+    await reachable()
+    await expect(editor.locator('details[open]')).toHaveCount(0)
+    await expect(editor.getByRole('textbox', { name: /^Caption / })).toHaveCount(0)
+    // Compactness is measured on the real editor, with all 94 saved references present.
+    expect(await editor.evaluate(node => node.getBoundingClientRect().height)).toBeLessThan(2400)
+    for (let ci = 0; ci < 4; ci++) {
+      const summary = editor.locator('.portfolio-editor__category > details > summary').nth(ci)
+      await summary.scrollIntoViewIfNeeded()
+      await expect(summary).toHaveText(`${original.categories[ci].title} · ${original.categories[ci].images.length} photos`)
+      await reachable()
+    }
+    await page.screenshot({ path: testInfo.outputPath(`portfolio-94-compact-${size}.png`) })
+    const lastGallery = editor.getByRole('region', { name: 'Gallery 4', exact: true })
+    const gallerySummary = lastGallery.locator(':scope > details > summary')
+    await gallerySummary.focus()
+    await page.keyboard.press('Enter')
+    const lastPhoto = lastGallery.locator('summary').filter({ hasText: /^Photo 23: Pastry 4-23$/ })
+    await lastPhoto.scrollIntoViewIfNeeded()
+    await lastPhoto.focus()
+    await page.keyboard.press('Space')
+    const caption = lastGallery.getByRole('textbox', { name: 'Caption 23', exact: true })
+    await expect(caption).toHaveValue('Pastry 4-23')
+    await expect(lastGallery.getByRole('textbox', { name: 'Alt text 23', exact: true })).toHaveValue('Pastry photograph 4-23')
+    await expect(lastGallery.getByRole('button', { name: 'Remove image 23', exact: true })).toBeVisible()
+    await caption.focus()
+    await expect(caption).toBeFocused()
+    await expect.poll(() => caption.evaluate(input => input.getBoundingClientRect().top >= input.closest('.project-page-editor').querySelector('.project-page-editor__save-row').getBoundingClientRect().bottom)).toBe(true)
+    await reachable()
+    expect(backend.calls.filter(call => call.method === 'PUT')).toEqual([])
+    expect(backend.nativeCalls).toEqual([])
+    const photoReads = backend.photoCalls.length
+    await lastPhoto.click(); await lastPhoto.click()
+    expect(backend.photoCalls).toHaveLength(photoReads)
+    await caption.fill('Final pastry caption')
+    await lastGallery.getByRole('combobox', { name: 'Hero image', exact: true }).selectOption('22')
+    await caption.scrollIntoViewIfNeeded()
+    await reachable()
+    await page.screenshot({ path: testInfo.outputPath(`portfolio-94-last-photo-save-${size}.png`) })
+    await editor.getByRole('button', { name: 'Add resume section', exact: true }).scrollIntoViewIfNeeded()
+    await reachable()
+    await editor.evaluate(node => node.lastElementChild.scrollIntoView({ block: 'end' }))
+    await reachable()
+    await save.click()
+    await expect(state).toHaveText('Saved')
+    const expected = structuredClone(original)
+    expected.categories[3].images[22].title = 'Final pastry caption'; expected.categories[3].hero = 22
+    const puts = backend.calls.filter(call => call.method === 'PUT')
+    expect(puts).toHaveLength(1)
+    expect(puts[0].body).toEqual({ expected_revision: 7, document: expected })
+    expect(backend.revisions.at(-1).document).toEqual(expected)
+    await editor.getByRole('button', { name: 'Reload saved page', exact: true }).click()
+    await expect(editor.locator('details[open]')).toHaveCount(0)
+    await editor.getByRole('region', { name: 'Gallery 4', exact: true }).locator(':scope > details > summary').click()
+    await editor.locator('summary').filter({ hasText: /^Photo 23: Final pastry caption$/ }).click()
+    await expect(editor.getByRole('textbox', { name: 'Caption 23', exact: true })).toHaveValue('Final pastry caption')
+    expect(backend.calls.filter(call => call.path === PAGE_PATH && call.method === 'GET')).toHaveLength(2)
+    expect(backend.foreign).toEqual([])
+  })
+
   test(`native preview journey, ${size}${viewport.width}x${viewport.height}`, async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     await page.setViewportSize(viewport)
@@ -225,9 +321,13 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await expect(preview.locator('img').first()).toBeVisible()
     await expect.poll(() => preview.locator('img').first().evaluate(image => image.naturalWidth)).toBeGreaterThan(0)
     await page.getByRole('button', { name: 'Project', exact: true }).click()
+    await editor.locator('summary').filter({ hasText: /^Cakes · 2 photos$/ }).click()
+    await editor.locator('summary').filter({ hasText: /^Photo 1: Cake.jpg$/ }).click()
     await editor.getByRole('textbox', { name: 'Caption 1', exact: true }).fill('Chocolate celebration')
     await editor.getByRole('combobox', { name: 'Hero image', exact: true }).selectOption('1')
+    await editor.locator('summary').filter({ hasText: /^Photo 2: Bread.jpg$/ }).click()
     await editor.getByRole('button', { name: 'Move image 2 up', exact: true }).click()
+    await editor.locator('summary').filter({ hasText: /^About \/ Contact$/ }).click()
     await editor.getByRole('textbox', { name: 'About', exact: true }).fill('Pastry chef. Cakes, breads and chocolates.')
     await editor.getByRole('button', { name: 'Save page', exact: true }).click()
     await expect(editor.getByRole('status').filter({ hasText: /^Saved$/ })).toBeVisible()
@@ -309,6 +409,8 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await editor.getByRole('button', { name: 'Open page', exact: true }).click()
     await expect(preview.getByRole('heading', { name: 'Selected pastry work' })).toBeVisible()
     await page.getByRole('button', { name: 'Project', exact: true }).click()
+    await editor.locator('summary').filter({ hasText: /^Cakes · 2 photos$/ }).click()
+    await editor.locator('summary').filter({ hasText: /^Photo 2: Chocolate celebration$/ }).click()
     await expect(editor.getByRole('textbox', { name: 'Caption 2', exact: true })).toHaveValue('Chocolate celebration')
     const event = page.waitForEvent('download')
     await editor.getByRole('button', { name: 'Download Next.js source', exact: true }).click()
