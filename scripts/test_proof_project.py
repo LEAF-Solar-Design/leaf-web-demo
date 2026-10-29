@@ -5111,3 +5111,151 @@ class TestProjectBrowser:
         monkeypatch.setattr(p.shutil, "which", lambda *a, **k: None)
         browser_refused(c.launch, p.FailureCode.BROWSER_UNAVAILABLE)
         assert c.starts == []
+
+
+def _h_a1b_docker(run_id):
+    name = "leafproof-" + run_id
+    return p.AuthorityOwnership(run_id, (name, name + "-pg", name + "-relay"),
+        (("leaf.proof-project.run", run_id), ("leaf.proof-project.owner", "proof_project_pg")),
+        ("a" * 12, "b" * 12), ("c" * 12,))
+
+
+def _h_a1b_entry(root, monkeypatch, effects, ownerships, *, disarm=True, before_main=None):
+    info = root.stat()
+    messages = [{"event": "init", "run_id": ownerships[0].run_id, "run_root": str(root),
+        "root_identity": [info.st_dev, info.st_ino], "deadline": 1.0}]
+    for owned in ownerships:
+        item = {"event": "authority", "ownership": p._owned_public(owned)}
+        if owned.kind == "native":
+            item["identity"] = {"pid": owned.pid, "start_id": owned.start_id, "started_at": owned.started_at}
+        messages.append(item)
+    if disarm:
+        messages.append({"event": "disarm"})
+    state = SimpleNamespace(output=io.StringIO(), events=[], snapshots=[], contexts=[])
+    real_main = p.guardian_main
+    def main(request, *, effects):
+        state.request = request
+        receive = request.channel.receive
+        def observed_receive(timeout):
+            event = receive(timeout)
+            state.events.append(event)
+            state.snapshots.append(request.ownership)
+            state.contexts.append(getattr(effects.host, "_native_context", None))
+            return event
+        monkeypatch.setattr(request.channel, "receive", observed_receive)
+        if before_main is not None:
+            before_main()
+        return real_main(request, effects=effects)
+    monkeypatch.delattr(effects.host, "_native_context", raising=False)
+    monkeypatch.setattr(p, "sys", SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+        b"".join((json.dumps(item) + "\n").encode() for item in messages))), stdout=state.output))
+    monkeypatch.setattr(p, "threading", SimpleNamespace(RLock=p.threading.RLock,
+        Thread=lambda *, target, daemon: SimpleNamespace(start=target)))
+    monkeypatch.setattr(p, "production_effects", lambda: effects)
+    monkeypatch.setattr(p, "guardian_main", main)
+    state.result = p._guardian_entry()
+    return state
+
+
+def test_h_a1b_native_then_docker_refused(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    owned = c.request.ownership
+    stop_checks = []
+    def runner(argv, **kwargs):
+        if "stop" in argv:
+            stop_checks.append(tuple(c.checks))
+        return c.runner(argv, **kwargs)
+    monkeypatch.setattr(c.pg.subprocess, "run", runner)
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, _h_a1b_docker(owned.run_id)])
+    assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+    assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+    assert state.snapshots[0] is state.snapshots[1]
+    assert stop_checks and stop_checks[0].count(12345) >= 3
+    assert not c.alive and not tmp_path.exists() and c.signals == []
+    assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_a1b_docker_then_native_refused(tmp_path, monkeypatch):
+    c = lifetime_case()
+    owned = _h_a1b_docker("run-test")
+    cleaned = []
+    cleanup = c.host.cleanup_owned_authority
+    def remove(run_id, ownership):
+        cleaned.append(ownership)
+        return cleanup(run_id, ownership)
+    c.host.cleanup_owned_authority = remove
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, native_owned()], disarm=False)
+    assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+    assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+    assert state.contexts == [None, None] and not hasattr(c.host, "_native_context")
+    assert cleaned == [owned] and c.teardown == ["authority", "private"]
+
+
+def test_h_a1b_native_identity_change_refused(tmp_path, monkeypatch):
+    for field, value in (("pid", 54321), ("start_id", "ps:1700000001"), ("started_at", 1700000001)):
+        root = tmp_path / field
+        root.mkdir()
+        with monkeypatch.context() as patch:
+            c = _h_c1_guardian(root, patch)
+            owned = c.request.ownership
+            replacement = replace(owned, **{field: value})
+            state = _h_a1b_entry(root, patch, c.effects, [owned, replacement])
+            assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+            assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+            assert state.snapshots[0] is state.snapshots[1]
+            assert c.checks and set(c.checks) == {12345} and c.signals == []
+            assert not c.alive and not root.exists()
+            assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_a1b_native_port_change_refused(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    owned = c.request.ownership
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, replace(owned, port=55433)])
+    assert state.result == 1 and state.output.getvalue() == "OK\nOK\n"
+    assert state.events == ["alive", "conflict"] and state.request.ownership == owned
+    assert c.effects.host._native_context == (owned.run_id, tmp_path, 55432)
+    assert state.contexts[0] is state.contexts[1]
+    assert not c.alive and not tmp_path.exists()
+    assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_a1b_native_repeat_identical(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    owned = c.request.ownership
+    def gone():
+        c.alive = False
+        c.pg.shutil.rmtree(tmp_path)
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [owned, owned], before_main=gone)
+    assert state.result == 0 and state.output.getvalue() == "OK\nOK\nOK\nOK\n"
+    assert state.events == ["alive", "alive", "disarm"]
+    assert state.snapshots[0] is state.snapshots[1] is state.snapshots[2]
+    assert state.contexts[0] is state.contexts[1] is state.contexts[2]
+    assert state.request.ownership == owned and c.checks == [12345] and c.signals == []
+    assert not any("stop" in argv for argv, kwargs in c.calls)
+
+
+def test_h_a1b_docker_progressive_unchanged(tmp_path, monkeypatch):
+    c = lifetime_case()
+    c.private = False
+    full = _h_a1b_docker("run-test")
+    partial = replace(full, containers=full.containers[:1])
+    validate = p._validate_ownership
+    validated = []
+    def validate_progressive(owned, run_id, *, allocated):
+        # Exercise the post-validation update policy with a partial Docker fake;
+        # the production allocation validator still requires the complete set.
+        if allocated and owned == partial:
+            validate(full, run_id, allocated=True)
+            validated.append(owned)
+            return owned
+        result = validate(owned, run_id, allocated=allocated)
+        if allocated:
+            validated.append(owned)
+        return result
+    monkeypatch.setattr(p, "_validate_ownership", validate_progressive)
+    state = _h_a1b_entry(tmp_path, monkeypatch, c.effects, [partial, full])
+    assert state.result == 0 and state.output.getvalue() == "OK\nOK\nOK\nOK\n"
+    assert state.events == ["alive", "alive", "disarm"] and validated == [partial, full]
+    assert state.snapshots == [partial, full, full] and state.request.ownership == full
+    assert state.contexts == [None, None, None] and c.teardown == []
