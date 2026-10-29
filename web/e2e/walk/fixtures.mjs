@@ -16,6 +16,7 @@ import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
 import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
+import { createAccessibilityMeasurementCapture } from './accessibilityMeasurements.mjs'
 import { seedParams, runBody, expectHeadAdvanced } from '../solarGraphCommitProof.mjs'
 import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readContext, runProjectTool } from '../local/solarProjectWalk.mjs'
 
@@ -492,6 +493,85 @@ export async function discloseControlPanel(page, recipe) {
   if (await more.isVisible() && await more.getAttribute('aria-expanded') === 'false') {
     await more.click({ timeout: 15_000 })
   }
+}
+
+export function mergeAccessibilityMeasurements(existing, result) {
+  const merge = (previous, observed) => {
+    const merged = { ...previous }
+    for (const [key, value] of Object.entries(observed || {})) {
+      if (value === undefined) continue
+      merged[key] = value && typeof value === 'object' && !Array.isArray(value)
+        ? merge(previous?.[key], value) : value
+    }
+    return merged
+  }
+  return merge(existing, Object.fromEntries(['reference', 'overlay', 'focus']
+    .filter(key => result?.[key] !== undefined).map(key => [key, result[key]])))
+}
+
+export const ACCESSIBILITY_DIALOG_SCOPE = Object.freeze({
+  'control:linked-services': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Linked services' }),
+  'control:claude-accounts': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Claude accounts' }),
+  'control:session-details': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Session · provenance' }),
+  'control:version-history': Object.freeze({ states: Object.freeze(['ready']), name: 'Version history' }),
+  'action:bar-shortcuts': Object.freeze({ states: Object.freeze(['ready']), name: 'Keyboard shortcuts' }),
+})
+
+export async function accessibilityDialogTargets({ page, probe, viewport, locator }) {
+  const spec = ACCESSIBILITY_DIALOG_SCOPE[probe.featureId]
+  if (viewport !== 'desktop' || !spec?.states.includes(probe.state)) return null
+  let opener = locator
+  let key = probe.featureId
+  if (probe.featureId === 'action:bar-shortcuts') {
+    const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+      .getByRole('button', { name: 'Project', exact: true })
+    const projectVisible = await project.isVisible()
+    opener = projectVisible ? project : page.getByRole('tablist', { name: 'Workspace profile', exact: true })
+      .getByRole('tab').first()
+    key = projectVisible ? 'workspace-project' : 'workspace-profile-tab'
+  }
+  const target = { key, locator: opener }
+  return { openTarget: target, returnTarget: { ...target },
+    dialog: page.getByRole('dialog', { name: spec.name, exact: true }) }
+}
+
+function accessibilityDiagnostic(evidence, phase) {
+  evidence.accessibilityDiagnostics ||= []
+  evidence.accessibilityDiagnostics.push({ phase, message: 'Optional accessibility observation failed' })
+}
+
+export async function prepareAccessibilityCapture({ page, probe, viewport, locator, evidence, cleanup,
+  createCapture = createAccessibilityMeasurementCapture }) {
+  try {
+    const targets = await accessibilityDialogTargets({ page, probe, viewport, locator })
+    if (!targets) return null
+    const capture = createCapture({ page, ...targets,
+      reference: `accessibility:${probe.featureId}[${probe.state}]@${viewport}` })
+    cleanup.push(async () => {
+      try { await capture.dispose() } catch { accessibilityDiagnostic(evidence, 'dispose') }
+    })
+    return capture
+  } catch { accessibilityDiagnostic(evidence, 'prepare'); return null }
+}
+
+export async function followAccessibilityCapture({ capture, page, evidence }) {
+  if (!capture) return
+  let phase = 'opened'
+  try {
+    await capture.opened()
+    phase = 'tab'
+    await page.keyboard.press('Tab')
+    await capture.afterTab()
+    phase = 'escape'
+    await page.keyboard.press('Escape')
+    await capture.afterEscape()
+  } catch { accessibilityDiagnostic(evidence, phase) }
+  try {
+    const result = capture.result()
+    evidence.measurements = mergeAccessibilityMeasurements(evidence.measurements, result)
+    evidence.accessibilityDiagnostics ||= []
+    if (result.diagnostics) evidence.accessibilityDiagnostics.push({ phase: 'observations', ...result.diagnostics })
+  } catch { accessibilityDiagnostic(evidence, 'result') }
 }
 
 async function disclosePhonePlan(page) {
@@ -4026,6 +4106,9 @@ export async function runProbe(probe, runtime) {
       }
     }
     const before = await captureBefore(probe, runtime)
+    const accessibilityCapture = typeof prepareAccessibilityCapture === 'function'
+      ? await prepareAccessibilityCapture({ page, probe, viewport: runtime.testInfo.project.name,
+        locator, evidence, cleanup: runtime.cleanup }) : null
     if (probe.kind === 'tool' && probe.sourceId === 'solar-solve-proposal' && probe.state === 'ready'
       && probe.assertion.target === 'catalog-run-decision') {
       runtime.catalogRunRequests = []
@@ -4045,6 +4128,9 @@ export async function runProbe(probe, runtime) {
       evidence.oracleReached = probe.assertion.assertionId
       return assertEffect(probe, runtime, locator, before)
     })
+    if (typeof followAccessibilityCapture === 'function') {
+      await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence })
+    }
     if (runtime.failedDrawing) evidence.failedDrawing.actionAvailability = probe.assertion.kind === 'disabled_with_reason'
       ? 'disabled_with_reason' : 'available'
     evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }

@@ -33,7 +33,7 @@ const branchStart = source.indexOf('    if (!drafting) {')
 const branch = source.slice(branchStart, source.indexOf('    const view = viewCluster(', branchStart))
 const workspace = new Function('REASONS', 'PROFILE_REASONS', 'profileTabs', `
   ${constants}
-  const drafting = false, activeRibbonTab = 'project', drawerViewport = false, navExpanded = false;
+  const drafting = false, activeRibbonTab = 'project', drawerViewport = false, navExpanded = false, studioShell = false;
   ${branch}
 `)
 const filesStart = source.indexOf('      files: { onUpload:')
