@@ -21,6 +21,22 @@ import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readCont
 
 export { expect }
 
+export const STUDIO_RAIL_FEATURES = Object.freeze(new Set([
+  'control:linked-services', 'control:job-monitor-expand', 'control:notification-collapse',
+]))
+
+const studioRailButton = page => page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  .getByRole('button', { name: 'Studio', exact: true })
+
+export async function revealStudioRail(page) {
+  const button = studioRailButton(page)
+  if (!await button.isVisible() || await button.getAttribute('aria-expanded') === 'true') return false
+  await button.click()
+  await expect(button).toHaveAttribute('aria-expanded', 'true')
+  await expect(page.locator('#project-workspace-activity')).toBeVisible()
+  return true
+}
+
 export function redactSolarDiagnostic(value, { maxLength = 300 } = {}) {
   if (!['string', 'number', 'boolean'].includes(typeof value)) return '[unavailable]'
   return String(value).replace(/eyJ[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*\.[A-Za-z0-9_-]*/g, '[redacted]')
@@ -2451,9 +2467,22 @@ export async function seedSolarChain(runtime, recipe) {
   }
 }
 
+export async function prepareStudioRail(probe, runtime, recipe, { enter = requireWorkspace, reveal = revealStudioRail } = {}) {
+  const { page } = runtime
+  if (STUDIO_RAIL_FEATURES.has(probe.featureId)
+    && ['baseline-three-state', 'job-monitor-collapsed'].includes(recipe.kind)) {
+    await enter(runtime)
+    if (await reveal(page)) runtime.cleanup.push(async () => {
+      const button = studioRailButton(page)
+      if (await button.getAttribute('aria-expanded') === 'true') await button.click()
+    })
+  }
+}
+
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
   if (probe.setup?.context?.projectSolar && !runtime.projectSolar) observeProjectSolarResponses(runtime)
+  await prepareStudioRail(probe, runtime, recipe)
   switch (recipe.kind) {
     case 'open-project-solar': await openProjectSolar(runtime, assertions); return
     case 'publish-project-solar': await publishProjectSolar(runtime, assertions); return
