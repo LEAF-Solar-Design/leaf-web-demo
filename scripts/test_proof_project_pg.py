@@ -1508,3 +1508,41 @@ def test_h_a1d_unreadable_root_refuses(tmp_path, monkeypatch):
     assert pg.cleanup_native(RUN, tmp_path, 55432, owned, binaries=c.binaries,
         runner=c.runner, process_table=c.table) is False
     assert c.calls == []
+
+
+def test_h_a1e_resume_stopped_directory(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    owned = dict(c.authority._ownership)
+    c.alive = False
+    c.pidfile.unlink()
+    c.calls.clear()
+    reads = []
+    def absent(pid):
+        reads.append(pid)
+        return c.table(pid)
+    monkeypatch.setattr(pg.os, "kill", lambda *args: pytest.fail("signal forbidden"))
+    assert c.inventory() == dict(owned, pid=0, start_id="", started_at=0)
+    assert pg.cleanup_native(RUN, tmp_path, 55432, owned, binaries=c.binaries,
+        runner=c.runner, process_table=absent) is True
+    assert reads == [12345] and c.calls == []
+    assert c.inventory() is None and not (tmp_path / "postgres").exists()
+
+
+def test_h_a1e_stopped_directory_live_capture_refuses(tmp_path, monkeypatch):
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    owned = dict(c.authority._ownership)
+    c.pidfile.unlink()
+    c.calls.clear()
+    reads = []
+    def live(pid):
+        reads.append(pid)
+        return c.table(pid)
+    monkeypatch.setattr(pg.os, "kill", lambda *args: pytest.fail("signal forbidden"))
+    stopped = dict(owned, pid=0, start_id="", started_at=0)
+    assert c.inventory() == stopped
+    assert pg.cleanup_native(RUN, tmp_path, 55432, owned, binaries=c.binaries,
+        runner=c.runner, process_table=live) is False
+    assert reads == [12345] and c.calls == [] and c.alive
+    assert (tmp_path / "postgres").is_dir() and c.inventory() == stopped

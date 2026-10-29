@@ -1282,7 +1282,8 @@ def _native_public_valid(owned, run_id):
 def _native_subset(observed, captured):
     return (observed.kind == captured.kind == "native"
         and _owned_public(observed) == _owned_public(captured)
-        and (observed == captured or observed == _empty_ownership(captured)))
+        and (observed == captured or observed == _empty_ownership(captured)
+            or observed == replace(captured, pid=0, start_id="", started_at=0)))
 
 
 def _validate_ownership(owned, run_id, *, allocated):

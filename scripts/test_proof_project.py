@@ -4714,6 +4714,25 @@ def test_h_c1_parent_loss_reused_pid(tmp_path, monkeypatch):
     assert c.alive and c.signals == [] and c.acks == [] and len(c.checks) >= 2
 
 
+def test_h_a1e_guardian_interrupted_teardown(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    c.alive = False
+    c.pidfile.unlink()
+    c.calls.clear()
+    assert c.inventory() == dict(c.authority._ownership, pid=0, start_id="", started_at=0)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert not tmp_path.exists() and c.inventory() is None
+    assert c.checks == [12345] and c.signals == [] and c.acks == [] and c.calls == []
+
+
+def test_h_a1e_subset_stopped():
+    captured = native_owned()
+    stopped = replace(captured, pid=0, start_id="", started_at=0)
+    assert stopped.present and p._native_subset(stopped, captured)
+    assert not p._native_subset(replace(stopped, port=55433), captured)
+    assert not p._native_subset(replace(stopped, run_id="foreign-run"), captured)
+
+
 def test_h_a1c_scrub_unreadable_root_refuses(tmp_path, monkeypatch):
     info = tmp_path.stat()
     reservation = p.Reservation(tmp_path, tmp_path / "artifacts",

@@ -686,10 +686,14 @@ def cleanup_native(run_id, run_root, port, ownership, *, binaries=None, runner=N
             if native_tombstone_present(run_root):
                 return False
             return _stop_native_process(ownership, process_table=table)
-        if not ownership or observed != ownership:
+        if not ownership:
             return False
+        if observed != ownership:
+            if (observed != dict(ownership, pid=0, start_id="", started_at=0)
+                    or not native_process_gone(ownership, process_table=table)):
+                return False
         owned, data, marker = _native_paths(run_root)
-        pid = ownership["pid"]
+        pid = observed["pid"]
         if pid:
             binaries = binaries or resolve_native_binaries(environ=environ, runner=runner)
             # Re-read immediately before pg_ctl consumes postmaster.pid.
