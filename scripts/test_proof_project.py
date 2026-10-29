@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -125,6 +126,23 @@ def refused(c, code=p.FailureCode.PREFLIGHT):
 def profile(c):
     return {"LEAF_PROOF_PROFILE": "project", "LEAF_PROOF_PROJECT_RUN_ID": c.config.run_id,
             "LEAF_PROOF_PROJECT_KEY_SHA256": "fakekey", "LEAF_PROOF_PROJECT_JWKS_FILE": str(ROOT / "public-jwks.json")}
+
+
+def test_src_empty_tracked_file_accepted():
+    c = case()
+    empty = p.FileProof("server/authored/.gitkeep", hashlib.sha256(b"").hexdigest(), 0)
+    c.host.source = replace(c.host.source, files=(*c.host.source.files, empty))
+    assert p._files_ok(c.host.source.files)
+    assert admitted(c).source == c.host.source
+    assert "reserve" in c.host.events
+
+
+def test_src_empty_negative_size_refused():
+    c = case()
+    negative = p.FileProof("server/authored/.gitkeep", hashlib.sha256(b"").hexdigest(), -1)
+    c.host.source = replace(c.host.source, files=(*c.host.source.files, negative))
+    assert not p._files_ok(c.host.source.files)
+    refused(c, p.FailureCode.SOURCE)
 
 
 def environment(c, ambient=None):
@@ -3841,6 +3859,18 @@ def verify_document(c, value):
 
 def clone_document(value):
     return json.loads(json.dumps(value))
+
+
+def test_src_empty_receipt_zero_size_file():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    empty = {"path": "vendor/engine/.gitkeep", "sha256": hashlib.sha256(b"").hexdigest(), "size": 0}
+    document["runtime"]["vendor_source"].append(empty)
+    assert verify_document(c, document).ok
+    empty["size"] = -1
+    result = verify_document(c, document)
+    assert not result.ok
+    assert result.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
 
 
 def disk_publication(c, tmp_path, monkeypatch):

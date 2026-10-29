@@ -782,7 +782,7 @@ def _hash_ok(value):
 
 def _files_ok(files):
     return bool(files) and len({f.path for f in files}) == len(files) and all(
-        _hash_ok(f.sha256) and f.size > 0 for f in files)
+        _hash_ok(f.sha256) and type(f.size) is int and f.size >= 0 for f in files)
 
 
 def preflight(config: Config, *, effects: Effects) -> Plan:
@@ -3615,7 +3615,7 @@ def _validate_files(rows, *, names=None):
         path = item["path"]
         if (type(path) is not str or re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", path) is None
                 or path.startswith("/") or ".." in path.split("/") or not _hash_ok(item["sha256"])
-                or type(item["size"]) is not int or item["size"] <= 0):
+                or type(item["size"]) is not int or item["size"] < 0):
             _receipt_refused()
         paths.append(path)
     if len(set(paths)) != len(paths) or (names is not None and set(paths) != set(names)):
