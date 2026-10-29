@@ -9,7 +9,7 @@ import { fileURLToPath } from 'node:url'
 export const SCHEMA = 'leaf.auth0-spa-origin-interactive-proof.v1'
 export const TARGET_ORIGIN = 'https://platform-staging.leafdesign.ai'
 export const ISSUER = 'https://leafautomation.us.auth0.com/'
-export const AUDIENCE = 'https://api.leafdesign.ai'
+export const AUDIENCE = 'https://api-staging.leafdesign.ai'
 export const CLIENT_ID = 'zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O'
 // Universal Login serves its own SDK bundle from Auth0's first-party CDN, so a real
 // interactive run observes it (live-verified 2026-08-17 19:47Z: performance entries on

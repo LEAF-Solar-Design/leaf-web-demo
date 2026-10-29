@@ -16,7 +16,7 @@ export const ACTIVATION_SCHEMA = 'leaf.staging-auth0-synthetic-users.v1'
 export const TARGET_ORIGIN = 'https://platform-staging.leafdesign.ai'
 export const AUTH0_ORIGIN = 'https://leafautomation.us.auth0.com'
 export const CLIENT_ID = 'zkJjr0ZFtcyQjyJ8e4zdkdgzoMaVWt5O'
-export const AUDIENCE = 'https://api.leafdesign.ai'
+export const AUDIENCE = 'https://api-staging.leafdesign.ai'
 export const PLAN_VERSION = '1.32'
 
 const SHA256 = /^[0-9a-f]{64}$/

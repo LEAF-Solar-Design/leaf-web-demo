@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import argparse
 import json
 import os
 import sys
@@ -31,9 +32,15 @@ TOKEN_PATH = Path(
 )
 RECEIPT_PATH = ROOT / "docs" / "auth0-live-server-receipt.json"
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--audience", default="https://api.leafdesign.ai", help="Auth0 API audience (https:// required)")
+args = parser.parse_args()
+if not args.audience.startswith("https://"):
+    parser.error("--audience must start with https://")
+
 os.environ["LEAF_AUTH_LIVE"] = "1"
 os.environ["LEAF_AUTH0_ISSUER"] = "https://leafautomation.us.auth0.com/"
-os.environ["LEAF_AUTH0_AUDIENCE"] = "https://api.leafdesign.ai"
+os.environ["LEAF_AUTH0_AUDIENCE"] = args.audience
 os.environ["LEAF_AUTH0_JWKS_URL"] = (
     "https://leafautomation.us.auth0.com/.well-known/jwks.json"
 )

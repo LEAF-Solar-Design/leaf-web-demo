@@ -11,6 +11,7 @@ was exposed to. The receipt contains only non-secret verification metadata.
 
 from __future__ import annotations
 
+import argparse
 import base64
 import hashlib
 import json
@@ -165,6 +166,12 @@ def b64url(raw: bytes) -> str:
     return base64.urlsafe_b64encode(raw).rstrip(b"=").decode("ascii")
 
 
+parser = argparse.ArgumentParser(description=__doc__)
+parser.add_argument("--audience", default=AUDIENCE, help="Auth0 API audience (https:// required)")
+args = parser.parse_args()
+if not args.audience.startswith("https://"):
+    parser.error("--audience must start with https://")
+
 verifier = b64url(secrets.token_bytes(64))
 challenge = b64url(hashlib.sha256(verifier.encode("ascii")).digest())
 state = secrets.token_urlsafe(32)
@@ -173,7 +180,7 @@ params = {
     "client_id": CLIENT_ID,
     "redirect_uri": REDIRECT_URI,
     "scope": "openid profile email",
-    "audience": AUDIENCE,
+    "audience": args.audience,
     "connection": "google-oauth2",
     "code_challenge": challenge,
     "code_challenge_method": "S256",
