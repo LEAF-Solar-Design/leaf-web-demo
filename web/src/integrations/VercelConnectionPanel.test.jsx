@@ -37,7 +37,7 @@ function setup(config = {}) {
   const controller = new AbortController()
   const op = { schema_version: 1, id: 'normalized-project-read', title: 'List projects', method: 'GET', path: '/v10/projects', effect: 'read',
     pagination: { kind: 'none', records_pointer: config.recordsPointer ?? '' }, limits: { timeout_ms: 1000, max_response_bytes: 131072, max_records: 250, max_pages: 1 }, idempotency: { kind: 'read' } }
-  let ref, draft, published, connection, issueSequence = 0
+  let ref, draft, published, connection, destination = null, issueSequence = 0
   const completion = { configurationId: 'icfg_123', integrationId: 'oac_123', userId: 'user_123', teamId: config.teamId ?? null,
     ownerId: config.teamId ?? 'user_123', revision: 2, cleanup: config.cleanup || 'complete' }
   const fetchImpl = vi.fn(async (url, request) => {
@@ -75,10 +75,30 @@ function setup(config = {}) {
     }
     if (url.endsWith('/vercel/complete')) {
       connection = { ...connection, revision: 2, credential_purposes: config.noCustody ? [] : ['access_token'], cleanup: completion.cleanup,
+        identity_verified: true, provider_account_id: completion.ownerId,
         owner_id: config.wrongStudioOwner ? '6a1f0c3e-2b7d-4c8a-9e61-0d4f7b2a9c12' : connection.owner_id }
       if (config.loseCompletion) throw new Error('transport lost')
       if (config.failCompletion) return response({ error: 'secret provider payload' }, 422)
       return response(completion)
+    }
+    const account = { ownerId: completion.ownerId, teamId: completion.teamId }
+    if (url.includes('/vercel/projects?')) {
+      await config.listGate
+      return response({ revision: connection.revision, account: config.listAccount || account,
+        projects: config.projects ?? [{ id: 'prj_jessica', name: '<Jessica & Studio>' }], truncated: config.truncated ?? false })
+    }
+    if (url.endsWith('/vercel/destination') && request.method === 'PUT') {
+      if (config.conflictSelect) return response({}, 409)
+      destination = { projectId: body.projectId, accountId: completion.ownerId, name: '<Jessica & Studio>' }
+      connection = { ...connection, revision: connection.revision + 1 }
+      if (config.loseSelect) throw new Error('transport lost')
+      return response({ revision: connection.revision, account, destination })
+    }
+    if (url.endsWith('/vercel/destination')) {
+      await config.destinationGate
+      if (config.failDestinationRead) throw new Error('read unavailable')
+      return response({ revision: connection.revision, account, destination: config.nullDestination ? null : destination,
+        ...config.destinationReadback })
     }
     if (url.endsWith(`/connections/${connection?.id}`)) return response(connection)
     throw new Error('Unexpected request')
@@ -100,6 +120,185 @@ async function callback(data = { state, outcome: 'authorized', code: 'code_123',
 }
 const mutations = (fetchImpl) => fetchImpl.mock.calls.filter(([, request]) => request.method !== 'GET')
 const completions = (fetchImpl) => fetchImpl.mock.calls.filter(([url]) => url.endsWith('/vercel/complete'))
+const destinationSaves = (fetchImpl) => fetchImpl.mock.calls.filter(([url, request]) => url.endsWith('/vercel/destination') && request.method === 'PUT')
+function deferred() {
+  let resolve
+  const promise = new Promise((done) => { resolve = done })
+  return { promise, resolve }
+}
+async function linked(props) {
+  render(<VercelConnectionPanel {...props} />)
+  await prepare(); await authorize(); await callback()
+  await screen.findByText(/Verified .*account/)
+  await waitFor(() => expect(screen.getByRole('button', { name: 'Load Vercel projects' }).disabled).toBe(false))
+}
+async function chooseProject() {
+  const load = await screen.findByRole('button', { name: 'Load Vercel projects' })
+  await waitFor(() => expect(load.disabled).toBe(false))
+  fireEvent.click(load)
+  await screen.findByRole('option', { name: '<Jessica & Studio>' })
+  await waitFor(() => expect(screen.getByLabelText('Vercel project').disabled).toBe(false))
+  fireEvent.change(screen.getByLabelText('Vercel project'), { target: { value: 'prj_jessica' } })
+}
+
+describe('Vercel destination selection', () => {
+  it('lists only on request for the completed owner, sends search, and confirms only after delayed readback', async () => {
+    const gate = deferred()
+    const { props, fetchImpl } = setup({ teamId: 'team_123', destinationGate: gate.promise })
+    await linked(props)
+    expect(fetchImpl.mock.calls.some(([url]) => /vercel\/(projects|destination)/.test(url))).toBe(false)
+    fireEvent.change(screen.getByLabelText('Search Vercel projects'), { target: { value: 'Jessica & Studio' } })
+    await chooseProject()
+    const listUrl = fetchImpl.mock.calls.find(([url]) => url.includes('/vercel/projects?'))[0]
+    expect(new URL(listUrl).searchParams.get('search')).toBe('Jessica & Studio')
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    await waitFor(() => expect(destinationSaves(fetchImpl)).toHaveLength(1))
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([url, request]) => url.endsWith('/vercel/destination') && request.method === 'GET')).toBe(true))
+    expect(screen.queryByText(/Confirmed destination:/)).toBeNull()
+    expect(screen.getByRole('button', { name: 'Load Vercel projects' }).disabled).toBe(true)
+    expect(JSON.parse(destinationSaves(fetchImpl)[0][1].body)).toEqual({ expectedRevision: 2, projectId: 'prj_jessica', search: 'Jessica & Studio' })
+    await act(async () => { gate.resolve() })
+    await screen.findByText('Confirmed destination: <Jessica & Studio>')
+    expect(screen.getByText(/does not publish your site/)).toBeTruthy()
+    expect(document.querySelector('option a')).toBeNull()
+    expect(completions(fetchImpl)).toHaveLength(1)
+  })
+  it('shows empty results and bounds truncated results with a search hint', async () => {
+    const config = { projects: [] }
+    const { props } = setup(config)
+    await linked(props)
+    fireEvent.click(screen.getByRole('button', { name: 'Load Vercel projects' }))
+    await screen.findByText('No Vercel projects found.')
+    expect(screen.queryByLabelText('Vercel project')).toBeNull()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Load Vercel projects' }).disabled).toBe(false))
+    config.projects = Array.from({ length: 20 }, (_, i) => ({ id: `prj_${i}`, name: `Project ${i}` }))
+    config.truncated = true
+    fireEvent.click(screen.getByRole('button', { name: 'Load Vercel projects' }))
+    await screen.findByText(/Showing at most 20 projects. Narrow your search/)
+    expect(screen.getAllByRole('option')).toHaveLength(21)
+    expect(screen.getByRole('button', { name: 'Save destination' }).disabled).toBe(true)
+  })
+  it('recovers an ambiguous dispatched PUT by GET without replaying PUT or OAuth', async () => {
+    const { props, fetchImpl } = setup({ loseSelect: true })
+    await linked(props); await chooseProject()
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    const check = await screen.findByRole('button', { name: 'Check destination status' })
+    await waitFor(() => expect(check.disabled).toBe(false))
+    expect(screen.queryByText(/Confirmed destination:/)).toBeNull()
+    fireEvent.click(check)
+    await screen.findByText('Confirmed destination: <Jessica & Studio>')
+    expect(destinationSaves(fetchImpl)).toHaveLength(1)
+    expect(completions(fetchImpl)).toHaveLength(1)
+  })
+  it('leaves a null readback honestly unconfirmed and requires a new choice', async () => {
+    const { props, fetchImpl } = setup({ nullDestination: true })
+    await linked(props); await chooseProject()
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    await screen.findByText(/intended destination is unconfirmed/)
+    expect(screen.queryByText(/Confirmed destination:/)).toBeNull()
+    expect(screen.queryByRole('button', { name: 'Save destination' })).toBeNull()
+    expect(screen.getByRole('button', { name: 'Load Vercel projects' }).disabled).toBe(false)
+    expect(destinationSaves(fetchImpl)).toHaveLength(1)
+  })
+  it.each([
+    { destination: { projectId: 'other', accountId: 'user_123', name: '<Jessica & Studio>' } },
+    { destination: { projectId: 'prj_jessica', accountId: 'user_123', name: 'Renamed elsewhere' } },
+    { revision: 4 },
+    { account: { ownerId: 'foreign', teamId: null }, destination: { projectId: 'prj_jessica', accountId: 'foreign', name: '<Jessica & Studio>' } },
+  ])('does not accept a readback that differs from the acknowledged destination: %j', async (destinationReadback) => {
+    const { props, fetchImpl } = setup({ destinationReadback })
+    await linked(props); await chooseProject()
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Load Vercel projects' }).disabled === false ||
+      screen.queryByRole('alert') !== null).toBe(true))
+    expect(screen.queryByText(/Confirmed destination:/)).toBeNull()
+    expect(destinationSaves(fetchImpl)).toHaveLength(1)
+  })
+  it('retains an acknowledged selection when confirmation fails and retries only GET', async () => {
+    const config = { failDestinationRead: true }
+    const { props, fetchImpl } = setup(config)
+    await linked(props); await chooseProject()
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    const check = await screen.findByRole('button', { name: 'Check destination status' })
+    await waitFor(() => expect(check.disabled).toBe(false))
+    config.failDestinationRead = false
+    fireEvent.click(check)
+    await screen.findByText(/Confirmed destination:/)
+    expect(destinationSaves(fetchImpl)).toHaveLength(1)
+  })
+  it('blocks after a conflict until explicit authoritative refresh, then uses the fresh revision', async () => {
+    const config = { conflictSelect: true }
+    const { props, fetchImpl, drift } = setup(config)
+    await linked(props); await chooseProject()
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    const refresh = await screen.findByRole('button', { name: 'Refresh destination status' })
+    await waitFor(() => expect(refresh.disabled).toBe(false))
+    expect(screen.getByRole('button', { name: 'Load Vercel projects' }).disabled).toBe(true)
+    config.conflictSelect = false
+    drift()
+    fireEvent.click(refresh)
+    await screen.findByText(/Destination status refreshed/)
+    await chooseProject()
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    await screen.findByText(/Confirmed destination:/)
+    expect(destinationSaves(fetchImpl).map(([, request]) => JSON.parse(request.body).expectedRevision)).toEqual([2, 3])
+  })
+  it('rejects a foreign but internally valid account without offering selection', async () => {
+    const { props, fetchImpl } = setup({ listAccount: { ownerId: 'foreign', teamId: null } })
+    await linked(props)
+    fireEvent.click(screen.getByRole('button', { name: 'Load Vercel projects' }))
+    await screen.findByRole('button', { name: 'Refresh destination status' })
+    expect(screen.queryByLabelText('Vercel project')).toBeNull()
+    expect(destinationSaves(fetchImpl)).toHaveLength(0)
+  })
+  it('revalidates the connection before listing or saving and uses forbidden behavior', async () => {
+    const { props, fetchImpl, drift } = setup()
+    await linked(props)
+    drift()
+    fireEvent.click(screen.getByRole('button', { name: 'Load Vercel projects' }))
+    await screen.findByRole('button', { name: 'Refresh destination status' })
+    expect(fetchImpl.mock.calls.some(([url]) => url.includes('/vercel/projects?'))).toBe(false)
+    props.guard.mockRejectedValue(Object.assign(new Error('forbidden'), { status: 403 }))
+    fireEvent.click(screen.getByRole('button', { name: 'Refresh destination status' }))
+    await waitFor(() => expect(props.onForbidden).toHaveBeenCalledOnce())
+  })
+  it.each(['scope', 'client', 'signal', 'unmount'])('aborts and ignores delayed project results on %s change', async (change) => {
+    const gate = deferred()
+    const { props, fetchImpl } = setup({ listGate: gate.promise })
+    const mounted = render(<VercelConnectionPanel {...props} />)
+    await prepare(); await authorize(); await callback()
+    const load = await screen.findByRole('button', { name: 'Load Vercel projects' })
+    await waitFor(() => expect(load.disabled).toBe(false))
+    fireEvent.click(load)
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([url]) => url.includes('/vercel/projects?'))).toBe(true))
+    const request = fetchImpl.mock.calls.find(([url]) => url.includes('/vercel/projects?'))[1]
+    if (change === 'unmount') mounted.unmount()
+    else mounted.rerender(<VercelConnectionPanel {...props}
+      {...(change === 'scope' ? { scope: { ...scope, externalSubject: 'auth0|other' } } :
+        change === 'client' ? { client: { ...props.client } } : { signal: new AbortController().signal })} />)
+    expect(request.signal.aborted).toBe(true)
+    await act(async () => { gate.resolve() })
+    expect(screen.queryByLabelText('Vercel project')).toBeNull()
+    expect(screen.queryByText(/Confirmed destination:/)).toBeNull()
+    expect(destinationSaves(fetchImpl)).toHaveLength(0)
+  })
+  it.each(['scope', 'unmount'])('ignores a delayed destination confirmation after %s change', async (change) => {
+    const gate = deferred()
+    const { props, fetchImpl } = setup({ destinationGate: gate.promise })
+    const mounted = render(<VercelConnectionPanel {...props} />)
+    await prepare(); await authorize(); await callback()
+    await chooseProject()
+    fireEvent.click(screen.getByRole('button', { name: 'Save destination' }))
+    await waitFor(() => expect(fetchImpl.mock.calls.some(([url, request]) => url.endsWith('/vercel/destination') && request.method === 'GET')).toBe(true))
+    const request = fetchImpl.mock.calls.find(([url, request]) => url.endsWith('/vercel/destination') && request.method === 'GET')[1]
+    if (change === 'unmount') mounted.unmount()
+    else mounted.rerender(<VercelConnectionPanel {...props} scope={{ ...scope, bindingId: '22222222-2222-4222-8222-222222222222' }} />)
+    expect(request.signal.aborted).toBe(true)
+    await act(async () => { gate.resolve() })
+    expect(screen.queryByText(/Confirmed destination:/)).toBeNull()
+    expect(destinationSaves(fetchImpl)).toHaveLength(1)
+  })
+})
 
 describe('Vercel connection flow', () => {
   it('describes the pinned v10 array response and stops if the host declines import', async () => {
