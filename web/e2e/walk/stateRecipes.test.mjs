@@ -2094,7 +2094,7 @@ test('Studio rail reveal tolerates builds without Workspace controls', async () 
 })
 
 function phonePanelFake({ modern = true, studio = false, content = true, drawer = 'none', ledger = true,
-  navStaysVisible = false, sidebarStaysVisible = false } = {}) {
+  empty = false, skeleton = false, navStaysVisible = false, sidebarStaysVisible = false } = {}) {
   const events = [], legacy = { Jobs: false, Plan: false }
   let view = false, more = false
   class Locator {
@@ -2103,6 +2103,7 @@ function phonePanelFake({ modern = true, studio = false, content = true, drawer 
       if (this.kind === 'Studio') return modern
       if (this.kind === 'sidebar') return studio || sidebarStaysVisible
       if (this.kind === 'ledger') return studio && content && ledger
+      if (this.kind === 'job content') return studio && content && (skeleton || empty || ledger)
       if (this.kind === 'heading') return studio && content
       if (this.kind === 'nav') return studio || navStaysVisible
       if (this.kind === 'Close Studio') return studio
@@ -2112,6 +2113,17 @@ function phonePanelFake({ modern = true, studio = false, content = true, drawer 
       return true
     }
     async count() { return 1 }
+    filter({ has }) {
+      assert.equal(this.kind, 'job rail')
+      assert.equal(has.kind, 'heading')
+      return this
+    }
+    locator(selector) {
+      assert.equal(this.kind, 'job rail')
+      assert.equal(selector, '.rail-ske, .rail-empty, .rail-ledger > *')
+      return locator('job content')
+    }
+    first() { assert.equal(this.kind, 'job content'); return this }
     async inputValue() { assert.equal(this.kind, 'Command bar'); return 'keep this command' }
     async getAttribute(name) {
       if (name === 'data-drawer') return drawer
@@ -2172,9 +2184,9 @@ function phonePanelFake({ modern = true, studio = false, content = true, drawer 
       return locator('heading')
     },
     locator: selector => {
-      assert.ok(['.app', '#project-workspace-activity', 'aside.rail .rail-ledger', 'aside.nav'].includes(selector))
+      assert.ok(['.app', '#project-workspace-activity', 'aside.rail .rail-ledger', 'aside.nav', 'aside.rail'].includes(selector))
       return locator(selector === '.app' ? 'app' : selector === '#project-workspace-activity' ? 'sidebar'
-        : selector === 'aside.nav' ? 'nav' : 'ledger')
+        : selector === 'aside.nav' ? 'nav' : selector === 'aside.rail' ? 'job rail' : 'ledger')
     },
   }
   const assertions = value => ({
@@ -2268,6 +2280,24 @@ test('desktop Studio setup routes both job and tool rail states through the shar
     for (const open of [true, true, false, false]) await setter(fake.page, open, false, fake.assertions)
     assert.deepEqual(fake.events, ['Studio', 'Close Studio'])
   }
+})
+
+test('Studio Jobs uses visible empty or loading content when the ledger has no rows', async () => {
+  for (const state of [{ empty: true }, { skeleton: true }]) {
+    const fake = phonePanelFake({ studio: true, ledger: false, ...state })
+    assert.equal(await fake.page.locator('aside.rail .rail-ledger').isVisible(), false)
+    await assertStudioDrawer(fake.page, 'jobs', true, fake.assertions)
+    await assertPhonePanel(fake.page, 'Jobs', true, fake.assertions)
+    assert.equal(await readPhonePanel(fake.page, 'Jobs'), true)
+  }
+})
+
+test('Studio Jobs heading without visible loading, empty or row content cannot prove open', async () => {
+  const fake = phonePanelFake({ studio: true, ledger: false })
+  assert.equal(await fake.page.getByRole('heading', { name: /^Job monitor/ }).isVisible(), true)
+  await assert.rejects(assertStudioDrawer(fake.page, 'jobs', true, fake.assertions), assert.AssertionError)
+  await assert.rejects(assertPhonePanel(fake.page, 'Jobs', true, fake.assertions), assert.AssertionError)
+  assert.equal(await readPhonePanel(fake.page, 'Jobs'), false)
 })
 
 test('legacy tool rail keeps desktop spine and phone Tool rail transitions without Studio', async () => {

@@ -52,12 +52,18 @@ export async function activateWithMobileTouchMeasurements({ page, locator, probe
       && !['script-file-picker', 'signed-out-session', 'viewer-overview-pan'].includes(probe.assertion.target)
       && await locator.count() === 1) handle = await locator.elementHandle()
   } catch { /* A missing or ambiguous handle supplies no measurements. */ }
+  let before
+  try {
+    if (handle) before = await collectMobileTouchMeasurements({ page, handle, viewport,
+      reference: `mobile-touch:${probe.featureId}[${probe.state}]@${viewport}`,
+      locatorDescription: probe.locator.phone || probe.locator })
+  } catch { /* Optional evidence never changes the functional verdict. */ }
   await activate()
   try {
     if (!handle) return
     const measurements = await collectMobileTouchMeasurements({ page, handle, viewport,
       reference: `mobile-touch:${probe.featureId}[${probe.state}]@${viewport}`,
       locatorDescription: probe.locator.phone || probe.locator })
-    if (measurements) addFragment('mobile-touch', measurements)
+    if (measurements || before) addFragment('mobile-touch', measurements || before)
   } catch { /* Optional evidence never changes the functional verdict. */ }
 }
