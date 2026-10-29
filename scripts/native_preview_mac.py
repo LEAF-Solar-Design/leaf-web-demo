@@ -317,6 +317,7 @@ class MacAdapter:
         self.report = {'cleanup_complete': False, 'allocator_release_confirmed': False}
 
     def __call__(self, archive, job, guard):
+        guard.stage('mac-bootstrap')
         guard.check()
         allocator = self.allocator or canonical_allocator()
         # Drop canonical helper diagnostics: no allocator token, app text or raw SSH error escapes.
@@ -366,7 +367,9 @@ class MacAdapter:
                     call(REFRESH, {**p, 'expiry': expiry + offset})
                 with guard.lock:
                     guard.refresh = refresh
+                    guard.stage('mac-permit-refresh')
                     guard.beat()
+                guard.stage('mac-producer')
                 payload = {**p, 'archive': base64.b64encode(archive).decode(),
                            'sha256': job['descriptor']['archive_sha256'], 'byte_size': len(archive),
                            'budget': max(1, guard.end - guard.monotonic()),
@@ -374,6 +377,7 @@ class MacAdapter:
                 code = inspect.getsource(supervise) + SUPERVISOR_END
                 facts = call(code, payload, limit=MAX_TRANSFER,
                              timeout=max(1, min(1300, guard.end - guard.monotonic())))
+                guard.stage('evidence')
                 encoded = facts.pop('screenshot_base64')
                 require(type(encoded) is str and len(encoded) <= MAX_TRANSFER, 'screenshot-bounds')
                 image = validate_png(base64.b64decode(encoded, validate=True))

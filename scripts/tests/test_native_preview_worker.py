@@ -281,6 +281,9 @@ def test_source_transfer_failure_settles_failed(source, tmp_path):
     http.request = request
     assert worker.run_once(SCOPE, http, lambda *a: pytest.fail('native'), tmp_path)['result'] == 'failed'
     assert http.calls[-1][2]['outcome'] == 'failed'
+    local = failure_receipt(tmp_path)
+    assert local['execution_stage'] == 'source'
+    assert local['failure_settlement'] == 'accepted'
 
 
 @pytest.mark.parametrize('field', ['cleanup_complete', 'allocator_release_confirmed'])
@@ -290,6 +293,7 @@ def test_unconfirmed_cleanup_cannot_complete(source, tmp_path, field):
     bad[field] = False
     assert worker.run_once(SCOPE, http, lambda *a: (bad, png()), tmp_path)['result'] == 'failed'
     assert http.calls[-1][2]['outcome'] == 'failed'
+    assert failure_receipt(tmp_path)['execution_stage'] == 'evidence'
 
 
 def test_uncertain_completion_is_never_rebuilt_or_resettled(source, tmp_path):
@@ -487,3 +491,195 @@ def test_mac_adapter_release_and_cleanup_fail_closed(source, release_code, clean
     guard.beat()
     with pytest.raises(worker.WorkerError, match='cleanup-release-unconfirmed'):
         mac.MacAdapter(Allocator(release_code, cleanup))(source[0], source[1], guard)
+
+
+@pytest.mark.parametrize('cause', ['heartbeat-request', 'heartbeat-contract', 'permit-refresh',
+                                  'deadline', 'ack-expired', 'allocator-lost', 'unexpected'])
+def test_first_authority_failure_is_sticky(source, cause):
+    now = [100.0]
+    source[1]['deadline'] = 200.0
+    http = Transport(source)
+    guard = worker.Authority(http, source[1], clock=lambda: now[0], monotonic=lambda: now[0])
+    assert guard.authority_failure == 'none'
+    guard.beat()
+    if cause == 'heartbeat-request':
+        http.deny = True
+    elif cause == 'heartbeat-contract':
+        http.request = lambda *a, **kw: b'{"secret":"Bearer synthetic"}'
+    elif cause == 'permit-refresh':
+        def refresh(expiry): raise RuntimeError('Bearer synthetic remote output')
+        guard.refresh = refresh
+    elif cause == 'deadline':
+        now[0] = 200.0
+    elif cause == 'ack-expired':
+        now[0] = 112.0
+    elif cause == 'allocator-lost':
+        guard.held = type('Held', (), {'lost': True})()
+    else:
+        guard.cancelled.set()
+    with pytest.raises((worker.WorkerError, RuntimeError)):
+        if cause in ('heartbeat-request', 'heartbeat-contract', 'permit-refresh'):
+            guard.beat()
+        else:
+            guard.check()
+    assert guard.authority_failure == cause
+    # Neither a later deadline nor a failed settlement heartbeat replaces the cause.
+    now[0] = 201.0
+    with pytest.raises(worker.WorkerError): guard.check()
+    with pytest.raises(worker.WorkerError): guard.beat()
+    assert guard.authority_failure == cause and guard.cancelled.is_set()
+
+
+def test_delayed_heartbeat_keeps_send_time_expiry(source):
+    now = [100.0]
+    source[1]['deadline'] = 200.0
+    http = Transport(source)
+    original = http.request
+    def delayed(*args, **kwargs):
+        now[0] += 12.0
+        return original(*args, **kwargs)
+    http.request = delayed
+    guard = worker.Authority(http, source[1], clock=lambda: now[0], monotonic=lambda: now[0])
+    with pytest.raises(worker.WorkerError, match='authority-lost'): guard.beat()
+    assert guard.ack == 100.0
+    assert guard.authority_failure == 'ack-expired'
+
+
+def failure_receipt(tmp_path):
+    return json.loads((tmp_path / (JOB + '-1-failure.json')).read_text())
+
+
+@pytest.mark.parametrize('reply,expected', [
+    ({'job_id': JOB, 'status': 'failed'}, 'accepted'),
+    ({'job_id': JOB, 'status': 'complete'}, 'response-unconfirmed'),
+    ({'job_id': OWNER, 'status': 'failed'}, 'response-unconfirmed'),
+    ({'job_id': JOB, 'status': 'failed', 'secret': 'Bearer synthetic'}, 'response-unconfirmed'),
+    ([], 'response-unconfirmed'),
+    (b'{invalid secret', 'response-unconfirmed'),
+    (TimeoutError('Bearer synthetic'), 'request-failed'),
+])
+def test_failure_settlement_requires_exact_response(source, tmp_path, monkeypatch, reply, expected):
+    monkeypatch.setattr(worker.Authority, 'start', lambda self: self.beat())
+    http = Transport(source)
+    original = http.request
+    def request(method, path, body=None, **kw):
+        if path.endswith('/complete'):
+            original(method, path, body, **kw)
+            if isinstance(reply, BaseException): raise reply
+            return reply if type(reply) is bytes else worker.encode(reply)
+        return original(method, path, body, **kw)
+    http.request = request
+    def native(*args): raise worker.WorkerError('native-failed')
+    result = worker.run_once(SCOPE, http, native, tmp_path)
+    local = failure_receipt(tmp_path)
+    assert result['result'] == 'failed'
+    assert local['failure_settlement'] == expected
+    assert local['error_code'] == 'native-failed'
+    assert local['authority_failure'] == 'none'
+    assert len([p for _, p, _, _ in http.calls if p.endswith('/complete')]) == 1
+    assert 'synthetic' not in json.dumps(local)
+
+
+@pytest.mark.parametrize('error,expected', [
+    (worker.WorkerError('source-integrity'), 'source-integrity'),
+    (worker.WorkerError('Bearer synthetic https://private.invalid body stderr'), 'unexpected'),
+    (worker.WorkerError('native-failed', {'Authorization': 'Bearer synthetic'}), 'unexpected'),
+    (RuntimeError('native-failed'), 'unexpected'),
+    (RuntimeError({'secret': 'Bearer synthetic'}), 'unexpected'),
+])
+def test_local_failure_diagnostics_are_closed_and_redacted(source, tmp_path, monkeypatch, error, expected):
+    monkeypatch.setattr(worker.Authority, 'start', lambda self: self.beat())
+    http = Transport(source)
+    def native(raw, job, guard):
+        guard.stage('mac-producer')
+        raise error
+    native.report = {'cleanup_complete': True, 'allocator_release_confirmed': True,
+                     'secret': 'Bearer synthetic', 'stderr': 'remote output'}
+    result = worker.run_once(SCOPE, http, native, tmp_path)
+    local = failure_receipt(tmp_path)
+    assert set(local) == {'stage', 'result', 'job_id', 'archive_sha256', 'execution_stage',
+                          'error_code', 'authority_failure', 'failure_settlement',
+                          'cleanup_complete', 'allocator_release_confirmed'}
+    assert local['execution_stage'] == 'mac-producer'
+    assert local['error_code'] == expected
+    assert local['cleanup_complete'] is True and local['allocator_release_confirmed'] is True
+    serialized = json.dumps([local, result])
+    for secret in ('synthetic', 'private.invalid', 'Authorization', 'stderr', 'remote output'):
+        assert secret not in serialized
+
+
+@pytest.mark.parametrize('stage', ['mac-bootstrap', 'mac-permit-refresh', 'mac-producer', 'evidence'])
+def test_mac_foreground_stage_survives_cleanup(source, stage):
+    guard = worker.Authority(Transport(source), source[1])
+    guard.beat()
+    cleanup_stages = []
+    class BrokenAllocator(Allocator):
+        @contextmanager
+        def lease(self, *args, **kwargs):
+            with super().lease(*args, **kwargs) as held:
+                original = held.ssh
+                def ssh(command, payload=None, **kw):
+                    p = json.loads(payload)
+                    if len(self.calls) == 0:
+                        current = 'mac-bootstrap'
+                    elif 'expiry' in p:
+                        current = 'mac-permit-refresh'
+                    elif 'driver' in p:
+                        current = 'mac-producer'
+                    else:
+                        cleanup_stages.append(guard.execution_stage)
+                        return original(command, payload, **kw)
+                    if current == stage:
+                        # Count the attempted bootstrap so the following call is cleanup.
+                        self.calls.append(p)
+                        raise worker.WorkerError('mac-transport-failed')
+                    result = original(command, payload, **kw)
+                    if current == 'mac-producer' and stage == 'evidence':
+                        data = json.loads(result.stdout)
+                        data['screenshot_base64'] = 'invalid secret'
+                        result.stdout = json.dumps(data)
+                    return result
+                held.ssh = ssh
+                yield held
+    adapter = mac.MacAdapter(BrokenAllocator())
+    with pytest.raises(Exception): adapter(source[0], source[1], guard)
+    assert guard.execution_stage == stage
+    assert cleanup_stages == [stage]
+    assert adapter.report == {'cleanup_complete': True, 'allocator_release_confirmed': True}
+    assert guard.authority_failure == ('permit-refresh' if stage == 'mac-permit-refresh' else 'none')
+
+
+def test_authority_lost_receipt_never_attempts_completion(source, tmp_path, monkeypatch):
+    monkeypatch.setattr(worker.Authority, 'start', lambda self: self.beat())
+    http = Transport(source)
+    def native(raw, job, guard):
+        guard.stage('mac-producer')
+        http.deny = True
+        guard.beat()
+    worker.run_once(SCOPE, http, native, tmp_path)
+    local = failure_receipt(tmp_path)
+    assert local['authority_failure'] == 'heartbeat-request'
+    assert local['execution_stage'] == 'mac-producer'
+    assert local['error_code'] == 'http-denied'
+    assert local['failure_settlement'] == 'not-attempted-authority-lost'
+    assert not any(p.endswith('/complete') for _, p, _, _ in http.calls)
+
+
+@pytest.mark.parametrize('reply,expected', [(TimeoutError('secret'), 'request-failed'),
+                                          (b'not-json secret', 'response-unconfirmed')])
+def test_uncertain_success_settlement_diagnostics(source, tmp_path, monkeypatch, reply, expected):
+    monkeypatch.setattr(worker.Authority, 'start', lambda self: self.beat())
+    http = Transport(source)
+    original = http.request
+    def request(method, path, body=None, **kw):
+        result = original(method, path, body, **kw)
+        if path.endswith('/complete'):
+            if isinstance(reply, BaseException): raise reply
+            return reply
+        return result
+    http.request = request
+    assert worker.run_once(SCOPE, http, lambda *a: (facts(), png()), tmp_path)['result'] == 'unknown'
+    local = failure_receipt(tmp_path)
+    assert local['execution_stage'] == 'completion'
+    assert local['failure_settlement'] == expected
+    assert len([p for _, p, _, _ in http.calls if p.endswith('/complete')]) == 1
