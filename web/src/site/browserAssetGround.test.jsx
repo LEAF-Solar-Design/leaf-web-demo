@@ -1,10 +1,27 @@
 import { useContext } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
-import { afterEach, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { BrowserArtifactContext, BrowserAssetGround } from './BrowserAssetGround.jsx'
 
 vi.mock('./ProjectBoardGround.jsx', () => ({ ProjectBoardGround: ({ panel, active }) => <div hidden={!active}>{panel}</div> }))
+const auth = vi.hoisted(() => ({ configured: true, signedIn: true, listeners: new Set(), login: vi.fn() }))
+vi.mock('../auth.js', async importOriginal => ({
+  ...await importOriginal(),
+  get authConfigured() { return auth.configured },
+  isSignedIn: () => auth.signedIn,
+  login: auth.login,
+  subscribeTokenStored: listener => {
+    auth.listeners.add(listener)
+    return () => auth.listeners.delete(listener)
+  },
+}))
+beforeEach(() => {
+  auth.configured = true
+  auth.signedIn = true
+  auth.listeners.clear()
+  auth.login.mockReset()
+})
 afterEach(cleanup)
 
 let handoff
@@ -14,6 +31,34 @@ function Output() {
 }
 const props = { browserActive: true, signedIn: true, accountScope: 'account:one', projectId: 'project-one',
   workspaceProject: { kind: 'project', label: 'Pastry shop' }, panel: <Output /> }
+
+it('wires the signed-out chooser sign-in click to live auth login', () => {
+  auth.signedIn = false
+  const { container } = render(<BrowserAssetGround {...props} signedIn={false} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Sign in' }))
+  expect(auth.login).toHaveBeenCalledExactlyOnceWith()
+  expect(container.querySelector('.workspace-environment').dataset.entered).toBe('false')
+})
+
+it.each([
+  { configured: true, signedIn: true },
+  { configured: false, signedIn: false },
+])('omits chooser sign-in for auth state %j', state => {
+  Object.assign(auth, state)
+  render(<BrowserAssetGround {...props} signedIn={state.signedIn} />)
+  expect(screen.queryByText('Sign in')).toBeNull()
+})
+
+it('drops chooser sign-in on token storage even when the account scope stays the same', () => {
+  auth.signedIn = false
+  render(<BrowserAssetGround {...props} signedIn={false} accountScope="guest" />)
+  expect(screen.getByRole('button', { name: 'Sign in' })).toBeTruthy()
+  act(() => {
+    auth.signedIn = true
+    for (const listener of auth.listeners) listener('stored-token')
+  })
+  expect(screen.queryByText('Sign in')).toBeNull()
+})
 
 it('starts empty with closed overlays and retains the existing panel input across toggles', () => {
   const { container } = render(<BrowserAssetGround {...props} />)
