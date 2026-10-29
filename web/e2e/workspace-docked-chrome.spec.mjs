@@ -36,18 +36,21 @@ async function expectPhoneViewControls(page, info, phase) {
     }
     return { width:innerWidth, height:innerHeight, scroll:document.documentElement.scrollWidth,
       profile:rect('.environment-strip'), view:rect('.cockpit-view'), find:rect('.drawing-navigation'),
+      overview:rect('.cad-overview'),
       command:rect('.bar-dock'), input:rect('.bar-command-line .bar-field'),
       commandControls:rect('.bar-command-line .bar-controls') }
   })
+  await info.attach(`${phase}-phone-view-initial-geometry`, { body:JSON.stringify(await measure(), null, 2), contentType:'application/json' })
   await expect.poll(async () => {
     const g = await measure()
     return g.view.y >= g.profile.bottom && g.find.y >= g.view.bottom
-      && g.find.bottom <= g.command.y
+      && g.find.bottom <= g.overview.y
+      && g.overview.bottom <= g.command.y
   }).toBe(true)
   const geometry = await measure()
   await info.attach(`${phase}-phone-view-geometry`, { body:JSON.stringify(geometry, null, 2), contentType:'application/json' })
   expect(geometry.scroll).toBeLessThanOrEqual(geometry.width)
-  for (const b of [geometry.view, geometry.find, geometry.command, geometry.input, geometry.commandControls]) {
+  for (const b of [geometry.view, geometry.find, geometry.overview, geometry.command, geometry.input, geometry.commandControls]) {
     expect(b.width).toBeGreaterThan(0)
     expect(b.height).toBeGreaterThan(0)
     expect(b.x).toBeGreaterThanOrEqual(0)
@@ -58,36 +61,70 @@ async function expectPhoneViewControls(page, info, phase) {
   expect(geometry.input.bottom).toBeLessThanOrEqual(geometry.commandControls.y)
   const view = page.getByRole('toolbar', { name:'View', exact:true })
   const zoom = view.getByRole('button', { name:'Zoom in', exact:true })
+  const zoomOut = view.getByRole('button', { name:'Zoom out', exact:true })
   const fit = view.getByRole('button', { name:'Fit drawing to view', exact:true })
   const find = page.getByRole('combobox', { name:'Find in drawing', exact:true })
   const submit = page.locator('.drawing-find-submit')
   // These centers used to hit Project and Workspace profile in the dock.
-  for (const control of [zoom, fit, find, submit]) await expectCenterHit(control)
-  await zoom.click()
-  await fit.click()
+  for (const control of [zoom, zoomOut, fit]) {
+    await expectCenterHit(control)
+    await control.click()
+  }
+  for (const control of [find, submit]) await expectCenterHit(control)
   await find.click()
   await expect(find).toBeFocused()
   await submit.click()
   await expectCenterHit(page.locator('.bar-command-line .bar-field'))
+  const overview = page.locator('.cad-overview')
+  const toggle = overview.locator('.cad-overview-toggle')
+  await expectCenterHit(toggle)
+  if (await overview.getAttribute('data-collapsed') === 'false') {
+    const map = overview.getByRole('button', { name:'Drawing overview', exact:true })
+    await expect(overview.locator('.cad-overview-key')).toBeVisible()
+    await expect(overview.locator('.cad-overview-key')).toContainText('selected')
+    await expectCenterHit(map)
+    await map.click()
+    await expect(map).toBeFocused()
+  }
+  const state = await overview.getAttribute('data-collapsed') === 'true' ? 'collapsed' : 'expanded'
+  await page.screenshot({ path:info.outputPath(`${phase}-phone-overview-${state}.png`) })
+}
+
+async function exercisePhoneOverview(page, info, phase) {
+  const overview = page.locator('.cad-overview')
+  const toggle = overview.locator('.cad-overview-toggle')
+  await expect(overview).toBeVisible()
+  // Deliberately visit both states; do not depend on the session's saved state.
+  if (await overview.getAttribute('data-collapsed') === 'true') {
+    await expectCenterHit(toggle)
+    await toggle.click()
+  }
+  await expect(toggle).toHaveAttribute('aria-expanded', 'true')
+  await expectPhoneViewControls(page, info, `${phase}-expanded`)
+  await expectCenterHit(toggle)
+  await toggle.click()
+  await expect(toggle).toHaveAttribute('aria-expanded', 'false')
+  await expect(overview.getByRole('button', { name:'Drawing overview', exact:true })).toBeHidden()
+  await expectPhoneViewControls(page, info, `${phase}-collapsed`)
 }
 
 async function exercisePhoneViewControls(page, info, phase) {
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg')
-  await expectPhoneViewControls(page, info, phase)
+  await exercisePhoneOverview(page, info, phase)
   const toolRail = page.getByRole('button', { name:'Tool rail', exact:true })
   await expect(toolRail).toHaveAttribute('aria-expanded', 'false')
   await toolRail.click()
   await expect(toolRail).toHaveAttribute('aria-expanded', 'true')
   await toolRail.click()
   await expect(toolRail).toHaveAttribute('aria-expanded', 'false')
-  await expectPhoneViewControls(page, info, `${phase}-rail-closed`)
+  await exercisePhoneOverview(page, info, `${phase}-rail-closed`)
   await page.getByRole('navigation', { name:'Workspace controls', exact:true })
     .getByRole('button', { name:'Studio', exact:true }).click()
   const studio = page.getByRole('region', { name:'Studio sidebar', exact:true })
   await expect(studio).toBeVisible()
   await studio.getByRole('button', { name:'Close Studio', exact:true }).click()
   await expect(studio).toBeHidden()
-  await expectPhoneViewControls(page, info, `${phase}-studio-closed`)
+  await exercisePhoneOverview(page, info, `${phase}-studio-closed`)
 }
 
 async function expectNaturalPanelFit(ribbon, info) {
@@ -288,7 +325,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wid
     await expectCenterHit(manage)
     await expect(environment).toHaveAttribute('data-entered', 'true')
     await expectDraftingBands(page, info, 'cad-collapsed')
-    if (size === 'phone') await expectPhoneViewControls(page, info, 'cad-collapsed')
+    if (size === 'phone') await exercisePhoneOverview(page, info, 'cad-collapsed')
     await page.screenshot({ path:info.outputPath(`docked-${size}-cad.png`) })
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(viewport.width)
   })

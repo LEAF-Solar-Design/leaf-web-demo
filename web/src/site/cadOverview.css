@@ -32,5 +32,17 @@
   .cad-overview-key { grid-column: 1; grid-row: 2; }
 }
 @media (max-width: 599px) {
-  .cad-overview { bottom: calc(var(--ck-dock, 112px) + var(--ck-drawer, 44px) + 8px); }
+  /* Find occupies the two rows above this seat. Keep a single 44px row
+     above the drawer headings, without adding borders to its height. */
+  .cad-overview {
+    bottom: calc(var(--ck-dock, 112px) + var(--ck-drawer, 44px));
+    border: 0; box-shadow: inset 0 0 0 1px var(--ck-edge, var(--leaf-line));
+  }
+  .cad-overview[data-collapsed="false"] {
+    display: grid; grid-template-columns: minmax(0, 1fr) 68px minmax(0, 1fr);
+    width: min(360px, calc(100vw - 16px));
+  }
+  .cad-overview .cad-overview-toggle { padding: 4px 6px; }
+  .cad-overview .cad-overview-map { display: flex; align-items: center; min-height: 44px; }
+  .cad-overview-key { flex-direction: column; justify-content: center; gap: 0; padding: 0 6px; white-space: nowrap; }
 }
