@@ -260,15 +260,18 @@ export function locatorRecipe(entry, state) {
     if (!STUDIO_DRAWERS.includes(entry.source_id)) throw new Error(`No drawer registry record for ${entry.id}`)
     if (entry.source_id === 'nav') return {
       ...role('button', state === 'open' ? 'Collapse the tool rail to a spine' : 'Tool rail'), trigger: 'click',
+      studioDrawer: 'nav',
       phone: { ...role('button', 'Tool rail'), trigger: 'click' },
     }
     if (entry.source_id === 'jobs') return {
       ...role('button', state === 'open' ? 'Collapse the job monitor to a spine' : /^Expand the job monitor \([0-9]+ live\)$/), trigger: 'click',
+      studioDrawer: 'jobs',
       phone: { ...role('button', 'Studio', role('navigation', 'Workspace controls')), trigger: 'click', phonePanel: 'Jobs',
         legacy: { ...role('button', 'Jobs', role('group', 'Workspace panels')), trigger: 'click' } },
     }
     return { ...role('button', drawerNames[entry.source_id], role('group', 'Workspace panels')),
       trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape',
+      ...(entry.source_id === 'none' ? { studioDrawer: 'jobs' } : {}),
       ...(entry.source_id === 'plan' ? {
         phone: { ...role('button', 'properties', role('toolbar', 'Drafting tools')), phonePanel: 'Plan' },
       } : entry.source_id === 'none' ? {

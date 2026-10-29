@@ -1469,6 +1469,22 @@ test('Jobs uses desktop spine controls and preserves the phone drawer locator', 
   }
 })
 
+test('drawer recipes identify their Studio host while preserving legacy locators and Escape', () => {
+  for (const drawer of ['jobs', 'nav']) {
+    const entry = map.entries.find(entry => entry.id === `drawer:${drawer}`)
+    for (const state of ['closed', 'open']) {
+      assert.equal(resolveProbe(entry, state).locator.studioDrawer, drawer)
+    }
+  }
+  const none = map.entries.find(entry => entry.id === 'drawer:none')
+  for (const state of ['drawer-open', 'drawers-closed']) {
+    const probe = resolveProbe(none, state)
+    assert.equal(probe.locator.studioDrawer, 'jobs')
+    assert.equal(probe.locator.trigger, 'keyboard')
+    assert.equal(probe.locator.key, 'Escape')
+  }
+})
+
 test('phone panel overrides preserve legacy locators and use the redesigned disclosures', () => {
   const jobs = resolveProbe(map.entries.find(entry => entry.id === 'drawer:jobs'), 'closed')
   assert.equal(jobs.locator.phone.legacy.name, 'Jobs')
