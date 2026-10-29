@@ -2908,6 +2908,9 @@ def build_suites() -> List[Suite]:
         # SPA client drift (P-160): 12 fake-transport tests, no network.
         Suite("auth0-spa-client-drift-check", "scripts test_check_auth0_spa_client_drift.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_check_auth0_spa_client_drift.py"), 12),
+        # Staging audience (P-178): 14 offline plan/apply tests, no network.
+        Suite("auth0-staging-audience-check", "scripts test_auth0_staging_audience.py",
+              "pytest", SCRIPTS_DIR, _py_pytest("test_auth0_staging_audience.py"), 14),
         # 33 cases: 19 original functions (27 parametrized cases), plus three
         # dry-run plans, two digest round trips and the CI deploy contract. No network.
         Suite("auth0-action-deploy", "scripts test_deploy_auth0_actions.py",
