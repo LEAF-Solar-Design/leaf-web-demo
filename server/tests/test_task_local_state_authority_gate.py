@@ -208,6 +208,20 @@ _TASK_LOCAL_STATE: dict[str, _State] = {
             "a stated one for the deployed app."
         ),
     ),
+    "LEAF_PUBLISHED_TOOLS_DIR": _State(
+        container_default="/app/server/published_tools",
+        modules=("server/tool_envelopes.py",),
+        manifests=(),
+        compose={},
+        read_only=True,
+        why=(
+            "Signed tool envelopes, package zips and the revocation list are "
+            "published into the image by a reviewed PR and only ever read "
+            "(load_catalog walks and reads; nothing writes). A task replacement "
+            "restores the catalog rather than destroying it; a write in that "
+            "module turns the read-only check red."
+        ),
+    ),
     "LEAF_STORE_DIR": _State(
         container_default="/app/server/drawings",
         modules=("server/write_loop.py",),

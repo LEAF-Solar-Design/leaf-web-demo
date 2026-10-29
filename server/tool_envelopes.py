@@ -10,6 +10,8 @@ from itertools import islice
 from pathlib import Path
 from threading import Lock
 
+SERVER_DIR = Path(__file__).resolve().parent
+
 _LOG = logging.getLogger(__name__)
 _CACHE: dict[Path, Catalog] = {}
 _LOCK = Lock()
@@ -155,4 +157,4 @@ def load_catalog(root: str | Path) -> Catalog:
 
 
 def published_catalog() -> Catalog:
-    return load_catalog(os.environ.get("LEAF_PUBLISHED_TOOLS_DIR", Path(__file__).parent / "published_tools"))
+    return load_catalog(os.environ.get("LEAF_PUBLISHED_TOOLS_DIR", str(SERVER_DIR / "published_tools")))
