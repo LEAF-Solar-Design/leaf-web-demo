@@ -30,6 +30,7 @@ vi.mock('./api.js', () => ({
   getOrgIdentities: vi.fn(),
   getProjectLifecycle: vi.fn(),
   inviteMember: vi.fn(),
+  listOrgInvitations: vi.fn(),
   resetProject: vi.fn(),
   revokeMember: vi.fn(),
   setIdentityDisplayName: vi.fn(),
@@ -37,7 +38,7 @@ vi.mock('./api.js', () => ({
 
 vi.mock('./flag.js', () => ({ ENV_LIFECYCLE_UI: true }))
 
-import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, resetProject, revokeMember, setIdentityDisplayName } from './api.js'
+import { cloneProject, deleteProject, exportProject, getOrgIdentities, getProjectLifecycle, inviteMember, listOrgInvitations, resetProject, revokeMember, setIdentityDisplayName } from './api.js'
 import { renderHook } from '@testing-library/react'
 import useProjectLifecycle from './useProjectLifecycle.js'
 import ProjectLifecyclePanel from './ProjectLifecyclePanel.jsx'
@@ -74,6 +75,35 @@ const SNAPSHOT = {
     { receipt_id: 'r-1', project_id: PROJECT_ID, action: 'project_created', input_digest: 'd'.repeat(64), created_at: '2026-08-01T00:00:00+00:00' },
   ],
 }
+
+it('shows organization invitations for a project editor when the server permits listing', async () => {
+  const orgId = 'cccccccc-dddd-4eee-8fff-111111111111'
+  getProjectLifecycle.mockResolvedValue({
+    ...SNAPSHOT,
+    project: { ...SNAPSHOT.project, org_id: orgId },
+    viewer: { ...SNAPSHOT.viewer, role: 'editor', can_invite: false, can_manage: false },
+  })
+  listOrgInvitations.mockResolvedValue({ invitations: [] })
+  render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Invite to organization' }))
+  await screen.findByText('No pending invitations.')
+  expect(listOrgInvitations).toHaveBeenCalledWith(orgId)
+  expect(screen.getByRole('region', { name: 'Invite to organization' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Create invite link' })).toBeTruthy()
+})
+
+it('hides organization invitations for a project owner when the server forbids listing', async () => {
+  const orgId = 'cccccccc-dddd-4eee-8fff-111111111111'
+  getProjectLifecycle.mockResolvedValue({ ...SNAPSHOT, project: { ...SNAPSHOT.project, org_id: orgId } })
+  listOrgInvitations.mockRejectedValue({ status: 403, message: 'owner role required' })
+  render(<ProjectLifecyclePanel enabled projectId={PROJECT_ID} />)
+  fireEvent.click(await screen.findByRole('button', { name: 'Invite to organization' }))
+  await waitFor(() => expect(screen.queryByRole('region', { name: 'Invite to organization' })).toBeNull())
+  expect(listOrgInvitations).toHaveBeenCalledWith(orgId)
+  expect(screen.queryByRole('button', { name: 'Invite to organization' })).toBeNull()
+  expect(screen.queryByRole('button', { name: 'Create invite link' })).toBeNull()
+  expect(screen.queryByRole('alert')).toBeNull()
+})
 
 it('B5 an org owner names a member from the lifecycle panel', async () => {
   const orgId = 'cccccccc-dddd-4eee-8fff-111111111111'

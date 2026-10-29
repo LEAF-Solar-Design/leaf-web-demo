@@ -23,6 +23,7 @@ import CloneDialog from './CloneDialog.jsx'
 import DangerZone from './DangerZone.jsx'
 import ExportDialog from './ExportDialog.jsx'
 import Membership from './Membership.jsx'
+import OrgInvitations from './OrgInvitations.jsx'
 import ReceiptPanel from './ReceiptPanel.jsx'
 import { ENV_LIFECYCLE_UI } from './flag.js'
 import useProjectLifecycle from './useProjectLifecycle.js'
@@ -159,6 +160,9 @@ export default function ProjectLifecyclePanel({
               </button>
             )}
             {identitiesError && <p role="alert">{identitiesError}</p>}
+            {lifecycle.project?.org_id && (
+              <OrgInvitations key={lifecycle.project?.org_id} orgId={lifecycle.project?.org_id} />
+            )}
           </div>
 
           <div className="project-lifecycle-tools">
