@@ -24,6 +24,7 @@ import { monitorStagingSolar, withStagingProject, stagingNetworkPath, stagingErr
 import { redactSolarDiagnostic, projectSolarRunDiagnostic, walkClick, walkFill, walkSelect, walkEnabled,
   enterWorkspaceIfChooser, enterWorkspaceEnvironment, reloadAndReenter, openSolarCadProfile, STUDIO_RAIL_FEATURES, revealStudioRail, prepareStudioRail } from './fixtures.mjs'
 import { stagingDelivery, observeDeliveryHealth, createLocalAncestry, deliveryRepo, decideStagingDelivery } from './stagingDelivery.mjs'
+import { absenceNamePattern, resolveSurfaceControl, assertSurfaceState } from './fixtures.mjs'
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
 const stagingIds = [1, 2, 3, 4, 5, 6].map(id => `00000000-0000-4000-8000-${String(id).padStart(12, '0')}`)
@@ -919,7 +920,9 @@ const stagingAssertions = value => ({
 stagingAssertions.poll = callback => ({ toBe: async expected => assert.equal(await callback(), expected) })
 
 function workspaceEnvironmentFake({ present = true, entered = 'false', resume = true, controlsPresent = true,
-  offered = true, settles = true } = {}) {
+  offered = true, settles = true, profileVisible = true, profileSettles = true, chooserVisible = true,
+  legacyVisible = true, boardVisible = legacyVisible, returnVisible = legacyVisible,
+  legacySelected = 'false', status = 'available', statusAttached = true, statusLabel = 'Ready' } = {}) {
   const events = []
   let expanded = 'false', profile = 'cad', entryClicked = false
   // Project's locator assertion delegates to _expect; environment polls read
@@ -965,20 +968,59 @@ function workspaceEnvironmentFake({ present = true, entered = 'false', resume = 
       } }
     },
   })
+  const profileControl = {
+    count: async () => 1, isVisible: async () => controlsPresent && profileVisible,
+    inputValue: async () => profile,
+    selectOption: async option => {
+      if (typeof option === 'string') {
+        events.push(`Select profile:${option}`)
+        if (profileSettles) profile = option
+      } else {
+        assert.deepEqual(option, { label: 'Solar CAD' }); profile = 'solar'; events.push('Select Solar CAD')
+      }
+    },
+  }
+  const legacy = {
+    text: statusLabel,
+    isVisible: async () => legacyVisible,
+    click: async () => { events.push('Select legacy tab'); legacySelected = 'true' },
+    getAttribute: async name => { assert.equal(name, 'aria-selected'); return legacySelected },
+    locator: selector => {
+      assert.equal(selector, '[data-state]')
+      return { isVisible: async () => false, getAttribute: async name => {
+        assert.equal(name, 'data-state'); return statusAttached ? status : null
+      } }
+    },
+  }
   const controls = { count: async () => controlsPresent ? 1 : 0, getByRole: (role, { name, exact }) => {
     assert.equal(exact, true)
     if (role === 'button' && name === 'Project') return project
     assert.equal(role, 'combobox')
     assert.equal(name, 'Workspace profile')
-    return { count: async () => 1, selectOption: async option => {
-      assert.deepEqual(option, { label: 'Solar CAD' }); profile = 'solar'; events.push('Select Solar CAD')
-    } }
+    return profileControl
   } }
   const page = {
     locator: selector => { assert.equal(selector, 'section.workspace-environment'); return environment },
     getByRole: (role, options) => {
       if (role === 'navigation') {
         assert.deepEqual(options, { name: 'Workspace controls', exact: true }); return controls
+      }
+      if (role === 'tablist') {
+        assert.equal(options.name, 'Workspace profile')
+        if (controlsPresent && profileVisible) assert.equal(options.includeHidden, true)
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'tab')
+          if (controlsPresent && profileVisible) assert.equal(options.includeHidden, true)
+          return legacy
+        } }
+      }
+      if (role === 'heading') return { isVisible: async () => {
+        if (options.name === 'What would you like to work on?') return chooserVisible
+        assert.equal(options.name, 'Project board'); return boardVisible
+      } }
+      if (role === 'button') {
+        assert.equal(options.name, 'Return to drawing')
+        return { isVisible: async () => returnVisible }
       }
       assert.equal(role, 'tab')
       assert.deepEqual(options, { name: 'Solar CAD', exact: true })
@@ -987,8 +1029,110 @@ function workspaceEnvironmentFake({ present = true, entered = 'false', resume = 
       } }
     },
   }
-  return { page, events, setPresent: value => { present = value }, setEntered: value => { entered = value } }
+  return { page, events, profileControl, legacy, environment,
+    setPresent: value => { present = value }, setEntered: value => { entered = value } }
 }
+
+const workspaceOracleAssertions = locator => ({
+  toBeVisible: async () => assert.equal(await locator.isVisible(), true),
+  toContainText: async expected => assert.ok(locator.text.includes(expected)),
+  toHaveValue: async expected => assert.equal(await locator.inputValue(), expected),
+  toHaveAttribute: async (name, expected) => assert.equal(await locator.getAttribute(name), expected),
+})
+
+test('WL23 absence identity ignores unrelated buttons and catches moved or hidden actions', () => {
+  const buttons = Array.from({ length: 122 }, (_, index) => ({ name: `Other ${index}` }))
+  for (const name of ['New drawing', 'Print', 'Save version', 'Save [version].+']) {
+    const pattern = absenceNamePattern({ name })
+    const absent = rows => assert.equal(rows.filter(button => pattern.test(button.name)).length, 0)
+    absent(buttons)
+    absent([...buttons, { name: `Other ${name}` }, { name: `${name} other` }])
+    for (const hidden of [false, true]) for (const suffix of ['', ' (unavailable: No drawing)']) {
+      assert.throws(() => absent([...buttons, { name: name + suffix, hidden, scope: 'elsewhere' }]), assert.AssertionError)
+    }
+  }
+  const explicit = /^Only this refusal$/
+  assert.equal(absenceNamePattern({ name: 'Print', unavailableName: explicit }), explicit)
+  assert.equal(absenceNamePattern({ name: 'Print', unavailableName: 'Exact refusal' }), 'Exact refusal')
+  assert.equal(absenceNamePattern({ name: 'Print (unavailable: Old reason)' }).test('Print'), true)
+  assert.equal(absenceNamePattern({ name: /^refusal$/, availableName: 'Print' }).test('Print'), true)
+  for (const locator of [undefined, {}, { name: '' }, { name: '  ' }, { name: /Print/ },
+    { unavailableName: '' }, { unavailableName: null }]) {
+    assert.throws(() => absenceNamePattern(locator), /stable action name/)
+  }
+})
+
+const surfaceProbe = id => ({ kind: 'surface', sourceId: id, state: 'ready',
+  locator: { role: 'tab', name: id, exact: true,
+    scope: { role: 'tablist', name: 'Workspace profile', exact: true } } })
+
+test('WL23 modern surface control selects the requested profile id despite hidden legacy tabs', async () => {
+  for (const id of ['browser', 'lab', 'ops', 'cad', 'solar']) {
+    const fake = workspaceEnvironmentFake({ legacyVisible: false })
+    const resolved = await resolveSurfaceControl(fake.page, surfaceProbe(id))
+    assert.equal(resolved.locator, fake.profileControl)
+    await resolved.activate()
+    await resolved.assertSelected(workspaceOracleAssertions)
+    assert.equal(fake.events.includes(`Select profile:${id}`), true)
+    assert.equal(fake.events.includes('Select legacy tab'), false)
+    fake.profileControl.inputValue = async () => 'wrong'
+    await assert.rejects(resolved.assertSelected(workspaceOracleAssertions), assert.AssertionError)
+    fake.profileControl.inputValue = async () => id
+    fake.environment.getAttribute = async () => 'wrong'
+    await assert.rejects(resolved.assertSelected(workspaceOracleAssertions), assert.AssertionError)
+  }
+})
+
+test('WL23 absent or hidden modern strip preserves legacy tab activation and selection checks', async () => {
+  for (const options of [{ controlsPresent: false }, { profileVisible: false }]) {
+    const fake = workspaceEnvironmentFake(options)
+    const resolved = await resolveSurfaceControl(fake.page, surfaceProbe('solar'))
+    assert.equal(resolved.locator, fake.legacy)
+    await assert.rejects(resolved.assertSelected(workspaceOracleAssertions), assert.AssertionError)
+    await resolved.activate()
+    await resolved.assertSelected(workspaceOracleAssertions)
+    assert.deepEqual(fake.events, ['Select legacy tab'])
+  }
+})
+
+test('WL23 readiness requires the expected data-state on an attached hidden legacy badge', async () => {
+  for (const state of ['available', 'beta', 'paused']) {
+    for (const options of [{ status: state }, { status: 'wrong' }, { status: state, statusAttached: false }]) {
+      const fake = workspaceEnvironmentFake({ legacyVisible: false, ...options })
+      const resolved = await resolveSurfaceControl(fake.page, surfaceProbe('solar'))
+      const check = () => assertSurfaceState(resolved.legacy, state, workspaceOracleAssertions)
+      if (options.status === state && options.statusAttached !== false) await check()
+      else await assert.rejects(check(), assert.AssertionError)
+    }
+  }
+})
+
+test('WL23 surface effect checks the modern profile and hidden legacy readiness together', async () => {
+  for (const [id, state, label] of [['browser', 'available', 'Ready'], ['lab', 'available', 'Ready'],
+    ['ops', 'available', 'Ready'], ['cad', 'paused', 'Execution paused'], ['solar', 'beta', 'Beta']]) {
+    for (const statusAttached of [true, false]) {
+      const fake = workspaceEnvironmentFake({ legacyVisible: false, status: state, statusLabel: label, statusAttached })
+      const probe = { ...surfaceProbe(id), assertion: { target: `surface:${id}`, state, label } }
+      const resolved = await resolveSurfaceControl(fake.page, probe)
+      await resolved.activate()
+      const check = () => assertEffect(probe, { page: fake.page }, resolved.locator, {}, workspaceOracleAssertions)
+      if (statusAttached) await check()
+      else await assert.rejects(check(), assert.AssertionError)
+    }
+  }
+})
+
+test('WL23 Start requires the visible chooser and exited environment, or the legacy board and Return', async () => {
+  const probe = { assertion: { target: 'project-board' } }
+  for (const options of [{ entered: 'false' }, { entered: 'true' }, { chooserVisible: false },
+    { present: false }, { present: false, boardVisible: false }, { present: false, returnVisible: false }]) {
+    const fake = workspaceEnvironmentFake(options)
+    const check = () => assertEffect(probe, { page: fake.page }, null, {}, workspaceOracleAssertions)
+    if (options.entered === 'true' || options.chooserVisible === false || options.boardVisible === false || options.returnVisible === false) {
+      await assert.rejects(check(), assert.AssertionError)
+    } else await check()
+  }
+})
 
 function boundedWorkspacePoll({ passes = 4, beforePass = () => {} } = {}) {
   const polls = []
