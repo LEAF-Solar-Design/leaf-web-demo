@@ -2,6 +2,7 @@
 import copy
 import hashlib
 import json
+import logging
 from pathlib import Path
 import sys
 import threading
@@ -24,7 +25,8 @@ def headers(org, actor):
 
 
 @pytest.fixture(autouse=True)
-def no_external_calls(monkeypatch):
+def no_external_calls(monkeypatch, caplog):
+    caplog.set_level(logging.WARNING, logger=proposals.__name__)
     monkeypatch.setenv('LEAF_AUTH_LIVE', '0')
     monkeypatch.setenv('LEAF_AUTHOR_HARNESS_URL', 'http://harness.invalid')
     monkeypatch.setenv('LEAF_HARNESS_SECRET', 'test-only-harness-secret')
@@ -108,6 +110,36 @@ def encoded(value):
     return json.dumps(value).encode()
 
 
+def failure_records(caplog):
+    return [record for record in caplog.records if record.name == proposals.__name__]
+
+
+def assert_failure(caplog, stage, code, upstream_status=0):
+    records = failure_records(caplog)
+    assert len(records) == 1
+    record = records[0]
+    assert record.levelno == logging.WARNING
+    assert record.msg == ('portfolio_proposal_failed correlation_id=%s stage=%s '
+                          'code=%s upstream_status=%s')
+    correlation_id, actual_stage, actual_code, actual_status = record.args
+    parsed = uuid.UUID(correlation_id)
+    assert parsed.version == 4 and str(parsed) == correlation_id
+    assert (actual_stage, actual_code, actual_status) == (stage, code, upstream_status)
+    assert record.exc_info is None and record.stack_info is None
+    rendered = record.getMessage()
+    assert rendered == (f'portfolio_proposal_failed correlation_id={correlation_id} '
+                        f'stage={stage} code={code} upstream_status={upstream_status}')
+    assert rendered in caplog.text
+    for sentinel in ('Make the headline warmer', 'Jessica Sargent', 'Selected work',
+                     'Handmade cakes', 'jessica@example.com', 'test-only-harness-secret',
+                     'private provider error', 'private upstream body', 'private connection detail',
+                     'private read error', 'private request error', 'compressed private body',
+                     'private text', 'metadata-secret', 'client-correlation-secret', 'claude-test-1'):
+        assert sentinel not in rendered
+        assert sentinel not in caplog.text
+        assert sentinel not in repr(record.args)
+
+
 def revision_count(saved):
     def operation(conn):
         with conn.cursor() as cur:
@@ -117,7 +149,7 @@ def revision_count(saved):
     return run_transaction(operation)
 
 
-def test_proposal_uses_saved_catalog_and_never_saves_then_explicit_put(client, saved, monkeypatch):
+def test_proposal_uses_saved_catalog_and_never_saves_then_explicit_put(client, saved, monkeypatch, caplog):
     def produce(payload):
         return Response(encoded(result(payload, [{'id': 'f0002', 'value': 'Made with love'}])))
     calls, responses = install_transport(monkeypatch, produce)
@@ -160,6 +192,7 @@ def test_proposal_uses_saved_catalog_and_never_saves_then_explicit_put(client, s
         'expected_revision': proposal['source']['revision'], 'document': proposal['proposed_document']})
     assert applied.status_code == 200 and applied.json()['page']['revision'] == 2
     assert revision_count(saved) == 2
+    assert failure_records(caplog) == []
     # A distinct stale draft cannot apply; PUT retains its existing retry semantics.
     stale = {**proposal['proposed_document'], 'headline': 'Another draft'}
     assert client.put(saved['url'], headers=saved['auth'], json={
@@ -216,11 +249,12 @@ def test_live_identity_uses_server_actor_despite_forged_dev_headers(client, save
     {'instruction': 'x' * 4001}, {'instruction': 5}, {'tenant_id': 'foreign'},
     {'actor': 'foreign'}, {'document': {}}, {'fields': []}, {'limit': 1}, {'grant': {}},
 ])
-def test_invalid_request_never_calls_transport(client, saved, changes):
+def test_invalid_request_never_calls_transport(client, saved, changes, caplog):
     response = client.post(saved['url'] + '/proposals', headers=saved['auth'], json=request_body(saved) | changes)
     assert response.status_code == 422, response.text
     assert response.headers['cache-control'] == 'private, no-store'
     assert revision_count(saved) == 1
+    assert failure_records(caplog) == []
 
 
 @pytest.mark.parametrize('raw,status', [
@@ -233,7 +267,7 @@ def test_raw_request_bound_and_strict_json(client, saved, raw, status):
     assert response.status_code == status
 
 
-def test_auth_scope_and_write_role_before_body_consumption(client, saved, make_org):
+def test_auth_scope_and_write_role_before_body_consumption(client, saved, make_org, caplog):
     org, project, owner = saved['org'], saved['project'], saved['actor']
     outsider = store.create_identity_binding(org, 'auth0', str(uuid.uuid4()), role='owner').binding_id
     other_org = make_org().org_id
@@ -251,12 +285,14 @@ def test_auth_scope_and_write_role_before_body_consumption(client, saved, make_o
     assert client.post(url, headers=headers(org, outsider), content=b'{').status_code == 403
     store.soft_delete_project(org, project)
     assert client.post(url, headers=saved['auth'], json=request_body(saved)).status_code == 404
+    assert failure_records(caplog) == []
 
 
 @pytest.mark.parametrize('changes', [{'expected_digest': '0' * 64}, {'expected_revision': 2}])
-def test_stale_source_rejected_before_transport(client, saved, changes):
+def test_stale_source_rejected_before_transport(client, saved, changes, caplog):
     response = client.post(saved['url'] + '/proposals', headers=saved['auth'], json=request_body(saved) | changes)
     assert response.status_code == 409
+    assert failure_records(caplog) == []
 
 
 def test_missing_or_nonportfolio_source_rejected(client, saved):
@@ -276,14 +312,20 @@ def test_missing_or_nonportfolio_source_rejected(client, saved):
     'unknown-id', 'path-id', 'duplicate-id', 'too-many', 'too-long', 'nonstring', 'unknown-edit',
     'bad-email', 'html', 'empty-required', 'bad-model', 'long-model', 'unknown-usage', 'bool-usage',
     'negative-usage', 'string-usage', 'float-usage', 'nan-usage', 'large-usage', 'oversize',
+    'source-and-schema', 'source-and-edit', 'invalid-utf8',
 ])
-def test_invalid_output_is_fixed_502_and_never_saves(client, saved, monkeypatch, kind):
+def test_invalid_output_is_fixed_502_and_never_saves(client, saved, monkeypatch, kind, caplog):
     def produce(payload):
         value = result(payload)
         if kind == 'malformed':
             return Response(b'private provider error')
         if kind == 'duplicate-key':
             return Response(encoded(value)[:-1] + b',"model":"second"}')
+        if kind == 'invalid-utf8': return Response(b'\xff')
+        if kind in {'source-and-schema', 'source-and-edit'}:
+            value['source']['digest64hex'] = '0' * 64
+            if kind == 'source-and-schema': value['model'] = 'private text\n'
+            else: value['edits'] = [{'id': 'f9999', 'value': 'Text'}]
         if kind == 'unknown-top': value['private'] = 'provider text'
         if kind == 'unknown-source': value['source']['tenant_id'] = 'foreign'
         if kind == 'changed-source': value['source']['digest64hex'] = '0' * 64
@@ -307,19 +349,35 @@ def test_invalid_output_is_fixed_502_and_never_saves(client, saved, monkeypatch,
         if kind == 'oversize': return Response(b' ' * (proposals.MAX_RESPONSE_BYTES + 1))
         return Response(encoded(value))
     calls, responses = install_transport(monkeypatch, produce)
-    response = client.post(saved['url'] + '/proposals', headers=saved['auth'], json=request_body(saved))
+    response = client.post(saved['url'] + '/proposals', headers={
+        **saved['auth'], 'X-Correlation-Id': 'client-correlation-secret'}, json=request_body(saved))
     assert response.status_code == 502, response.text
     assert response.json() == {'detail': 'Invalid portfolio proposal response.'}
     assert response.headers['cache-control'] == 'private, no-store'
     assert len(calls) == 1 and responses[0].closed
     assert revision_count(saved) == 1
     assert project_web_page.read(saved['org'], saved['project'], saved['actor']) == saved['page']
+    stage, code, upstream_status = 'response', 'invalid_schema', 0
+    if kind in {'malformed', 'duplicate-key', 'nan-usage', 'invalid-utf8'}:
+        code = 'invalid_json'
+    elif kind in {'changed-source', 'source-and-edit'}:
+        code = 'source_mismatch'
+    elif kind in {'unknown-id', 'path-id', 'duplicate-id', 'too-long', 'nonstring', 'unknown-edit'}:
+        code = 'invalid_edits'
+    elif kind in {'bad-email', 'html', 'empty-required'}:
+        stage, code = 'document', 'invalid_document'
+    elif kind == 'oversize':
+        stage, code, upstream_status = 'transport', 'response_size', 200
+    assert_failure(caplog, stage, code, upstream_status)
 
 
-@pytest.mark.parametrize('kind', ['http-failure', 'redirect', 'connect', 'read', 'deadline', 'compressed'])
-def test_transport_failures_are_bounded_closed_and_not_retried(client, saved, monkeypatch, kind):
+@pytest.mark.parametrize('kind', ['http-failure', 'redirect', 'connect', 'connect-timeout', 'request',
+                                 'read', 'deadline', 'header-deadline', 'end-deadline', 'compressed'])
+def test_transport_failures_are_bounded_closed_and_not_retried(client, saved, monkeypatch, kind, caplog):
     def produce(payload):
         if kind == 'connect': raise requests.ConnectionError('private connection detail')
+        if kind == 'connect-timeout': raise requests.ConnectTimeout('private connection detail')
+        if kind == 'request': raise requests.RequestException('private request error')
         if kind == 'http-failure': return Response(b'private upstream body', status=500)
         if kind == 'redirect': return Response(b'', status=307)
         if kind == 'read': return Response(b'', failure=requests.Timeout('private read error'))
@@ -327,29 +385,132 @@ def test_transport_failures_are_bounded_closed_and_not_retried(client, saved, mo
             response = Response(b'compressed private body')
             response.headers['Content-Encoding'] = 'gzip'
             return response
+        if kind == 'end-deadline': return Response(b'')
         return Response(encoded(result(payload)))
     calls, responses = install_transport(monkeypatch, produce)
     if kind == 'deadline':
         # Headers arrive in time; the stream then exceeds the total operation budget.
         times = iter([0, 1, proposals.OPERATION_SECONDS + 1])
         monkeypatch.setattr(proposals, 'monotonic', lambda: next(times))
+    if kind in {'header-deadline', 'end-deadline'}:
+        times = iter([0, proposals.OPERATION_SECONDS + 1] if kind == 'header-deadline'
+                     else [0, 1, proposals.OPERATION_SECONDS + 1])
+        monkeypatch.setattr(proposals, 'monotonic', lambda: next(times))
     response = client.post(saved['url'] + '/proposals', headers=saved['auth'], json=request_body(saved))
     assert response.status_code == 502, response.text
     assert response.json() == {'detail': 'Invalid portfolio proposal response.'}
     assert len(calls) == 1 and all(r.closed for r in responses)
     assert revision_count(saved) == 1
+    assert project_web_page.read(saved['org'], saved['project'], saved['actor']) == saved['page']
+    code, upstream_status = {
+        'http-failure': ('upstream_status', 500), 'redirect': ('upstream_status', 307),
+        'connect': ('connection_error', 0), 'connect-timeout': ('timeout', 0),
+        'request': ('request_error', 0), 'read': ('timeout', 200), 'deadline': ('deadline', 200),
+        'header-deadline': ('deadline', 200), 'end-deadline': ('deadline', 200),
+        'compressed': ('content_encoding', 200),
+    }[kind]
+    assert_failure(caplog, 'transport', code, upstream_status)
 
 
 @pytest.mark.parametrize('missing', ['LEAF_AUTHOR_HARNESS_URL', 'LEAF_HARNESS_SECRET'])
-def test_unconfigured_transport_is_503_without_network(client, saved, monkeypatch, missing):
+def test_unconfigured_transport_is_503_without_network(client, saved, monkeypatch, missing, caplog):
     monkeypatch.delenv(missing)
     response = client.post(saved['url'] + '/proposals', headers=saved['auth'], json=request_body(saved))
     assert response.status_code == 503
     assert response.json() == {'detail': 'Portfolio proposal service is unavailable.'}
+    assert revision_count(saved) == 1
+    assert project_web_page.read(saved['org'], saved['project'], saved['actor']) == saved['page']
+    assert_failure(caplog, 'configuration', 'unavailable')
+
+
+@pytest.mark.parametrize('stage,code,upstream_status,expected', [
+    ('metadata-secret', 'metadata-secret', 'metadata-secret', ('response', 'invalid_schema', 0)),
+    ([], {}, True, ('response', 'invalid_schema', 0)),
+    ('transport', 'invalid_document', 99, ('response', 'invalid_schema', 0)),
+    ('transport', 'timeout', 600, ('transport', 'timeout', 0)),
+    ('transport', 'upstream_status', 100, ('transport', 'upstream_status', 100)),
+    ('transport', 'upstream_status', 599, ('transport', 'upstream_status', 599)),
+])
+def test_diagnostic_metadata_is_closed_and_same_error_is_rethrown(
+        saved, monkeypatch, caplog, stage, code, upstream_status, expected):
+    error = proposals.ProposalError(502, stage=stage, code=code, upstream_status=upstream_status)
+    assert (error.stage, error.code, error.upstream_status) == expected
+    # Also normalize at the log boundary if an internal caller mutates metadata.
+    error.stage, error.code, error.upstream_status = stage, code, upstream_status
+
+    def fail(payload):
+        raise error
+
+    monkeypatch.setattr(proposals, '_transport', fail)
+    with pytest.raises(proposals.ProposalError) as caught:
+        proposals.propose(saved['org'], saved['project'], saved['actor'], **request_body(saved))
+    assert caught.value is error
+    assert str(caught.value) == 'Invalid portfolio proposal response.'
+    assert_failure(caplog, *expected)
+    assert revision_count(saved) == 1
+    assert project_web_page.read(saved['org'], saved['project'], saved['actor']) == saved['page']
+
+
+def test_logging_handler_failure_preserves_service_error(saved, monkeypatch):
+    emitted = []
+
+    class RaisingHandler(logging.Handler):
+        def emit(self, record):
+            emitted.append(record)
+            raise RuntimeError('private logging exception')
+
+    calls = []
+    error = proposals.ProposalError(503, stage='configuration', code='unavailable')
+
+    def fail(payload):
+        calls.append(payload)
+        raise error
+
+    monkeypatch.setattr(proposals, '_transport', fail)
+    handler = RaisingHandler()
+    proposals.logger.addHandler(handler)
+    try:
+        with pytest.raises(proposals.ProposalError) as caught:
+            proposals.propose(saved['org'], saved['project'], saved['actor'], **request_body(saved))
+    finally:
+        proposals.logger.removeHandler(handler)
+        handler.close()
+    assert caught.value is error
+    assert caught.value.status == 503
+    assert str(caught.value) == 'Portfolio proposal service is unavailable.'
+    assert len(calls) == 1
+    assert len(emitted) == 1
+    assert revision_count(saved) == 1
+    assert project_web_page.read(saved['org'], saved['project'], saved['actor']) == saved['page']
+
+
+@pytest.mark.parametrize('raw', [None, bytearray(b'{}'), b' ' * (proposals.MAX_RESPONSE_BYTES + 1)])
+def test_invalid_result_bytes_are_classified_at_operation_boundary(saved, monkeypatch, caplog, raw):
+    monkeypatch.setattr(proposals, '_transport', lambda payload: raw)
+    with pytest.raises(proposals.ProposalError) as caught:
+        proposals.propose(saved['org'], saved['project'], saved['actor'], **request_body(saved))
+    assert caught.value.status == 502
+    assert str(caught.value) == 'Invalid portfolio proposal response.'
+    assert_failure(caplog, 'response', 'invalid_bytes')
+    assert revision_count(saved) == 1
+
+
+def test_arbitrary_operation_error_is_not_logged_or_swallowed(saved, monkeypatch, caplog):
+    error = RuntimeError('private connection detail')
+
+    def fail(payload):
+        raise error
+
+    monkeypatch.setattr(proposals, '_transport', fail)
+    with pytest.raises(RuntimeError) as caught:
+        proposals.propose(saved['org'], saved['project'], saved['actor'], **request_body(saved))
+    assert caught.value is error
+    assert failure_records(caplog) == []
+    assert revision_count(saved) == 1
 
 
 @pytest.mark.parametrize('change,status', [('source', 409), ('membership', 403), ('role', 403), ('delete', 404)])
-def test_rechecks_source_and_write_authority_after_model(client, saved, monkeypatch, change, status):
+def test_rechecks_source_and_write_authority_after_model(client, saved, monkeypatch, change, status, caplog):
     def produce(payload):
         # Independent DB transactions here also prove the model call holds no project lock.
         if change == 'source':
@@ -375,6 +536,7 @@ def test_rechecks_source_and_write_authority_after_model(client, saved, monkeypa
     assert response.status_code == status, response.text
     assert responses[0].closed
     assert revision_count(saved) == (2 if change == 'source' else 1)
+    assert failure_records(caplog) == []
 
 
 def test_empty_edits_preserve_digest_and_absent_usage(client, saved, monkeypatch):
