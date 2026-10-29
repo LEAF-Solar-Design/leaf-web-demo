@@ -1,9 +1,13 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, it } from 'node:test'
+import { fileURLToPath } from 'node:url'
 
 import {
+  DEFAULT_DRAWING_FIXTURE,
   MAX_REQUEST_CEILING,
   ProofError,
+  READY_PHASE,
   TOKEN_ENV,
   classifyStageResponse,
   createFetchBackend,
@@ -18,6 +22,30 @@ import {
 
 const TOKEN = 'proof.token.value-0123456789'
 const ORIGINAL_FETCH = globalThis.fetch
+
+it('ready phase labels still exist in ToolCast', () => {
+  const source = readFileSync(new URL('../src/site/ToolCast.jsx', import.meta.url), 'utf8')
+  assert.ok(source.includes('data-testid="operator-phase"'))
+  assert.ok(source.includes("return 'Drawing ready'"))
+  assert.ok(source.includes("return 'No drawing yet'"))
+  assert.equal(READY_PHASE.test('Drawing ready'), true)
+  assert.equal(READY_PHASE.test('No drawing yet'), true)
+  assert.equal(READY_PHASE.test('Backend ready'), false)
+})
+
+it('resolveConfig refuses a missing drawing fixture', () => {
+  const drawingPath = fileURLToPath(new URL('../e2e/fixtures/missing-quota-proof.dxf', import.meta.url))
+  const { config, refusals } = resolveConfig(environment({ LEAF_QUOTA_PROOF_DRAWING: drawingPath }), { maxRequests: '5' })
+  assert.equal(config.drawingPath, drawingPath)
+  assert.deepEqual(refusals, ['drawing fixture is missing or not .dxf/.dwg'])
+})
+
+it('the default drawing fixture exists in the repo', () => {
+  const fixture = new URL('../e2e/fixtures/distinctive-panel.dxf', import.meta.url)
+  assert.equal(DEFAULT_DRAWING_FIXTURE, 'web/e2e/fixtures/distinctive-panel.dxf')
+  assert.ok(readFileSync(fixture, 'utf8').length > 0)
+  assert.equal(configFor().drawingPath, fileURLToPath(fixture))
+})
 
 function environment(overrides = {}) {
   return {
@@ -73,7 +101,7 @@ function fakeBrowser(backend, { render } = {}) {
   return {
     calls,
     async captureQuotaGate(opts) {
-      calls.push({ screenshotPath: opts.screenshotPath, webOrigin: opts.webOrigin })
+      calls.push({ screenshotPath: opts.screenshotPath, webOrigin: opts.webOrigin, drawingPath: opts.drawingPath })
       opts.takeRequest()
       const response = await backend.stage({
         apiOrigin: opts.apiOrigin,
@@ -237,6 +265,7 @@ describe('fake cap-one execution', () => {
     assert.equal(receipt.requests_made, 3)
     assert.equal(backend.calls.length, 3)
     assert.equal(browser.calls.length, 1)
+    assert.equal(browser.calls[0].drawingPath, config.drawingPath)
     assert.equal(fetchCalls, 0)
 
     assert.equal(receipt.quota_refusal.error_code, 'quota_exceeded')
