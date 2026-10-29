@@ -54,6 +54,7 @@ import { DEFAULT_TENANT } from "../src/ports/index.js";
 import type { AgentGrant, HarnessPorts, OAuthGrantProvider } from "../src/ports/index.js";
 import type { ConverseRunner } from "../src/ports/converse.js";
 import { SpineTurnAdapter } from "../src/agent/spineTurnAdapter.js";
+import { PortfolioProposalService } from "../src/agent/portfolioProposal.js";
 import { AgentSdkRunner } from "../src/ports/impl/agentSdkRunner.js";
 import { BrokerApsClientHttp } from "../src/ports/impl/brokerApsClient.js";
 import { ConverseSdkRunner } from "../src/ports/impl/converseSdkRunner.js";
@@ -449,6 +450,7 @@ async function main(): Promise<void> {
       })
     : undefined;
   const serverOptions = {
+    portfolioProposals: new PortfolioProposalService({ oauth: ports.oauth }),
     ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
     ...(standardServicesApproval ? { standardServicesApproval } : {}),
     ...(glugMushyAuthor ? { glugMushyAuthor } : {}),
