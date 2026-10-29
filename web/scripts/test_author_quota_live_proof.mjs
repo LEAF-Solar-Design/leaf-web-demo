@@ -1,9 +1,11 @@
 import assert from 'node:assert/strict'
+import { readFileSync } from 'node:fs'
 import { afterEach, beforeEach, describe, it } from 'node:test'
 
 import {
   MAX_REQUEST_CEILING,
   ProofError,
+  READY_PHASE,
   TOKEN_ENV,
   classifyStageResponse,
   createFetchBackend,
@@ -18,6 +20,16 @@ import {
 
 const TOKEN = 'proof.token.value-0123456789'
 const ORIGINAL_FETCH = globalThis.fetch
+
+it('ready phase labels still exist in ToolCast', () => {
+  const source = readFileSync(new URL('../src/site/ToolCast.jsx', import.meta.url), 'utf8')
+  assert.ok(source.includes('data-testid="operator-phase"'))
+  assert.ok(source.includes("return 'Drawing ready'"))
+  assert.ok(source.includes("return 'No drawing yet'"))
+  assert.equal(READY_PHASE.test('Drawing ready'), true)
+  assert.equal(READY_PHASE.test('No drawing yet'), true)
+  assert.equal(READY_PHASE.test('Backend ready'), false)
+})
 
 function environment(overrides = {}) {
   return {

@@ -23,6 +23,7 @@ import { fileURLToPath, pathToFileURL } from 'node:url'
 export const SCHEMA = 'leaf.author-quota-live-proof.v1'
 export const TOKEN_ENV = 'LEAF_QUOTA_PROOF_JWT'
 export const STAGE_PATH = '/api/author/stage'
+export const READY_PHASE = /Drawing ready|No drawing yet/
 // One refused API probe plus the browser's one request is the smallest useful run.
 export const MIN_REQUESTS = 2
 // Hard ceiling: each accepted request is real authoring spend.
@@ -487,7 +488,7 @@ export function createPlaywrightBrowser({ chromiumImpl } = {}) {
         const page = await context.newPage()
         await page.goto('/try', { waitUntil: 'domcontentloaded', timeout: 120_000 })
         await page.getByTestId('operator-phase')
-          .filter({ hasText: 'Backend ready' })
+          .filter({ hasText: READY_PHASE })
           .waitFor({ state: 'visible', timeout: 120_000 })
         await page.getByRole('tab', { name: 'Author' }).click()
         await page.getByLabel('What should the tool do?').fill(opts.description)
