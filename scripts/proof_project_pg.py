@@ -14,6 +14,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
+import signal
+import stat
 import socket
 import subprocess
 import tempfile
@@ -75,6 +78,23 @@ def clean_libpq_environment(environ):
         name: value for name, value in environ.items()
         if not (isinstance(name, str) and name.upper() in _LIBPQ_ENV_SET)
     }
+
+
+def _libpq_connect(args, *, native=False):
+    import psycopg
+    # Preserve Docker's documented-name isolation; native calls exclude every
+    # PG* name as well. One connect site serves readiness and database creation.
+    with _CONNECT_LOCK:
+        names = tuple(key for key in os.environ if key.upper().startswith("PG")) if native else _LIBPQ_ENV
+        previous = {name: os.environ[name] for name in names if name in os.environ}
+        try:
+            for name in names:
+                os.environ.pop(name, None)
+            return psycopg.connect(**args)
+        finally:
+            for name in names:
+                os.environ.pop(name, None)
+            os.environ.update(previous)
 
 
 def _validate(run_id):
@@ -405,21 +425,7 @@ class PgAuthority:
                 "sslmode": "disable", "gssencmode": "disable", "connect_timeout": 5}
 
     def _connect(self):
-        import psycopg
-        # This CLI helper has a single-threaded readiness path. Smoke also
-        # connects from worker threads, so serialize the process-wide environment
-        # change for just this call; transactions remain concurrent afterwards.
-        # Embedding alongside unrelated environment readers/writers is unsupported.
-        with _CONNECT_LOCK:
-            previous = {name: os.environ[name] for name in _LIBPQ_ENV if name in os.environ}
-            try:
-                for name in _LIBPQ_ENV:
-                    os.environ.pop(name, None)
-                return psycopg.connect(**self._connect_args())
-            finally:
-                for name in _LIBPQ_ENV:
-                    os.environ.pop(name, None)
-                os.environ.update(previous)
+        return _libpq_connect(self._connect_args())
 
     def redacted_dsn(self):
         return self.dsn().replace(quote(self._password, safe=""), "***")
@@ -464,6 +470,365 @@ class PgAuthority:
     def stop(self):
         self._stop_transport()
         return cleanup(self.run_id, docker=self._docker)
+
+
+NATIVE_DATA = "postgres/data"
+NATIVE_TIMEOUT = 60
+
+
+def _native_environment(environ=None):
+    source = clean_libpq_environment(os.environ if environ is None else environ)
+    # Deliberately also exclude unknown/future PG* settings.
+    result = {key: value for key, value in source.items()
+              if key.upper() in {"PATH", "HOME", "TMPDIR", "SYSTEMROOT", "WINDIR"}
+              and not key.upper().startswith("PG")}
+    result.update(LC_ALL="C", LANG="C", TZ="UTC")
+    return result
+
+
+def _native_command(argv, *, runner=None, environ=None, timeout=NATIVE_TIMEOUT + 5):
+    try:
+        result = (runner or subprocess.run)(list(argv), env=_native_environment(environ),
+            stdin=subprocess.DEVNULL, capture_output=True, text=True, timeout=timeout)
+        if result.returncode:
+            raise RuntimeError("native command failed")
+        return result.stdout
+    except Exception:
+        # Neither child output nor an exception containing argv may escape.
+        raise RuntimeError("proof native database operation failed") from None
+
+
+def resolve_native_binaries(*, environ=None, executable=None, runner=None):
+    source = os.environ if environ is None else environ
+    executable = executable or (lambda path: Path(path).is_file() and os.access(path, os.X_OK))
+    directories = list(dict.fromkeys(filter(None, [source.get("LEAF_PG_BIN"),
+        *source.get("PATH", "").split(os.pathsep), "/opt/homebrew/opt/postgresql@16/bin",
+        "/usr/local/opt/postgresql@16/bin", "/usr/lib/postgresql/16/bin"])))
+    binaries = {}
+    for name in ("initdb", "pg_ctl", "postgres"):
+        for directory in directories:
+            candidate = str(Path(directory) / name)
+            if executable(candidate):
+                binaries[name] = candidate
+                break
+        if name not in binaries:
+            raise RuntimeError("proof native database binaries unavailable")
+    if len({Path(path).resolve().parent for path in binaries.values()}) != 1:
+        raise RuntimeError("proof native database binaries must share a directory")
+    for name, binary in binaries.items():
+        version = _native_command([binary, "--version"], runner=runner, environ=source)
+        if re.fullmatch(re.escape(name) + r" \(PostgreSQL\) 16(?:\.[0-9]+)?(?: [^\r\n]*)?\s*", version) is None:
+            raise RuntimeError("proof native database requires PostgreSQL 16")
+    return binaries
+
+
+def native_process_identity(pid, *, runner=None, kill_probe=None):
+    """Read the process table, not a PID's existence alone (UTC, fixed locale)."""
+    import calendar
+    try:
+        result = (runner or subprocess.run)(["/bin/ps", "-p", str(pid), "-o", "lstart=", "-o", "comm="],
+            env=_native_environment(), stdin=subprocess.DEVNULL, capture_output=True,
+            text=True, timeout=5)
+        if result.returncode:
+            # ps failure is not evidence of absence, even with empty output.
+            if result.stderr.strip():
+                raise ValueError("process table failed")
+            try:
+                (kill_probe or os.kill)(pid, 0)
+            except ProcessLookupError:
+                return None
+            raise ValueError("process table failed")
+        fields = result.stdout.strip().split(None, 5)
+        epoch = calendar.timegm(time.strptime(" ".join(fields[:5]), "%a %b %d %H:%M:%S %Y"))
+        if len(fields) != 6 or Path(fields[5]).name != "postgres":
+            raise ValueError("not a postmaster")
+        return {"start_id": "ps:" + str(epoch), "started_at": epoch}
+    except Exception:
+        raise RuntimeError("proof native database process identity unavailable") from None
+
+
+def native_process_gone(ownership, *, process_table=None):
+    """Only proven absence or a successfully read different start ID is gone."""
+    if not ownership or not ownership.get("pid"):
+        return True
+    identity = (process_table or native_process_identity)(ownership["pid"])
+    if identity is None:
+        return True
+    if (type(identity) is not dict or type(identity.get("started_at")) is not int
+            or identity["started_at"] <= 0
+            or not re.fullmatch(r"ps:[0-9]{1,12}", identity.get("start_id", ""))):
+        raise RuntimeError("proof native database process identity unavailable")
+    return identity["start_id"] != ownership["start_id"]
+
+
+def _stop_native_process(ownership, *, process_table=None):
+    # The data path may have vanished. Never signal a reused PID or infer death
+    # from an unreadable process table. SIGINT is PostgreSQL's fast shutdown.
+    if native_process_gone(ownership, process_table=process_table):
+        return True
+    if not native_process_gone(ownership, process_table=process_table):
+        try:
+            os.kill(ownership["pid"], signal.SIGINT)
+        except ProcessLookupError:
+            return True
+    deadline = time.monotonic() + NATIVE_TIMEOUT
+    while not native_process_gone(ownership, process_table=process_table):
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.05)
+    return True
+
+
+def _native_paths(run_root):
+    root = Path(run_root)
+    # Refuse links at every ancestor, including a vanished root after cleanup.
+    if not root.is_absolute() or any(p.is_symlink() for p in (root, *root.parents)):
+        raise RuntimeError("proof native database path refused")
+    owned = root / "postgres"
+    if owned.is_symlink() or (owned / "data").is_symlink() or (owned / "socket").is_symlink():
+        raise RuntimeError("proof native database path refused")
+    return owned, owned / "data", owned / "owner.json"
+
+
+def _native_marker(run_id, run_root, port, *, owned=None):
+    if owned is None:
+        owned, data, marker = _native_paths(run_root)
+    marker = owned / "owner.json"
+    if any(path.is_symlink() for path in (owned, marker, owned / "data", owned / "socket")):
+        raise RuntimeError("proof native database ownership refused")
+    try:
+        with marker.open("rb") as stream:
+            raw = stream.read(4097)
+        if len(raw) > 4096:
+            raise ValueError("marker size")
+        value = json.loads(raw)
+        if (type(value) is not dict or set(value) != {"run_id", "kind", "data_dir", "port"}
+                or value != {"run_id": run_id, "kind": "native", "data_dir": NATIVE_DATA, "port": port}):
+            raise ValueError("marker mismatch")
+        return value
+    except Exception:
+        raise RuntimeError("proof native database ownership refused") from None
+
+
+def native_inventory(run_id, run_root, port, *, process_table=None):
+    _validate(run_id)
+    if type(port) is not int or not 1 <= port <= 65535:
+        raise RuntimeError("proof native database port refused")
+    owned, data, marker = _native_paths(run_root)
+    if not owned.exists():
+        return None
+    value = _native_marker(run_id, run_root, port)
+    pidfile = data / "postmaster.pid"
+    if pidfile.is_symlink():
+        raise RuntimeError("proof native database identity refused")
+    value.update(pid=0, start_id="", started_at=0)
+    try:
+        with pidfile.open("r", encoding="utf-8") as stream:
+            raw = stream.read(4097)
+    except FileNotFoundError:
+        return value  # Owned directory remains; absence is not removal.
+    try:
+        lines = raw.splitlines()
+        pid, epoch = int(lines[0]), int(lines[2])
+        if (len(raw) > 4096 or pid <= 0 or epoch <= 0 or Path(lines[1]) != data
+                or int(lines[3]) != port or lines[4] != str(owned / "socket")
+                or lines[5] != "127.0.0.1"):
+            raise ValueError("postmaster mismatch")
+        identity = (process_table or native_process_identity)(pid)
+        if (identity is None or type(identity.get("started_at")) is not int
+                or abs(identity["started_at"] - epoch) > 2
+                or not re.fullmatch(r"ps:[0-9]{1,12}", identity.get("start_id", ""))):
+            raise ValueError("postmaster identity mismatch")
+        value.update(pid=pid, start_id=identity["start_id"], started_at=epoch)
+        return value
+    except Exception:
+        raise RuntimeError("proof native database identity refused") from None
+
+
+def native_tombstone_present(run_root):
+    """True when a removal tombstone may exist; a missing root has none, any other listing error counts as one (fails closed)."""
+    try:
+        with os.scandir(run_root) as entries:
+            return any(entry.name.startswith("postgres.removing-") for entry in entries)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
+def _remove_native_directory(run_id, run_root, port):
+    owned, data, marker = _native_paths(run_root)
+    validated = owned.lstat()
+    if not stat.S_ISDIR(validated.st_mode):
+        return False
+    _native_marker(run_id, run_root, port)
+    tombstone = owned.with_name("postgres.removing-" + secrets.token_hex(16))
+    # Move the selected directory before inspecting it again. A replacement
+    # cannot inherit the validated inode merely by occupying the same path.
+    owned.rename(tombstone)
+    moved = tombstone.lstat()
+    if (not stat.S_ISDIR(moved.st_mode)
+            or (moved.st_dev, moved.st_ino) != (validated.st_dev, validated.st_ino)):
+        return False
+    _native_marker(run_id, run_root, port, owned=tombstone)
+    shutil.rmtree(tombstone)
+    return not tombstone.exists() and not tombstone.is_symlink()
+
+
+def cleanup_native(run_id, run_root, port, ownership, *, binaries=None, runner=None,
+                   process_table=None, environ=None):
+    """A captured private identity authorizes stop; a marker authorizes removal."""
+    try:
+        table = process_table or native_process_identity
+        observed = native_inventory(run_id, run_root, port, process_table=table)
+        if observed is None:
+            # Recheck a captured PID even if the directory was removed externally.
+            if native_tombstone_present(run_root):
+                return False
+            return _stop_native_process(ownership, process_table=table)
+        if not ownership:
+            return False
+        if observed != ownership:
+            if (observed != dict(ownership, pid=0, start_id="", started_at=0)
+                    or not native_process_gone(ownership, process_table=table)):
+                return False
+        owned, data, marker = _native_paths(run_root)
+        pid = observed["pid"]
+        if pid:
+            binaries = binaries or resolve_native_binaries(environ=environ, runner=runner)
+            # Re-read immediately before pg_ctl consumes postmaster.pid.
+            if native_inventory(run_id, run_root, port, process_table=table) != ownership:
+                return False
+            _native_command([binaries["pg_ctl"], "stop", "-D", str(data), "-m", "fast",
+                             "-w", "-t", str(NATIVE_TIMEOUT)], runner=runner, environ=environ)
+            if not native_process_gone(ownership, process_table=table):
+                return False
+        after = native_inventory(run_id, run_root, port, process_table=table)
+        if after is None or after["pid"]:
+            return False
+        if not _remove_native_directory(run_id, run_root, port):
+            return False
+        return native_inventory(run_id, run_root, port, process_table=table) is None
+    except Exception:
+        return False
+
+
+class NativePgAuthority(PgAuthority):
+    """Native PG16, using the same binary transaction readiness as the relay."""
+    def __init__(self, run_id, *, run_root, port, resolver=None, runner=None, process_table=None,
+                 environ=None):
+        _validate(run_id)
+        if type(port) is not int or not 1 <= port <= 65535:
+            raise RuntimeError("proof native database port refused")
+        self.run_id, self.run_root, self.port = run_id, Path(run_root), port
+        self.address = ("127.0.0.1", port)
+        self._password = secrets.token_urlsafe(32)
+        self._resolver, self._runner = resolver or resolve_native_binaries, runner
+        self._process_table, self._environ = process_table or native_process_identity, environ
+        self._binaries, self._ownership = None, None
+        self._created, self._start_attempted = False, False
+
+    def __repr__(self):
+        return "<native project database authority>"
+
+    @classmethod
+    def start(cls, run_id, **seams):
+        # Exclusive mkdir is the native collision arbiter; no global temp lock.
+        authority = cls(run_id, **seams)
+        return authority._start()
+
+    def _command(self, argv):
+        return _native_command(argv, runner=self._runner, environ=self._environ)
+
+    def _inventory(self):
+        return native_inventory(self.run_id, self.run_root, self.port, process_table=self._process_table)
+
+    def _start(self):
+        owned, data, marker = _native_paths(self.run_root)
+        self._binaries = self._resolver(environ=self._environ, runner=self._runner)
+        try:
+            owned.mkdir(mode=0o700)
+        except FileExistsError:
+            raise RuntimeError("run already exists") from None
+        self._created = True
+        try:
+            with os.fdopen(os.open(marker, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "w", newline="\n") as stream:
+                json.dump({"run_id": self.run_id, "kind": "native", "data_dir": NATIVE_DATA,
+                           "port": self.port}, stream, sort_keys=True)
+            data.mkdir(mode=0o700)
+            sockets = owned / "socket"
+            sockets.mkdir(mode=0o700)
+            password_file = owned / "password"
+            try:
+                with os.fdopen(os.open(password_file, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600), "wb") as stream:
+                    stream.write((self._password + "\n").encode())
+                self._command([self._binaries["initdb"], "-D", str(data), "-U", "postgres",
+                    "--auth-local=scram-sha-256", "--auth-host=scram-sha-256", "--pwfile", str(password_file),
+                    "--encoding=UTF8", "--locale=C"])
+            finally:
+                password_file.unlink(missing_ok=True)
+            # Config avoids pg_ctl -o's shell-like option parsing entirely.
+            socket_value = str(sockets).replace("\\", "\\\\").replace("'", "''")
+            with (data / "postgresql.conf").open("a", encoding="utf-8", newline="\n") as stream:
+                stream.write("\nlisten_addresses = '127.0.0.1'\nport = " + str(self.port)
+                    + "\nunix_socket_directories = '" + socket_value + "'\nunix_socket_permissions = 0700\n")
+            self._start_attempted = True
+            self._command([self._binaries["pg_ctl"], "start", "-D", str(data), "-p", self._binaries["postgres"],
+                "-l", str(owned / "postgres.log"), "-w", "-t", str(NATIVE_TIMEOUT)])
+            self._ownership = self._inventory()
+            if not self._ownership or not self._ownership["pid"]:
+                raise RuntimeError("postmaster identity missing")
+            # CREATE DATABASE cannot run in a transaction. Password stays in libpq kwargs.
+            with self._connect_database("postgres") as conn:
+                if type(conn.info.server_version) is not int or conn.info.server_version // 10000 != 16:
+                    raise RuntimeError("proof native database requires PostgreSQL 16")
+                conn.autocommit = True
+                conn.execute("CREATE DATABASE leaf")
+            deadline = time.monotonic() + NATIVE_TIMEOUT
+            while True:
+                try:
+                    self.readiness()
+                    return self
+                except RuntimeError:
+                    if time.monotonic() >= deadline:
+                        raise RuntimeError("proof native database readiness timed out") from None
+                    time.sleep(0.2)
+        except BaseException:
+            if not self._cleanup_created():
+                raise RuntimeError("proof native database start and cleanup failed") from None
+            raise RuntimeError("proof native database start failed") from None
+
+    def _connect_database(self, database):
+        args = self._connect_args()
+        args["dbname"] = database
+        return _libpq_connect(args, native=True)
+
+    def _connect(self):
+        return self._connect_database("leaf")
+
+    def dsn(self):
+        return f"postgresql://postgres:{quote(self._password, safe='')}@127.0.0.1:{self.port}/leaf"
+
+    def _stop_transport(self):
+        # Native mode has no relay; deletion still requires a captured identity.
+        return None
+
+    def _cleanup_created(self):
+        try:
+            if not self._created:
+                return self._inventory() is None
+            ownership = self._ownership or self._inventory()
+            # A failed start without a PID cannot prove it did not spawn a child.
+            if self._start_attempted and (not ownership or not ownership["pid"]):
+                return False
+            return cleanup_native(self.run_id, self.run_root, self.port, ownership,
+                binaries=self._binaries, runner=self._runner, process_table=self._process_table,
+                environ=self._environ)
+        except Exception:
+            return False
+
+    def stop(self):
+        return self._cleanup_created()
 
 
 def smoke(run_id):

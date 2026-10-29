@@ -247,10 +247,17 @@ class Reservation:
     artifact_root: Path
     port_handles: tuple[Any, ...] = field(default=(), repr=False)
     root_identity: tuple[int, int] | None = field(default=None, repr=False)
+    database_port: int = 0
+    database_handle: Any = field(default=None, repr=False)
 
     def release_ports(self):
         for handle in self.port_handles:
             handle.close()
+        self.release_database_port()
+
+    def release_database_port(self):
+        if self.database_handle is not None:
+            self.database_handle.close()
 
 
 @dataclass(frozen=True)
@@ -585,7 +592,7 @@ def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
     try:
         # This is a capability transferred over the owned parent channel, not
         # an inventory discovered after parent loss. Unknown/new IDs are refused.
-        _validate_ownership(replace(request.ownership, containers=(), networks=()),
+        _validate_ownership(_empty_ownership(request.ownership),
                             request.run_id, allocated=False)
         ids = request.ownership.containers + request.ownership.networks
         if (len(set(ids)) != len(ids)
@@ -615,6 +622,8 @@ def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
                     owned = effects.host.authority_inventory(request.run_id)
                     _validate_ownership(owned, request.run_id, allocated=False)
                     absent = effects.host.private_absent(request.reservation)
+                    if request.ownership.kind == "native":
+                        stopped = stopped and _pg_module().native_process_gone(_native_capture(request.ownership))
                 except BaseException:
                     absent = False
                 if absent and stopped:
@@ -629,7 +638,10 @@ def guardian_main(request: GuardianRequest, *, effects: Effects) -> int:
         scope.own_reservation(request.reservation)
         def remove_authority():
             observed = effects.host.authority_inventory(request.run_id)
-            if (observed.run_id != request.ownership.run_id
+            if observed.kind == "native" or request.ownership.kind == "native":
+                if not _native_subset(observed, request.ownership):
+                    return False
+            elif (observed.run_id != request.ownership.run_id
                     or observed.names != request.ownership.names
                     or observed.labels != request.ownership.labels
                     or not set(observed.containers).issubset(request.ownership.containers)
@@ -773,6 +785,7 @@ def preflight(config: Config, *, effects: Effects) -> Plan:
         if any(type(p) is not int or not 1 <= p <= 65535 for p in ports) or len(set(ports)) != 4:
             _refuse()
         facts = effects.host.inspect(config)
+        _authority_kind(facts.environment)
         if facts.posture not in {"local", "test"} or facts.legacy_posture not in {"", "local", "test"} or facts.synthetic:
             _refuse(FailureCode.ENVIRONMENT)
         if facts.run_root_exists:
@@ -999,6 +1012,13 @@ class AuthorityOwnership:
     labels: tuple[tuple[str, str], ...]
     containers: tuple[str, ...] = ()
     networks: tuple[str, ...] = ()
+    kind: str = "docker"
+    data_dir: str = ""
+    port: int = 0
+    present: bool = False
+    pid: int = 0
+    start_id: str = ""
+    started_at: int = 0
 
 
 @dataclass(frozen=True, repr=False)
@@ -1248,9 +1268,39 @@ def _validate_binding(proof, request):
     return proof
 
 
+def _empty_ownership(owned):
+    return replace(owned, containers=(), networks=(), present=False, pid=0, start_id="", started_at=0)
+
+
+def _native_public_valid(owned, run_id):
+    return (type(owned) is dict and set(owned) == {"run_id", "kind", "data_dir", "port"}
+        and owned["run_id"] == run_id and owned["kind"] == "native"
+        and owned["data_dir"] == "postgres/data" and type(owned["port"]) is int
+        and 1 <= owned["port"] <= 65535)
+
+
+def _native_subset(observed, captured):
+    return (observed.kind == captured.kind == "native"
+        and _owned_public(observed) == _owned_public(captured)
+        and (observed == captured or observed == _empty_ownership(captured)
+            or observed == replace(captured, pid=0, start_id="", started_at=0)))
+
+
 def _validate_ownership(owned, run_id, *, allocated):
+    if type(owned) is AuthorityOwnership and owned.kind == "native":
+        if (not _native_public_valid(_owned_public(owned), run_id)
+                or owned.names != () or owned.labels != () or owned.containers != () or owned.networks != ()
+                or owned.present is not allocated or type(owned.pid) is not int
+                or type(owned.started_at) is not int
+                or (allocated and (owned.pid <= 0 or owned.started_at <= 0
+                    or type(owned.start_id) is not str or re.fullmatch(r"ps:[0-9]{1,12}", owned.start_id) is None))
+                or (not allocated and (owned.pid != 0 or owned.start_id != "" or owned.started_at != 0))):
+            _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
+        return owned
     name = "leafproof-" + run_id
     if (type(owned) is not AuthorityOwnership or owned.run_id != run_id
+            or owned.kind != "docker" or owned.data_dir != "" or owned.port != 0
+            or owned.present is not False or owned.pid != 0 or owned.start_id != "" or owned.started_at != 0
             or owned.names != (name, name + "-pg", name + "-relay")
             or owned.labels != (("leaf.proof-project.run", run_id),
                                 ("leaf.proof-project.owner", "proof_project_pg"))
@@ -1374,7 +1424,7 @@ def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> Prepa
         binding = _validate_binding(effects.seed_operation(seed, scope=scope), seed)
         _check_deadline(seed, effects)
         object.__setattr__(lease, "binding", binding)
-        database = DatabaseProof(run_id, ownership, "host-relay", transport, plan.migrations,
+        database = DatabaseProof(run_id, ownership, "native-loopback" if ownership.kind == "native" else "host-relay", transport, plan.migrations,
             _manifest_hash(plan.migrations), migration, allocated - start, relayed - allocated, migrated - relayed)
         identity = IdentityProof(issuer.thumbprint, issuer.issuer, issuer.audience, binding.organization_id,
                                  binding.binding_id, binding.subject, binding.tier)
@@ -2191,6 +2241,17 @@ def _private_directory(path):
         kernel.LocalFree(descriptor)
 
 
+def _native_tombstone_present(root):
+    """True when a native removal tombstone may exist under root; an unreadable root counts as present (fails closed)."""
+    try:
+        with os.scandir(root) as entries:
+            return any(entry.name.startswith("postgres.removing-") for entry in entries)
+    except FileNotFoundError:
+        return False
+    except OSError:
+        return True
+
+
 class _Host:
     @staticmethod
     def read_stack_ready(path):
@@ -2234,6 +2295,12 @@ class _Host:
 
     @staticmethod
     def scrub(reservation, *, keep_safe):
+        # Native PG must pass its own marker/identity cleanup first. Generic
+        # root scrubbing must never erase a failed stop or a foreign marker.
+        native = reservation.run_root / "postgres"
+        if (native.exists() or native.is_symlink()
+                or _native_tombstone_present(reservation.run_root)):
+            return False
         root = reservation.run_root
         if (not root.is_absolute() or root == Path(root.anchor)
                 or root.is_relative_to(REPO) or REPO.is_relative_to(root)
@@ -2284,10 +2351,16 @@ class _Host:
         # Relative imports reuse exactly the child-local leaf_platform.db pool.
         return importlib.import_module("leaf_platform.store")
 
-    @staticmethod
-    def authority_inventory(run_id):
+    def authority_inventory(self, run_id):
         pg = _pg_module()
         pg._validate(run_id)
+        native = getattr(self, "_native_context", None)
+        if native is not None:
+            expected_run, root, port = native
+            if run_id != expected_run:
+                raise RuntimeError("native authority run mismatch")
+            selected = pg.native_inventory(run_id, root, port)
+            return _native_ownership(run_id, port, selected)
         selected = pg._inventory(run_id, pg._docker)
         if (set(selected) != {"containers", "networks"}
                 or any(not isinstance(value, str) or re.fullmatch(r"[a-f0-9]{12,64}", value) is None
@@ -2302,10 +2375,18 @@ class _Host:
     def cleanup_authority(run_id):
         return _pg_module().cleanup(run_id)
 
-    @staticmethod
-    def cleanup_owned_authority(run_id, ownership):
+    def cleanup_owned_authority(self, run_id, ownership):
         pg = _pg_module()
-        _validate_ownership(replace(ownership, containers=(), networks=()), run_id, allocated=False)
+        _validate_ownership(_empty_ownership(ownership), run_id, allocated=False)
+        if ownership.kind == "native":
+            native = getattr(self, "_native_context", None)
+            if native is None or native[0] != run_id or native[2] != ownership.port:
+                raise RuntimeError("native authority context missing")
+            captured = _native_capture(ownership) if ownership.present else None
+            if not pg.cleanup_native(run_id, native[1], native[2], captured,
+                    environ=getattr(self, "_authority_environment", None)):
+                raise RuntimeError("native authority removal unverified")
+            return True
         allowed = set(ownership.containers + ownership.networks)
         def docker(args):
             # PP-2 re-inventories immediately before deletion. Guard the actual
@@ -2402,6 +2483,7 @@ class _Host:
 
     def reserve(self, plan, *, scope=None):
         config = plan.config
+        kind = _authority_kind(plan.host.environment)
         if not _path_safe(config.run_root) or not _path_safe(config.artifact_root):
             raise RuntimeError("unsafe reservation")
         _private_directory(config.run_root)
@@ -2441,8 +2523,19 @@ class _Host:
                 if os.name == "nt":
                     handle.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
                 handle.bind(("127.0.0.1", port))
+            if kind == "native":
+                handle = socket.socket()
+                object.__setattr__(reservation, "database_handle", handle)
+                if os.name == "nt":
+                    handle.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+                handle.bind(("127.0.0.1", 0))
+                object.__setattr__(reservation, "database_port", handle.getsockname()[1])
+                self._native_context = (config.run_id, config.run_root, reservation.database_port)
+            self._reservation = reservation
+            self._authority_environment = plan.host.environment
             return reservation
         except Exception:
+            reservation.release_database_port()
             for handle in handles:
                 handle.close()
             # Remove only empty directories created here; D handles a partially
@@ -2471,8 +2564,7 @@ class _ReceiptWriter:
                   "artifact_root": str(value.artifact_root), "created_at": value.created_at.isoformat()}
         if value.authority is not None:
             owned = value.authority
-            public["authority"] = {"run_id": owned.run_id, "names": list(owned.names),
-                "labels": dict(owned.labels), "containers": list(owned.containers), "networks": list(owned.networks)}
+            public["authority"] = _owned_public(owned)
         with path.open("x", encoding="utf-8", newline="\n") as stream:
             json.dump(public, stream, sort_keys=True)
             stream.write("\n")
@@ -2783,8 +2875,33 @@ class _ProjectAuthority:
         return self._authority._stop_transport()
 
 
-def _authority_factory(run_id):
+def _authority_kind(environ=None):
+    source = os.environ if environ is None else environ
+    kind = source.get("LEAF_PROOF_PROJECT_AUTHORITY", "docker")
+    if kind not in ("docker", "native"):
+        _refuse(FailureCode.ENVIRONMENT, Stage.PREFLIGHT)
+    return kind
+
+
+def _native_ownership(run_id, port, selected):
+    return AuthorityOwnership(run_id, (), (), kind="native", data_dir="postgres/data", port=port,
+        present=selected is not None, pid=selected["pid"] if selected else 0,
+        start_id=selected["start_id"] if selected else "", started_at=selected["started_at"] if selected else 0)
+
+
+def _native_capture(owned):
+    return dict(_owned_public(owned), pid=owned.pid, start_id=owned.start_id, started_at=owned.started_at)
+
+
+def _authority_factory(run_id, *, reservation=None, environ=None):
+    kind = _authority_kind(environ)
     try:
+        if kind == "native":
+            if reservation is None or not reservation.database_port:
+                _refuse(FailureCode.ALLOCATION, Stage.ALLOCATION)
+            reservation.release_database_port()
+            return _ProjectAuthority(_pg_module().NativePgAuthority.start(run_id,
+                run_root=reservation.run_root, port=reservation.database_port, environ=environ))
         return _ProjectAuthority(_pg_module().PgAuthority.start(run_id))
     except RuntimeError as error:
         # PP-2's closed refusal is emitted under its start lock, before provision.
@@ -2930,9 +3047,12 @@ def _run_database_child(request, *, effects, scope):
 
 def production_effects() -> Effects:
     """Adapters are lazy: construction imports no worker and acquires nothing."""
-    effects = Effects(_authority_factory, _issuer_factory, None, None,
+    host = _SupervisorHost()
+    effects = Effects(lambda run_id: _authority_factory(run_id,
+        reservation=getattr(host, "_reservation", None), environ=getattr(host, "_authority_environment", None)),
+                   _issuer_factory, None, None,
                    _launch_supervised, None, _browser_unavailable, _canonical_reader,
-                   _Clock(), _SupervisorHost(), _ReceiptWriter())
+                   _Clock(), host, _ReceiptWriter())
     return replace(effects,
         readiness_probe=lambda request: check_readiness(request, effects=effects),
         migration_runner=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope),
@@ -3207,8 +3327,26 @@ def _file_rows(files):
 
 
 def _owned_public(owned):
+    if owned.kind == "native":
+        return {"run_id": owned.run_id, "kind": "native", "data_dir": owned.data_dir, "port": owned.port}
+    if owned.kind != "docker":
+        _receipt_refused()
     return {"run_id": owned.run_id, "names": list(owned.names), "labels": dict(owned.labels),
         "containers": list(owned.containers), "networks": list(owned.networks)}
+
+
+def _read_owned_public(value, run_id, *, native_identity=None):
+    if type(value) is dict and value.get("kind") == "native":
+        if not _native_public_valid(value, run_id):
+            _receipt_refused()
+        return _native_ownership(run_id, value["port"], native_identity)
+    row = _exact(value, ("run_id", "names", "labels", "containers", "networks"))
+    if any(type(row[key]) is not list for key in ("names", "containers", "networks")):
+        _receipt_refused()
+    _exact(row["labels"], ("leaf.proof-project.run", "leaf.proof-project.owner"))
+    return AuthorityOwnership(row["run_id"], tuple(row["names"]),
+        tuple((key, row["labels"][key]) for key in ("leaf.proof-project.run", "leaf.proof-project.owner")),
+        tuple(row["containers"]), tuple(row["networks"]))
 
 
 def _heartbeat_public(heartbeat):
@@ -3242,7 +3380,8 @@ def _receipt_document(plan, runtime, prepared, execution, cleanup_proof, failure
         document["identity"] = {name: getattr(identity, name) for name in _IDENTITY_FIELDS}
     if database is not None:
         document["database"] = {"authority_run_id": database.authority_run_id,
-            "ownership": _owned_public(database.ownership), "transport": "docker-exec-relay",
+            "ownership": _owned_public(database.ownership),
+            "transport": "native-loopback" if database.ownership.kind == "native" else "docker-exec-relay",
             "readiness": {"ok": database.readiness.ok, "server_version": database.readiness.server_version,
                 "round_trip_bytes": database.readiness.round_trip_bytes},
             "migration_manifest": _file_rows(database.migration_manifest),
@@ -3342,15 +3481,16 @@ def _validate_receipt_structure(document, *, project=True):
     if database is not None:
         _exact(database, ("authority_run_id", "ownership", "transport", "readiness", "migration_manifest",
             "migration_manifest_sha256", "schema_status"))
-        if database["authority_run_id"] != document["run_id"] or database["transport"] != "docker-exec-relay":
+        if (database["authority_run_id"] != document["run_id"]
+                or database["transport"] not in ("docker-exec-relay", "native-loopback")):
             _receipt_refused()
-        owned = _exact(database["ownership"], ("run_id", "names", "labels", "containers", "networks"))
-        if any(type(owned[key]) is not list for key in ("names", "containers", "networks")) or type(owned["labels"]) is not dict:
-            _receipt_refused()
-        _exact(owned["labels"], ("leaf.proof-project.run", "leaf.proof-project.owner"))
-        labels = tuple((key, owned["labels"][key]) for key in ("leaf.proof-project.run", "leaf.proof-project.owner"))
-        _validate_ownership(AuthorityOwnership(owned["run_id"], tuple(owned["names"]), labels,
-            tuple(owned["containers"]), tuple(owned["networks"])), document["run_id"], allocated=True)
+        owned = database["ownership"]
+        if database["transport"] == "native-loopback":
+            if not _native_public_valid(owned, document["run_id"]):
+                _receipt_refused()
+        else:
+            _exact(owned, ("run_id", "names", "labels", "containers", "networks"))
+            _validate_ownership(_read_owned_public(owned, document["run_id"]), document["run_id"], allocated=True)
         ready = _exact(database["readiness"], ("ok", "server_version", "round_trip_bytes"))
         if (ready["ok"] is not True or type(ready["round_trip_bytes"]) is not int or ready["round_trip_bytes"] != 256
                 or type(ready["server_version"]) is not str
@@ -3674,7 +3814,7 @@ def _measure_prepared(plan, *, effects, scope):
     class Writer:
         def ownership(self, path, value):
             original_writer.ownership(path, value)
-            if value.authority is not None and value.authority.containers:
+            if value.authority is not None and (value.authority.containers or value.authority.present):
                 observed["ownership"] = value.authority
         def __getattr__(self, name):
             return getattr(original_writer, name)
@@ -3709,7 +3849,8 @@ def _measure_prepared(plan, *, effects, scope):
     try:
         prepare_authority(plan, effects=measured, scope=scope)
     except _MigrationBoundary:
-        return DatabaseProof(plan.config.run_id, observed["ownership"], "host-relay",
+        return DatabaseProof(plan.config.run_id, observed["ownership"],
+            "native-loopback" if observed["ownership"].kind == "native" else "host-relay",
             TransportProof(**observed["readiness"]), plan.migrations, _manifest_hash(plan.migrations),
             observed["proof"], observed["allocation"], observed["relay"], observed["migration"])
     _refuse(FailureCode.INTERNAL, Stage.MIGRATION)
@@ -3720,7 +3861,8 @@ class _RunWriter:
         self.writer, self.guardian = writer, guardian
     def ownership(self, path, value):
         self.writer.ownership(path, value)
-        if isinstance(value, OwnershipJournal) and value.authority is not None and value.authority.containers:
+        if (isinstance(value, OwnershipJournal) and value.authority is not None
+                and (value.authority.containers or value.authority.present)):
             self.guardian.observe(value.authority)
     def __getattr__(self, name):
         return getattr(self.writer, name)
@@ -4188,11 +4330,13 @@ class _SupervisorHost(_Host):
             ownership = self.authority_inventory(run_id)
             _validate_ownership(ownership, run_id, allocated=False)
         else:
-            _exact(value, ("run_id", "names", "labels", "containers", "networks"))
-            ownership = AuthorityOwnership(value["run_id"], tuple(value["names"]),
-                tuple((key, value["labels"][key]) for key in ("leaf.proof-project.run", "leaf.proof-project.owner")),
-                tuple(value["containers"]), tuple(value["networks"]))
-            _validate_ownership(ownership, run_id, allocated=True)
+            ownership = _read_owned_public(value, run_id)
+            if ownership.kind == "native":
+                self._native_context = (run_id, root, ownership.port)
+                # Public journals do not transfer process-stop capability.
+                _validate_ownership(self.authority_inventory(run_id), run_id, allocated=False)
+            else:
+                _validate_ownership(ownership, run_id, allocated=True)
         return Reservation(root, root / "artifacts", (), (info.st_dev, info.st_ino)), ownership
 
     @staticmethod
@@ -4243,6 +4387,9 @@ class _GuardianLease:
         self.responses = queue.Queue(maxsize=4)
         code = "import runpy,sys; m=runpy.run_path(sys.argv[1]); sys.exit(m['_guardian_entry']())"
         environment = _PrivateEnvironment(_clean_libpq(_essential_environment(self.plan.host.environment)))
+        if (_authority_kind(self.plan.host.environment) == "native"
+                and "LEAF_PG_BIN" in self.plan.host.environment):
+            environment["LEAF_PG_BIN"] = self.plan.host.environment["LEAF_PG_BIN"]
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         options = ({"creationflags": 0x08000000} if _PLATFORM == "win32"
                    else {"start_new_session": True})
@@ -4267,7 +4414,11 @@ class _GuardianLease:
 
     def observe(self, ownership):
         _validate_ownership(ownership, self.plan.config.run_id, allocated=True)
-        self._send({"event": "authority", "ownership": _owned_public(ownership)})
+        message = {"event": "authority", "ownership": _owned_public(ownership)}
+        if ownership.kind == "native":
+            message["identity"] = {"pid": ownership.pid, "start_id": ownership.start_id,
+                                   "started_at": ownership.started_at}
+        self._send(message)
         if not self._response():
             _refuse(FailureCode.GUARDIAN, Stage.ALLOCATION)
 
@@ -4427,6 +4578,7 @@ def _guardian_entry():
         owned = AuthorityOwnership(run_id, (name, name + "-pg", name + "-relay"),
             (("leaf.proof-project.run", run_id), ("leaf.proof-project.owner", "proof_project_pg")))
         _validate_ownership(owned, run_id, allocated=False)
+        effects = production_effects()
         jobs = []
         class Channel:
             def receive(self, timeout):
@@ -4440,12 +4592,17 @@ def _guardian_entry():
                     return "disarm"
                 if type(item) is not dict:
                     return "invalid"
-                if set(item) == {"event", "ownership"} and item["event"] == "authority":
-                    row = _exact(item["ownership"], ("run_id", "names", "labels", "containers", "networks"))
-                    ownership = AuthorityOwnership(row["run_id"], tuple(row["names"]),
-                        tuple((key, row["labels"][key]) for key in ("leaf.proof-project.run", "leaf.proof-project.owner")),
-                        tuple(row["containers"]), tuple(row["networks"]))
+                if set(item) in ({"event", "ownership"}, {"event", "ownership", "identity"}) and item["event"] == "authority":
+                    identity = None
+                    if type(item["ownership"]) is dict and item["ownership"].get("kind") == "native":
+                        _exact(item, ("event", "ownership", "identity"))
+                        identity = _exact(item["identity"], ("pid", "start_id", "started_at"))
+                    else:
+                        _exact(item, ("event", "ownership"))
+                    ownership = _read_owned_public(item["ownership"], run_id, native_identity=identity)
                     _validate_ownership(ownership, run_id, allocated=True)
+                    if ownership.kind == "native":
+                        effects.host._native_context = (run_id, root, ownership.port)
                     object.__setattr__(request, "ownership", ownership)
                 elif (set(item) == {"event", "handle"} and item["event"] == "job"
                         and type(item["handle"]) is int and item["handle"] > 0):
@@ -4463,7 +4620,7 @@ def _guardian_entry():
         request = GuardianRequest(run_id, Reservation(root, root / "artifacts", (), (info.st_dev, info.st_ino)),
             owned, Channel(), jobs, initial["deadline"])
         acknowledge()
-        return guardian_main(request, effects=production_effects())
+        return guardian_main(request, effects=effects)
     except BaseException:
         return 1
 

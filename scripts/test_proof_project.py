@@ -660,6 +660,202 @@ def authority_refused(c, code, operation=prepare):
 
 
 class TestProjectAuthority:
+    def test_h_default_docker(self, monkeypatch):
+        calls = []
+        monkeypatch.delenv("LEAF_PROOF_PROJECT_AUTHORITY", raising=False)
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(PgAuthority=SimpleNamespace(
+            start=lambda run_id: calls.append(("docker", run_id)) or SimpleNamespace())))
+        p.production_effects().authority_factory("run-test")
+        assert calls == [("docker", "run-test")]
+        calls.clear()
+        p._authority_factory("run-test", environ={"LEAF_PROOF_PROJECT_AUTHORITY": "docker"})
+        assert calls == [("docker", "run-test")]
+
+    def test_h_native_factory(self, monkeypatch):
+        calls = []
+        native = SimpleNamespace(readiness=lambda: "ready", dsn=lambda: "private", _stop_transport=lambda: "stopped")
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(NativePgAuthority=SimpleNamespace(
+            start=lambda run_id, **kw: calls.append((run_id, kw)) or native)))
+        reservation = p.Reservation(ROOT, ROOT / "artifacts", database_port=55432,
+            database_handle=SimpleNamespace(close=lambda: calls.append("release")))
+        environment = {"LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/fake"}
+        authority = p._authority_factory("run-test", reservation=reservation, environ=environment)
+        assert calls == ["release", ("run-test", {"run_root": ROOT, "port": 55432, "environ": environment})]
+        assert authority.readiness() == "ready" and authority.dsn() == "private" and authority.stop() == "stopped"
+
+    def test_h_selection_refusal(self, monkeypatch):
+        c = case()
+        c.host.facts = replace(c.host.facts, environment={"LEAF_PROOF_PROJECT_AUTHORITY": "other"})
+        refused(c, p.FailureCode.ENVIRONMENT)
+        monkeypatch.setattr(p, "_pg_module", lambda: pytest.fail("allocated for invalid selection"))
+        with pytest.raises(p.ProofRefused) as error:
+            p._authority_factory("run-test", environ={"LEAF_PROOF_PROJECT_AUTHORITY": ""})
+        assert error.value.failure == p.Failure(p.Stage.PREFLIGHT, p.FailureCode.ENVIRONMENT)
+
+    def test_h_native_reservation(self, tmp_path, monkeypatch):
+        c = case()
+        c.config = replace(c.config, run_root=tmp_path / "run", artifact_root=tmp_path / "run/artifacts")
+        c.host.facts = replace(c.host.facts, environment={"LEAF_PROOF_PROJECT_AUTHORITY": "native"}, vendor_candidates=())
+        plan = admitted(c)
+        calls = []
+        class Socket:
+            def setsockopt(self, *args):
+                pass
+            def bind(self, address):
+                calls.append(address)
+            def getsockname(self):
+                return ("127.0.0.1", 55432)
+            def close(self):
+                calls.append("closed")
+        monkeypatch.setattr(p.socket, "socket", Socket)
+        host = p._Host()
+        reservation = host.reserve(plan)
+        assert calls == [("127.0.0.1", port) for port in (8101, 8102, 8103, 8104, 0)]
+        assert reservation.database_port == 55432
+        assert host._native_context == ("run-test", c.config.run_root, 55432)
+        reservation.release_ports()
+        assert calls.count("closed") == 5
+
+    def test_h_prepare_native(self):
+        c = authority_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        c.host.cleanup_owned_authority = lambda run_id, owned: c.events.append("native-remove")
+        prepared = prepare(c)
+        assert prepared.database.transport == "native-loopback"
+        assert prepared.database.ownership == native_owned()
+        assert prepared.database.schema_status == c.migration_proof
+        assert len(c.requests) == 2 and all(r.environment["DATABASE_URL"] == "fakedb" for r in c.requests)
+        for kind, cleanup in c.scope.cleanups:
+            cleanup()
+        assert c.events.index("stop-authority") < c.events.index("native-remove")
+
+    def test_h_native_inventory_adapter(self, monkeypatch):
+        calls = []
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(_validate=lambda run_id: None,
+            native_inventory=lambda *args: calls.append(args) or p._native_capture(native_owned())))
+        host = p._Host()
+        host._native_context = ("run-test", ROOT, 55432)
+        assert host.authority_inventory("run-test") == native_owned()
+        assert calls == [("run-test", ROOT, 55432)]
+
+    def test_h_native_cleanup_adapter(self, monkeypatch):
+        calls = []
+        def cleanup(*args, **kwargs):
+            calls.append((args, kwargs))
+            return False
+        monkeypatch.setattr(p, "_pg_module", lambda: SimpleNamespace(cleanup_native=cleanup))
+        host = p._Host()
+        host._native_context = ("run-test", ROOT, 55432)
+        with pytest.raises(RuntimeError, match="removal unverified"):
+            host.cleanup_owned_authority("run-test", native_owned())
+        assert calls[0][0] == ("run-test", ROOT, 55432, p._native_capture(native_owned()))
+
+    def test_h_native_ownership_absence(self):
+        empty = native_owned(present=False)
+        assert p._validate_ownership(empty, "run-test", allocated=False) == empty
+        with pytest.raises(p.ProofRefused):
+            p._validate_ownership(replace(empty, present=True), "run-test", allocated=False)
+
+    def test_h_unknown_ownership_kind(self):
+        c = authority_case()
+        owned = c.host.authority_inventory("run-test")
+        with pytest.raises(p.ProofRefused):
+            p._validate_ownership(replace(owned, kind="other"), "run-test", allocated=False)
+
+    def test_h_native_guardian_observed(self):
+        c = authority_case()
+        seen = []
+        writer = p._RunWriter(c.effects.receipt_writer, SimpleNamespace(observe=seen.append))
+        journal = p.OwnershipJournal("run-test", ROOT, ROOT / "artifacts", c.effects.clock.utc_now(), native_owned())
+        writer.ownership(ROOT / "authority-observed.json", journal)
+        assert seen == [native_owned()]
+
+    def test_h_native_guardian_message(self):
+        c = authority_case()
+        guardian = p._GuardianLease(c.plan)
+        messages = []
+        guardian._send = messages.append
+        guardian._response = lambda: True
+        guardian.observe(native_owned())
+        assert messages == [{"event": "authority", "ownership": native_public(),
+            "identity": {"pid": 12345, "start_id": "ps:1700000000", "started_at": 1700000000}}]
+
+    def test_h_native_guardian_bin_environment(self, monkeypatch):
+        c = authority_case()
+        plan = replace(c.plan, host=replace(c.plan.host, environment={
+            "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/fake/custom-pg16",
+            "PGPASSWORD": "ambient", "TOKEN": "ambient"}),
+            reservation=replace(c.plan.reservation, root_identity=(1, 2)))
+        calls = []
+        process = SimpleNamespace(poll=lambda: None, stdin=io.BytesIO())
+        monkeypatch.setattr(p, "os", SimpleNamespace(name="nt"))
+        monkeypatch.setattr(p.subprocess, "Popen", lambda argv, **kwargs: calls.append((argv, kwargs)) or process)
+        monkeypatch.setattr(p.threading, "Thread", lambda **kwargs: SimpleNamespace(start=lambda: None))
+        guardian = p._GuardianLease(plan)
+        guardian._response = lambda: True
+        guardian.arm()
+        assert calls[0][1]["env"]["LEAF_PG_BIN"] == "/fake/custom-pg16"
+        assert "PGPASSWORD" not in calls[0][1]["env"] and "TOKEN" not in calls[0][1]["env"]
+
+    def test_h_native_guardian_cleanup(self):
+        c, request = native_guardian_case()
+        assert p.guardian_main(request, effects=c.effects) == 0
+        assert c.teardown == ["native", "private"] and c.native_inventory == native_owned(present=False)
+
+    def test_h_native_guardian_foreign(self):
+        c, request = native_guardian_case()
+        c.native_inventory = replace(native_owned(), start_id="ps:1700000001")
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert "native" not in c.teardown and c.native_inventory.present
+
+    def test_h_native_guardian_unknown(self):
+        c, request = native_guardian_case()
+        request = replace(request, ownership=replace(request.ownership, kind="other"))
+        assert p.guardian_main(request, effects=c.effects) == 1
+        assert c.teardown == []
+
+    def test_h_native_guardian_entry(self, tmp_path, monkeypatch):
+        c, request = native_guardian_case()
+        root = tmp_path
+        info = root.stat()
+        messages = [{"event": "init", "run_id": "run-test", "run_root": str(root),
+            "root_identity": [info.st_dev, info.st_ino], "deadline": 1.0},
+            {"event": "authority", "ownership": native_public(),
+             "identity": {"pid": 12345, "start_id": "ps:1700000000", "started_at": 1700000000}}]
+        monkeypatch.setattr(p.sys, "stdin", SimpleNamespace(buffer=io.BytesIO(
+            ("\n".join(json.dumps(value) for value in messages) + "\n").encode())))
+        monkeypatch.setattr(p.sys, "stdout", io.StringIO())
+        monkeypatch.setattr(p, "production_effects", lambda: c.effects)
+        monkeypatch.setattr(p.threading, "Thread", lambda target, **kwargs: SimpleNamespace(start=target))
+        assert p._guardian_entry() == 0
+        assert c.host._native_context == ("run-test", root, 55432)
+        assert c.teardown == ["native", "private"]
+
+    def test_h_native_scrub_refusal(self, tmp_path):
+        root = tmp_path / "run"
+        root.mkdir()
+        (root / "postgres").mkdir()
+        (root / "postgres/foreign").write_bytes(b"keep")
+        info = root.stat()
+        reservation = p.Reservation(root, root / "artifacts", root_identity=(info.st_dev, info.st_ino))
+        assert p._Host.scrub(reservation, keep_safe=False) is False
+        assert (root / "postgres/foreign").read_bytes() == b"keep"
+
+    def test_h_native_honest_removal(self):
+        c = lifetime_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        c.host.cleanup_owned_authority = lambda run_id, ownership: True  # A lying deletion return.
+        prepare(c)
+        proof = c.scope.close()
+        assert not proof.authority_removed and not proof.ok
+
+    def test_h_native_migration_measurement(self):
+        c = authority_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        proof = p._measure_prepared(c.plan, effects=c.effects, scope=c.scope)
+        assert proof.ownership == native_owned() and proof.transport == "native-loopback"
+        assert proof.schema_status == c.migration_proof and "issuer" not in c.events
+
     def test_allocation_journal(self, monkeypatch):
         c = authority_case()
         prepared = prepare(c)
@@ -3528,6 +3724,31 @@ class ReceiptPath:
         return Stream()
 
 
+def native_owned(*, present=True):
+    return p.AuthorityOwnership("run-test", (), (), kind="native", data_dir="postgres/data", port=55432,
+        present=present, pid=12345 if present else 0, start_id="ps:1700000000" if present else "",
+        started_at=1700000000 if present else 0)
+
+
+def native_public():
+    return {"run_id": "run-test", "kind": "native", "data_dir": "postgres/data", "port": 55432}
+
+
+def native_guardian_case():
+    c = lifetime_case()
+    c.native_inventory = native_owned()
+    c.host.authority_inventory = lambda run_id: c.native_inventory
+    def remove(run_id, ownership):
+        assert ownership == native_owned()
+        c.teardown.append("native")
+        c.native_inventory = native_owned(present=False)
+    c.host.cleanup_owned_authority = remove
+    def receive(timeout):
+        raise EOFError
+    channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("EOF disarmed"))
+    return c, p.GuardianRequest("run-test", c.plan.reservation, native_owned(), channel, deadline=1)
+
+
 def receipt_case():
     from contextlib import nullcontext
     c = execution_case()
@@ -3720,6 +3941,77 @@ def correction_disk_case(monkeypatch):
 
 
 class TestProjectReceipt:
+    def test_h_native_receipt(self):
+        c = receipt_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code == 0
+        document = c.receipts[outcome.receipt_path]
+        assert document["database"]["transport"] == "native-loopback"
+        assert document["database"]["ownership"] == native_public()
+        assert p.verify_receipt(outcome.receipt_path,
+            expected=p.ReceiptBinding("run-test", c.plan.source, "fakekey"), effects=c.effects).ok
+        assert "guardian-authority" in c.events
+
+    def test_h_native_with_docker_shape(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"]["transport"] = "native-loopback"
+        assert not verify_document(c, document).ok
+
+    def test_h_docker_with_native_shape(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"]["ownership"] = native_public()
+        assert not verify_document(c, document).ok
+
+    def test_h_receipt_unknown_transport(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"]["transport"] = "native-remote"
+        assert not verify_document(c, document).ok
+
+    def test_h_native_shape_exact(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"].update(transport="native-loopback", ownership=dict(native_public(), pid=12345))
+        assert not verify_document(c, document).ok
+
+    def test_h_native_path_refusal(self):
+        c = successful_receipt()
+        document = clone_document(c.document)
+        document["database"].update(transport="native-loopback", ownership=dict(native_public(), data_dir="../foreign"))
+        assert not verify_document(c, document).ok
+
+    def test_h_docker_receipt_unchanged(self):
+        c = successful_receipt()
+        assert c.document["database"]["transport"] == "docker-exec-relay"
+        assert c.document["database"]["ownership"] == {
+            "run_id": "run-test", "names": ["leafproof-run-test", "leafproof-run-test-pg", "leafproof-run-test-relay"],
+            "labels": {"leaf.proof-project.run": "run-test", "leaf.proof-project.owner": "proof_project_pg"},
+            "containers": ["a" * 12, "b" * 12], "networks": ["c" * 12]}
+
+    def test_h_native_private_values(self, capsys):
+        c = receipt_case()
+        c.host.authority_inventory = lambda run_id: native_owned(present=c.allocated)
+        allocate = c.effects.authority_factory
+        password = "native-secret/@:canary"
+        dsn = "postgresql://postgres:native-secret%2F%40%3Acanary@127.0.0.1:55432/leaf"
+        def factory(run_id):
+            authority = allocate(run_id)
+            authority.dsn = lambda: dsn
+            return authority
+        c.effects = replace(c.effects, authority_factory=factory)
+        c.host.database_module = lambda environment: c.db
+        outcome = p.supervise(c.config, effects=c.effects)
+        assert outcome.exit_code == 0
+        retained = repr(outcome) + json.dumps(list(c.receipts.values())) + repr(c.journals) + str(capsys.readouterr())
+        assert password not in retained and dsn not in retained
+        for secret in (password, dsn):
+            with pytest.raises(p.ProofRefused):
+                c.run_scope.private_values.check({"output": secret})
+            c.run_scope.private_values.rejected = False
+
     def test_success_after_cleanup(self, monkeypatch):
         c = successful_receipt()
         assert c.events.index("intent") < c.events.index("scrub") < c.events.index("disarm") < c.events.index("publish-commit")
@@ -4338,3 +4630,120 @@ class TestProjectReceipt:
         assert outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
         assert outcome.exit_code != 0 and outcome.receipt_path is None and not c.receipts
         assert not c.private and not c.allocated
+
+
+# C1 drives guardian_main synchronously with fake channels, clocks and processes.
+def _h_c1_guardian(tmp_path, monkeypatch, *, disarm=False):
+    from test_proof_project_pg import _native_case, pg, RUN
+    c = _native_case(tmp_path, monkeypatch)
+    c.start()
+    c.pg, c.checks, c.signals, c.acks, c.block_signal = pg, [], [], [], False
+    def identity(pid):
+        c.checks.append(pid)
+        return c.table(pid)
+    def signal_process(pid, sig):
+        c.signals.append((pid, sig))
+        if c.block_signal:
+            raise PermissionError("fake signal refusal")
+        assert pid == 12345 and sig == pg.signal.SIGINT
+        c.alive = False
+    monkeypatch.setattr(pg, "native_process_identity", identity)
+    monkeypatch.setattr(pg.os, "kill", signal_process)
+    monkeypatch.setattr(pg.subprocess, "run", c.runner)
+    monkeypatch.setattr(pg, "resolve_native_binaries", lambda **kwargs: c.binaries)
+    monkeypatch.setattr(p, "_pg_module", lambda: pg)
+    host = p._Host()
+    host._native_context = (RUN, tmp_path, 55432)
+    host.begin_operation = ImmediateOperation
+    info = tmp_path.stat()
+    reservation = p.Reservation(tmp_path, tmp_path / "artifacts", root_identity=(info.st_dev, info.st_ino))
+    def receive(timeout):
+        if disarm:
+            return "disarm"
+        raise EOFError
+    channel = SimpleNamespace(receive=receive, acknowledge=lambda: c.acks.append("OK"))
+    c.request = p.GuardianRequest(RUN, reservation, p._native_ownership(RUN, 55432, c.authority._ownership),
+        channel, deadline=1)
+    c.effects = replace(lifetime_case().effects, host=host)
+    return c
+
+
+def test_h_c1_live_disarm(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch, disarm=True)
+    c.pg.shutil.rmtree(tmp_path)
+    c.block_signal = True
+    assert p.guardian_main(c.request, effects=c.effects) == 1
+    assert c.checks and c.alive and c.acks == []
+
+
+def test_h_c1_absent_disarm(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch, disarm=True)
+    c.alive = False
+    c.pg.shutil.rmtree(tmp_path)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert c.checks == [12345] and c.acks == ["OK"] and c.signals == []
+    assert not any("stop" in argv for argv, kwargs in c.calls)
+
+
+def test_h_c1_parent_loss(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert not c.alive and not tmp_path.exists() and c.acks == []
+    assert c.checks.count(12345) >= 3
+    assert sum("stop" in argv for argv, kwargs in c.calls) == 1
+
+
+def test_h_c1_parent_loss_missing_directory(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    c.pg.shutil.rmtree(tmp_path)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert not c.alive and c.acks == []
+    assert c.signals == [(12345, c.pg.signal.SIGINT)] and len(c.checks) >= 3
+
+
+def test_h_c1_parent_loss_reused_pid(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    c.pg.shutil.rmtree(tmp_path)
+    def replacement(pid):
+        c.checks.append(pid)
+        if len(c.checks) == 2:
+            c.identity.update(start_id="ps:1700000001", started_at=1700000001)
+        return c.table(pid)
+    monkeypatch.setattr(c.pg, "native_process_identity", replacement)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert c.alive and c.signals == [] and c.acks == [] and len(c.checks) >= 2
+
+
+def test_h_a1e_guardian_interrupted_teardown(tmp_path, monkeypatch):
+    c = _h_c1_guardian(tmp_path, monkeypatch)
+    c.alive = False
+    c.pidfile.unlink()
+    c.calls.clear()
+    assert c.inventory() == dict(c.authority._ownership, pid=0, start_id="", started_at=0)
+    assert p.guardian_main(c.request, effects=c.effects) == 0
+    assert not tmp_path.exists() and c.inventory() is None
+    assert c.checks == [12345] and c.signals == [] and c.acks == [] and c.calls == []
+
+
+def test_h_a1e_subset_stopped():
+    captured = native_owned()
+    stopped = replace(captured, pid=0, start_id="", started_at=0)
+    assert stopped.present and p._native_subset(stopped, captured)
+    assert not p._native_subset(replace(stopped, port=55433), captured)
+    assert not p._native_subset(replace(stopped, run_id="foreign-run"), captured)
+
+
+def test_h_a1c_scrub_unreadable_root_refuses(tmp_path, monkeypatch):
+    info = tmp_path.stat()
+    reservation = p.Reservation(tmp_path, tmp_path / "artifacts",
+        root_identity=(info.st_dev, info.st_ino))
+    scandir = p.os.scandir
+    removals = []
+    def unreadable(root):
+        if root == tmp_path:
+            raise PermissionError("fake")
+        return scandir(root)
+    monkeypatch.setattr(p.os, "scandir", unreadable)
+    monkeypatch.setattr(p.shutil, "rmtree", lambda path: removals.append(path))
+    assert p._Host.scrub(reservation, keep_safe=False) is False
+    assert removals == []
