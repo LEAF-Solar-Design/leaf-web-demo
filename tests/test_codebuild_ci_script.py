@@ -70,6 +70,27 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertLess(script.index("=== job contract ==="), script.index("=== job license-fence ==="))
         self.assertLess(script.index("=== job license-fence ==="), script.index("=== job test-gate ==="))
 
+    def test_shard_result_reuse_evidence_is_immutable_and_advisory(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        key = '--key "mq/leaf-web-demo/selection/${CODEBUILD_BUILD_ID}.result.json"'
+        self.assertIn(key, script)
+        gate_end = script.index('echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"')
+        result_display = script.index(
+            'if [[ -f /tmp/gate-results/gate-result.json ]]; then', gate_end)
+        block_start = script.index(
+            'if [[ -n "${CODEBUILD_BUILD_ID:-}" && -f /tmp/gate-results/gate-result.json ]]; then')
+        block_end = script.index('\nfi\n', block_start)
+        self.assertLess(gate_end, block_start)
+        self.assertLess(block_end, result_display)
+        block = script[block_start:block_end]
+        put_object = block[block.index('aws s3api put-object'):].strip()
+        self.assertIn(key, put_object)
+        self.assertIn("--if-none-match '*'", put_object)
+        self.assertTrue(put_object.endswith(
+            "|| echo 'WARNING: result_write_failed; reuse evidence absent for this build' >&2"))
+        self.assertNotRegex(block, r"\bexit\b")
+        self.assertNotRegex(block, r"\bgate_status\s*=")
+
     def test_autofill_solver_fetch_is_pinned_and_fail_open(self):
         script = CI_PATH.read_text(encoding="utf-8")
         block = script.split("# LEAF_AUTOFILL_SOLVER_BEGIN\n", 1)[1].split(
