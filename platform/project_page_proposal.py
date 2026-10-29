@@ -53,6 +53,7 @@ class ProposalError(Exception):
         self.stage, self.code, self.upstream_status = _diagnostic(stage, code, upstream_status)
         super().__init__({413: 'Portfolio proposal request is too large.',
                           422: 'Invalid portfolio proposal request.',
+                          429: 'Portfolio proposal service is temporarily rate limited.',
                           502: 'Invalid portfolio proposal response.',
                           503: 'Portfolio proposal service is unavailable.'}[status])
 
@@ -155,6 +156,8 @@ def _transport(payload):
         response = requests.post(base + '/internal/portfolio/proposals', data=encoded,
                                  headers=headers, timeout=(CONNECT_SECONDS, READ_SECONDS),
                                  allow_redirects=False, stream=True)
+        if response.status_code == 429:
+            raise ProposalError(429, stage='transport', code='upstream_status', upstream_status=429)
         if response.status_code != 200:
             raise ProposalError(502, stage='transport', code='upstream_status',
                                 upstream_status=response.status_code)

@@ -979,7 +979,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
           if (error instanceof PortfolioProposalError) {
             const code = error.code === "grant_unavailable" || error.code === "sdk_failure" || error.code === "settlement_failure"
               ? "unavailable" : error.code;
-            const status = { invalid_request: 400, invalid_output: 502, unavailable: 503, timeout: 504, aborted: 499 }[code];
+            const status = { invalid_request: 400, invalid_output: 502, unavailable: 503, rate_limit: 429, timeout: 504, aborted: 499 }[code];
             return send(res, status, { error: { code } });
           }
           return send(res, 500, { error: { code: "internal_error" } });

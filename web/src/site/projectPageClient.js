@@ -65,6 +65,7 @@ async function request(path, { signal, native = false, proposal = false, ...opti
         422: 'Some page fields were not accepted. Check your draft and try again.',
       }
       let message = messages[response.status]
+      if (proposal && response.status === 429) message = 'The text proposal service is temporarily rate limited. Try again later. Your saved page and draft are unchanged.'
       if (response.status === 422 && !proposal) {
         try {
           const { detail } = await response.json()

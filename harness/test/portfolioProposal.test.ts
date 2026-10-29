@@ -191,9 +191,15 @@ describe("source-bound portfolio proposals", () => {
     { error: { code: "rate_limit", body: `${exceptionSentinel} ${secret}` }, code: "assistant_error" },
   ] satisfies Array<{ error: unknown; code: PortfolioProposalFailure["code"] }>)("allowlists only exact assistant error literals (%#)", async ({ error, code }) => {
     const f = setup([{ ...assistant(exceptionSentinel), error }, result()]);
-    await expect(f.service.propose(request())).rejects.toThrow("Portfolio proposal failed: sdk_failure");
+    const input = request(), original = structuredClone(input);
+    await expect(f.service.propose(input)).rejects.toMatchObject({
+      code: code === "rate_limit" ? "rate_limit" : "sdk_failure",
+      message: `Portfolio proposal failed: ${code === "rate_limit" ? "rate_limit" : "sdk_failure"}`,
+    });
     expectFailure(f.logger, "sdk_query", code);
     expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "error" });
+    expect(f.query).toHaveBeenCalledTimes(1);
+    expect(input).toEqual(original);
   });
 
   it("does not inspect or coerce arbitrary assistant error payloads", async () => {

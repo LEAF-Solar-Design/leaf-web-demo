@@ -21,7 +21,7 @@ export interface PortfolioProposalResult {
   usage: Pick<ConverseTurnUsage, "input_tokens" | "output_tokens" | "cache_creation_tokens" | "cache_read_tokens" | "cost_tokens">;
 }
 
-export type PortfolioProposalErrorCode = "invalid_request" | "grant_unavailable" | "invalid_output" | "sdk_failure" | "timeout" | "aborted" | "settlement_failure";
+export type PortfolioProposalErrorCode = "invalid_request" | "grant_unavailable" | "invalid_output" | "sdk_failure" | "rate_limit" | "timeout" | "aborted" | "settlement_failure";
 
 type FailureStage = "lease_support" | "acquisition" | "grant" | "sdk_import" | "sdk_query" | "settlement";
 type SdkFailureCode = "rate_limit" | "authentication_failed" | "oauth_org_not_allowed" | "billing_error" | "assistant_error" |
@@ -204,7 +204,7 @@ export class PortfolioProposalService {
         let text = "";
         let complete = false;
         const sdkFail = (code: SdkFailureCode): never => {
-          const error = new PortfolioProposalError("sdk_failure");
+          const error = new PortfolioProposalError(code === "rate_limit" ? "rate_limit" : "sdk_failure");
           sdkFailure = { code, error };
           throw error;
         };
