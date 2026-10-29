@@ -1,6 +1,8 @@
 .workspace-environment { position: fixed; inset: 0; pointer-events: none; z-index: 12; color: var(--leaf-ink); }
 .environment-focus { position: absolute; inset: 0; outline: none; pointer-events: none; }
-.environment-backdrop { position: absolute; inset: 0; background: var(--leaf-ground); opacity: .94; pointer-events: auto; transition: opacity 210ms ease; }
+/* App publishes the wrapping header's measured height on the root. Clear its
+   nearest-pixel rounding so the initial backdrop leaves header clicks usable. */
+.environment-backdrop { position: absolute; inset: calc(var(--drawer-top, 44px) + 1px) 0 0; background: var(--leaf-ground); opacity: .94; pointer-events: auto; transition: opacity 210ms ease; }
 .workspace-environment:is([data-profile="cad"], [data-profile="solar"]) .environment-backdrop { background-image: linear-gradient(var(--leaf-line) 1px, transparent 1px), linear-gradient(90deg, var(--leaf-line) 1px, transparent 1px); background-size: 40px 40px; }
 .environment-phone { width: min(280px, 65vw); height: min(570px, 75vh); border: 2px solid var(--leaf-line); border-radius: 38px; margin: 10vh auto; }
 .environment-chooser { position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); width: min(340px, calc(100vw - 40px)); padding: 20px; box-sizing: border-box; border: 1px solid var(--leaf-line); border-radius: 16px; background: var(--leaf-surface); text-align: center; pointer-events: auto; opacity: 1; transition: opacity 210ms ease, transform 210ms ease; }
