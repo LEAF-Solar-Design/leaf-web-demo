@@ -15,6 +15,7 @@
 .portfolio-viewer img { max-height: 80vh; }
 .portfolio-viewer button { margin-bottom: 16px; }
 .portfolio :focus-visible { outline: 2px solid #202020; outline-offset: 4px; }
+.portfolio button.portfolio__edit { display: inline-block; min-height: 44px; min-width: 44px; max-width: calc(100% - 8px); margin: 4px 8px 4px 0; padding: 8px 12px; border: 1px solid currentColor; border-radius: 4px; background: transparent; text-align: left; font: 14px/1.4 Arial, sans-serif; cursor: pointer; overflow-wrap: anywhere; }
 .portfolio-editor { display: grid; gap: 14px; min-width: 0; }
 .portfolio-editor section { display: grid; gap: 14px; min-width: 0; padding-block: 4px; }
 .portfolio-editor__disclosure { min-width: 0; border-top: 1px solid var(--leaf-line, #bdb9b2); }

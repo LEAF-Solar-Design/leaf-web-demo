@@ -3,6 +3,7 @@ import { Blob as NativeBlob } from 'node:buffer'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
+import { portfolioField } from './PortfolioEditor.jsx'
 import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot } from './projectPageClient.js'
 import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
 import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
@@ -72,6 +73,138 @@ const importDraft = () => {
 }
 
 describe('portfolio project document', () => {
+  it('wires separate portfolio edit controls through PagePreview without nesting navigation or View actions', () => {
+    const original = portfolioDraft(), select = vi.fn()
+    original.resume = [{ heading: 'Experience', entries: [{ title: 'Baker', subtitle: '', dates: '', description: '' }] }]
+    const view = render(<PagePreview document={original} projectId={PROJECT} onSelectField={select} />)
+    fireEvent.click(button('Edit headline'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'headline' }))
+    fireEvent.click(button('Edit Cakes gallery title'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'gallery.title', gallery: 'cakes' }))
+    expect(view.container.querySelector('button button')).toBeNull()
+    fireEvent.click(button('Cakes'))
+    expect(select).toHaveBeenCalledTimes(2)
+    fireEvent.click(button('Edit Cakes caption for Cake.jpg'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'caption', gallery: 'cakes', material: PHOTO.material_id }))
+    fireEvent.click(button('View Cake.jpg'))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+    expect(select).toHaveBeenCalledTimes(3)
+    fireEvent.click(button('Close image'))
+    fireEvent.click(button('About / Contact'))
+    fireEvent.click(button('Edit About'))
+    expect(select).toHaveBeenLastCalledWith(portfolioField(original, { field: 'about' }))
+    fireEvent.click(button('Resume'))
+    fireEvent.click(button('Edit resume section 1 entry 1 title'))
+    expect(select.mock.lastCall[0]).toEqual({ field: 'resume.title', section: expect.any(String), entry: expect.any(String), document: expect.any(String) })
+    view.rerender(<PagePreview document={original} projectId={PROJECT} />)
+    expect(screen.queryAllByRole('button', { name: /^Edit / })).toHaveLength(0)
+    fireEvent.click(button('Cakes'))
+    fireEvent.click(button('View Cake.jpg'))
+    expect(screen.getByRole('dialog')).toBeTruthy()
+  })
+
+  it('reveals and focuses only selected fields, repeats requests, and saves only explicit edits at the saved revision', async () => {
+    const original = portfolioDraft(), bytes = JSON.stringify(original), onPreview = vi.fn()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: original })
+    const view = setup({ onPreview })
+    fireEvent.click(button('Open page'))
+    await screen.findByLabelText('Name')
+    let request = 0
+    const select = descriptor => view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} selectedField={{ field: portfolioField(original, descriptor), request: ++request }} />)
+    select({ field: 'headline' })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Headline'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+    select({ field: 'caption', gallery: 'cakes', material: PHOTO_TWO.material_id })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Caption 2'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(2)
+    expect(screen.getByLabelText('Caption 1').closest('details').open).toBe(false)
+    disclose('Photo 2: Bread.jpg')
+    disclose('Cakes · 2 photos')
+    screen.getByLabelText('Headline').focus()
+    select({ field: 'caption', gallery: 'cakes', material: PHOTO_TWO.material_id })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Caption 2'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(2)
+    select({ field: 'about' })
+    expect(window.document.activeElement).toBe(screen.getByLabelText('About'))
+    expect(screen.getByLabelText('About').closest('details').open).toBe(true)
+    expect(JSON.stringify(original)).toBe(bytes)
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+    expect(listProjectPhotos).not.toHaveBeenCalled()
+    expect(readProjectPhotoPreview).not.toHaveBeenCalled()
+    expect(button('Save page').disabled).toBe(true)
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'New headline' } })
+    fireEvent.change(screen.getByLabelText('Caption 2'), { target: { value: 'New caption' } })
+    expect(onPreview.mock.lastCall[0].document.headline).toBe('New headline')
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Save page'))
+    await screen.findByText('Saved')
+    const expected = JSON.parse(bytes)
+    expected.headline = 'New headline'; expected.categories[0].images[1].title = 'New caption'
+    expect(saveProjectPage).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).toHaveBeenCalledWith(PROJECT, expected, 7, { signal: expect.any(AbortSignal) })
+  })
+
+  it('tracks captions by material across reorder and ignores malformed, removed and stale scoped selections', async () => {
+    const onPreview = vi.fn(), view = setup({ onPreview })
+    await openPortfolio()
+    let request = 0
+    const select = field => view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" selectedField={{ field, request: ++request }} />)
+    const original = onPreview.mock.lastCall[0].document
+    const caption = portfolioField(original, { field: 'caption', gallery: 'cakes', material: PHOTO_TWO.material_id })
+    select(caption)
+    fireEvent.click(button('Move image 2 up'))
+    select(caption)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Caption 1'))
+    expect(screen.getByLabelText('Caption 1').value).toBe('Bread.jpg')
+    fireEvent.click(button('Remove image 1'))
+    const headline = screen.getByLabelText('Headline')
+    headline.focus()
+    const open = view.container.querySelectorAll('details[open]').length
+    for (const invalid of [caption, null, 'headline', [], portfolioField(original, { field: 'caption', gallery: 'cakes', material: 'missing' }), portfolioField(original, { field: 'about', extra: 'unexpected' }), { field: '__proto__' }, { field: { selector: 'input' } }, portfolioField(portfolioDraft(), { field: 'headline' })]) {
+      select(invalid)
+      expect(window.document.activeElement).toBe(headline)
+      expect(view.container.querySelectorAll('details[open]')).toHaveLength(open)
+    }
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    view.rerender(<ProjectPageEditor projectId={OTHER} accountScope="account-a" selectedField={{ field: caption, request: ++request }} />)
+    expect(screen.queryByLabelText('Headline')).toBeNull()
+    expect(screen.queryByLabelText('Caption 1')).toBeNull()
+    await openPortfolio()
+    expect(window.document.activeElement).not.toBe(screen.getByLabelText('Caption 2'))
+    expect(view.container.querySelectorAll('details[open]')).toHaveLength(0)
+    act(() => { auth.scope = 'account-b'; auth.token() })
+    expect(button('Open page').disabled).toBe(true)
+  })
+
+  it('selects resume entries inside their disclosure and preserves identity through draft changes', async () => {
+    const original = portfolioDraft(), onPreview = vi.fn(), select = vi.fn()
+    original.resume = [{ heading: 'Experience', entries: [{ title: 'Baker', subtitle: '', dates: '', description: '' }] }]
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: original })
+    const view = setup({ onPreview })
+    fireEvent.click(button('Open page'))
+    await screen.findByLabelText('Name')
+    const preview = render(<PagePreview document={onPreview.mock.lastCall[0].document} projectId={PROJECT} onSelectField={select} />)
+    fireEvent.click(button('Resume'))
+    fireEvent.click(button('Edit resume section 1 entry 1 title'))
+    const field = select.mock.lastCall[0]
+    preview.unmount()
+    const request = number => view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} selectedField={{ field, request: number }} />)
+    request(1)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Entry title'))
+    expect(screen.getByLabelText('Entry title').closest('details').open).toBe(true)
+    fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'New name' } })
+    screen.getByLabelText('Name').focus()
+    request(2)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Entry title'))
+    fireEvent.click(button('Remove entry 1'))
+    screen.getByLabelText('Name').focus()
+    request(3)
+    expect(window.document.activeElement).toBe(screen.getByLabelText('Name'))
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
   it('keeps 94 photos compact and disclosure neutral, then saves only explicit caption and hero edits', async () => {
     const original = portfolioDraft()
     original.categories = [32, 31, 31].map((length, ci) => ({ slug: `gallery-${ci}`, title: `Gallery name ${ci}`, description: '', hero: 0,

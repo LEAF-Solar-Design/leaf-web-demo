@@ -14,7 +14,7 @@ const equalDocument = (left, right) => left && right && (left.schema || right.sc
 
 export function PagePreview({ document, onSelectField, projectId }) {
   if (!document) return null
-  if (document.schema === 'leaf.portfolio.v1') return <PortfolioPreview document={document} projectId={projectId} />
+  if (document.schema === 'leaf.portfolio.v1') return <PortfolioPreview document={document} projectId={projectId} onSelectField={onSelectField} />
   const text = field => onSelectField
     ? <button type="button" className="project-page__edit" aria-label={`Edit ${field}`} onClick={() => onSelectField(field)}>{document[field]}</button>
     : document[field]
@@ -107,7 +107,10 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     }
   }, [accountScope])
 
-  useEffect(() => { fields.current[typeof selectedField === 'string' ? selectedField : selectedField?.field]?.focus() }, [selectedField, draft !== null])
+  useEffect(() => {
+    const field = typeof selectedField === 'string' ? selectedField : selectedField?.field
+    if (TEXT_FIELDS.some(([name]) => name === field)) fields.current[field]?.focus()
+  }, [selectedField, draft !== null])
   useEffect(() => {
     if (!draft || !actionRow.current) return
     const heading = editor.current.closest('.browser-project-panel')?.querySelector('.browser-panel-heading')
@@ -304,7 +307,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
       </div>}
       <fieldset disabled={Boolean(busy) || !enabled}>
         <legend className="project-page-editor__legend">Page content</legend>
-        {draft.schema === 'leaf.portfolio.v1' ? <PortfolioEditor document={draft} onChange={changePortfolio} projectId={projectId} reviewRequest={reviewRequest} /> : <>{TEXT_FIELDS.map(([field, label, limit]) => <label key={field} htmlFor={`${id}-${field}`}>
+        {draft.schema === 'leaf.portfolio.v1' ? <PortfolioEditor document={draft} onChange={changePortfolio} projectId={projectId} reviewRequest={reviewRequest} selectedField={enabled ? selectedField : null} /> : <>{TEXT_FIELDS.map(([field, label, limit]) => <label key={field} htmlFor={`${id}-${field}`}>
           <span>{label}</span>
           {field === 'description'
             ? <textarea id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} rows={4} onChange={event => change(field, event.target.value)} />

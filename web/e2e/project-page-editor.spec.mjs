@@ -155,6 +155,85 @@ async function expectInsideViewport(locator, viewport) {
 }
 
 for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`portfolio visual text selection at ${size}`, async ({ page }, testInfo) => {
+    test.setTimeout(120_000)
+    const selectionViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
+    await page.setViewportSize(selectionViewport)
+    const backend = await installBackend(page)
+    const original = portfolioImport()
+    original.schema = 'leaf.portfolio.v1'
+    original.categories[0].images = PHOTOS.map(({ material_id, sha256, preview_sha256, name }) => ({ material_id, sha256, preview_sha256, title: name, alt: name }))
+    backend.revisions.push({ revision: 7, digest: digest(original), document: structuredClone(original) })
+    await page.goto('/app?surface=browser')
+    const editor = await openProject(page)
+    await editor.getByRole('button', { name: 'Open page', exact: true }).click()
+    const preview = page.locator('[data-ground="browser-asset"] .portfolio')
+    await expect(preview.getByRole('heading', { name: original.headline, exact: true })).toBeVisible()
+    await page.getByRole('button', { name: 'Project', exact: true }).click()
+    await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    const editHeadline = preview.getByRole('button', { name: 'Edit headline', exact: true })
+    await editHeadline.scrollIntoViewIfNeeded()
+    await expect(editHeadline).toBeVisible()
+    expect(await editHeadline.evaluate(node => node.getBoundingClientRect().height)).toBeGreaterThanOrEqual(44)
+    await editHeadline.focus()
+    await page.keyboard.press('Enter')
+    const headline = editor.getByRole('textbox', { name: 'Headline', exact: true })
+    const save = editor.getByRole('button', { name: 'Save page', exact: true })
+    const assertFocusAndSave = async field => {
+      await expect(field).toBeFocused()
+      await expectInsideViewport(field, selectionViewport)
+      await expect(save).toBeVisible()
+      await expect.poll(() => field.evaluate(node => {
+        const box = node.getBoundingClientRect()
+        const panel = node.closest('.browser-project-panel')
+        const row = panel.querySelector('.project-page-editor__save-row').getBoundingClientRect()
+        const button = panel.querySelector('.project-page-editor__save-row button')
+        const saveBox = button.getBoundingClientRect()
+        return box.top >= row.bottom && saveBox.top >= 0 && saveBox.bottom <= innerHeight
+          && saveBox.left >= 0 && saveBox.right <= innerWidth
+          && node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2))
+          && button.contains(document.elementFromPoint(saveBox.x + saveBox.width / 2, saveBox.y + saveBox.height / 2))
+          && document.documentElement.scrollWidth <= document.documentElement.clientWidth
+      })).toBe(true)
+    }
+    await assertFocusAndSave(headline)
+    await expect(save).toBeDisabled()
+    expect(backend.calls.filter(call => call.method === 'PUT')).toHaveLength(0)
+    await headline.fill('Sweet work, selected with care')
+    await expect(preview.getByRole('heading', { name: 'Sweet work, selected with care', exact: true })).toHaveCount(1)
+    await testInfo.attach(`portfolio-headline-selection-${size}`, { body: await page.screenshot(), contentType: 'image/png' })
+    await save.click()
+    await expect(editor.locator('.project-page-editor__save-row').getByRole('status')).toHaveText('Saved')
+    expect(backend.calls.filter(call => call.method === 'PUT').map(call => call.body.expected_revision)).toEqual([7])
+    expect(backend.revisions.at(-1).document.categories).toEqual(original.categories)
+    await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    await preview.getByRole('button', { name: 'Cakes', exact: true }).click()
+    const editCaption = preview.getByRole('button', { name: 'Edit Cakes caption for Bread.jpg', exact: true })
+    await editCaption.click()
+    const caption = editor.getByRole('textbox', { name: 'Caption 2', exact: true })
+    await expect(caption).toHaveValue('Bread.jpg')
+    await assertFocusAndSave(caption)
+    await expect(editor.locator('details[open]')).toHaveCount(2)
+    await expect(save).toBeDisabled()
+    await testInfo.attach(`portfolio-caption-selection-${size}`, { body: await page.screenshot(), contentType: 'image/png' })
+    await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    const imageTrigger = preview.getByRole('button', { name: 'View Bread.jpg', exact: true })
+    await imageTrigger.click()
+    const viewer = preview.getByRole('dialog', { name: 'Bread.jpg', exact: true })
+    await expect(viewer).toBeVisible()
+    await expect(viewer.getByRole('button', { name: 'Close image', exact: true })).toBeFocused()
+    await viewer.getByRole('button', { name: 'Close image', exact: true }).click()
+    await expect(imageTrigger).toBeFocused()
+    expect(backend.calls.filter(call => call.method === 'PUT')).toHaveLength(1)
+    expect(backend.nativeCalls).toEqual([])
+    expect(backend.foreign).toEqual([])
+    await testInfo.attach(`portfolio-selection-evidence-${size}`, { body: JSON.stringify({
+      kind: 'rendered-ui-fixture-proof', liveJessicaAcceptance: false, viewport: selectionViewport,
+      selectedMaterial: PHOTOS[1].material_id, expectedRevision: 7, savedRevision: backend.revisions.at(-1).revision,
+      saveCount: backend.calls.filter(call => call.method === 'PUT').length,
+    }), contentType: 'application/json' })
+  })
+
   test(`large portfolio disclosures and reachable Save at ${size}`, async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     const editorViewport = { ...viewport, height: size === 'desktop' ? 900 : 844 }
@@ -318,6 +397,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await editor.getByLabel('Import portfolio content').setInputFiles({ name: 'portfolio.json', mimeType: 'application/json', buffer: Buffer.from(JSON.stringify(portfolioImport())) })
     const preview = page.locator('[data-ground="browser-asset"] .portfolio')
     await expect(preview.getByRole('heading', { name: 'Selected pastry work' })).toBeVisible()
+    await preview.locator('.portfolio-photo').first().scrollIntoViewIfNeeded()
     await expect(preview.locator('img').first()).toBeVisible()
     await expect.poll(() => preview.locator('img').first().evaluate(image => image.naturalWidth)).toBeGreaterThan(0)
     await page.getByRole('button', { name: 'Project', exact: true }).click()
@@ -333,6 +413,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await expect(editor.getByRole('status').filter({ hasText: /^Saved$/ })).toBeVisible()
     expect(backend.revisions[0].document.categories[0]).toMatchObject({ hero: 0, images: [{ material_id: PHOTOS[1].material_id }, { material_id: PHOTOS[0].material_id, title: 'Chocolate celebration' }] })
     await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    await preview.getByRole('navigation').scrollIntoViewIfNeeded()
     await expectInsideViewport(preview.getByRole('navigation'), viewport)
     await preview.getByRole('button', { name: 'Cakes', exact: true }).click()
     const imageTrigger = preview.getByRole('button', { name: 'View Cake.jpg', exact: true })
