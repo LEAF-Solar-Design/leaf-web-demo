@@ -186,6 +186,7 @@ describe("contained portfolio proposal HTTP route", () => {
   it.each<[PortfolioProposalErrorCode, number, string]>([
     ["invalid_request", 400, "invalid_request"], ["invalid_output", 502, "invalid_output"],
     ["grant_unavailable", 503, "unavailable"], ["sdk_failure", 503, "unavailable"],
+    ["rate_limit", 429, "rate_limit"],
     ["settlement_failure", 503, "unavailable"], ["timeout", 504, "timeout"], ["aborted", 499, "aborted"],
   ])("maps %s to a fixed sanitized response", async (code, status, publicCode) => {
     const { url } = boot({ async propose() {
@@ -197,6 +198,7 @@ describe("contained portfolio proposal HTTP route", () => {
     expect(response.status).toBe(status);
     expect(response.body).toEqual({ error: { code: publicCode } });
     expect(response.headers["cache-control"]).toBe("private, no-store");
+    expect(response.headers["retry-after"]).toBeUndefined();
   });
 
   it("sanitizes unexpected failures without trusting error-shaped objects", async () => {

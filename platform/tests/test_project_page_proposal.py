@@ -412,6 +412,41 @@ def test_transport_failures_are_bounded_closed_and_not_retried(client, saved, mo
     assert_failure(caplog, 'transport', code, upstream_status)
 
 
+def test_rate_limit_is_fixed_429_with_unread_closed_body_and_unchanged_page(client, saved, monkeypatch, caplog):
+    class UnreadResponse(Response):
+        def iter_content(self, chunk_size):
+            pytest.fail('Rate-limit body must not be read')
+
+        @property
+        def content(self):
+            pytest.fail('Rate-limit body must not be read')
+
+        @property
+        def text(self):
+            pytest.fail('Rate-limit body must not be read')
+
+        def json(self):
+            pytest.fail('Rate-limit body must not be read')
+
+    def produce(payload):
+        response = UnreadResponse(b'private upstream body', status=429)
+        response.headers['Retry-After'] = 'private provider error'
+        return response
+
+    original = copy.deepcopy(saved)
+    calls, responses = install_transport(monkeypatch, produce)
+    response = client.post(saved['url'] + '/proposals', headers=saved['auth'], json=request_body(saved))
+    assert response.status_code == 429, response.text
+    assert response.json() == {'detail': 'Portfolio proposal service is temporarily rate limited.'}
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert 'retry-after' not in response.headers
+    assert len(calls) == 1 and responses[0].closed
+    assert revision_count(saved) == 1
+    assert project_web_page.read(saved['org'], saved['project'], saved['actor']) == saved['page']
+    assert saved == original
+    assert_failure(caplog, 'transport', 'upstream_status', 429)
+
+
 @pytest.mark.parametrize('missing', ['LEAF_AUTHOR_HARNESS_URL', 'LEAF_HARNESS_SECRET'])
 def test_unconfigured_transport_is_503_without_network(client, saved, monkeypatch, missing, caplog):
     monkeypatch.delenv(missing)

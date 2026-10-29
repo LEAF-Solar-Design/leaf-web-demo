@@ -1,5 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { portfolioTextChanges, proposeProjectPage } from './projectPageClient.js'
+import { loadProjectPage, portfolioTextChanges, proposeProjectPage } from './projectPageClient.js'
 
 const unauthorized = vi.hoisted(() => vi.fn())
 vi.mock('../api.js', () => ({ config: { apiBase: 'https://api.example.test' },
@@ -110,6 +110,33 @@ describe('source-bound portfolio proposal transport', () => {
       expect(json).not.toHaveBeenCalled()
     }
     expect(unauthorized).toHaveBeenCalledTimes(1)
+  })
+
+  it('shows fixed rate-limit copy after one request without reading errors or changing input', async () => {
+    vi.useFakeTimers()
+    const source = saved(), original = JSON.stringify(source), instruction = 'Shorten the headline'
+    const json = vi.fn(() => { throw new Error('secret') })
+    const text = vi.fn(() => { throw new Error('secret') })
+    const cancel = vi.fn().mockResolvedValue()
+    fetch.mockResolvedValueOnce({ ok: false, status: 429, json, text, body: { cancel } })
+    await expect(propose(source, instruction)).rejects.toMatchObject({ status: 429,
+      message: 'The text proposal service is temporarily rate limited. Try again later. Your saved page and draft are unchanged.' })
+    expect(json).not.toHaveBeenCalled()
+    expect(text).not.toHaveBeenCalled()
+    expect(cancel).toHaveBeenCalledTimes(1)
+    expect(JSON.stringify(source)).toBe(original)
+    expect(JSON.parse(fetch.mock.lastCall[1].body)).toEqual({ expected_revision: source.revision, expected_digest: source.digest, instruction })
+    expect(vi.getTimerCount()).toBe(0)
+    await vi.advanceTimersByTimeAsync(60000)
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(unauthorized).not.toHaveBeenCalled()
+  })
+
+  it('keeps the existing rate-limit message for other page operations', async () => {
+    fetch.mockResolvedValueOnce({ ok: false, status: 429 })
+    await expect(loadProjectPage(PROJECT)).rejects.toMatchObject({ status: 429,
+      message: 'The page action failed. Your draft is still here. Try again.' })
+    expect(fetch).toHaveBeenCalledTimes(1)
   })
 
   it('allows 60 seconds only for proposals and aborts on timeout or caller cancellation', async () => {
