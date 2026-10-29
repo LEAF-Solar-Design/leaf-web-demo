@@ -507,6 +507,11 @@ export async function discloseControlPanel(page, recipe) {
   }
 }
 
+export function studioJobMonitorContent(page) {
+  return page.locator('aside.rail').filter({ has: page.getByRole('heading', { name: /^Job monitor/ }) })
+    .locator('.rail-ske, .rail-empty, .rail-ledger > *').first()
+}
+
 export const PANEL_PERFORMANCE_BUDGET_SOURCE = 'WL28-PANEL-PERFORMANCE-BUDGETS.md'
 export const PANEL_PERFORMANCE_VIEWPORTS = Object.freeze({
   desktop: Object.freeze({ width: 1440, height: 1000 }),
@@ -595,7 +600,7 @@ export async function preparePanelPerformanceCapture({ page, probe, viewport, lo
 
 export function studioDrawerLocator(page, drawer) {
   if (!['jobs', 'nav'].includes(drawer)) throw new Error(`Unknown Studio drawer: ${drawer}`)
-  return page.locator(drawer === 'jobs' ? 'aside.rail .rail-ledger' : 'aside.nav')
+  return drawer === 'jobs' ? studioJobMonitorContent(page) : page.locator('aside.nav')
 }
 
 export async function assertStudioDrawer(page, drawer, open, assertions = expect) {
@@ -869,7 +874,7 @@ export async function readPhonePanel(page, panel) {
   if (panel === 'Plan') return await page.getByRole('region', { name: 'Entitlements', exact: true }).isVisible()
   return await page.getByRole('region', { name: 'Studio sidebar', exact: true }).isVisible()
     && await page.getByRole('heading', { name: /Job monitor/ }).isVisible()
-    && await page.locator('aside.rail .rail-ledger').isVisible()
+    && await studioJobMonitorContent(page).isVisible()
 }
 
 export async function assertPhonePanel(page, panel, open, assertions = expect) {
@@ -888,7 +893,7 @@ export async function assertPhonePanel(page, panel, open, assertions = expect) {
   await assertions(page.getByRole('region', { name: 'Studio sidebar', exact: true }))[open ? 'toBeVisible' : 'toBeHidden']()
   if (open) {
     await assertions(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
-    await assertions(page.locator('aside.rail .rail-ledger')).toBeVisible()
+    await assertions(studioJobMonitorContent(page)).toBeVisible()
   }
 }
 

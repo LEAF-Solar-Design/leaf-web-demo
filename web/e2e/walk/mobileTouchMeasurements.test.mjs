@@ -124,7 +124,7 @@ test('the call-site helper captures before activation, measures after, and prese
   await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence,
     addFragment: (persona, measurements) => addPersonaFragment(evidence, { persona, measurements, bundleReference }),
     activate: async () => { fake.calls.push('activate') } })
-  assert.deepEqual(fake.calls.slice(0, 3), ['handle', 'activate', 'evaluate'])
+  assert.deepEqual(fake.calls.filter(call => typeof call === 'string'), ['handle', 'evaluate', 'activate', 'evaluate'])
   assert.equal(evidence.result, result)
   assert.deepEqual(evidence.measurements.unrelated, { value: 7 })
   assert.equal(evidence.measurements.input.otherInput, true)
@@ -136,6 +136,52 @@ test('the call-site helper captures before activation, measures after, and prese
     { persona: 'accessibility', reference: 'accessibility:open-drawing[ready]@phone', missing: false },
     { persona: 'mobile-touch', reference, missing: false },
   ])
+})
+
+test('controls that detach or lose their box on activation emit their pre-activation sample once', async () => {
+  for (const disappear of [fake => { fake.handle.isConnected = false },
+    fake => { fake.handle.boundingBox = async () => null }]) {
+    const fake = phone()
+    const expected = await collect(fake)
+    const fragments = []
+    await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone',
+      addFragment: (...args) => fragments.push(args), activate: async () => disappear(fake) })
+    assert.deepEqual(fragments, [['mobile-touch', expected]])
+  }
+})
+
+test('persistent controls emit their post-activation sample once', async () => {
+  const fake = phone()
+  const fragments = []
+  const afterBox = { x: 30, y: 40, width: 48, height: 48 }
+  await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone',
+    addFragment: (...args) => fragments.push(args),
+    activate: async () => { fake.handle.boundingBox = async () => afterBox } })
+  assert.deepEqual(fragments, [['mobile-touch', await collect(fake)]])
+  assert.deepEqual(fragments[0][1].target.box, afterBox)
+})
+
+test('a throwing pre-activation sample leaves the post-activation sample available', async () => {
+  const fake = phone()
+  const expected = await collect(fake)
+  const boundingBox = fake.handle.boundingBox
+  fake.handle.boundingBox = async () => { throw new Error('pre-sample unavailable') }
+  const fragments = []
+  await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone',
+    addFragment: (...args) => fragments.push(args),
+    activate: async () => { fake.handle.boundingBox = boundingBox } })
+  assert.deepEqual(fragments, [['mobile-touch', expected]])
+})
+
+test('a throwing activation propagates its error without emitting the pre-activation sample', async () => {
+  const fake = phone()
+  const error = new Error('activation failed')
+  const fragments = []
+  await assert.rejects(activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone',
+    addFragment: (...args) => fragments.push(args), activate: async () => { throw error } }),
+  caught => caught === error)
+  assert.deepEqual(fragments, [])
+  assert.deepEqual(fake.calls.filter(call => typeof call === 'string'), ['handle', 'evaluate'])
 })
 
 test('non-click, disabled, navigation, ambiguous and desktop activations collect nothing', async () => {
@@ -175,5 +221,5 @@ test('measurement and handle failures preserve the verdict; activation failures 
   await assert.rejects(activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence: {},
     addFragment: () => assert.fail('failed activation must not add a fragment'),
     activate: async () => { throw error } }), (caught) => caught === error)
-  assert.deepEqual(fake.calls, ['handle'])
+  assert.deepEqual(fake.calls.filter(call => typeof call === 'string'), ['handle', 'evaluate'])
 })
