@@ -2,6 +2,7 @@
 from dataclasses import replace
 from datetime import datetime, timezone
 import errno
+import hashlib
 import importlib.util
 import io
 import json
@@ -127,9 +128,60 @@ def profile(c):
             "LEAF_PROOF_PROJECT_KEY_SHA256": "fakekey", "LEAF_PROOF_PROJECT_JWKS_FILE": str(ROOT / "public-jwks.json")}
 
 
+def test_src_empty_tracked_file_accepted():
+    c = case()
+    empty = p.FileProof("server/authored/.gitkeep", hashlib.sha256(b"").hexdigest(), 0)
+    c.host.source = replace(c.host.source, files=(*c.host.source.files, empty))
+    assert p._files_ok(c.host.source.files)
+    assert admitted(c).source == c.host.source
+    assert "reserve" in c.host.events
+
+
+def test_src_empty_negative_size_refused():
+    c = case()
+    negative = p.FileProof("server/authored/.gitkeep", hashlib.sha256(b"").hexdigest(), -1)
+    c.host.source = replace(c.host.source, files=(*c.host.source.files, negative))
+    assert not p._files_ok(c.host.source.files)
+    refused(c, p.FailureCode.SOURCE)
+
+
 def environment(c, ambient=None):
     return p.project_environment(admitted(c), os_env=ambient or {}, dsn="fakedb",
                                  profile_env=profile(c), organization_id="fakeorg")
+
+
+def test_native_select_inspect_carries_keys(tmp_path, monkeypatch):
+    monkeypatch.setattr(p.os, "environ", {"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin",
+        "UNRELATED": "not carried"})
+    root = tmp_path / "run-test"
+    config = p.Config("run-test", root, root / "artifacts", p.Ports(0, 0, 0, 0))
+    facts = p.production_effects().host.inspect(config)
+    assert dict(facts.environment) == {"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin"}
+    assert p._authority_kind(facts.environment) == "native"
+
+
+def test_native_select_children_exclude_keys():
+    c = case()
+    c.host.facts = replace(c.host.facts, environment=p._host_environment({"PATH": "fakepath",
+        "LEAF_PROOF_PROJECT_AUTHORITY": "native", "LEAF_PG_BIN": "/opt/fake/bin"}))
+    env = environment(c, c.host.facts.environment)
+    assert "LEAF_PROOF_PROJECT_AUTHORITY" not in env
+    assert "LEAF_PG_BIN" not in env
+    assert env["PATH"] == "fakepath"
+    assert c.host.facts.environment["LEAF_PROOF_PROJECT_AUTHORITY"] == "native"
+    assert c.host.facts.environment["LEAF_PG_BIN"] == "/opt/fake/bin"
+
+
+def test_native_select_default_docker(tmp_path, monkeypatch):
+    monkeypatch.setattr(p.os, "environ", {"PATH": "fakepath"})
+    root = tmp_path / "run-test"
+    config = p.Config("run-test", root, root / "artifacts", p.Ports(0, 0, 0, 0))
+    facts = p.production_effects().host.inspect(config)
+    assert "LEAF_PROOF_PROJECT_AUTHORITY" not in facts.environment
+    assert "LEAF_PG_BIN" not in facts.environment
+    assert p._authority_kind(facts.environment) == "docker"
 
 
 class TestProjectBoundary:
@@ -283,6 +335,7 @@ class TestProjectBoundary:
                     "LEAF_GUEST_DXF_EXTRACT": "local", "LEAF_CANONICAL_WORKER_TOOL": "solar-settings",
                     "LEAF_EXPECTED_WORKER_REVISION": "sha256:" + OTHER_HASH,
                     "LEAF_CANONICAL_WORKER_ID": "project:run-test", "LEAF_AGENT_STORE": "postgres",
+                    "LEAF_DRAWING_STORE": "postgres", "LEAF_UPLOAD_STORE": "postgres",
                     "LEAF_HARNESS_SESSION_STORE": "postgres", "LEAF_TENANT_CLAIM_NS": "https://leafdesign.ai/"}
         assert {key: env.get(key) for key in expected} == expected
         assert p.TIER == "hosted_pro" and p.PROFILE == "project"
@@ -1245,6 +1298,113 @@ def execution_refused(c, code):
         execute(c)
     assert error.value.failure.fixed_code == code
     assert "fakedb" not in str(error.value) and "faketok" not in str(error.value)
+
+
+def _run_root_stores_case(tmp_path):
+    c = execution_case()
+    root = tmp_path / "run-test"
+    c.plan = replace(c.prepared.plan,
+        config=replace(c.prepared.plan.config, run_root=root, artifact_root=root / "artifacts"),
+        host=replace(c.prepared.plan.host, vendor_candidates=()))
+    lease = replace(c.prepared.identity_lease, jwks_path=root / "public-jwks.json",
+        profile={**dict(c.prepared.identity_lease.profile),
+                 "LEAF_PROOF_PROJECT_JWKS_FILE": str(root / "public-jwks.json")})
+    c.prepared = replace(c.prepared, plan=c.plan, identity_lease=lease)
+    return c
+
+
+def test_run_root_stores_created_before_launch(tmp_path, monkeypatch):
+    c = _run_root_stores_case(tmp_path)
+    root = c.plan.config.run_root
+    monkeypatch.setattr(p.socket, "socket", lambda: SimpleNamespace(
+        setsockopt=lambda *args: None, bind=lambda address: None, close=lambda: None))
+    host = p._Host()
+    reservation = host.reserve(c.plan)
+    try:
+        assert host._reservation is reservation
+        env = p.project_environment(c.plan, os_env=c.plan.host.environment, dsn=c.prepared.dsn,
+            profile_env=c.prepared.identity_lease.profile, organization_id=c.prepared.binding.organization_id)
+        for key in ("LEAF_STORE_DIR", "LEAF_GUEST_STORE_DIR", "LEAF_UPLOADS_DIR",
+                    "LEAF_GRANTS_DIR", "LEAF_TENANTS_DIR", "LEAF_TENANT_GIT_DIR",
+                    "LEAF_TENANT_MCP_DIR", "LEAF_MARATHON_RUNS_DIR", "LEAF_AGENT_STATE_DIR"):
+            path = Path(env[key])
+            assert path != root and path.is_relative_to(root) and path.is_dir()
+            assert p._path_safe(path)
+            if p.os.name != "nt":
+                assert path.stat().st_mode & 0o777 == 0o700
+        for key in ("JOBS_DB", "SESSIONS_DB", "LEAF_AGENT_LEDGER", "BROKER_LEDGER",
+                    "BROKER_TENANTS", "LEAF_GRANT_FILE"):
+            assert not Path(env[key]).exists()
+        assert c.launches == []
+    finally:
+        reservation.release_ports()
+
+
+def test_run_root_stores_removed_when_reservation_fails(tmp_path, monkeypatch):
+    def bind(address):
+        raise OSError("port taken")
+    monkeypatch.setattr(p.socket, "socket", lambda: SimpleNamespace(
+        setsockopt=lambda *args: None, bind=bind, close=lambda: None))
+    c = _run_root_stores_case(tmp_path)
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        p._Host().reserve(c.plan)
+    assert not c.plan.config.run_root.exists()
+    assert c.launches == []
+
+    second = tmp_path / "second"
+    second.mkdir()
+    c = _run_root_stores_case(second)
+    root = c.plan.config.run_root
+    keep = root / "drawings" / "keep.txt"
+    private_directory = p._private_directory
+    def create_with_collision(path):
+        private_directory(path)
+        if path == root:
+            keep.parent.mkdir()
+            keep.write_bytes(b"keep these bytes")
+    monkeypatch.setattr(p, "_private_directory", create_with_collision)
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        p._Host().reserve(c.plan)
+    assert keep.read_bytes() == b"keep these bytes"
+    assert root.is_dir()
+    assert all(not (root / relative).exists()
+               for relative in p._RUN_ROOT_DIRECTORY_STORES.values() if relative != "drawings")
+    assert c.launches == []
+
+
+def test_run_root_stores_agent_state_in_root(tmp_path):
+    c = _run_root_stores_case(tmp_path)
+    env = p.project_environment(c.plan, os_env=c.plan.host.environment, dsn=c.prepared.dsn,
+        profile_env=c.prepared.identity_lease.profile, organization_id=c.prepared.binding.organization_id)
+    path = Path(env["LEAF_AGENT_STATE_DIR"])
+    assert path == c.plan.config.run_root / "agent-state"
+    assert not path.is_relative_to(p.REPO)
+    assert not path.exists()
+
+
+def test_run_root_stores_refuse_link(tmp_path, monkeypatch):
+    c = _run_root_stores_case(tmp_path)
+    target = tmp_path / "foreign"
+    target.mkdir()
+    store = c.plan.config.run_root / "drawings"
+    private_directory = p._private_directory
+    def create_with_collision(path):
+        private_directory(path)
+        if path == c.plan.config.run_root:
+            try:
+                store.symlink_to(target, target_is_directory=True)
+            except OSError:
+                if p.os.name != "nt":
+                    raise
+                store.write_bytes(b"existing file")
+    monkeypatch.setattr(p, "_private_directory", create_with_collision)
+    monkeypatch.setattr(p.socket, "socket", lambda: pytest.fail("reserved ports for unsafe store"))
+    host = p._Host()
+    with pytest.raises(RuntimeError, match="exclusive reservation failed"):
+        host.reserve(c.plan)
+    assert not hasattr(host, "_reservation")
+    assert c.launches == []
+    assert list(target.iterdir()) == []
 
 
 def canonical_case():
@@ -3843,6 +4003,18 @@ def clone_document(value):
     return json.loads(json.dumps(value))
 
 
+def test_src_empty_receipt_zero_size_file():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    empty = {"path": "vendor/engine/.gitkeep", "sha256": hashlib.sha256(b"").hexdigest(), "size": 0}
+    document["runtime"]["vendor_source"].append(empty)
+    assert verify_document(c, document).ok
+    empty["size"] = -1
+    result = verify_document(c, document)
+    assert not result.ok
+    assert result.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
+
+
 def disk_publication(c, tmp_path, monkeypatch):
     root = tmp_path / "owned-run"
     root.mkdir()
@@ -5259,3 +5431,15 @@ def test_h_a1b_docker_progressive_unchanged(tmp_path, monkeypatch):
     assert state.events == ["alive", "alive", "disarm"] and validated == [partial, full]
     assert state.snapshots == [partial, full, full] and state.request.ownership == full
     assert state.contexts == [None, None, None] and c.teardown == []
+
+
+def test_contract_heartbeat_runtime_python_form():
+    request = {"purpose": "heartbeat", "worker_id": "project:run-test"}
+    spec = p.ProcessSpec("canonical-child", ("fake",), ROOT,
+        {"LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(request)}, 5)
+    heartbeat = {"worker_id": request["worker_id"], "tool_name": p.WORKER_TOOL,
+        "runtime": "python-3.12.14", "source_revision": "sha256:" + HASH,
+        "source_sha256": HASH, "observed_at": datetime(2026, 1, 1, tzinfo=timezone.utc).isoformat()}
+    assert p._child_public(spec, json.dumps(heartbeat).encode()) == heartbeat
+    for runtime in ("3.12.14", "python-3.12"):
+        assert p._child_public(spec, json.dumps(dict(heartbeat, runtime=runtime)).encode()) is None

@@ -46,6 +46,12 @@ REQUIRED_MODULES = ("fastapi", "uvicorn", "psycopg", "psycopg_pool", "jwt",
 REQUIRED_TEST_IDS = ("project_browser_create_import", "project_browser_bearer_required",
                      "project_settings_worker_readback")
 ENGINE_OUTPUTS = ("engine.js", "engine_bg.wasm")
+_RUN_ROOT_DIRECTORY_STORES = MappingProxyType({
+    "LEAF_STORE_DIR": "drawings", "LEAF_GUEST_STORE_DIR": "guest-drawings",
+    "LEAF_UPLOADS_DIR": "uploads", "LEAF_GRANTS_DIR": "grants", "LEAF_TENANTS_DIR": "tenants",
+    "LEAF_TENANT_GIT_DIR": "tenant-git", "LEAF_TENANT_MCP_DIR": "tenant-mcp",
+    "LEAF_MARATHON_RUNS_DIR": "marathon-runs", "LEAF_AGENT_STATE_DIR": "agent-state",
+})
 # The managed stack and injected browser client share this closed public contract.
 MANAGED_PUBLIC_UI_SETTINGS = MappingProxyType({
     "VITE_CAD_EDIT": "1", "VITE_SOLAR_FLOW_RAIL": "1", "VITE_SOLAR_SETTINGS_FORM": "1",
@@ -782,7 +788,7 @@ def _hash_ok(value):
 
 def _files_ok(files):
     return bool(files) and len({f.path for f in files}) == len(files) and all(
-        _hash_ok(f.sha256) and f.size > 0 for f in files)
+        _hash_ok(f.sha256) and type(f.size) is int and f.size >= 0 for f in files)
 
 
 def preflight(config: Config, *, effects: Effects) -> Plan:
@@ -854,6 +860,7 @@ def preflight(config: Config, *, effects: Effects) -> Plan:
 
 _OS_KEYS = frozenset({"PATH", "SYSTEMROOT", "WINDIR", "COMSPEC", "PATHEXT", "TEMP", "TMP",
                       "USERPROFILE", "LOCALAPPDATA", "APPDATA", "HOME", "LANG", "LC_ALL"})
+_AUTHORITY_KEYS = ("LEAF_PROOF_PROJECT_AUTHORITY", "LEAF_PG_BIN")
 
 
 class _PrivateEnvironment(dict):
@@ -868,6 +875,12 @@ class _PrivateEnvironment(dict):
 
 def _essential_environment(environ):
     return {key.upper(): value for key, value in environ.items() if key.upper() in _OS_KEYS}
+
+
+def _host_environment(environ):
+    env = _essential_environment(environ)
+    env.update({key: environ[key] for key in _AUTHORITY_KEYS if key in environ})
+    return env
 
 
 def _load_file(name, path, *, package=False):
@@ -926,6 +939,7 @@ def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
             "LEAF_AGENT_MOCK": "1", "LEAF_GUEST_DXF_EXTRACT": "local",
             "LEAF_AUTHORED_EXECUTION": "0", "LEAF_HARNESS_AUTHORING_MODE": "disabled",
             "LEAF_AGENT_STORE": "postgres", "LEAF_HARNESS_SESSION_STORE": "postgres",
+            "LEAF_DRAWING_STORE": "postgres", "LEAF_UPLOAD_STORE": "postgres",
             "LEAF_CANONICAL_WORKER_TOOL": WORKER_TOOL, "LEAF_CANONICAL_WORKER_REQUIRED": "1",
             "LEAF_EXPECTED_WORKER_REVISION": plan.descriptor.source_revision,
             "LEAF_CANONICAL_WORKER_ID": "project:" + plan.config.run_id,
@@ -944,13 +958,9 @@ def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
                     "BROKER_URL": f"http://127.0.0.1:{ports.broker}",
                     "WEB_PORT": str(ports.web), "APP_PORT": str(ports.app),
                     "BROKER_PORT": str(ports.broker), "HARNESS_PORT": str(ports.harness)})
-        stores = {"LEAF_STORE_DIR": "drawings", "LEAF_GUEST_STORE_DIR": "guest-drawings",
-                  "LEAF_UPLOADS_DIR": "uploads", "JOBS_DB": "jobs.db", "SESSIONS_DB": "sessions.db",
+        stores = {**_RUN_ROOT_DIRECTORY_STORES, "JOBS_DB": "jobs.db", "SESSIONS_DB": "sessions.db",
                   "LEAF_AGENT_LEDGER": "agent-ledger.jsonl", "BROKER_LEDGER": "broker-ledger.jsonl",
-                  "BROKER_TENANTS": "broker-tenants.json", "LEAF_GRANTS_DIR": "grants",
-                  "LEAF_GRANT_FILE": "no-legacy-grant.token", "LEAF_TENANTS_DIR": "tenants",
-                  "LEAF_TENANT_GIT_DIR": "tenant-git", "LEAF_TENANT_MCP_DIR": "tenant-mcp",
-                  "LEAF_MARATHON_RUNS_DIR": "marathon-runs"}
+                  "BROKER_TENANTS": "broker-tenants.json", "LEAF_GRANT_FILE": "no-legacy-grant.token"}
         env.update({key: str(root / relative) for key, relative in stores.items()})
         return env
     except ProofRefused:
@@ -2652,7 +2662,7 @@ class _Host:
             tuple(name for name in (".env", ".env.local", ".env.development", ".env.development.local")
                   if (REPO / "web" / name).exists()), candidates, requirements,
             sys.version.split()[0], tuple((name, shutil.which(name) or "") for name in TOOLS),
-            _essential_environment(os.environ), tuple(outputs), tuple(versions))
+            _host_environment(os.environ), tuple(outputs), tuple(versions))
 
     def source_snapshot(self):
         commit = _git("rev-parse", "HEAD").decode().strip()
@@ -2680,7 +2690,15 @@ class _Host:
         if scope is not None:
             scope.own_reservation(reservation, keep_safe=config.keep_run_root)
         handles = []
+        stores = []
         try:
+            # Reserve private directory stores from the same names used by the child environment.
+            for relative in _RUN_ROOT_DIRECTORY_STORES.values():
+                path = config.run_root / relative
+                if path == config.run_root or not path.is_relative_to(config.run_root) or not _path_safe(path):
+                    raise RuntimeError("unsafe directory store")
+                _private_directory(path)
+                stores.append(path)
             _private_directory(config.artifact_root)
             # Cargo may create a lockfile alongside Cargo.toml. Stage the exact
             # measured vendor inputs so even that output stays off the checkout.
@@ -2725,8 +2743,13 @@ class _Host:
             reservation.release_database_port()
             for handle in handles:
                 handle.close()
-            # Remove only empty directories created here; D handles a partially
-            # staged root. Never recursively delete an unjournaled tree here.
+            # Remove only empty stores and directories created here; D handles a
+            # partially staged root. Never recursively delete an unjournaled tree here.
+            for path in reversed(stores):
+                try:
+                    path.rmdir()
+                except OSError:
+                    pass
             try:
                 config.artifact_root.rmdir()
                 config.run_root.rmdir()
@@ -3615,7 +3638,7 @@ def _validate_files(rows, *, names=None):
         path = item["path"]
         if (type(path) is not str or re.fullmatch(r"[A-Za-z0-9_./-]{1,240}", path) is None
                 or path.startswith("/") or ".." in path.split("/") or not _hash_ok(item["sha256"])
-                or type(item["size"]) is not int or item["size"] <= 0):
+                or type(item["size"]) is not int or item["size"] < 0):
             _receipt_refused()
         paths.append(path)
     if len(set(paths)) != len(paths) or (names is not None and set(paths) != set(names)):
@@ -4327,7 +4350,7 @@ def _child_public(spec, raw):
             _exact(value, ("worker_id", "tool_name", "runtime", "source_revision", "source_sha256", "observed_at"))
             if (value["worker_id"] != request["worker_id"] or value["tool_name"] != WORKER_TOOL
                     or not _hash_ok(value["source_sha256"]) or value["source_revision"] != "sha256:" + value["source_sha256"]
-                    or re.fullmatch(r"[0-9]+\.[0-9]+\.[0-9]+", value["runtime"]) is None):
+                    or re.fullmatch(r"python-[0-9]+\.[0-9]+\.[0-9]+", value["runtime"]) is None):
                 return None
             beat = HeartbeatProof(**dict(value, observed_at=datetime.fromisoformat(value["observed_at"])))
             return _heartbeat_public(beat)
