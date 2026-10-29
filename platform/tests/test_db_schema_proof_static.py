@@ -175,6 +175,21 @@ def test_async_solve_migration_proof():
     assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
 
 
+def test_org_invitations_migration_proof():
+    name = "0095_org_invitations.sql"
+    manifest = db.migration_manifest()
+    proof = next(item for item in manifest if item['name'] == name)
+    assert proof == {
+        "name": name,
+        "sha256": sha256((db._PKG_DIR / "migrations" / name).read_bytes()).hexdigest(),
+    }
+    assert db._migration_proof(manifest)["missing_migrations"] == []
+    without_runner = [item for item in manifest if item['name'] != name]
+    assert db._migration_proof(without_runner)["missing_migrations"] == [name]
+    drifted = [*without_runner, {"name": name, "sha256": "0" * 64}]
+    assert db._migration_proof(drifted)["migration_hash_drift"] == [name]
+
+
 @pytest.mark.parametrize("kind,name", [
     ("constraints", "project_solve_exchanges_async_shape_check"),
     ("triggers", "project_solve_exchanges_async_guard"),
