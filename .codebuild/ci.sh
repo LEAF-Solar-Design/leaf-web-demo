@@ -697,6 +697,14 @@ else
   gate_status=0
 fi
 echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"
+# Reuse evidence (plan ci-test-selection-20260925 S1): the shard's own result, immutable and advisory.
+if [[ -n "${CODEBUILD_BUILD_ID:-}" && -f /tmp/gate-results/gate-result.json ]]; then
+  aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+    --key "mq/leaf-web-demo/selection/${CODEBUILD_BUILD_ID}.result.json" \
+    --body /tmp/gate-results/gate-result.json \
+    --content-type application/json --if-none-match '*' >/dev/null \
+    || echo 'WARNING: result_write_failed; reuse evidence absent for this build' >&2
+fi
 if [[ -f /tmp/gate-results/gate-result.json ]]; then
   tail -n 200 /tmp/gate-results/gate-result.json || true
   # BEGIN GATE FAIL NAMES
