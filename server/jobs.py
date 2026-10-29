@@ -2465,7 +2465,8 @@ def _redispatch_record(job_id: str) -> bool:
     rec = get_job(job_id)
     if rec is None or rec["status"] in TERMINAL:
         return False
-    if int(rec.get("attempt") or 0) >= max_attempts():
+    if (int(rec.get("attempt") or 0) >= max_attempts()
+            and (rec.get('native_preview') or {}).get('schema') != 'leaf.native-preview-job.v2'):
         complete_callback(
             job_id, "failed",
             error=error_obj(ErrorCode.TIMEOUT, "job exhausted its delivery attempts", False),
@@ -2483,11 +2484,27 @@ def _redispatch_record(job_id: str) -> bool:
             execution = json.loads(rows[0]["execution_json"] or "{}")
         from native_preview_job import record_context as native_record_context
         native = native_record_context(execution, rec)
+    except (IndexError, KeyError, TypeError, ValueError):
+        complete_callback(job_id, "failed", error=error_obj(
+            ErrorCode.INTERNAL, "cannot recover job: missing execution context", False))
+        return False
+    if native is not None and native['schema'] == 'leaf.native-preview-job.v2':
+        if job_store_mode() != "postgres":
+            return False
+        outcome = _pg_store.expire_native_remote(job_id, int(rec.get('attempt') or 0))
+        if outcome != 'applied':
+            return False
+        platform_link.forget(job_id)
+        provenance = {'attempt': int(rec.get('attempt') or 0), 'execution_path': 'native-worker'}
+        error = error_obj(ErrorCode.TIMEOUT, "native preview execution budget expired", False)
+        _emit_job_terminal('failed')
+        _emit_job_terminal_event(job_id, 'failed', error, provenance)
+        _write_terminal_receipt(job_id)
+        return True
+    try:
         if native is not None:
             if job_store_mode() != "postgres":
                 raise ValueError("native recovery requires PostgreSQL")
-            if native['schema'] == 'leaf.native-preview-job.v2':
-                return True
             executor = _executors.get(LANE_FAST)
             if executor is None:
                 return False

@@ -169,6 +169,77 @@ def test_png_and_duplicate_json_are_rejected():
     with pytest.raises(remote.ProtocolError): remote.parse(b'{"attempt":1,"attempt":2}')
 
 
+@pytest.mark.parametrize('outcome', ['applied', 'not_owner', 'missing'])
+def test_remote_redispatch_uses_expiry_authority_without_local_work(protocol, monkeypatch, outcome):
+    c = protocol
+    context = native.validate_context({'schema': native.REMOTE_SCHEMA,
+        'tenant_id': c.org, 'org_id': c.org, 'project_id': c.project,
+        'actor_id': c.actor, 'source': c.prepare(), 'dispatch_kind': 'remote-worker',
+        'worker_binding': c.binding, 'budget_s': 17})
+    jid = str(uuid.uuid4())
+    rec = {'job_id': jid, 'tool': native.OPERATION, 'status': 'running',
+           'attempt': jobs.max_attempts(), 'native_preview': context, **{k: context[k] for k in
+               ('tenant_id', 'org_id', 'project_id')}}
+    calls, events = [], []
+    monkeypatch.setattr(jobs, 'job_store_mode', lambda: 'postgres')
+    monkeypatch.setattr(jobs, 'get_job', lambda _: rec)
+    def expire(job_id, attempt):
+        calls.append((job_id, attempt))
+        return outcome
+    monkeypatch.setattr(jobs, '_pg_store', SimpleNamespace(
+        execution=lambda _: {'operation': native.OPERATION, 'native_preview': context},
+        expire_native_remote=expire))
+    monkeypatch.setattr(jobs, '_executors', {})
+    monkeypatch.setattr(jobs, 'complete_callback', lambda *a, **k: pytest.fail('worker callback'))
+    monkeypatch.setattr(jobs, '_emit_job_terminal', lambda status: events.append(status))
+    monkeypatch.setattr(jobs, '_emit_job_terminal_event', lambda *a: None)
+    monkeypatch.setattr(jobs, '_write_terminal_receipt', lambda *a: None)
+    assert jobs._redispatch_record(jid) is (outcome == 'applied')
+    assert calls == [(jid, rec['attempt'])]
+    assert events == (['failed'] if outcome == 'applied' else [])
+
+
+def test_local_native_redispatch_still_schedules_executor(protocol, monkeypatch):
+    c = protocol
+    context = native.validate_context({'schema': native.SCHEMA,
+        'tenant_id': c.org, 'org_id': c.org, 'project_id': c.project,
+        'actor_id': c.actor, 'source': c.prepare()})
+    jid, calls = str(uuid.uuid4()), []
+    rec = {'tool': native.OPERATION, 'status': 'submitted', 'attempt': 0,
+           **{k: context[k] for k in ('tenant_id', 'org_id', 'project_id')}}
+    monkeypatch.setattr(jobs, 'job_store_mode', lambda: 'postgres')
+    monkeypatch.setattr(jobs, 'get_job', lambda _: rec)
+    monkeypatch.setattr(jobs, '_pg_store', SimpleNamespace(
+        execution=lambda _: {'operation': native.OPERATION, 'native_preview': context}))
+    monkeypatch.setattr(jobs, '_executors', {jobs.LANE_FAST: SimpleNamespace(
+        submit=lambda *args: calls.append(args))})
+    assert jobs._redispatch_record(jid)
+    assert calls == [(jobs._run_native_preview, jid)]
+
+
+@pytest.mark.parametrize('record', [None, {'status': 'complete'}, {'status': 'failed'}])
+def test_remote_redispatch_terminal_or_missing_is_noop(monkeypatch, record):
+    monkeypatch.setattr(jobs, 'get_job', lambda _: record)
+    monkeypatch.setattr(jobs, '_pg_store', SimpleNamespace())
+    assert not jobs._redispatch_record(str(uuid.uuid4()))
+
+
+def test_ordinary_redispatch_still_schedules_executor(monkeypatch):
+    jid, calls = str(uuid.uuid4()), []
+    tool = {'name': 'ordinary', 'capabilities': ['drawing.read']}
+    rec = {'tool': tool['name'], 'status': 'submitted', 'attempt': 0,
+           'tenant_id': 'ordinary-tenant', 'params': {}, 'dwg': 'demo'}
+    execution = {'tool': tool, 'dwg_version': None, 'aps_live': False}
+    monkeypatch.setattr(jobs, 'job_store_mode', lambda: 'postgres')
+    monkeypatch.setattr(jobs, 'get_job', lambda _: rec)
+    monkeypatch.setattr(jobs, '_pg_store', SimpleNamespace(execution=lambda _: execution))
+    monkeypatch.setattr(jobs, '_executors', {jobs.lane_for(tool, False): SimpleNamespace(
+        submit=lambda *args, **kwargs: calls.append((args, kwargs)))})
+    assert jobs._redispatch_record(jid)
+    assert calls == [((jobs._run_job, jid, rec['tenant_id'], tool, {}, 'demo',
+                       False, None, None, None), {})]
+
+
 def test_real_postgres_http_round_trip_and_readback(protocol, postgres_authority):
     c = protocol
     headers = {**c.headers(), 'Idempotency-Key': 'http-one'}
@@ -217,7 +288,7 @@ def test_real_postgres_http_round_trip_and_readback(protocol, postgres_authority
 def test_real_postgres_competing_claims_and_no_local_dispatch(protocol, postgres_authority):
     c = protocol
     jid = submit(c)
-    assert jobs._redispatch_record(jid)
+    assert not jobs._redispatch_record(jid)
     jobs._run_job(jid, c.org, {}, {}, '', False)
     jobs._run_native_preview(jid)
     assert jobs.get_job(jid)['attempt'] == 0
@@ -388,3 +459,164 @@ def test_real_postgres_binding_drift_and_source_integrity_fail_closed(protocol, 
     with pytest.raises(native.source.SourceStoreUnavailable):
         remote.complete(c.org, c.project, c.worker, jid, completion(c, job, ident))
     assert jobs.get_job(jid)['status'] != 'complete'
+
+
+@pytest.fixture
+def linked_remote(protocol, postgres_authority):
+    """Real authority and platform rows; protocol source bytes remain synthetic."""
+    c = protocol
+    db, executors = postgres_authority
+    jid = submit(c)
+    job, ident = claim(c)
+    mirror = str(uuid.uuid4())
+    with db.transaction() as conn:
+        conn.execute("INSERT INTO orgs (org_id, name) VALUES (%s, 'native expiry test')", (c.org,))
+        conn.execute("INSERT INTO projects (project_id, org_id, name) "
+                     "VALUES (%s, %s, 'native expiry test')", (c.project, c.org))
+        conn.execute("INSERT INTO jobs (job_id, project_id, org_id, kind, status, spine_ref) "
+                     "VALUES (%s, %s, %s, 'run', 'running', %s)",
+                     (mirror, c.project, c.org, jid))
+    try:
+        yield c, db, executors, jid, job, ident, mirror
+    finally:
+        with db.transaction() as conn:
+            conn.execute('DELETE FROM async_jobs WHERE job_id = %s', (jid,))
+            conn.execute('DELETE FROM orgs WHERE org_id = %s', (c.org,))
+
+
+def expiry_rows(db, jid, mirror):
+    with db.cursor() as cur:
+        cur.execute('SELECT * FROM async_jobs WHERE job_id = %s', (jid,))
+        authority = cur.fetchone()
+        cur.execute('SELECT * FROM jobs WHERE job_id = %s', (mirror,))
+        return authority, cur.fetchone()
+
+
+def expire_original_budget(db, jid):
+    with db.transaction() as conn:
+        # Exactly the stored budget has elapsed. A fresh heartbeat and future
+        # lease must not hide this job from the reaper's deadline selection.
+        conn.execute("UPDATE async_jobs SET started_at = "
+            "EXTRACT(EPOCH FROM clock_timestamp()) - "
+            "(execution_json->'native_preview'->>'budget_s')::double precision, "
+            "updated_at = EXTRACT(EPOCH FROM clock_timestamp()), "
+            "lease_expires_at = CASE WHEN lease_owner IS NOT NULL THEN "
+            "EXTRACT(EPOCH FROM clock_timestamp()) + 3600 ELSE NULL END "
+            "WHERE job_id = %s", (jid,))
+
+
+def test_real_postgres_reaper_settles_expired_remote_and_mirror_once(linked_remote, monkeypatch):
+    c, db, executors, jid, job, ident, mirror = linked_remote
+    expire_original_budget(db, jid)
+    before = jobs.get_job(jid)
+    # A runtime budget change cannot extend the persisted execution budget.
+    monkeypatch.setenv('JOB_MAX_S', '3600')
+    assert remote.claim(c.org, c.project, c.worker, {}) == {'job': None}
+    with pytest.raises(remote.ProtocolError):
+        remote.complete(c.org, c.project, c.worker, jid, completion(c, job, ident))
+    candidates = jobs._pg_store.reclaimable(0, jobs.CLOSED_PROGRESS, time.time())
+    assert jid in {row['job_id'] for row in candidates}
+    jobs._reap_orphans_once()
+    rec = jobs.get_job(jid)
+    assert rec['status'] == 'failed' and rec['result'] is None and rec['lease'] is None
+    assert rec['started_at'] == before['started_at']
+    assert rec['native_preview'] == before['native_preview']
+    assert rec['error'] == jobs.error_obj(jobs.ErrorCode.TIMEOUT,
+        'native preview execution budget expired', False)
+    assert rec['provenance'] == {'attempt': ident['attempt'], 'execution_path': 'native-worker'}
+    authority, platform = expiry_rows(db, jid, mirror)
+    assert platform['status'] == authority['status'] == 'failed'
+    assert authority['terminal_fingerprint'] == jobs._terminal_fingerprint(
+        'failed', None, rec['error'], rec['provenance'])
+    assert not jobs._redispatch_record(jid)
+    jobs._reap_orphans_once()
+    assert expiry_rows(db, jid, mirror) == (authority, platform)
+    assert not any(e.calls for e in executors.values())
+
+
+@pytest.mark.parametrize('unstarted', [False, True])
+def test_real_postgres_reaper_preserves_unexpired_and_unstarted(linked_remote, unstarted):
+    c, db, _, jid, _, _, mirror = linked_remote
+    with db.transaction() as conn:
+        conn.execute("UPDATE async_jobs SET updated_at = 1, lease_expires_at = 1, "
+                     "started_at = %s WHERE job_id = %s",
+                     (None if unstarted else time.time(), jid))
+        if unstarted:
+            conn.execute("UPDATE async_jobs SET status = 'submitted', progress = 'queued', "
+                         "attempt = 0, lease_owner = NULL, lease_expires_at = NULL "
+                         "WHERE job_id = %s", (jid,))
+    before = expiry_rows(db, jid, mirror)
+    assert not jobs._redispatch_record(jid)
+    jobs._reap_orphans_once()
+    assert expiry_rows(db, jid, mirror) == before
+    candidates = jobs._pg_store.native_remote_candidates(c.binding, time.time(), jobs.max_attempts())
+    assert jid in {row['job_id'] for row in candidates}
+    if unstarted:
+        claimed, _ = claim(c)
+        assert claimed['job_id'] == jid
+
+
+@pytest.mark.parametrize('change', ['attempt', 'schema', 'scope', 'ordinary', 'closed'])
+def test_real_postgres_expiry_revalidates_locked_authority(linked_remote, change):
+    _, db, _, jid, _, ident, mirror = linked_remote
+    expire_original_budget(db, jid)
+    with db.transaction() as conn:
+        if change == 'attempt':
+            conn.execute('UPDATE async_jobs SET attempt = attempt + 1 WHERE job_id = %s', (jid,))
+        elif change == 'schema':
+            conn.execute("UPDATE async_jobs SET execution_json = jsonb_set( "
+                         "execution_json #- '{native_preview,dispatch_kind}' "
+                         "#- '{native_preview,worker_binding}' #- '{native_preview,budget_s}', "
+                         "'{native_preview,schema}', '\"leaf.native-preview-job.v1\"') "
+                         "WHERE job_id = %s", (jid,))
+        elif change == 'scope':
+            conn.execute('UPDATE async_jobs SET tenant_id = %s WHERE job_id = %s',
+                         (str(uuid.uuid4()), jid))
+        elif change == 'ordinary':
+            conn.execute("UPDATE async_jobs SET tool = 'ordinary', execution_json = '{}'::jsonb "
+                         "WHERE job_id = %s", (jid,))
+        else:
+            conn.execute("UPDATE async_jobs SET progress = 'closed' WHERE job_id = %s", (jid,))
+    before = expiry_rows(db, jid, mirror)
+    assert jobs._pg_store.expire_native_remote(jid, ident['attempt']) == 'not_owner'
+    assert expiry_rows(db, jid, mirror) == before
+
+
+def test_real_postgres_expiry_rechecks_current_deadline_after_stale_read(linked_remote, monkeypatch):
+    _, db, _, jid, _, _, mirror = linked_remote
+    expire_original_budget(db, jid)
+    stale = jobs.get_job(jid)
+    with db.transaction() as conn:
+        conn.execute('UPDATE async_jobs SET started_at = %s WHERE job_id = %s',
+                     (time.time(), jid))
+    before = expiry_rows(db, jid, mirror)
+    monkeypatch.setattr(jobs, 'get_job', lambda _: stale)
+    assert not jobs._redispatch_record(jid)
+    assert expiry_rows(db, jid, mirror) == before
+
+
+@pytest.mark.parametrize('outcome', ['complete', 'failed'])
+def test_real_postgres_expiry_stale_read_preserves_competing_terminal(linked_remote, monkeypatch, outcome):
+    c, db, _, jid, job, ident, mirror = linked_remote
+    stale = jobs.get_job(jid)
+    body = completion(c, job, ident) if outcome == 'complete' else {**ident, 'outcome': 'failed'}
+    remote.complete(c.org, c.project, c.worker, jid, body)
+    expire_original_budget(db, jid)
+    before = expiry_rows(db, jid, mirror)
+    monkeypatch.setattr(jobs, 'get_job', lambda _: stale)
+    assert not jobs._redispatch_record(jid)
+    assert expiry_rows(db, jid, mirror) == before
+
+
+def test_real_postgres_expiry_mirror_failure_rolls_back_authority(linked_remote, monkeypatch):
+    _, db, _, jid, _, _, mirror = linked_remote
+    expire_original_budget(db, jid)
+    before = expiry_rows(db, jid, mirror)
+    real_mirror = jobs.platform_link.terminal_in_transaction
+    def fail_after_mirror(*args):
+        real_mirror(*args)
+        raise ValueError('synthetic mirror failure')
+    monkeypatch.setattr(jobs.platform_link, 'terminal_in_transaction', fail_after_mirror)
+    with pytest.raises(ValueError, match='synthetic mirror failure'):
+        jobs._redispatch_record(jid)
+    assert expiry_rows(db, jid, mirror) == before
