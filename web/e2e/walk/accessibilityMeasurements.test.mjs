@@ -14,6 +14,14 @@ function fixture(options = {}) {
   const calls = []
   const forbidden = () => { calls.push('FORBIDDEN ACTION'); throw new Error('Collector attempted an action') }
   const node = () => ({ isConnected: true, visible: true, disposed: 0,
+    parentElement: null, inert: false, ariaHidden: null,
+    closest(selector) {
+      assert.equal(selector, '[inert], [aria-hidden="true"]')
+      for (let current = this; current; current = current.parentElement) {
+        if (current.inert || current.ariaHidden === 'true') return current
+      }
+      return null
+    },
     contains(other) { return other === this || other === child },
     getAttribute(name) {
       assert.equal(name, 'aria-modal')
@@ -95,6 +103,28 @@ test('each observed semantic or focus mismatch produces a real finding', async (
     assert.equal(verdict(await complete(fake, phases?.(fake))), 'finding')
     await fake.capture.dispose()
   }
+})
+
+test('Escape treats inert or aria-hidden exit animations on the dialog or an ancestor as closed', async () => {
+  for (const ancestor of [false, true]) for (const attribute of ['inert', 'ariaHidden']) {
+    const fake = fixture()
+    await fake.capture.opened()
+    const target = ancestor ? { parentElement: null } : fake.original
+    if (ancestor) fake.original.parentElement = target
+    target[attribute] = attribute === 'inert' ? true : 'true'
+    await fake.capture.afterEscape()
+    assert.equal(fake.original.isConnected, true)
+    assert.equal(fake.original.visible, true)
+    assert.equal(fake.capture.result().focus.escapeClosed, true, `${ancestor}/${attribute}`)
+    await fake.capture.dispose()
+  }
+  const interactive = fixture()
+  await interactive.capture.opened()
+  interactive.original.ariaHidden = 'false'
+  interactive.original.parentElement = { inert: false, ariaHidden: 'false', parentElement: null }
+  await interactive.capture.afterEscape()
+  assert.equal(interactive.capture.result().focus.escapeClosed, false)
+  await interactive.capture.dispose()
 })
 
 test('omitted phases and out-of-order phases stay absent and unknown', async () => {

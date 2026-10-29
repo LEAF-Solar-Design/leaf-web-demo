@@ -656,11 +656,18 @@ export function mergeAccessibilityMeasurements(existing, result) {
 }
 
 export const ACCESSIBILITY_DIALOG_SCOPE = Object.freeze({
-  'control:linked-services': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Linked services' }),
-  'control:claude-accounts': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Claude accounts' }),
+  'control:linked-services': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Linked services',
+    initialFocus: Object.freeze({ role: 'button', name: 'Close linked services panel', key: 'close-linked-services' }),
+    expectedModal: false, expectedEscapeClosed: true }),
+  'control:claude-accounts': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Claude accounts',
+    initialFocus: Object.freeze({ role: 'button', name: 'Close Claude account panel', key: 'close-claude-accounts' }),
+    expectedModal: false, expectedEscapeClosed: true }),
   'control:session-details': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Session · provenance' }),
-  'control:version-history': Object.freeze({ states: Object.freeze(['ready']), name: 'Version history' }),
-  'action:bar-shortcuts': Object.freeze({ states: Object.freeze(['ready']), name: 'Keyboard shortcuts' }),
+  'control:version-history': Object.freeze({ states: Object.freeze(['ready']), name: 'Version history',
+    initialFocus: Object.freeze({ key: 'control:version-history' }), expectedModal: false, expectedEscapeClosed: true }),
+  'action:bar-shortcuts': Object.freeze({ states: Object.freeze(['ready']), name: 'Keyboard shortcuts',
+    initialFocus: Object.freeze({ role: 'switch', name: 'Single-key shortcuts', key: 'single-key-shortcuts' }),
+    expectedModal: false, expectedEscapeClosed: true }),
 })
 
 export async function accessibilityDialogTargets({ page, probe, viewport, locator }) {
@@ -677,7 +684,10 @@ export async function accessibilityDialogTargets({ page, probe, viewport, locato
     key = projectVisible ? 'workspace-project' : 'workspace-profile-tab'
   }
   const target = { key, locator: opener }
-  return { openTarget: target, returnTarget: { ...target },
+  const openTarget = spec.initialFocus?.role
+    ? { key: spec.initialFocus.key,
+      locator: page.getByRole(spec.initialFocus.role, { name: spec.initialFocus.name, exact: true }) } : target
+  return { openTarget, returnTarget: { ...target },
     dialog: page.getByRole('dialog', { name: spec.name, exact: true }) }
 }
 
@@ -696,7 +706,7 @@ export async function prepareAccessibilityCapture({ page, probe, viewport, locat
     cleanup.push(async () => {
       try { await capture.dispose() } catch { accessibilityDiagnostic(evidence, 'dispose') }
     })
-    return capture
+    return { ...capture, expectedModal: ACCESSIBILITY_DIALOG_SCOPE[probe.featureId].expectedModal }
   } catch { accessibilityDiagnostic(evidence, 'prepare'); return null }
 }
 
@@ -717,6 +727,9 @@ export async function followAccessibilityCapture({ capture, page, evidence,
     const result = capture.result()
     const measurements = Object.fromEntries(['reference', 'overlay', 'focus']
       .filter(key => result?.[key] !== undefined).map(key => [key, result[key]]))
+    if (typeof capture.expectedModal === 'boolean') {
+      measurements.overlay = { ...measurements.overlay, expectedModal: capture.expectedModal }
+    }
     addPersonaFragment(evidence, { persona: 'accessibility', measurements, bundleReference })
     evidence.accessibilityDiagnostics ||= []
     if (result.diagnostics) evidence.accessibilityDiagnostics.push({ phase: 'observations', ...result.diagnostics })

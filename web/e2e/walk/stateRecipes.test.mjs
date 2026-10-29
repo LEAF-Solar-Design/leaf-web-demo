@@ -257,21 +257,27 @@ test('late observer exceptions drop only that persona after other facts were col
   }
 })
 
-function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal = true } = {}) {
+function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal = false } = {}) {
   const calls = [], cleanup = [], child = {}, outside = {}
   const opener = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
+  const initial = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
   const root = { isConnected: true, visible: true, disposed: 0,
     contains: node => node === child,
+    closest: () => null,
     getAttribute: name => { assert.equal(name, 'aria-modal'); return String(modal) },
     async isVisible() { return this.visible },
     async dispose() { this.disposed++ } }
-  const document = { activeElement: opener }
+  const document = { activeElement: initial }
   const locatorFor = handle => ({ count: async () => 1, isVisible: async () => handle.visible !== false,
     elementHandle: async () => handle,
     ariaSnapshot: async () => '- dialog "Linked services":\n  - button "Close"' })
   const locator = locatorFor(opener), dialog = locatorFor(root)
   const page = {
     getByRole(role, options) {
+      if (role === 'button') {
+        assert.deepEqual(options, { name: 'Close linked services panel', exact: true })
+        return locatorFor(initial)
+      }
       assert.equal(role, 'dialog')
       assert.deepEqual(options, { name: 'Linked services', exact: true })
       return dialog
@@ -440,13 +446,18 @@ test('only the declared desktop dialog states can create an accessibility captur
   ]) {
     assert.deepEqual(ACCESSIBILITY_DIALOG_SCOPE[featureId].states, states)
     for (const state of states) {
-      const locator = {}, dialog = {}
+      const locator = {}, dialog = {}, initial = {}
+      const focus = ACCESSIBILITY_DIALOG_SCOPE[featureId].initialFocus
       const targets = await accessibilityDialogTargets({ viewport: 'desktop', probe: { featureId, state }, locator,
         page: { getByRole: (role, options) => {
+          if (focus?.role && role === focus.role) {
+            assert.deepEqual(options, { name: focus.name, exact: true })
+            return initial
+          }
           assert.deepEqual([role, options], ['dialog', { name, exact: true }])
           return dialog
         } } })
-      assert.deepEqual(targets, { openTarget: { key: featureId, locator },
+      assert.deepEqual(targets, { openTarget: focus?.role ? { key: focus.key, locator: initial } : { key: featureId, locator },
         returnTarget: { key: featureId, locator }, dialog })
     }
   }
@@ -465,10 +476,57 @@ test('only the declared desktop dialog states can create an accessibility captur
   }
 })
 
-test('shortcuts declares the persistent control activation focuses without changing observed non-modal semantics', async () => {
+test('each declared dialog capture receives its initial focus target and emits its modality expectation', async () => {
+  for (const [featureId, name, role, focusName, key] of [
+    ['control:linked-services', 'Linked services', 'button', 'Close linked services panel', 'close-linked-services'],
+    ['control:claude-accounts', 'Claude accounts', 'button', 'Close Claude account panel', 'close-claude-accounts'],
+    ['control:version-history', 'Version history', null, null, 'control:version-history'],
+    ['action:bar-shortcuts', 'Keyboard shortcuts', 'switch', 'Single-key shortcuts', 'single-key-shortcuts'],
+  ]) for (const state of ACCESSIBILITY_DIALOG_SCOPE[featureId].states) {
+    const opener = { isVisible: async () => true }, initial = {}, dialog = {}, cleanup = []
+    const page = { getByRole(actualRole, options) {
+      if (actualRole === 'navigation') {
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+        return { getByRole: () => opener }
+      }
+      if (actualRole === 'dialog') {
+        assert.deepEqual(options, { name, exact: true })
+        return dialog
+      }
+      assert.deepEqual([actualRole, options], [role, { name: focusName, exact: true }])
+      return initial
+    }, keyboard: { press: async () => {} } }
+    const probe = { featureId, state }
+    const evidence = { schema: 'leaf.walk-evidence.v1', featureId, state, viewport: 'desktop' }
+    const capture = await prepareAccessibilityCapture({ page, probe, viewport: 'desktop', locator: opener,
+      evidence, cleanup, createCapture(options) {
+        assert.deepEqual(options.openTarget, { key, locator: role ? initial : opener })
+        assert.deepEqual(options.returnTarget, {
+          key: featureId === 'action:bar-shortcuts' ? 'workspace-project' : featureId, locator: opener })
+        assert.equal(options.dialog, dialog)
+        return { opened: async () => {}, afterTab: async () => {}, afterEscape: async () => {},
+          dispose: async () => {}, result: () => ({ reference: options.reference,
+            overlay: { role: 'dialog', name, modal: false } }) }
+      } })
+    assert.equal(ACCESSIBILITY_DIALOG_SCOPE[featureId].expectedModal, false)
+    assert.equal(ACCESSIBILITY_DIALOG_SCOPE[featureId].expectedEscapeClosed, true)
+    await followAccessibilityCapture({ capture, page, evidence })
+    assert.equal(evidence.personaFragments[0].measurements.overlay.expectedModal, false)
+    assert.equal(evidence.measurements.overlay.expectedModal, false)
+    assert.equal(evidence.measurements.overlay.modal, false)
+    assert.equal(accessibility.evaluate(evidence).status, 'unknown')
+    for (const dispose of cleanup) await dispose()
+  }
+})
+
+test('shortcuts declares the switch for initial focus and the persistent opener for return focus', async () => {
   for (const visible of [true, false]) {
-    const project = { isVisible: async () => visible }, tab = {}
+    const project = { isVisible: async () => visible }, tab = {}, toggle = {}
     const page = { getByRole: (role, options) => {
+      if (role === 'switch') {
+        assert.deepEqual(options, { name: 'Single-key shortcuts', exact: true })
+        return toggle
+      }
       if (role === 'navigation') {
         assert.equal(options.name, 'Workspace controls')
         return { getByRole: () => project }
@@ -479,15 +537,24 @@ test('shortcuts declares the persistent control activation focuses without chang
     } }
     const targets = await accessibilityDialogTargets({ page, viewport: 'desktop',
       probe: { featureId: 'action:bar-shortcuts', state: 'ready' }, locator: {} })
-    assert.equal(targets.openTarget.locator, visible ? project : tab)
-    assert.deepEqual(targets.returnTarget, targets.openTarget)
+    assert.deepEqual(targets.openTarget, { key: 'single-key-shortcuts', locator: toggle })
+    assert.deepEqual(targets.returnTarget, { key: visible ? 'workspace-project' : 'workspace-profile-tab',
+      locator: visible ? project : tab })
   }
   const fake = accessibilityWalkFixture({ modal: false })
   const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
   await followAccessibilityCapture({ ...fake, capture })
   assert.equal(fake.evidence.measurements.overlay.modal, false)
-  assert.equal(accessibility.evaluate(fake.evidence).status, 'finding')
+  assert.equal(fake.evidence.measurements.overlay.expectedModal, false)
+  assert.equal(accessibility.evaluate(fake.evidence).status, 'pass')
   for (const dispose of fake.cleanup) await dispose()
+  const mismatch = accessibilityWalkFixture({ modal: true })
+  const mismatchedCapture = await prepareAccessibilityCapture({ ...mismatch, viewport: 'desktop' })
+  await followAccessibilityCapture({ ...mismatch, capture: mismatchedCapture })
+  assert.equal(mismatch.evidence.measurements.overlay.modal, true)
+  assert.equal(mismatch.evidence.measurements.overlay.expectedModal, false)
+  assert.equal(accessibility.evaluate(mismatch.evidence).status, 'finding')
+  for (const dispose of mismatch.cleanup) await dispose()
 })
 
 const stagingBase = 'https://platform-staging.leafdesign.ai'
