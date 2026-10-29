@@ -5049,14 +5049,13 @@ def describe_selection(patterns: List[str]) -> str:
 # gate-runner-selftest pins every key here to a registered suite id so a
 # rename cannot strand a weight.
 _MEASURED_EST_S = {
-    # Studio suite medians measured on the CI runner on 2026-09-23 across eight
-    # green builds: 0a6da3b1 7d0f4a21 6810678d 01ed60fc 85f91706
-    # 92ba1605 68abb5ed 7c8c895a. Without these, the partitioner weighted
-    # them at the 2.0s default and stacked two in one pool group.
-    "scripts-solar-w1-studio-string-add": 344.9,
-    "scripts-solar-w1-studio-string-delete": 336.6,
-    "scripts-solar-w1-studio-string-multi-add": 211.7,
-    "scripts-solar-w1-studio-solve": 121.0,
+    # Studio suite seconds measured 2026-10-28 on BUILD_GENERAL1_LARGE (gate build c5a2fa32, one run). The
+    # 2026-09-23 medians (344.9, 336.6, 211.7, 121.0) were about 5x high after the graph memo and left the
+    # shards that held them light. Without an entry they would fall back to the 2.0 s default.
+    "scripts-solar-w1-studio-string-add": 68.4,
+    "scripts-solar-w1-studio-string-delete": 65.1,
+    "scripts-solar-w1-studio-string-multi-add": 38.0,
+    "scripts-solar-w1-studio-solve": 28.5,
     # Refreshed 2026-09-23 from build leaf-ci-leaf-web-demo:ab6b3982 (BUILD_GENERAL1_XLARGE, jobs auto=8).
     "web-vitest-1": 140.0,
     "web-vitest-2": 140.0,

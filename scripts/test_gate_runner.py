@@ -806,7 +806,7 @@ def test_studio_suites_are_registered_with_measured_floors():
     ):
         assert sid in suites, sid
         assert sid in g._MEASURED_EST_S, sid
-        assert g._MEASURED_EST_S[sid] >= 100.0, sid
+        assert g._MEASURED_EST_S[sid] > g._DEFAULT_EST_S, sid
 
 
 def test_host_capability_ci_producers_cover_unit_and_postgres_modules(tmp_path, monkeypatch):
