@@ -138,6 +138,7 @@
     "scripts-native-preview-session",
     "scripts-native-preview-host",
     "scripts-native-preview-store",
+    "scripts-native-preview-entry",
     "scripts-proof-string-sizer",
     "scripts-proof-project-pg",
     "scripts-proof-project",
