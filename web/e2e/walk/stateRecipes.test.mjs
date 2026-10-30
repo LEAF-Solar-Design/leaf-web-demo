@@ -9,7 +9,7 @@ import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, 
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
-import { prepareProjectSharedShell, prepareProjectSharedShellSetup, closeBaselinePanel } from './fixtures.mjs'
+import { prepareProjectSharedShell, closeBaselinePanel } from './fixtures.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
 import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
@@ -89,7 +89,13 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
     clearContent: () => { contentVisible = false }, restoreContent: () => { contentVisible = true } }
 }
 
-test('WL43 provisions Tools project before the Project sidebar setup only on the shared browser shell', async () => {
+test('WL43c provisions Tools project once in setup before the shared Project sidebar preparation', async () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const runner = source.slice(source.indexOf('export async function runProbe(probe, runtime) {'), source.indexOf('\n// This reporter'))
+  const setup = runner.indexOf('for (const recipe of probe.setup.steps)')
+  const sidebar = runner.indexOf('probe = await prepareProjectSharedShell(probe, runtime)')
+  assert.ok(setup >= 0 && sidebar > setup)
+  assert.doesNotMatch(source, /prepareProjectSharedShellSetup/)
   for (const tab of ['tools', 'activity', 'project']) {
     for (const surface of ['browser', 'cad']) {
       for (const studioPresent of [true, false]) {
@@ -97,19 +103,18 @@ test('WL43 provisions Tools project before the Project sidebar setup only on the
         const originalSetup = structuredClone(probe.setup)
         const fake = projectSidebarFake({ surface, studioPresent })
         const runtime = { page: fake.page, cleanup: [], evidence: { steps: [] } }
-        await prepareProjectSharedShellSetup(probe, runtime, async (actualProbe, actualRuntime, recipe) => {
-          assert.equal(actualProbe, probe)
-          assert.equal(actualRuntime, runtime)
-          assert.deepEqual(recipe, { kind: 'open-real-project' })
+        for (const recipe of probe.setup.steps.filter(row => row.kind === 'open-real-project')) {
           fake.events.push(recipe.kind)
-        })
+          runtime.evidence.steps.push({ phase: 'setup', ...recipe })
+        }
         const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
         const sharedTools = tab === 'tools' && surface === 'browser' && studioPresent
-        assert.deepEqual(fake.events, sharedTools ? ['open-real-project', 'Project'] : [])
-        assert.deepEqual(runtime.evidence.steps, sharedTools ? [{ phase: 'setup', kind: 'open-real-project' }] : [])
+        assert.deepEqual(fake.events, [
+          ...(tab === 'tools' ? ['open-real-project'] : []), ...(sharedTools ? ['Project'] : []),
+        ])
+        assert.deepEqual(runtime.evidence.steps, tab === 'tools' ? [{ phase: 'setup', kind: 'open-real-project' }] : [])
         assert.deepEqual(probe.setup, originalSetup)
-        assert.deepEqual(resolved.setup.steps, sharedTools
-          ? [...originalSetup.steps, { kind: 'open-real-project' }] : originalSetup.steps)
+        assert.deepEqual(resolved.setup.steps, originalSetup.steps)
       }
     }
   }

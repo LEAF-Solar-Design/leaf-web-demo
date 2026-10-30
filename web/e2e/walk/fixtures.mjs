@@ -47,18 +47,6 @@ export async function revealStudioRail(page) {
   return true
 }
 
-export async function prepareProjectSharedShellSetup(probe, runtime, execute = setupStep) {
-  if (probe.featureId !== 'tab:project:tools' || probe.profile !== 'project' || probe.state !== 'ready') return
-  const { page } = runtime
-  const surface = await page.locator('.app').first().getAttribute('data-surface')
-  if (surface !== 'browser') return
-  const resolved = projectSharedShellProbe(probe, { surface, studioPresent: await studioRailButton(page).isVisible() })
-  for (const recipe of resolved.setup.steps.slice(probe.setup.steps.length)) {
-    await execute(probe, runtime, recipe)
-    runtime.evidence.steps.push({ phase: 'setup', ...recipe })
-  }
-}
-
 export async function prepareProjectSharedShell(probe, runtime, assertions = expect) {
   if (probe.profile !== 'project' || probe.state !== 'ready'
     || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
@@ -3078,7 +3066,7 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailabilit
   // Keep the authenticated recipes intact for staging (F1).
   if (['open', 'published', 'form-switch'].includes(probe.setup?.context?.projectSolar)
     && workerFacts.authLive !== true) return PROJECT_SOLAR_AUTH_REASON
-  if (probe.setup?.context?.openProjectId) {
+  if (probe.setup?.context?.openProjectId || probe.workerOptions?.walkPostgres === true) {
     if (workerFacts.postgresUnavailableReason) return workerFacts.postgresUnavailableReason
     if (workerFacts.walkPostgres !== true) return 'walk_postgres_required'
   }
@@ -4646,7 +4634,7 @@ export async function runProbe(probe, runtime) {
     if (typeof observeProbeRequests === 'function' && typeof page.on === 'function') {
       runtime.cleanup.push(observeProbeRequests(page, evidence, setupStartedAt))
     }
-    const initialReason = (probe.setup?.context?.openProjectId
+    const initialReason = (probe.setup?.context?.openProjectId || probe.workerOptions?.walkPostgres === true
       || typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state))
       && typeof unsupportedBeforeSetup === 'function'
       ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null
@@ -4692,7 +4680,6 @@ export async function runProbe(probe, runtime) {
       })
     }
     page = runtime.page
-    if (typeof prepareProjectSharedShellSetup === 'function') await prepareProjectSharedShellSetup(probe, runtime)
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
     if (typeof prepareProjectSharedShell === 'function') {
       probe = await prepareProjectSharedShell(probe, runtime)

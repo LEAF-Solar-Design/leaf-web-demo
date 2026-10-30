@@ -313,9 +313,10 @@ export function stateRecipe(entry, state) {
       : entry.kind === 'tool' && entry.source_id.startsWith('solar-') && state === 'ready' ? 'solar'
       : entry.kind === 'action' && actionRecord(entry).panel === 'solar-panels' ? 'solar' : 'cad'
   const steps = []
-  // A project context is a recipe requirement, regardless of feature kind.
+  // A project context or declared workspace probe requires a real project.
   // Open it after the drawing/surface setup so navigation cannot clear it.
-  const projectSteps = () => context.openProjectId ? [step('open-real-project')] : []
+  const projectSteps = () => context.openProjectId || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`)
+    ? [step('open-real-project')] : []
   if (entry.id === 'surface:solar' && context.projectSolar) {
     if (context.projectSolar === 'proposal-offline') return { context, steps: [step('require-local-state', {
       reason: 'cloud_service_offline: project Solar proposal requires server/solar_project_solve.py (cloud stringer) and a retained proposal for review',
@@ -505,6 +506,8 @@ export function effectAssertion(entry, state) {
     ...(effect.target === 'cockpit-prompt' ? { verb: PROMPTS[effect.operation]?.verb } : {}) }
 }
 
+export const PROJECT_WORKSPACE_PROBES = Object.freeze(['tab:project:tools/ready'])
+
 export function resolveProbe(entry, state) {
   if (!entry.states.includes(state)) throw new Error(`Unknown state ${state} for ${entry.id}`)
   const assertion = effectAssertion(entry, state)
@@ -514,7 +517,8 @@ export function resolveProbe(entry, state) {
     certification: ['unsupported_local', 'staging'].includes(entry.certify)
       ? { result: entry.certify, reason: entry.certify_reason } : null,
     setup: stateRecipe(entry, state), locator: locatorRecipe(entry, state), assertion,
-    ...(entry.state_contexts?.[state]?.openProjectId ? { workerOptions: { walkPostgres: true } } : {}),
+    ...(entry.state_contexts?.[state]?.openProjectId || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`)
+      ? { workerOptions: { walkPostgres: true } } : {}),
   }
 }
 
@@ -522,7 +526,6 @@ export function projectSharedShellProbe(probe, { surface, studioPresent } = {}) 
   if (surface !== 'browser' || !studioPresent || probe.profile !== 'project' || probe.state !== 'ready'
     || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
   if (probe.featureId === 'tab:project:tools') return { ...probe,
-    setup: { ...probe.setup, steps: [...probe.setup.steps, step('open-real-project')] },
     locator: { ...role('button', 'Open tools', role('region', 'Project sidebar')), trigger: 'click' },
     assertion: { ...probe.assertion, target: 'project-shared-tools', region: 'Tools',
       content: '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible' },
