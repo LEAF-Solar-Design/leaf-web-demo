@@ -3966,7 +3966,8 @@ import { captureEngineRepeat, activateEngineRepeat } from './fixtures.mjs'
 import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
   setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
 import { CENSUS_DISCLOSURES, censusDisclosureState, setupCensusDisclosure, setupCensusScript,
-  setupCensusDownloadOnly, activateCensusFileChooser, captureCensusEffect, assertCensusEffect } from './fixtures.mjs'
+  setupCensusDownloadOnly, activateCensusFileChooser, captureCensusEffect, assertCensusEffect,
+  observeDxfImportState } from './fixtures.mjs'
 
 const censusAssertions = (value) => ({
   toBe: (expected) => assert.equal(value, expected),
@@ -4460,6 +4461,103 @@ test('C2 and C3 disclosures click into each initial state, reject a wrong effect
       if (target === 'ribbon-overflow-expanded') assert.equal(events.at(-1), 1440)
     }
   }
+})
+
+function dxfImportFixture({ featureId = 'control:open-dxf', present = false, chooser = false, readFails = false,
+  enabled = true, picking = false } = {}) {
+  const originalError = new Error('original DXF file visibility failure')
+  let inputExpectationFailed = false
+  const page = new EventEmitter()
+  const pane = { count: async () => 1, isVisible: async () => true,
+    getAttribute: async (name) => {
+      // The disclosure oracle reads this flag before the input expectation.
+      if (readFails && inputExpectationFailed) throw new Error('diagnostic read failed')
+      return name === 'data-import-open' ? 'true' : picking ? '1' : null
+    } }
+  const input = { visible: present, count: async () => present ? 1 : 0,
+    isVisible: async () => input.visible, isEnabled: async () => enabled }
+  input.first = () => input
+  page.locator = (selector) => { assert.equal(selector, '#cockpit-import-pane'); return pane }
+  page.getByLabel = (name, options) => {
+    assert.equal(name, 'DXF file'); assert.deepEqual(options, { exact: true }); return input
+  }
+  const button = { getAttribute: async () => 'true', click: async () => {
+    if (['control:open-dxf', 'control:open-dxf-browser'].includes(featureId)) assert.equal(page.listenerCount('filechooser'), 1)
+    if (chooser) page.emit('filechooser', {})
+  } }
+  const assertions = (value) => ({ ...censusAssertions(value), toBeVisible: async () => {
+    if (!value.visible) {
+      inputExpectationFailed = true
+      throw originalError
+    }
+  } })
+  assertions.poll = censusAssertions.poll
+  const probe = { featureId, assertion: { target: 'dxf-import-expanded', value: true } }
+  const runtime = { page, evidence: {}, cleanup: [] }
+  return { page, probe, runtime, button, assertions, originalError }
+}
+
+test('Open DXF failures record the open flag and absent input while preserving the original error', async () => {
+  for (const featureId of ['control:open-dxf', 'control:open-dxf-browser']) {
+    const fake = dxfImportFixture({ featureId })
+    observeDxfImportState(fake.probe, fake.runtime)
+    await fake.button.click()
+    await assert.rejects(assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions),
+      (error) => error === fake.originalError)
+    assert.deepEqual(fake.runtime.evidence.dxfImportState, { importOpen: true, paneVisible: true,
+      busy: null, picking: false, input: { count: 0, visible: null, enabled: null }, fileChooserOpened: false })
+    for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.page.listenerCount('filechooser'), 0)
+    assert.equal(fake.runtime.captureDxfImportState, undefined)
+  }
+})
+
+test('Open DXF observes a chooser emitted during activation and reads busy and picking from the DOM', async () => {
+  for (const featureId of ['control:open-dxf', 'control:open-dxf-browser']) {
+    const fake = dxfImportFixture({ featureId, chooser: true, present: true, enabled: false, picking: true })
+    // A hidden but mounted input still exposes its busy state.
+    fake.page.getByLabel('DXF file', { exact: true }).visible = false
+    observeDxfImportState(fake.probe, fake.runtime)
+    await fake.button.click()
+    await assert.rejects(assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions),
+      (error) => error === fake.originalError)
+    assert.equal(fake.runtime.evidence.dxfImportState.fileChooserOpened, true)
+    assert.equal(fake.runtime.evidence.dxfImportState.busy, true)
+    assert.equal(fake.runtime.evidence.dxfImportState.picking, true)
+    assert.deepEqual(fake.runtime.evidence.dxfImportState.input, { count: 1, visible: false, enabled: false })
+    for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.page.listenerCount('filechooser'), 0)
+  }
+})
+
+test('passing Open DXF and another census control leave DXF diagnostic evidence absent', async () => {
+  const fake = dxfImportFixture({ present: true })
+  observeDxfImportState(fake.probe, fake.runtime)
+  await fake.button.click()
+  await assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions)
+  assert.deepEqual(fake.runtime.evidence, {})
+  for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+  assert.equal(fake.page.listenerCount('filechooser'), 0)
+
+  const probe = { featureId: 'control:ribbon-script', assertion: { target: 'ribbon-script-text' }, locator: { inputValue: 'line' } }
+  const runtime = { page: new EventEmitter(), evidence: {}, cleanup: [] }
+  observeDxfImportState(probe, runtime)
+  await assertCensusEffect(probe, runtime, { text: 'line' }, {}, censusAssertions)
+  assert.deepEqual(runtime.evidence, {})
+  assert.equal(runtime.page.listenerCount('filechooser'), 0)
+  assert.equal(runtime.cleanup.length, 0)
+})
+
+test('a throwing DXF diagnostic read preserves the original input expectation failure', async () => {
+  const fake = dxfImportFixture({ readFails: true })
+  observeDxfImportState(fake.probe, fake.runtime)
+  await fake.button.click()
+  await assert.rejects(assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, fake.assertions),
+    (error) => error === fake.originalError)
+  assert.equal(fake.runtime.evidence.dxfImportState.importOpen, null)
+  assert.equal(fake.runtime.evidence.dxfImportState.picking, null)
+  for (const cleanup of fake.runtime.cleanup.reverse()) await cleanup()
+  assert.equal(fake.page.listenerCount('filechooser'), 0)
 })
 
 test('C2 script setup holds genuine replies only for running and drains them before clearing text', async () => {

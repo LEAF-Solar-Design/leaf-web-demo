@@ -2502,6 +2502,40 @@ export async function activateCensusFileChooser(runtime, locator) {
   })
 }
 
+export function observeDxfImportState(probe, runtime) {
+  if (!['control:open-dxf', 'control:open-dxf-browser'].includes(probe.featureId)) return
+  const { page } = runtime
+  let fileChooserOpened = null
+  const opened = () => { fileChooserOpened = true }
+  try {
+    page.on('filechooser', opened)
+    fileChooserOpened = false
+  } catch { /* A missing event API must not affect the probe. */ }
+  runtime.cleanup.push(async () => {
+    try { page.off('filechooser', opened) } catch { /* Optional diagnostic cleanup. */ }
+    delete runtime.captureDxfImportState
+  })
+  runtime.captureDxfImportState = async () => {
+    const read = async (callback) => { try { return await callback() } catch { return null } }
+    try {
+      const pane = page.locator('#cockpit-import-pane')
+      const input = page.getByLabel('DXF file', { exact: true })
+      const paneCount = await read(() => pane.count())
+      const count = await read(() => input.count())
+      const enabled = count > 0 ? await read(() => input.first().isEnabled({ timeout: 1000 })) : null
+      runtime.evidence.dxfImportState = {
+        importOpen: paneCount > 0 ? await read(async () => await pane.getAttribute('data-import-open') === 'true') : null,
+        paneVisible: paneCount > 0 ? await read(() => pane.isVisible()) : null,
+        // CadEditSurface's file input is disabled={busy}; there is no separate busy attribute.
+        busy: enabled === null ? null : !enabled,
+        picking: paneCount > 0 ? await read(async () => await pane.getAttribute('data-cockpit-picking') === '1') : null,
+        input: { count, visible: count > 0 ? await read(() => input.first().isVisible()) : null, enabled },
+        fileChooserOpened,
+      }
+    } catch { /* Diagnostics never replace the original expectation failure. */ }
+  }
+}
+
 export async function assertCensusEffect(probe, runtime, locator, before, assertions = expect) {
   const { page } = runtime
   const target = probe.assertion.target
@@ -2513,8 +2547,15 @@ export async function assertCensusEffect(probe, runtime, locator, before, assert
       await assertions(menu).toHaveCount(probe.assertion.value ? 1 : 0)
       if (probe.assertion.value) await assertions(menu).toBeVisible()
     }
-    if (target === 'dxf-import-expanded') await assertions(page.getByLabel('DXF file', { exact: true }))
-      [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
+    if (target === 'dxf-import-expanded') {
+      try {
+        await assertions(page.getByLabel('DXF file', { exact: true }))
+          [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
+      } catch (error) {
+        try { await runtime.captureDxfImportState?.() } catch { /* Preserve the oracle failure. */ }
+        throw error
+      }
+    }
     if (target === 'drawing-objects-expanded') await assertions(page.locator('.drawing-objects-content'))
       .toHaveCount(probe.assertion.value ? 1 : 0)
     return
@@ -4696,6 +4737,7 @@ export async function runProbe(probe, runtime) {
       page.on('request', observe)
       runtime.cleanup.push(async () => page.off('request', observe))
     }
+    if (typeof observeDxfImportState === 'function') observeDxfImportState(probe, runtime)
     if (probe.assertion.kind !== 'disabled_with_reason' || probe.locator?.keyboardAction === 'engine:repeat') {
       await test.step(`Activate ${probe.featureId}`, () => typeof activateWithMobileTouchMeasurements === 'function'
         ? activateWithMobileTouchMeasurements({ page, locator, probe, viewport: runtime.testInfo.project.name,
