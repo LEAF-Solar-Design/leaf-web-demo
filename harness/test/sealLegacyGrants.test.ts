@@ -140,6 +140,67 @@ describe("sealLegacyGrants", () => {
     expect(result.summary).toMatchObject({ sealed: 0, legacy_remaining: 1, blocked_tenants: 1 });
   });
 
+  it.each(["unlink", "overwrite"] as const)("blocks a concurrent %s during KMS wrapping without publishing or restoring", async change => {
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    sidecars("tenant");
+    const replacement = Buffer.from(` { "version": 1, "kind": "oauth", "token": "replacement" }\n`);
+    let wrapping!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { wrapping = resolve; });
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const unwrap = vi.fn<KeyProvider["unwrap"]>((wrapped, context) => keys.unwrap(wrapped, context));
+    const provider: KeyProvider = {
+      keyId: () => keys.keyId(),
+      wrap: async (key, context) => {
+        wrapping();
+        await waiting;
+        return keys.wrap(key, context);
+      },
+      unwrap,
+    };
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(provider);
+    const sealing = main(["--seal"], env());
+    await started;
+    try {
+      if (change === "unlink") rmSync(path("tenant"));
+      else writeFileSync(path("tenant"), replacement);
+    } finally { release(); }
+    expect(await sealing).toBe(1);
+    expect(JSON.parse(output[0])).toEqual({ tenant: "tenant", outcome: "blocked", reason: "changed_during_migration" });
+    expect(summary()).toMatchObject({ sealed: 0, blocked_tenants: 1 });
+    if (change === "unlink") expect(existsSync(path("tenant"))).toBe(false);
+    else expect(readFileSync(path("tenant"))).toEqual(replacement);
+    expect(unwrap).not.toHaveBeenCalled();
+    expect(existsSync(path("tenant", ".token"))).toBe(true);
+    expect(existsSync(path("tenant", ".kind"))).toBe(true);
+    expect(readdirSync(dir).some(name => name.endsWith(".tmp"))).toBe(false);
+    for (const secret of [TOKEN, LABEL, ACCOUNT, dir]) expect([...output, ...errors].join("\n")).not.toContain(secret);
+  });
+
+  it.each(["unlink", "overwrite"] as const)("does not restore over a concurrent %s after publishing", async change => {
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    sidecars("tenant");
+    const replacement = Buffer.from("concurrent replacement bytes\n");
+    const provider: KeyProvider = {
+      keyId: () => keys.keyId(),
+      wrap: (key, context) => keys.wrap(key, context),
+      unwrap: async () => {
+        if (change === "unlink") rmSync(path("tenant"));
+        else writeFileSync(path("tenant"), replacement);
+        throw new Error(TOKEN);
+      },
+    };
+    const restore = vi.fn((target: string, bytes: Buffer) => { writeFileSync(target, bytes); });
+    const result = await sealTenants(dir, undefined, provider, change === "unlink" ? undefined : restore);
+    expect(result.outcomes).toEqual([{ tenant: "tenant", outcome: "blocked", reason: "changed_during_migration" }]);
+    expect(result.summary).toMatchObject({ sealed: 0, blocked_tenants: 1 });
+    expect(restore).not.toHaveBeenCalled();
+    if (change === "unlink") expect(existsSync(path("tenant"))).toBe(false);
+    else expect(readFileSync(path("tenant"))).toEqual(replacement);
+    expect(existsSync(path("tenant", ".token"))).toBe(true);
+    expect(existsSync(path("tenant", ".kind"))).toBe(true);
+  });
+
   it("uses the injectable restore writer on separate verifier failure", async () => {
     write("tenant", { version: 1, kind: "oauth", token: TOKEN });
     sidecars("tenant");

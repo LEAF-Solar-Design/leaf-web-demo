@@ -1,3 +1,5 @@
+// Run sealing in maintenance posture with no concurrent grant writes. These checks
+// narrow the race window but do not replace that operational requirement.
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -5,6 +7,7 @@ import { pathToFileURL } from "node:url";
 import { EnvelopeTenantGrantStore, resolveGrantsDir } from "../src/ports/impl/oauthGrantProvider.js";
 import type { GrantStatus } from "../src/ports/index.js";
 import { grantKeyProviderFromEnv } from "../src/security/grantEnvelope/fromEnv.js";
+import { sealGrant } from "../src/security/grantEnvelope/envelope.js";
 import type { KeyProvider } from "../src/security/grantEnvelope/keyProvider.js";
 
 const TENANT = /^[a-z0-9][a-z0-9_-]{0,62}$/;
@@ -56,17 +59,60 @@ function inventory(dir: string): { tenants: string[]; skipped_names: number } {
   return { tenants: [...tenants].sort(), skipped_names };
 }
 
+class GrantChangedDuringMigration extends Error {
+  constructor() { super("grant changed during migration"); }
+}
+
+function requireCurrentBytes(path: string, expected: readonly Buffer[]): void {
+  let current: Buffer;
+  try { current = readFileSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") throw new GrantChangedDuringMigration();
+    throw error;
+  }
+  if (!expected.some(bytes => current.equals(bytes))) throw new GrantChangedDuringMigration();
+}
+
 class MigratingEnvelopeStore extends EnvelopeTenantGrantStore {
+  private readonly snapshots = new Map<string, Buffer>();
+  private readonly published = new Map<string, Buffer>();
+  private readonly migrationKeys: KeyProvider;
+
+  constructor(opts: { dir: string; keyProvider: KeyProvider }) {
+    super(opts);
+    this.migrationKeys = opts.keyProvider;
+  }
+
   protected override async readRecordPayload(tenantId: string, path: string): Promise<unknown> {
     if (existsSync(path)) {
-      const value: unknown = JSON.parse(readFileSync(path, "utf8"));
-      if (plaintext(value)) return value;
+      const bytes = readFileSync(path);
+      const value: unknown = JSON.parse(bytes.toString("utf8"));
+      if (plaintext(value)) {
+        this.snapshots.set(path, bytes);
+        return value;
+      }
     }
     return super.readRecordPayload(tenantId, path);
   }
+
+  protected override async writeRecord(tenantId: string, record: unknown): Promise<void> {
+    const path = this.recordFile(tenantId);
+    const snapshot = this.snapshots.get(path);
+    if (!snapshot) throw new GrantChangedDuringMigration();
+    const sealed = await sealGrant(JSON.stringify(record), {
+      tenantId, grantId: `${tenantId}.grant.json`,
+    }, this.migrationKeys);
+    const bytes = Buffer.from(JSON.stringify(sealed) + "\n");
+    atomicRestore(path, bytes, () => requireCurrentBytes(path, [snapshot]),
+      () => { this.published.set(path, bytes); });
+  }
+
+  requireRestorable(path: string, original: Buffer): void {
+    const sealed = this.published.get(path);
+    requireCurrentBytes(path, sealed ? [original, sealed] : [original]);
+  }
 }
 
-const atomicRestore: RestoreWriter = (path, bytes) => {
+function atomicRestore(path: string, bytes: Buffer, beforePublish?: () => void, onPublished?: () => void): void {
   const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
   let fd: number | undefined;
   try {
@@ -75,7 +121,10 @@ const atomicRestore: RestoreWriter = (path, bytes) => {
     fsyncSync(fd);
     closeSync(fd);
     fd = undefined;
+    // Keep the optimistic check and rename synchronous, with no await between them.
+    beforePublish?.();
     renameSync(temp, path);
+    onPublished?.();
     // Directory fsync is unavailable on Windows. Other failures must surface.
     if (process.platform !== "win32") {
       try {
@@ -89,7 +138,7 @@ const atomicRestore: RestoreWriter = (path, bytes) => {
     if (fd !== undefined) closeSync(fd);
     rmSync(temp, { force: true });
   }
-};
+}
 
 async function verified(store: EnvelopeTenantGrantStore, tenant: string, before: GrantStatus): Promise<boolean> {
   const diagnostic = await store.diagnostic(tenant);
@@ -145,21 +194,32 @@ export async function sealTenants(dir: string, tenantScope: readonly string[] | 
             await migrating.activate(tenant, before.active_account_id);
           }
           pass = await verified(reader, tenant, before);
-        } catch {
+        } catch (error) {
+          if (error instanceof GrantChangedDuringMigration) throw error;
           // activate itself reads back after publishing; include that read in verification.
           let unchanged = false;
-          try { unchanged = !!original && readFileSync(path).equals(original); } catch { /* Restore even if read-back is unavailable. */ }
+          try { unchanged = !!original && readFileSync(path).equals(original); } catch { /* The guarded restore checks absence below. */ }
           if (unchanged) throw new Error("Conversion failed");
         }
         if (!pass) {
-          if (original) await restore(path, original);
+          if (original) {
+            const guard = () => migrating.requireRestorable(path, original);
+            if (restore === atomicRestore) atomicRestore(path, original, guard);
+            else {
+              guard();
+              await restore(path, original);
+            }
+          }
           outcome.reason = "verify_failed";
         } else {
           for (const suffix of [".token", ".kind"]) rmSync(join(dir, `${tenant}${suffix}`), { force: true });
           outcome = { tenant, outcome: original ? "sealed" : "already_sealed", reason: null };
         }
       }
-    } catch { /* Never expose store errors or tenant credential metadata. */ }
+    } catch (error) {
+      if (error instanceof GrantChangedDuringMigration) outcome.reason = "changed_during_migration";
+      // Never expose store errors or tenant credential metadata.
+    }
     outcomes.push(outcome);
   }
   return {
