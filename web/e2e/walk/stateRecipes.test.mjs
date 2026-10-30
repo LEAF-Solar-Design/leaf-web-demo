@@ -9,7 +9,7 @@ import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, 
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
-import { prepareProjectSharedShell } from './fixtures.mjs'
+import { prepareProjectSharedShell, closeBaselinePanel } from './fixtures.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
 import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
@@ -88,6 +88,112 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
   return { page, assertions, events, open: () => open, pane: () => pane,
     clearContent: () => { contentVisible = false }, restoreContent: () => { contentVisible = true } }
 }
+
+test('WL43c provisions Tools project once in setup before the shared Project sidebar preparation', async () => {
+  const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
+  const runner = source.slice(source.indexOf('export async function runProbe(probe, runtime) {'), source.indexOf('\n// This reporter'))
+  const setup = runner.indexOf('for (const recipe of probe.setup.steps)')
+  const sidebar = runner.indexOf('probe = await prepareProjectSharedShell(probe, runtime)')
+  assert.ok(setup >= 0 && sidebar > setup)
+  assert.doesNotMatch(source, /prepareProjectSharedShellSetup/)
+  for (const tab of ['tools', 'activity', 'project']) {
+    for (const surface of ['browser', 'cad']) {
+      for (const studioPresent of [true, false]) {
+        const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+        const originalSetup = structuredClone(probe.setup)
+        const fake = projectSidebarFake({ surface, studioPresent })
+        const runtime = { page: fake.page, cleanup: [], evidence: { steps: [] } }
+        for (const recipe of probe.setup.steps.filter(row => row.kind === 'open-real-project')) {
+          fake.events.push(recipe.kind)
+          runtime.evidence.steps.push({ phase: 'setup', ...recipe })
+        }
+        const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+        const sharedTools = tab === 'tools' && surface === 'browser' && studioPresent
+        assert.deepEqual(fake.events, [
+          ...(tab === 'tools' ? ['open-real-project'] : []), ...(sharedTools ? ['Project'] : []),
+        ])
+        assert.deepEqual(runtime.evidence.steps, tab === 'tools' ? [{ phase: 'setup', kind: 'open-real-project' }] : [])
+        assert.deepEqual(probe.setup, originalSetup)
+        assert.deepEqual(resolved.setup.steps, originalSetup.steps)
+      }
+    }
+  }
+})
+
+function baselinePanelFake({ exiting = false, staysVisible = false, waitError, clickError } = {}) {
+  let visible = true, clicks = 0, hiddenChecks = 0
+  const close = {
+    waitFor: async options => {
+      assert.deepEqual(options, { state: 'attached', timeout: 2000 })
+      if (waitError) throw waitError
+      if (exiting) {
+        visible = staysVisible
+        const error = new Error('close button did not resolve')
+        error.name = 'TimeoutError'
+        throw error
+      }
+    },
+    click: async () => {
+      clicks++
+      if (clickError) throw clickError
+      visible = staysVisible
+    },
+  }
+  class Locator {
+    constructor() { this._apiName = 'Locator' }
+    async isVisible() { return visible }
+    getByRole(role, options) {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Close version history', exact: true })
+      return close
+    }
+    async _expect(expression) {
+      assert.equal(expression, 'to.be.hidden')
+      hiddenChecks++
+      assert.equal(visible, false, 'panel must be hidden')
+      return { matches: true, log: [] }
+    }
+  }
+  const panel = new Locator()
+  const spec = { role: 'dialog', name: 'Version history', close: 'Close version history' }
+  const page = { getByRole: (role, options) => {
+    assert.equal(role, spec.role)
+    assert.deepEqual(options, { name: spec.name, exact: true })
+    return panel
+  } }
+  return { page, spec, clicks: () => clicks, hiddenChecks: () => hiddenChecks }
+}
+
+test('WL43 exiting baseline panels skip only the unresolved close and still require hidden', async () => {
+  for (const staysVisible of [false, true]) {
+    const fake = baselinePanelFake({ exiting: true, staysVisible })
+    const evidence = {}
+    const closing = closeBaselinePanel(fake.page, fake.spec, evidence)
+    if (staysVisible) await assert.rejects(closing, /panel must be hidden/)
+    else await closing
+    assert.equal(fake.clicks(), 0)
+    assert.equal(fake.hiddenChecks(), 1)
+    assert.deepEqual(evidence, { baselineCloseSkipped: 'panel-exiting' })
+  }
+})
+
+test('WL43 normal baseline close clicks once and propagates non-resolution failures', async () => {
+  const fake = baselinePanelFake()
+  const evidence = {}
+  await closeBaselinePanel(fake.page, fake.spec, evidence)
+  assert.equal(fake.clicks(), 1)
+  assert.equal(fake.hiddenChecks(), 1)
+  assert.deepEqual(evidence, {})
+  for (const source of ['waitError', 'clickError']) {
+    const error = new Error(`${source} failure`)
+    if (source === 'clickError') error.name = 'TimeoutError'
+    const failed = baselinePanelFake({ [source]: error })
+    await assert.rejects(closeBaselinePanel(failed.page, failed.spec, evidence), actual => actual === error)
+    assert.equal(failed.clicks(), source === 'clickError' ? 1 : 0)
+    assert.equal(failed.hiddenChecks(), 0)
+    assert.deepEqual(evidence, {})
+  }
+})
 
 test('WL40 Tools starts from the board, opens once, observes content and restores sidebars', async () => {
   const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
@@ -2445,7 +2551,8 @@ test('Studio rail reveal tolerates builds without Workspace controls', async () 
 })
 
 function phonePanelFake({ modern = true, studio = false, content = true, drawer = 'none', ledger = true,
-  empty = false, skeleton = false, navStaysVisible = false, sidebarStaysVisible = false, result = true } = {}) {
+  empty = false, skeleton = false, navStaysVisible = false, sidebarStaysVisible = false, result = true,
+  resultCount = result ? 1 : 0, resultInSidebar = true, resultVisible = true } = {}) {
   const events = [], legacy = { Catalog: false, Jobs: false, Result: false, Plan: false }
   let view = false, more = false
   class Locator {
@@ -2457,20 +2564,24 @@ function phonePanelFake({ modern = true, studio = false, content = true, drawer 
       if (this.kind === 'job content') return studio && content && (skeleton || empty || ledger)
       if (this.kind === 'heading') return studio && content
       if (this.kind === 'nav') return studio || navStaysVisible
-      if (this.kind === 'result') return studio && result
+      if (this.kind === 'result') return studio && result && resultVisible
       if (this.kind === 'Close Studio') return studio
       if (this.kind === 'Entitlements') return drawer === 'plan' && content
       if (this.kind === 'View panel') return view && more
       if (this.kind === 'More panels') return view
       return true
     }
-    async count() { return 1 }
+    async count() { return this.kind === 'sidebar result' ? (resultInSidebar ? resultCount : 0) : 1 }
     filter({ has }) {
       assert.equal(this.kind, 'job rail')
       assert.equal(has.kind, 'heading')
       return this
     }
     locator(selector) {
+      if (this.kind === 'sidebar') {
+        assert.equal(selector, '.result-block')
+        return locator('sidebar result')
+      }
       assert.equal(this.kind, 'job rail')
       assert.equal(selector, '.rail-ske, .rail-empty, .rail-ledger > *')
       return locator('job content')
@@ -2547,6 +2658,7 @@ function phonePanelFake({ modern = true, studio = false, content = true, drawer 
     toBeVisible: async () => assert.equal(await value.isVisible(), true),
     toBeHidden: async () => assert.equal(await value.isVisible(), false),
     toHaveValue: async expected => assert.equal(await value.inputValue(), expected),
+    toHaveCount: async expected => assert.equal(await value.count(), expected),
   })
   return { page, events, assertions }
 }
@@ -2594,7 +2706,18 @@ test('phone Studio Result opens once, requires the result block, and proves the 
   assert.deepEqual(stuck.events, ['Close Studio'])
 })
 
-test('phone Result setup, activation and effect use Studio and require visible result content', async () => {
+test('WL43 phone Result accepts one empty block inside the visible expanded Studio sidebar', async () => {
+  const fake = phonePanelFake({ studio: true, resultVisible: false })
+  assert.equal(await fake.page.locator('.result-block').isVisible(), false)
+  await assertStudioDrawer(fake.page, 'result', true, fake.assertions)
+  for (const options of [{ resultCount: 0 }, { resultCount: 2 }, { resultInSidebar: false },
+    { studio: false }]) {
+    const invalid = phonePanelFake({ studio: true, resultVisible: false, ...options })
+    await assert.rejects(assertStudioDrawer(invalid.page, 'result', true, invalid.assertions), assert.AssertionError)
+  }
+})
+
+test('phone Result setup, activation and effect use Studio and require a result block', async () => {
   const entry = buildFeatureMap().entries.find(entry => entry.id === 'drawer:result')
   for (const state of ['closed', 'open']) {
     const fake = phonePanelFake()

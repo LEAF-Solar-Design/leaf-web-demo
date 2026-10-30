@@ -3,7 +3,7 @@ import test from 'node:test'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS,
-  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe } from './probes.mjs'
+  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
@@ -39,6 +39,10 @@ test('WL36b project Activity and Project resolve to shared-shell controls and co
     ['project', 'Project', 'Project sidebar', '#environment-project-panel .ground-pane'],
   ]) {
     const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    assert.equal(probe.workerOptions, undefined)
+    assert.deepEqual(probe.setup, { context: {}, steps: [
+      { kind: 'open-private-drawing', surface: 'browser', signedOut: false },
+    ] })
     const resolved = projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true })
     assert.deepEqual(resolved.locator, { role: 'button', name, exact: true,
       scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click' })
@@ -51,6 +55,17 @@ test('WL36b project Activity and Project resolve to shared-shell controls and co
 
 test('WL40 Tools resolves to the empty-board opener and Tools content oracle', () => {
   const probe = resolveProbe(map.entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  assert.ok(Object.isFrozen(PROJECT_WORKSPACE_PROBES))
+  assert.deepEqual(PROJECT_WORKSPACE_PROBES, ['tab:project:tools/ready'])
+  assert.deepEqual(probe.workerOptions, { walkPostgres: true })
+  assert.deepEqual(probe.setup.steps, [
+    { kind: 'open-private-drawing', surface: 'browser', signedOut: false },
+    { kind: 'open-real-project' },
+  ])
+  assert.equal(unsupportedBeforeSetup(probe), 'walk_postgres_required')
+  assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true }), null)
+  assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true,
+    postgresUnavailableReason: 'postgres_binaries_missing' }), 'postgres_binaries_missing')
   const resolved = projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true })
   assert.deepEqual(resolved.locator, { role: 'button', name: 'Open tools', exact: true,
     scope: { role: 'region', name: 'Project sidebar', exact: true }, trigger: 'click' })

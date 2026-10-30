@@ -705,7 +705,8 @@ export async function assertStudioDrawer(page, drawer, open, assertions = expect
     await assertions(studioRailButton(page)).toHaveAttribute('aria-expanded', 'true')
     await assertions(sidebar).toBeVisible()
     if (drawer === 'jobs') await assertions(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
-    await assertions(content).toBeVisible()
+    if (drawer === 'result') await assertions(sidebar.locator('.result-block')).toHaveCount(1)
+    else await assertions(content).toBeVisible()
   } else {
     await assertions(sidebar).toBeHidden()
     if (drawer === 'nav') await assertions(content).toBeHidden()
@@ -1425,9 +1426,20 @@ const baselineThreePanels = Object.freeze({
   'cost-panel': { role: 'region', name: 'What Leaf costs to operate', close: 'Close cost panel' },
 })
 const namedPanel = (page, spec) => page.getByRole(spec.role, { name: spec.name, exact: true })
-async function closeBaselinePanel(page, spec) {
+export async function closeBaselinePanel(page, spec, evidence = {}) {
   const panel = namedPanel(page, spec)
-  if (await panel.isVisible()) await panel.getByRole('button', { name: spec.close, exact: true }).click()
+  if (await panel.isVisible()) {
+    const close = panel.getByRole('button', { name: spec.close, exact: true })
+    let exiting = false
+    try {
+      await close.waitFor({ state: 'attached', timeout: 2000 })
+    } catch (error) {
+      if (error.name !== 'TimeoutError') throw error
+      exiting = true
+      evidence.baselineCloseSkipped = 'panel-exiting'
+    }
+    if (!exiting) await close.click()
+  }
   await expect(panel).toBeHidden()
 }
 async function clearComposer(page) {
@@ -2858,8 +2870,8 @@ async function baselineThreeState(probe, runtime, recipe) {
   const target = recipe.target
   const panel = baselineThreePanels[target]
   if (panel) {
-    await closeBaselinePanel(page, panel)
-    runtime.cleanup.push(() => closeBaselinePanel(page, panel))
+    await closeBaselinePanel(page, panel, runtime.evidence)
+    runtime.cleanup.push(() => closeBaselinePanel(page, panel, runtime.evidence))
   }
   if (recipe.expanded !== undefined) await expect(locator).toHaveAttribute('aria-expanded', String(recipe.expanded))
   if (target === 'project-board') {
@@ -3058,7 +3070,7 @@ export function unsupportedBeforeSetup(probe, workerFacts = {}, checkAvailabilit
   // Keep the authenticated recipes intact for staging (F1).
   if (['open', 'published', 'form-switch'].includes(probe.setup?.context?.projectSolar)
     && workerFacts.authLive !== true) return PROJECT_SOLAR_AUTH_REASON
-  if (probe.setup?.context?.openProjectId) {
+  if (probe.setup?.context?.openProjectId || probe.workerOptions?.walkPostgres === true) {
     if (workerFacts.postgresUnavailableReason) return workerFacts.postgresUnavailableReason
     if (workerFacts.walkPostgres !== true) return 'walk_postgres_required'
   }
@@ -4626,7 +4638,7 @@ export async function runProbe(probe, runtime) {
     if (typeof observeProbeRequests === 'function' && typeof page.on === 'function') {
       runtime.cleanup.push(observeProbeRequests(page, evidence, setupStartedAt))
     }
-    const initialReason = (probe.setup?.context?.openProjectId
+    const initialReason = (probe.setup?.context?.openProjectId || probe.workerOptions?.walkPostgres === true
       || typeof UI_UNREACHABLE_STATES !== 'undefined' && UI_UNREACHABLE_STATES.has(probe.state))
       && typeof unsupportedBeforeSetup === 'function'
       ? unsupportedBeforeSetup(probe, runtime.workerFacts) : null

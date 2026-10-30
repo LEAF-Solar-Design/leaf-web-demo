@@ -3,7 +3,7 @@ import test from 'node:test'
 import { readFileSync } from 'node:fs'
 import { collectProbeCases, declareProbes } from './collection.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
-import { resolveProbe } from './probes.mjs'
+import { resolveProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
 
 test('probe cases partition exact PostgreSQL options and preserve declaration order', () => {
   const probes = [
@@ -117,12 +117,17 @@ test('the feature map assigns every project probe to the PostgreSQL spec exactly
   assert.ok(cases.ordinary.some(({ entry, state }) => entry.id === 'surface:solar' && state === 'ready'))
   assert.ok(!cases.ordinary.some(({ state }) => solar.includes(state)))
   assert.ok(cases.postgres.length > 0)
+  assert.equal(cases.postgres.filter(({ entry, state }) => entry.id === 'tab:project:tools' && state === 'ready').length, 1)
+  for (const tab of ['activity', 'project']) {
+    assert.ok(cases.ordinary.some(({ entry, state }) => entry.id === `tab:project:${tab}` && state === 'ready'))
+  }
   const all = [...cases.ordinary, ...cases.postgres]
   assert.equal(all.length, entries.reduce((count, entry) => count + entry.states.length, 0))
   assert.equal(new Set(all.map(({ entry, state }) => JSON.stringify([entry.id, state]))).size, all.length)
   for (const { entry, state, probe } of all) {
     const postgres = cases.postgres.some((item) => item.probe === probe)
-    assert.equal(postgres, Boolean(entry.state_contexts?.[state]?.openProjectId))
+    assert.equal(postgres, Boolean(entry.state_contexts?.[state]?.openProjectId)
+      || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`))
     assert.deepEqual(probe.workerOptions, postgres ? { walkPostgres: true } : undefined)
   }
 })
