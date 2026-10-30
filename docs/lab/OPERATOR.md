@@ -412,9 +412,13 @@ the existing staging delivery rail.
 unavailable.
 
 **Recover:** Set `LEAF_LAB_TOOL_NODES=1` and roll again. Confirm the tool shows
-available in `GET /api/lab/tools`, then readmit activations as described in
-[Activations](#activations): resume a paused activation and renew an expired
-one. A successful tick resets the failure count for `readmit_unavailable`.
+available in `GET /api/lab/tools`, then list `GET /api/lab/activations`.
+For every activation that is `stopped` with reason `lab_activation_tools_disabled`
+or `readmit_unavailable`, create a replacement activation for its document with
+`POST /api/lab/activations`: stopped activations cannot be resumed or renewed
+(409 `lab_activation_state_conflict`). An activation that was paused before the
+flag went off and never ticked can still be resumed as described in
+[Activations](#activations).
 
 ### Image downgrade (R8)
 
