@@ -720,14 +720,15 @@ export async function setStudioDrawer(page, drawer, open, assertions = expect) {
   await assertStudioDrawer(page, drawer, open, assertions)
 }
 
-export async function studioDrawerProbeLocator(page, probe) {
+export async function studioDrawerProbeLocator(page, probe, describeControl) {
   const drawer = probe.locator.studioDrawer
   if (!drawer || !await studioRailButton(page).isVisible()) return null
-  return probe.state === 'open' || probe.state === 'drawer-open'
-    ? page.getByRole('button', { name: 'Close Studio', exact: true }) : studioRailButton(page)
+  const closing = probe.state === 'open' || probe.state === 'drawer-open'
+  describeControl?.({ role: 'button', name: closing ? 'Close Studio' : 'Studio' })
+  return closing ? page.getByRole('button', { name: 'Close Studio', exact: true }) : studioRailButton(page)
 }
 
-export async function railExpandLauncher(probe, runtime, locator) {
+export async function railExpandLauncher(probe, runtime, locator, describeControl) {
   if (probe.featureId !== 'action:rail-expand' || probe.state !== 'ready'
     || runtime.testInfo.project.name === 'phone' || await locator.isVisible()) return null
   const launchers = runtime.page.getByRole('button', { name: /^Open .+ in the tool rail \([0-9]+ tools\)$/ })
@@ -738,6 +739,7 @@ export async function railExpandLauncher(probe, runtime, locator) {
     const family = name?.match(/^Open (.+) in the tool rail \([0-9]+ tools\)$/)?.[1]
     if (!family) throw new Error('Tool rail launcher must identify its family')
     runtime.railExpandFamily = family
+    describeControl?.({ role: 'button', name })
     return launcher
   }
   return null
@@ -4715,15 +4717,16 @@ export async function runProbe(probe, runtime) {
     let locator = probe.kind === 'surface' && probe.locator.role === 'tab' && typeof resolveSurfaceControl === 'function'
       ? (await resolveSurfaceControl(page, probe)).locator
       : control(page, phoneRecipe || (runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe))
+    let locatorDescription
     if (typeof studioDrawerProbeLocator === 'function'
       && (['drawer:jobs', 'drawer:nav'].includes(probe.featureId)
         || probe.featureId === 'drawer:result' && runtime.testInfo.project.name === 'phone'
         || probe.featureId === 'drawer:none' && probe.state === 'drawer-open' && runtime.testInfo.project.name === 'phone')) {
-      locator = await studioDrawerProbeLocator(page, probe) || locator
+      locator = await studioDrawerProbeLocator(page, probe, description => { locatorDescription = description }) || locator
     }
     if (typeof railExpandLauncher === 'function' && probe.featureId === 'action:rail-expand'
       && probe.state === 'ready' && runtime.testInfo.project.name !== 'phone') {
-      locator = await railExpandLauncher(probe, runtime, locator) || locator
+      locator = await railExpandLauncher(probe, runtime, locator, description => { locatorDescription = description }) || locator
     }
     try {
       const observations = await collectProbeUxEvidence(probe, locator, runtime.testInfo.project.name)
@@ -4788,7 +4791,7 @@ export async function runProbe(probe, runtime) {
     if (typeof observeDxfImportState === 'function') observeDxfImportState(probe, runtime)
     if (probe.assertion.kind !== 'disabled_with_reason' || probe.locator?.keyboardAction === 'engine:repeat') {
       await test.step(`Activate ${probe.featureId}`, () => typeof activateWithMobileTouchMeasurements === 'function'
-        ? activateWithMobileTouchMeasurements({ page, locator, probe, viewport: runtime.testInfo.project.name,
+        ? activateWithMobileTouchMeasurements({ page, locator, probe, viewport: runtime.testInfo.project.name, locatorDescription,
           addFragment: (persona, measurements) => {
             if (typeof addPersonaFragment === 'function') addPersonaFragment(evidence, { persona, measurements,
               bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })

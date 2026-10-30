@@ -43,7 +43,7 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
 }
 
 // Keep activation outside the optional-evidence catches so its verdict is preserved.
-export async function activateWithMobileTouchMeasurements({ page, locator, probe, viewport, addFragment, activate }) {
+export async function activateWithMobileTouchMeasurements({ page, locator, probe, viewport, addFragment, activate, locatorDescription }) {
   let handle
   try {
     if (viewport === 'phone' && (!probe.locator.trigger || probe.locator.trigger === 'click')
@@ -56,14 +56,14 @@ export async function activateWithMobileTouchMeasurements({ page, locator, probe
   try {
     if (handle) before = await collectMobileTouchMeasurements({ page, handle, viewport,
       reference: `mobile-touch:${probe.featureId}[${probe.state}]@${viewport}`,
-      locatorDescription: probe.locator.phone || probe.locator })
+      locatorDescription: locatorDescription || probe.locator.phone || probe.locator })
   } catch { /* Optional evidence never changes the functional verdict. */ }
   await activate()
   try {
     if (!handle) return
     const measurements = await collectMobileTouchMeasurements({ page, handle, viewport,
       reference: `mobile-touch:${probe.featureId}[${probe.state}]@${viewport}`,
-      locatorDescription: probe.locator.phone || probe.locator })
+      locatorDescription: locatorDescription || probe.locator.phone || probe.locator })
     if (measurements || before) addFragment('mobile-touch', measurements || before)
   } catch { /* Optional evidence never changes the functional verdict. */ }
 }
