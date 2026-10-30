@@ -71,7 +71,7 @@ or an enqueue acknowledgment does not establish this observation.
 ### activation.json — leaf.wave3-activation.v1
 
 Create the published graph activation with `POST /api/lab/activations` and
-inspect `GET /api/lab/activations`. Observe the custom-transform widget on
+inspect `GET /api/lab/activations`. For a human principal, observe the custom-transform widget on
 `/mini` after closing the editor, allowing the activation to produce its output.
 Copy only `revision`, canonical `digest`, `publicationCount`, `activatedAt`,
 `editorClosedAt`, `observedAt`, `widgetRendered: true`, and
@@ -81,6 +81,22 @@ activated revision's output after closure, rather than an editor-local preview.
 Read the ledger publication count again at this observation; the activation
 listing does not itself supply that count. Do not simply copy the earlier count
 without confirming it is unchanged.
+
+For a machine acceptance principal, use API observation per operator decision
+`operator-yes-20261030-wave3-activation-api-observation`. First run the capture
+tool's `activation --create` step, close the editor after it returns, then run
+`activation --surface api --editor-closed-at <UTC after the create step returns>`
+with the same common capture arguments. Omit `--observed-at` and
+`--widget-rendered`; the tool records its own successful read time. It polls
+`GET /api/lab/activations` until the selected activation has a finished summary
+with available harvest, a finish time after editor closure, and a nonempty
+output object other than the truncation marker. The receipt keeps the common
+activation fields above, replaces `widgetRendered` with `outputObserved: true`
+and `outputFinishedAt`, and sets `widgetSurface: "api"`. Times must satisfy
+`activatedAt <= editorClosedAt < outputFinishedAt <= observedAt`. The publication
+count is reread at observation. No output values or execution identifiers enter
+the receipt. The visual `/mini` check is then an advisory walk in the operator's
+own scope, outside the receipts.
 
 ### relay.json — leaf.wave3-relay.v1
 

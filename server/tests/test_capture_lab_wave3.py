@@ -358,6 +358,88 @@ def test_activation_create_then_capture(tmp_path, capsys):
     assert receipt["observedAt"] == "2026-10-28T12:02:00Z"
 
 
+def api_flags():
+    return ["--surface", "api", "--editor-closed-at", "2026-10-28T10:01:00Z"]
+
+
+def api_output(http, *, finished="2026-10-28T10:02:00+00:00", harvest="available", output=None):
+    http.activation["last_summary"] = dict(state="finished", harvest=harvest,
+                                           finished_at=finished, run_id=PRIVATE)
+    http.activation["last_output"] = {"value": PRIVATE} if output is None else output
+
+
+def test_activation_api_polls_output_after_editor_closure(tmp_path, capsys):
+    capture, http, db, clock = fake_capture()
+    original = http.request
+
+    def scheduled(method, path, body=None):
+        assert path == "/api/lab/activations" and method == "GET"
+        assert not db.reads
+        api_output(http, finished="2026-10-28T10:00:30Z" if clock.elapsed == 0
+                   else "2026-10-28T10:02:00+00:00")
+        return original(method, path, body)
+
+    http.request = scheduled
+    assert c.main(argv("activation", tmp_path, *api_flags()), capture=capture) == 0
+    printed = capsys.readouterr()
+    assert json.loads(printed.out) == {"outcome": "captured", "receipt": "activation"}
+    assert printed.err == "" and PRIVATE not in printed.out
+    raw = (tmp_path / "activation.json").read_text()
+    receipt = json.loads(raw)
+    assert receipt["widgetSurface"] == "api" and receipt["outputObserved"] is True
+    assert "widgetRendered" not in receipt
+    assert receipt["outputFinishedAt"] == "2026-10-28T10:02:00Z"
+    assert receipt["observedAt"] == STAMP
+    assert receipt["publicationCount"] == 1
+    assert PRIVATE not in raw and DOC not in raw and "run_id" not in raw
+    assert clock.elapsed == 5 and len(http.calls) == 2
+    assert db.reads == [("count", PRIVATE)]
+
+
+@pytest.mark.parametrize("extra", [
+    ["--observed-at", "2026-10-28T10:02:00Z"], ["--widget-rendered"],
+])
+def test_activation_api_refuses_manual_observations(tmp_path, capsys, extra):
+    capture, http, db, _ = fake_capture()
+    assert c.main(argv("activation", tmp_path, *api_flags(), *extra), capture=capture) == 1
+    assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": "usage"}
+    assert not http.calls and not db.reads and not list(tmp_path.iterdir())
+
+
+def test_activation_api_requires_editor_closure(tmp_path, capsys):
+    capture, http, db, _ = fake_capture()
+    assert c.main(argv("activation", tmp_path, "--surface", "api"), capture=capture) == 1
+    assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": "usage"}
+    assert not http.calls and not db.reads and not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("changes", [
+    {"harvest": "unavailable"}, {"output": {"truncated": True}}, {"output": {}},
+    {"output": [PRIVATE]}, {"finished": "2026-10-28T10:01:00Z"},
+    {"finished": "invalid"}, {"finished": "2026-10-28T10:02:00"},
+])
+def test_activation_api_output_absent_until_timeout(tmp_path, capsys, changes):
+    capture, http, db, clock = fake_capture()
+    api_output(http, **changes)
+    assert c.main(argv("activation", tmp_path, *api_flags(), "--timeout", "10"), capture=capture) == 1
+    assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": "activation_output_absent"}
+    assert clock.elapsed == 10 and len(http.calls) == 3
+    assert not db.reads and not list(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("finished,activated", [
+    ("2026-10-28T12:00:01Z", "2026-10-28T10:00:00Z"),
+    ("2026-10-28T10:02:00Z", "2026-10-28T10:01:01Z"),
+])
+def test_activation_api_time_order(tmp_path, capsys, finished, activated):
+    capture, http, _, _ = fake_capture()
+    api_output(http, finished=finished)
+    http.activation["transitions"][0]["at"] = activated
+    assert c.main(argv("activation", tmp_path, *api_flags()), capture=capture) == 1
+    assert json.loads(capsys.readouterr().out) == {"outcome": "refused", "reason": "time_order"}
+    assert not list(tmp_path.iterdir())
+
+
 @pytest.mark.parametrize("flags", [
     ["--editor-closed-at", "2026-10-28T12:01:00Z"],
     ["--observed-at", "2026-10-28T12:02:00Z"],
@@ -553,10 +635,13 @@ def test_exact_fractional_activation_times_and_null_publication():
     assert c.ledger_receipt(meta("ledger"), dict(head(), published_revision=None), head(), 0)["publishedRevision"] is None
 
 
-def test_end_to_end_checker_and_privacy(tmp_path, capsys):
+@pytest.mark.parametrize("surface", ["/mini", "api"])
+def test_end_to_end_checker_and_privacy(tmp_path, capsys, surface):
     capture, http, db, clock = fake_capture()
+    if surface == "api":
+        api_output(http)
     # SEL-316e3 captures an existing activation and attests to documented controls.
-    extra = {"ledger": ["--publish"], "activation": activation_flags(),
+    extra = {"ledger": ["--publish"], "activation": api_flags() if surface == "api" else activation_flags(),
              "relay": relay_flags(), "rollback": reviewed_flags()}
     for name in ("replay", "ledger", "run", "activation", "relay", "rollback"):
         assert c.main(argv(name, tmp_path, *extra.get(name, [])), capture=capture) == 0

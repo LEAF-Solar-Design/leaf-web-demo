@@ -45,6 +45,10 @@ const fields = {
   relay: { opsSha: hex(40), listOk: yes, detailOk: yes, intentByIdOk: yes, opaqueHandlesOnly: yes, capsHeld: yes, fallbackPolicyOk: yes },
   rollback: { controls: value => Array.isArray(value) && value.length === ids.length },
 };
+const apiActivationFields = {
+  revision, digest: hex(64), publicationCount: integer(0), activatedAt: utc, editorClosedAt: utc,
+  observedAt: utc, widgetSurface: literal('api'), outputObserved: yes, outputFinishedAt: utc,
+};
 const uuid = '[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}';
 const privacy = {
   'account-run': new RegExp(`(?:account-)?${uuid}:[a-f0-9]{64}`, 'i'),
@@ -133,7 +137,9 @@ async function verify(directory, required, doc, io = disk) {
     for (const [rule, pattern] of Object.entries(privacy)) {
       check(`${name}.privacy.${rule}`, !strings.some(text => pattern.test(text)));
     }
-    const validators = { ...common, schema: literal(`leaf.wave3-${name}.v1`), ...fields[name] };
+    const shape = name === 'activation' && object(value) && value.widgetSurface === 'api'
+      ? apiActivationFields : fields[name];
+    const validators = { ...common, schema: literal(`leaf.wave3-${name}.v1`), ...shape };
     check(`${name}.fields`, exact(value, Object.keys(validators)));
     for (const [field, valid] of Object.entries(validators)) check(`${name}.${field}`, object(value) && valid(value[field]));
     if (!object(value)) continue;
@@ -165,7 +171,11 @@ async function verify(directory, required, doc, io = disk) {
   if (activation) {
     check('activation.time-order', utc(activation.activatedAt) && utc(activation.editorClosedAt) && utc(activation.observedAt)
       && compareTime(activation.activatedAt, activation.editorClosedAt) <= 0
-      && compareTime(activation.editorClosedAt, activation.observedAt) < 0);
+      && (activation.widgetSurface === 'api'
+        ? utc(activation.outputFinishedAt)
+          && compareTime(activation.editorClosedAt, activation.outputFinishedAt) < 0
+          && compareTime(activation.outputFinishedAt, activation.observedAt) <= 0
+        : compareTime(activation.editorClosedAt, activation.observedAt) < 0));
   }
   const available = Object.values(receipts);
   for (const field of ['proofKey', 'sha']) check(`agree.${field}`, available.every(value => value[field] === available[0][field]));
@@ -220,6 +230,28 @@ async function selfTest(doc) {
     outcomes.push(result.exit === exit && found);
     if (found && result.exit === exit) covered.add(code);
   };
+  const asApi = data => {
+    delete data.activation.widgetRendered;
+    Object.assign(data.activation, { widgetSurface: 'api', outputObserved: true,
+      outputFinishedAt: '2026-10-26T10:01:30Z' });
+  };
+  const api = fixture();
+  asApi(api);
+  const apiGood = await run(api);
+  outcomes.push(apiGood.exit === 0 && apiGood.output.verdict === 'pass');
+  await bad('activation.time-order', data => {
+    asApi(data);
+    data.activation.outputFinishedAt = data.activation.editorClosedAt;
+  });
+  await bad('activation.time-order', data => {
+    asApi(data);
+    data.activation.outputFinishedAt = '2026-10-26T10:03:00Z';
+  });
+  await bad('activation.fields', data => { asApi(data); data.activation.widgetRendered = true; });
+  await bad('activation.outputObserved', data => { asApi(data); delete data.activation.outputObserved; });
+  for (const field of Object.keys(apiActivationFields)) {
+    await bad(`activation.${field}`, data => { asApi(data); data.activation[field] = 'invalid'; });
+  }
   const samples = {
     'account-run': `account-12345678-1234-1234-1234-123456789abc:${'a'.repeat(64)}`,
     uuid: '12345678-1234-1234-1234-123456789abc', 'client-request-id': 'client_request_id',
@@ -296,6 +328,7 @@ async function selfTest(doc) {
   outcomes.push(Boolean(argumentsFor([])) && Boolean(argumentsFor(['--self-test']))
     && Boolean(argumentsFor(['--require-receipts', '--receipts', 'a'])));
   outcomes.push(good.output.checks.every(check => covered.has(check.code)));
+  outcomes.push(apiGood.output.checks.every(check => covered.has(check.code)));
   const ok = outcomes.every(Boolean);
   return { output: { schema: 'leaf.wave3-verdict.v1', verdict: ok ? 'pass' : 'fail',
     checks: [{ code: 'self-test.fixtures', ok }] }, exit: ok ? 0 : 1 };

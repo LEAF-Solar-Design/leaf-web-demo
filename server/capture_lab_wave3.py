@@ -7,8 +7,9 @@ LEAF_E2E_STAGING_JWT or --jwt-secret (Secrets Manager key jwt); DATABASE_URL
 must address the staging database. relay needs no credentials or database.
 ledger --publish and activation --create explicitly perform their named writes.
 First use activation --create, then close the editor, observe the custom widget
-on /mini, and capture with activation (without --create). Capture requires
---editor-closed-at, --observed-at and --widget-rendered. relay requires
+on /mini, and capture with activation (without --create). The default /mini
+surface requires --editor-closed-at, --observed-at and --widget-rendered.
+Use --surface api with only --editor-closed-at to observe scheduled output. relay requires
 --ops-sha and all six explicit observation flags. rollback performs live pause,
 resume and cancel exercises; use a disposable acceptance document and attest to
 each documented control with --reviewed <id> after reviewing its procedure. run --cancel
@@ -138,18 +139,24 @@ def run_receipt(meta, run, revision, jobs):
                 brokerDigest=broker_digest)
 
 
-def activation_receipt(meta, activation, count, closed, observed, widget):
+def activation_receipt(meta, activation, count, closed, observed, widget, *, surface="/mini",
+                       output_finished=None):
     require(activation is not None and activation.get("state") == "active", "activation_absent")
     times = [t["at"] for t in activation.get("transitions", [])
              if t.get("to_state") == "active" and t.get("reason") == "created" and "at" in t]
     require(len(times) == 1, "activation_time_unknown")
-    require(widget is True, "widget_unobserved")
-    require(utc(times[0]) <= utc(closed) < utc(observed), "time_order")
+    if surface == "api":
+        require(utc(times[0]) <= utc(closed) < utc(output_finished) <= utc(observed), "time_order")
+        observation = dict(widgetSurface="api", outputObserved=True, outputFinishedAt=output_finished)
+    else:
+        require(widget is True, "widget_unobserved")
+        require(utc(times[0]) <= utc(closed) < utc(observed), "time_order")
+        observation = dict(widgetRendered=True, widgetSurface="/mini")
     return dict(meta, revision=integer(activation["revision"]),
                 digest=hex_value(activation.get("graph_sha256"), 64, "digest_invalid"),
                 publicationCount=integer(count, 0), activatedAt=times[0],
                 editorClosedAt=closed, observedAt=observed,
-                widgetRendered=True, widgetSurface="/mini")
+                **observation)
 
 
 def relay_receipt(meta, ops_sha, observations):
@@ -370,6 +377,27 @@ class Capture:
         require(date.tzinfo is not None, "measurement_invalid")
         return date
 
+    def activation_output(self, doc, closed, timeout):
+        deadline = self.monotonic() + timeout
+        while True:
+            activation = self.active(doc)
+            summary, output = activation.get("last_summary"), activation.get("last_output")
+            finished = None
+            if isinstance(summary, dict) and summary.get("state") == "finished" and summary.get("harvest") == "available":
+                try:
+                    value = summary.get("finished_at")
+                    finished = value if isinstance(value, str) and value.endswith("Z") else self.date(value).astimezone(
+                        timezone.utc).isoformat().replace("+00:00", "Z")
+                    if utc(finished) <= utc(closed):
+                        finished = None
+                except (AttributeError, TypeError, ValueError, Refused):
+                    finished = None
+            if finished is not None and isinstance(output, dict) and output and output != {"truncated": True}:
+                observed = self.now().astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
+                return activation, finished, observed
+            require(self.monotonic() < deadline, "activation_output_absent")
+            self.sleep(min(5, deadline - self.monotonic()))
+
     def rollback(self, doc, timeout):
         observations = {}
         # Finally blocks attempt recovery even when a stop observation fails.
@@ -449,9 +477,17 @@ class Capture:
                         and not args.widget_rendered, "usage")
                 self.request("POST", "/api/lab/activations", {"doc_id": doc, "interval_s": 60})
                 return None
-            require(args.widget_rendered is True, "widget_unobserved")
-            require(utc(args.editor_closed_at) < utc(args.observed_at), "time_order")
-            activation = self.active(doc)
+            output_finished = None
+            observed = args.observed_at
+            if args.surface == "api":
+                require(args.observed_at is None and not args.widget_rendered, "usage")
+                require(args.editor_closed_at is not None, "usage")
+                utc(args.editor_closed_at)
+                activation, output_finished, observed = self.activation_output(doc, args.editor_closed_at, args.timeout)
+            else:
+                require(args.widget_rendered is True, "widget_unobserved")
+                require(utc(args.editor_closed_at) < utc(args.observed_at), "time_order")
+                activation = self.active(doc)
             # The server stores +00:00, whereas receipts require UTC Z.
             transitions = []
             for transition in activation.get("transitions", []):
@@ -466,7 +502,8 @@ class Capture:
             activation = dict(activation, transitions=transitions)
             count = self.db.publication_count(self.scope)
             project = lambda meta: activation_receipt(meta, activation, count, args.editor_closed_at,
-                                                       args.observed_at, args.widget_rendered)
+                                                       observed, args.widget_rendered, surface=args.surface,
+                                                       output_finished=output_finished)
         elif name == "relay":
             observations = {key: getattr(args, re.sub(r"(?<!^)(?=[A-Z])", "_", key).lower()) for key in RELAY}
             project = lambda meta: relay_receipt(meta, args.ops_sha, observations)
@@ -502,6 +539,7 @@ def parser():
             sub.add_argument("--reviewed", action="append", default=[])
         if name == "activation":
             sub.add_argument("--create", action="store_true")
+            sub.add_argument("--surface", choices=("/mini", "api"), default="/mini")
             sub.add_argument("--editor-closed-at")
             sub.add_argument("--observed-at")
             sub.add_argument("--widget-rendered", action="store_true")
