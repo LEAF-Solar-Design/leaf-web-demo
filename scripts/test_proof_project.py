@@ -3674,7 +3674,7 @@ class TestProjectLifetime:
         monkeypatch.setattr(p, "_path_safe", lambda path: True)
         original_stat = Path.stat
         monkeypatch.setattr(Path, "stat", lambda path, *args, **kw:
-            SimpleNamespace(st_dev=1, st_ino=2) if path == ROOT else original_stat(path, *args, **kw))
+            SimpleNamespace(st_dev=1, st_ino=2, st_mode=0o40700) if path == ROOT else original_stat(path, *args, **kw))
         assert not p._path_absent(SimpleNamespace(lstat=lambda: SimpleNamespace()))
         def denied():
             raise PermissionError("fake")
@@ -5530,3 +5530,406 @@ def test_contract_heartbeat_runtime_python_form():
     assert p._child_public(spec, json.dumps(heartbeat).encode()) == heartbeat
     for runtime in ("3.12.14", "python-3.12"):
         assert p._child_public(spec, json.dumps(dict(heartbeat, runtime=runtime)).encode()) is None
+
+
+def r14f1_facts(c):
+    sizing = p._sizing_module()
+    return dict(classification="synthetic", run_id=c.config.run_id, organization_id="fakeorg",
+        source_sha256=c.plan.source.tested_source_manifest_sha256, endpoint_sha256=HASH,
+        manifest_sha256=sizing.MANIFEST_SHA256, fixture_sha256=sizing.FIXTURE_SHA256)
+
+
+def r14f1_attachment(facts):
+    return {**{key: facts[key] for key in ("run_id", "organization_id", "classification",
+            "endpoint_sha256", "fixture_sha256")},
+        "project_id": "sizing-project", "job_id": "sizing-job", "exchange_job_id": "sizing-job",
+        "output_version_id": "sizing-output", "evidence_sha256": HASH,
+        "request_sha256": HASH, "response_sha256": OTHER_HASH}
+
+
+def r14f1_runtime(c):
+    sizing = p._sizing_module()
+    facts = r14f1_facts(c)
+    runtime = SimpleNamespace(plan=SimpleNamespace(public=lambda: dict(facts)), calls=[], closed=False)
+    def start(environment, deadline):
+        runtime.calls.append("start")
+        assert any(kind is p.ResourceKind.REPLAY for kind, _ in c.run_scope._actions)
+        return dict(environment, **{sizing.CONFIG_KEY: str(c.config.run_root / "project-replay/private.json"),
+                                    sizing.CONFIG_HASH_KEY: HASH})
+    def close():
+        runtime.calls.append("close")
+        runtime.closed = True
+        return True
+    runtime.start, runtime.close = start, close
+    runtime.launcher_argv = lambda argv: tuple([sys.executable, "-B", "fake-replay-launcher", *argv[3:]])
+    def launch_worker(deadline):
+        runtime.calls.append("sizing-worker")
+        child = SimpleNamespace(stop=lambda deadline: runtime.calls.append("stop-sizing") or True,
+                                identity=p.ProcessIdentity("sizing-worker", 900, "start900", 50))
+        c.run_scope.acquire(p.ResourceKind.STACK_PROCESS, lambda: child.stop(deadline))
+        c.guardian.own_process(child)
+        return child
+    runtime.launch_worker = launch_worker
+    runtime.heartbeat = lambda deadline: runtime.calls.append("sizing-heartbeat")
+    c.effects = replace(c.effects, replay_factory=lambda prepared, **kwargs: runtime)
+    c.canonical = replace(c.canonical, replay_facts=facts)
+    return runtime
+
+
+def test_r14f1_supervisor_replay_lifecycle():
+    c = receipt_case()
+    runtime = r14f1_runtime(c)
+    outcome = p.supervise(c.config, effects=c.effects)
+    assert outcome.exit_code == 0, outcome
+    assert runtime.calls == ["start", "sizing-worker", "sizing-heartbeat", "sizing-heartbeat",
+                             "sizing-heartbeat", "stop-sizing", "close"]
+    document = c.receipts[outcome.receipt_path]
+    assert document["replay"]["facts"] == r14f1_facts(c)
+    assert document["replay"]["sizing_required"] is False
+    assert document["worker"]["tool"] == "solar-settings"
+    assert document["worker"]["initial_heartbeat"]["worker_id"] == "project:run-test"
+    assert document["worker"]["final_heartbeat"]["worker_id"] == "project:run-test"
+    assert not any("REPLAY" in key for key in c.browser_requests[0].environment)
+
+
+def test_r14f1_cleanup_registration():
+    c = lifetime_case()
+    closed = []
+    c.scope.own_replay(SimpleNamespace(close=lambda: closed.append("replay") or True))
+    proof = c.scope.close()
+    assert proof.ok and closed == ["replay"]
+
+
+def test_r14f1_replay_cleanup_failure_blocks_receipt():
+    c = receipt_case()
+    runtime = r14f1_runtime(c)
+    runtime.close = lambda: False
+    outcome = p.supervise(c.config, effects=c.effects)
+    assert outcome.exit_code != 0 and outcome.receipt_path is None and c.receipts == {}
+    assert any(item.fixed_code is p.FailureCode.CLEANUP_PRIVATE for item in outcome.cleanup_failures)
+    assert "disarm" not in c.events
+
+
+def test_r14f1_partial_replay_start_is_owned():
+    c = receipt_case()
+    runtime = r14f1_runtime(c)
+    def start(environment, deadline):
+        runtime.calls.append("partial-private-file")
+        raise RuntimeError("private fixture credential")
+    runtime.start = start
+    outcome = p.supervise(c.config, effects=c.effects)
+    assert outcome.exit_code != 0 and runtime.closed
+    assert runtime.calls == ["partial-private-file", "close"]
+    assert "private fixture credential" not in repr(outcome) + json.dumps(list(c.receipts.values()))
+
+
+def test_r14f1_parent_loss_reaps_replay_and_replacements():
+    c = lifetime_case()
+    stopped = []
+    processes = [SimpleNamespace(stop=lambda deadline, role=role: stopped.append(role) or True)
+                 for role in ("sizing-replay", "sizing-worker", "sizing-replacement")]
+    def receive(timeout):
+        raise EOFError
+    channel = SimpleNamespace(receive=receive, acknowledge=lambda: pytest.fail("parent loss acknowledged"))
+    request = p.GuardianRequest(c.config.run_id, c.plan.reservation,
+        c.host.authority_inventory(c.config.run_id), channel, processes, deadline=1)
+    assert p.guardian_main(request, effects=c.effects) == 0
+    assert set(stopped) == {"sizing-replay", "sizing-worker", "sizing-replacement"}
+    assert not c.private and c.teardown[-1] == "private"
+
+
+def test_r14f1_receipt_legacy_and_exact_replay():
+    c = successful_receipt()
+    assert "replay" not in c.document
+    document = clone_document(c.document)
+    document["replay"] = dict(facts=r14f1_facts(c), sizing_required=False,
+                               sizing_evidence=None, canonical_sizing_sha256=None)
+    assert verify_document(c, document).ok
+    for field in document["replay"]:
+        corrupt = clone_document(document)
+        del corrupt["replay"][field]
+        assert not verify_document(c, corrupt).ok
+    for field in document["replay"]["facts"]:
+        corrupt = clone_document(document)
+        corrupt["replay"]["facts"][field] = "contradictory"
+        assert not verify_document(c, corrupt).ok
+
+
+def test_r14f1_required_sizing_evidence():
+    c = successful_receipt()
+    document = clone_document(c.document)
+    facts = r14f1_facts(c)
+    evidence = r14f1_attachment(facts)
+    document["replay"] = dict(facts=facts, sizing_required=True, sizing_evidence=evidence,
+                               canonical_sizing_sha256=p._sizing_attachment_hash(evidence))
+    assert verify_document(c, document).ok
+    execution = execute(execution_case())
+    for broken in (replace(execution, sizing_evidence=evidence),
+                   replace(execution, sizing_evidence=evidence,
+                           canonical=replace(execution.canonical, sizing_evidence=evidence)),
+                   replace(execution, replay_facts=facts)):
+        with pytest.raises(p.ProofRefused):
+            p._receipt_document(c.plan, None, c.prepared, broken, c.run_scope._closed, None)
+    corrupt = clone_document(document)
+    corrupt["replay"]["sizing_evidence"] = None
+    assert not verify_document(c, corrupt).ok
+    for key, value in (("classification", "live"), ("output_version_id", "substituted"),
+                       ("exchange_job_id", "foreign-job")):
+        corrupt = clone_document(document)
+        corrupt["replay"]["sizing_evidence"][key] = value
+        assert not verify_document(c, corrupt).ok
+
+
+def test_r14f1_incomplete_browser_cannot_claim_sizing():
+    c = successful_receipt()
+    for field in ("selected_test_ids", "started_test_ids", "completed_test_ids"):
+        bad = clone_document(c.document)
+        bad["playwright"][field].pop()
+        assert not verify_document(c, bad).ok
+    for key, value in (("status", "skipped"), ("retry", 1)):
+        bad = clone_document(c.document)
+        bad["playwright"]["outcomes"][0][key] = value
+        assert not verify_document(c, bad).ok
+    bad = clone_document(c.document)
+    bad["playwright"]["annotation_types"] = ["skip"]
+    assert not verify_document(c, bad).ok
+
+
+def test_r14f1_canonical_replay_independent(monkeypatch):
+    c = canonical_case()
+    sizing = p._sizing_module()
+    facts = dict(classification="synthetic", run_id="run-test", organization_id=c.evidence.organization_id,
+        source_sha256=HASH, endpoint_sha256=OTHER_HASH, manifest_sha256=sizing.MANIFEST_SHA256,
+        fixture_sha256=sizing.FIXTURE_SHA256)
+    replay = SimpleNamespace(organization_id=c.evidence.organization_id,
+        endpoint="http://127.0.0.1:12345/string-length", public=lambda: facts)
+    reads = []
+    monkeypatch.setattr(sizing, "read_private_plan", lambda env: reads.append(env["DATABASE_URL"]) or replay)
+    c.graph.cloud = SimpleNamespace(SIZING_URL=replay.endpoint, SIZING_CLASSIFICATION="synthetic")
+    c.graph.SYNTHETIC_SIZING_PROOF_ACCEPTED = True
+    c.request = replace(c.request, environment={"DATABASE_URL": "fakedb", sizing.CONFIG_KEY: "private"})
+    result = p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+    assert result.replay_facts == facts and reads == ["fakedb"] and c.connections == 2
+    c.graph.cloud.SIZING_CLASSIFICATION = "live"
+    with pytest.raises(p.ProofRefused):
+        p._canonical_database_proof(c.request, graph=c.graph, connection=c.connection)
+    # The parent refuses a child that drops a requested sizing attachment.
+    attachment = r14f1_attachment(facts)
+    raw = dict(stored_settings_sha256=HASH, reopened_settings_sha256=HASH,
+               replay_facts=facts, sizing_evidence=None)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(
+        start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: raw))
+    request = replace(c.request, sizing_attachment=attachment, deadline=p.time.monotonic() + 10,
+        environment=dict(c.request.environment, LEAF_STORE_DIR=str(ROOT / "drawings")))
+    with pytest.raises(p.ProofRefused):
+        p._canonical_execution(request)
+    raw["sizing_evidence"] = attachment
+    assert p._canonical_execution(request).sizing_evidence == attachment
+
+
+def test_r14f1_canonical_child_bootstrap(monkeypatch, capsys):
+    from contextlib import contextmanager
+    sizing, called = p._sizing_module(), []
+    replay = object()
+    monkeypatch.setattr(sizing, "read_private_plan", lambda env: called.append("pins") or replay)
+    def bootstrap(plan, role, environment):
+        assert plan is replay and role == "canonical"
+        called.append("bootstrap")
+        return environment
+    monkeypatch.setattr(sizing, "bootstrap_child", bootstrap)
+    @contextmanager
+    def connection(environment, deadline):
+        assert called == ["pins", "bootstrap"] and environment["DATABASE_URL"] == "fakedb"
+        yield SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: None))
+    monkeypatch.setattr(p, "_project_connection", connection)
+    request = dict(purpose="heartbeat", tool_name="solar-size-strings", evidence=None,
+                   deadline=10, worker_id="project:run-test:sizing:1")
+    monkeypatch.setattr(p.os, "environ", {"DATABASE_URL": "fakedb", sizing.CONFIG_KEY: "private",
+        "LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(request)})
+    assert p._canonical_child_entry() == 0
+    assert capsys.readouterr().out == "null\n"
+
+
+def test_r14f1_sizing_worker_identity_and_descriptor():
+    c = execution_case()
+    sizing = p._sizing_module()
+    runtime = sizing.ReplayRuntime(c.prepared, c.effects, c.scope, p)
+    runtime.worker_identity = p.ProcessIdentity("sizing-worker", 900, "start900", 50)
+    runtime.worker = SimpleNamespace(identity=runtime.worker_identity, poll=lambda: None)
+    runtime.worker_id = "project:run-test:sizing:1"
+    runtime.environment = {"DATABASE_URL": "fakedb"}
+    runtime.descriptor = replace(c.descriptor, tool="solar-size-strings")
+    beat = replace(c.heartbeat, worker_id=runtime.worker_id, tool_name="solar-size-strings")
+    runtime.effects = replace(c.effects, canonical_reader=lambda request: beat)
+    assert runtime.heartbeat(10) == beat
+    for changed in (replace(beat, worker_id="foreign"), replace(beat, tool_name="solar-settings"),
+                    replace(beat, source_sha256=HASH)):
+        runtime.effects = replace(c.effects, canonical_reader=lambda request: changed)
+        with pytest.raises(sizing.ReplayRefused):
+            runtime.heartbeat(10)
+    runtime.effects = replace(c.effects, canonical_reader=lambda request: beat)
+    runtime.worker.identity = replace(runtime.worker_identity, start_id="reused-pid")
+    with pytest.raises(sizing.ReplayRefused):
+        runtime.heartbeat(10)
+
+
+def test_r14f1_replay_processes_use_guardian(monkeypatch):
+    c = lifetime_case()
+    owned = []
+    c.scope.guardian = SimpleNamespace(own_process=lambda child: owned.append(child))
+    starts = []
+    child = SimpleNamespace(start=lambda: starts.append("start"), stop=lambda deadline: True)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: child)
+    for role in ("sizing-replay", "sizing-worker"):
+        assert p._launch_supervised(p.ProcessSpec(role, ("fake",), ROOT, {}, 5), scope=c.scope) is child
+    assert owned == [child, child] and starts == ["start", "start"]
+    assert len(c.scope._actions) == 2 and c.scope.close().ok
+
+
+def test_r14f1_replay_roles_launchable(monkeypatch):
+    class SpawnSentinel(RuntimeError):
+        pass
+    sentinel = SpawnSentinel()
+    calls = []
+    def popen(*args, **kwargs):
+        calls.append(args[0])
+        raise sentinel
+    monkeypatch.setattr(p.subprocess, "Popen", popen)
+    monkeypatch.setattr(p, "_WindowsJob", lambda: SimpleNamespace(close=lambda: None))
+    for role in ("sizing-replay", "sizing-worker"):
+        with pytest.raises(RuntimeError, match="^runtime process start failed$") as error:
+            p._RuntimeProcess(p.ProcessSpec(role, ("fake",), p.REPO, {}, 10)).start()
+        assert error.value.__context__ is sentinel
+    assert calls == [("fake",), ("fake",)]
+    with pytest.raises(RuntimeError, match="^unknown process role$"):
+        p._RuntimeProcess(p.ProcessSpec("not-a-role", ("fake",), p.REPO, {}, 10)).start()
+    assert len(calls) == 2
+
+
+def test_r14f1_private_replay_split_logs():
+    values = ("ephemeral-local-fixture-credential", "postgresql://local:secret@127.0.0.1/leaf")
+    for value in values:
+        raw = json.dumps({"stage": "browser", "fixed_code": "BROWSER_EXIT", "private": value}).encode()
+        for split in range(1, len(value)):
+            boundary = raw.index(value.encode()) + split
+            output = p._RetainedOutput(p._approved_event)
+            output.feed(raw[:boundary])
+            output.feed(raw[boundary:])
+            assert output.finish() == b"" and not output._raw
+    private = p._PrivateValues()
+    private.add(values[0])
+    private.dsn(values[1])
+    with pytest.raises(p.ProofRefused):
+        private.check({"fixture": values[0]})
+
+
+def test_r14f1_production_replay_wired():
+    assert p.production_effects().replay_factory is p._project_replay_factory
+
+
+def test_r14f1_supervisor_ambient_replay_refusal():
+    for key in ("SYNTHETIC_SIZING_PROOF_ACCEPTED", "SIZING_CLASSIFICATION", "LEAF_PROJECT_REPLAY_CONFIG"):
+        c = case()
+        with pytest.raises(p.ProofRefused):
+            environment(c, {key: "ambient"})
+
+
+def test_r14f1_database_sizing_attachment():
+    from uuid import UUID
+    sizing = p._sizing_module()
+    ids = [str(UUID(int=index)) for index in range(1, 7)]
+    org, project, job_id, output, drawing, actor = ids
+    endpoint = "http://127.0.0.1:51234/string-length"
+    request, response = b"request", b"response"
+    record = dict(classification="synthetic", identity=dict(organization_id=org, project_id=project, job_id=job_id),
+                  producer={"service_identity": endpoint})
+    raw = json.dumps(record).encode()
+    exchange = dict(state="published", output_version_id=output, classification="synthetic",
+        request_bytes=request, response_bytes=response, evidence_bytes=raw,
+        request_sha256=sizing.digest(request), response_sha256=sizing.digest(response), evidence_sha256=sizing.digest(raw))
+    commit = dict(schema="fixture", attempt=2, tool="solar-size-strings", tool_manifest_sha256=HASH,
+        parameters={}, parent_intake_sha256=HASH, before_graph_sha256=HASH, graph_project_id=project, initialized=False)
+    job = dict(status="succeeded", tool_name="solar-size-strings", org_id=org, project_id=project,
+        request_tenant_id=org, input_version_id="input", output_version_id=output, result={"graph_commit": commit},
+        execution_context=dict(drawing_id=drawing, actor_binding_id=actor, checkout_fence="1"))
+    replay = SimpleNamespace(run_id="run-test", organization_id=org, endpoint=endpoint,
+        fixture_sha256=sizing.FIXTURE_SHA256,
+        fixture_map={sizing.digest(request): ("fixture", response, sizing.digest(response))})
+    attachment = dict(run_id="run-test", organization_id=org, project_id=project, job_id=job_id,
+        exchange_job_id=job_id, output_version_id=output, classification="synthetic",
+        endpoint_sha256=sizing.digest(endpoint.encode()), fixture_sha256=sizing.FIXTURE_SHA256,
+        evidence_sha256=sizing.digest(raw), request_sha256=sizing.digest(request), response_sha256=sizing.digest(response))
+    verified = []
+    def prove(job_uuid, observed, *, expected, conn):
+        assert str(job_uuid) == job_id and observed == commit
+        assert expected["organization_id"] == org and expected["project_id"] == project
+        assert expected["sizing_exchange"] == {"job_id": job_id, "evidence_sha256": sizing.digest(raw)}
+        verified.append(output)
+        return {"output_version_id": output}
+    graph = SimpleNamespace(_exchange_authority=lambda row: (SimpleNamespace(job_id=job_id), "lease"),
+        _exchanges=lambda: SimpleNamespace(get_exchange=lambda *args, **kwargs: exchange),
+        project_graph_job_provenance=prove)
+    conn = SimpleNamespace(execute=lambda sql, args: SimpleNamespace(fetchone=lambda: job))
+    assert sizing.observe_database_sizing(replay, attachment, graph=graph, conn=conn) == attachment
+    assert verified == [output]
+    job["request_tenant_id"] = "foreign"
+    with pytest.raises(sizing.ReplayRefused):
+        sizing.observe_database_sizing(replay, attachment, graph=graph, conn=conn)
+    assert verified == [output]
+
+
+def test_r14f1_replacement_keeps_scope_and_guardian(monkeypatch):
+    c = lifetime_case()
+    sizing = p._sizing_module()
+    events, owned = [], []
+    c.scope.guardian = SimpleNamespace(own_process=lambda child: owned.append(child))
+    def process(spec):
+        number = len(owned) + 1
+        identity = p.ProcessIdentity("sizing-worker", 900 + number, "start" + str(number), 50)
+        def start():
+            assert len(c.scope._actions) == number
+            events.append(("start", number))
+        return SimpleNamespace(identity=identity, start=start, poll=lambda: None,
+            stop=lambda deadline: events.append(("stop", number)) or True)
+    monkeypatch.setattr(p, "_RuntimeProcess", process)
+    runtime = sizing.ReplayRuntime(c.prepared if hasattr(c, "prepared") else None, c.effects, c.scope, p)
+    runtime.plan = sizing.ReplayPlan(run_id="run-test", run_root=ROOT, root_identity=(1, 2),
+        organization_id="fakeorg", endpoint="http://127.0.0.1:51234/string-length",
+        source_sha256=HASH, source_files=(), fixture_map={}, token="fake-fixture-credential")
+    runtime.environment = {"DATABASE_URL": "fakedb"}
+    runtime.descriptor = replace(c.descriptor, tool="solar-size-strings")
+    def reader(request):
+        d = runtime.descriptor
+        return p.HeartbeatProof(runtime.worker_id, d.tool, d.runtime, d.source_revision, d.source_sha256,
+                                c.effects.clock.utc_now())
+    runtime.effects = replace(c.effects, process_launcher=p._launch_supervised, canonical_reader=reader)
+    first = runtime.launch_worker(10)
+    schedule = sizing.FaultSchedule(runtime.plan)
+    barrier = sizing.arm_scenario(schedule, "capture-recovery", run_id="run-test", organization_id="fakeorg",
+                                 project_id="project", job_id="job")
+    captured = first.identity
+    first.identity = replace(captured, start_id="foreign-start")
+    with pytest.raises(sizing.ReplayRefused):
+        runtime.recover(barrier, barrier.binding, committed=True, captured_identity=captured, deadline=10)
+    assert events == [("start", 1)]
+    first.identity = captured
+    replacement = runtime.recover(barrier, barrier.binding, committed=True, captured_identity=first.identity, deadline=10)
+    assert replacement is not first and owned == [first, replacement]
+    assert runtime.worker_id == "project:run-test:sizing:2"
+    assert events[:3] == [("start", 1), ("stop", 1), ("start", 2)]
+    assert c.scope.close().ok and ("stop", 2) in events
+
+
+@pytest.fixture(autouse=True)
+def r14f1_no_external_effects(request, monkeypatch):
+    if request.node.name.startswith("test_r14f1_"):
+        def forbidden(*args, **kwargs):
+            pytest.fail("R14-F1 attempted a socket or subprocess")
+        class DeniedSocket(socket.socket):
+            def __init__(self, *args, **kwargs):
+                forbidden()
+        monkeypatch.setattr(socket, "socket", DeniedSocket)
+        monkeypatch.setattr(socket, "create_connection", forbidden)
+        monkeypatch.setattr(subprocess, "Popen", forbidden)
+        monkeypatch.setattr(subprocess, "run", forbidden)
