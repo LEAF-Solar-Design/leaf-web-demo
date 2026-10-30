@@ -1,6 +1,99 @@
+import asyncio
+from types import SimpleNamespace
+
 import pytest
 
 import platform_link
+
+
+@pytest.fixture
+def job_startup(monkeypatch):
+    import app as application
+
+    handler = application.initialize_job_runtime
+    assert handler in application.app.router.on_startup
+    # Exercise the registered lifecycle without starting unrelated app workers.
+    monkeypatch.setattr(application.app.router, "on_startup", [handler])
+    monkeypatch.setattr(application.app.router, "on_shutdown", [])
+    return application
+
+
+async def run_lifespan(application):
+    async with application.app.router.lifespan_context(application.app):
+        pass
+
+
+def test_registered_startup_validates_before_starting_jobs(job_startup, monkeypatch):
+    calls = []
+    monkeypatch.setattr(platform_link, "validate_postgres_startup",
+                        lambda: calls.append("platform"))
+    monkeypatch.setattr(job_startup.job_store, "validate_store_startup",
+                        lambda: calls.append("jobs"))
+    monkeypatch.setattr(job_startup.job_store, "ensure_started",
+                        lambda: calls.append("runtime"))
+
+    for _ in range(2):
+        asyncio.run(run_lifespan(job_startup))
+    assert calls == ["platform", "jobs", "runtime"] * 2
+
+
+@pytest.mark.parametrize("failure", ["platform", "jobs"])
+def test_registered_startup_fails_closed(job_startup, monkeypatch, failure):
+    calls = []
+
+    def validate(authority):
+        calls.append(authority)
+        if authority == failure:
+            raise RuntimeError("invalid authority")
+
+    monkeypatch.setattr(platform_link, "validate_postgres_startup",
+                        lambda: validate("platform"))
+    monkeypatch.setattr(job_startup.job_store, "validate_store_startup",
+                        lambda: validate("jobs"))
+    monkeypatch.setattr(job_startup.job_store, "ensure_started",
+                        lambda: calls.append("runtime"))
+    with pytest.raises(RuntimeError, match="invalid authority"):
+        asyncio.run(run_lifespan(job_startup))
+    assert calls == (["platform"] if failure == "platform" else ["platform", "jobs"])
+
+
+def test_registered_startup_reuses_runtime_owners_and_recovers_once(job_startup, monkeypatch):
+    jobs = job_startup.job_store
+    pools, daemons, recovered = [], [], []
+    monkeypatch.setenv("LEAF_JOBS_STORE", "postgres")
+    monkeypatch.setattr(platform_link, "validate_postgres_startup", lambda: None)
+    monkeypatch.setattr(jobs, "_pg_store", SimpleNamespace(
+        ensure_ready=lambda: None, submitted_ids=lambda: ["persisted-job"]))
+    monkeypatch.setattr(jobs, "_executors", {})
+    monkeypatch.setattr(jobs, "_reaper_started", False)
+
+    def pool(**kwargs):
+        pools.append(kwargs)
+        return object()
+
+    def thread(**kwargs):
+        daemons.append(kwargs)
+        return SimpleNamespace(start=lambda: None)
+
+    monkeypatch.setattr(jobs, "ThreadPoolExecutor", pool)
+    monkeypatch.setattr(jobs, "threading", SimpleNamespace(Thread=thread))
+    monkeypatch.setattr(jobs, "_redispatch_record", recovered.append)
+    for _ in range(2):
+        asyncio.run(run_lifespan(job_startup))
+    assert len(pools) == len(jobs.lane_workers())
+    assert daemons == [{"target": jobs._reaper_loop, "daemon": True, "name": "job-reaper"}]
+    assert recovered == ["persisted-job"]
+
+
+def test_registered_startup_rejects_invalid_job_authority(job_startup, monkeypatch):
+    calls = []
+    monkeypatch.setenv("LEAF_JOBS_STORE", "typo")
+    monkeypatch.setattr(platform_link, "validate_postgres_startup", lambda: None)
+    monkeypatch.setattr(job_startup.job_store, "ensure_started",
+                        lambda: calls.append("runtime"))
+    with pytest.raises(RuntimeError, match="LEAF_JOBS_STORE"):
+        asyncio.run(run_lifespan(job_startup))
+    assert calls == []
 
 
 def _enable_required_upload_authorities(monkeypatch):

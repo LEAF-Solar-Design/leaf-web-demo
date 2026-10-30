@@ -169,6 +169,18 @@ _ios_callback_tls_server: ios_ship_callback_listener.CallbackTlsServer | None = 
 
 
 @app.on_event("startup")
+def initialize_job_runtime() -> None:
+    """Validate authority, then recover durable work without a new submission."""
+    import platform_link
+
+    platform_link.validate_postgres_startup()
+    job_store.validate_store_startup()
+    # Keep executor ownership, submitted-row recovery and the reaper under the
+    # existing per-process startup lock in ensure_started().
+    job_store.ensure_started()
+
+
+@app.on_event("startup")
 def initialize_glug_mushy_control() -> None:
     """Fail startup closed when the durable Glug control rail is enabled."""
     if os.environ.get("GLUG_MUSHY_ENABLED", "").strip().lower() == "true":
