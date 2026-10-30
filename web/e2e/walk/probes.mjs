@@ -522,6 +522,12 @@ export function resolveProbe(entry, state) {
   }
 }
 
+export function jobMonitorLauncherRecipe(probe, studioPresent) {
+  if (probe.featureId !== 'control:job-monitor-expand' || !studioPresent) return probe.locator
+  return { role: 'button', name: 'Studio', exact: true,
+    scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click' }
+}
+
 export function projectSharedShellProbe(probe, { surface, studioPresent } = {}) {
   if (surface !== 'browser' || !studioPresent || probe.profile !== 'project' || probe.state !== 'ready'
     || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
