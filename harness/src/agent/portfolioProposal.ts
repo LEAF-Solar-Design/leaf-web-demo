@@ -206,6 +206,7 @@ export class PortfolioProposalService {
         const sdkFail = (code: SdkFailureCode): never => {
           const error = new PortfolioProposalError(code === "rate_limit" ? "rate_limit" : "sdk_failure");
           sdkFailure = { code, error };
+          if (code === "rate_limit") reason = "llm_quota_exhausted";
           throw error;
         };
         const append = (part: string) => {

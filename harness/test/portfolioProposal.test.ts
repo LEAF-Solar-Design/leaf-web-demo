@@ -174,7 +174,7 @@ describe("source-bound portfolio proposals", () => {
   ] satisfies Array<{ events: unknown[]; code: PortfolioProposalFailure["code"] }>)("requires successful SDK completion and assistant text (%#)", async ({ events, code }) => {
     const f = setup(events);
     await expect(f.service.propose(request())).rejects.toBeInstanceOf(PortfolioProposalError);
-    expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "error" });
     expectFailure(f.logger, "sdk_query", code);
   });
 
@@ -197,9 +197,24 @@ describe("source-bound portfolio proposals", () => {
       message: `Portfolio proposal failed: ${code === "rate_limit" ? "rate_limit" : "sdk_failure"}`,
     });
     expectFailure(f.logger, "sdk_query", code);
-    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "error" });
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", {
+      usage: {}, stop_reason: code === "rate_limit" ? "llm_quota_exhausted" : "error",
+    });
     expect(f.query).toHaveBeenCalledTimes(1);
     expect(input).toEqual(original);
+  });
+
+  it("settles a confirmed rate limit once with measured usage and no retry", async () => {
+    const f = setup([{ type: "assistant", error: "rate_limit", message: { content: [], usage: {
+      input_tokens: 2, output_tokens: 3, cache_creation_input_tokens: 0, cache_read_input_tokens: 7,
+    } } }]);
+    await expect(f.service.propose(request())).rejects.toMatchObject({ code: "rate_limit" });
+    expect(f.acquireGrant).toHaveBeenCalledExactlyOnceWith("tenant");
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", {
+      usage: { cost_tokens: 5 }, stop_reason: "llm_quota_exhausted",
+    });
+    expect(f.query).toHaveBeenCalledTimes(1);
+    expectFailure(f.logger, "sdk_query", "rate_limit");
   });
 
   it("does not inspect or coerce arbitrary assistant error payloads", async () => {
@@ -299,11 +314,11 @@ describe("source-bound portfolio proposals", () => {
   });
 
   it("classifies a thrown SDK query without logging its arguments or exception", async () => {
-    const f = setup([], { sdkImport: async () => ({ query: () => { throw new Error(`${exceptionSentinel} ${secret}`); } }) });
+    const f = setup([], { sdkImport: async () => ({ query: () => { throw new Error(`rate_limit 429 ${exceptionSentinel} ${secret}`); } }) });
     const input = request();
     input.instruction = `${input.instruction} ${exceptionSentinel} ${secret}`;
     await expect(f.service.propose(input)).rejects.toMatchObject({ code: "sdk_failure" });
-    expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", { usage: {}, stop_reason: "error" });
     expectFailure(f.logger, "sdk_query", "sdk_exception_before_event");
   });
 
@@ -461,7 +476,9 @@ describe("source-bound portfolio proposals", () => {
     await outcome;
     late.reject(new Error(secret));
     await vi.advanceTimersByTimeAsync(0);
-    expect(f.settleGrant).toHaveBeenCalledTimes(1);
+    expect(f.settleGrant).toHaveBeenCalledExactlyOnceWith("tenant", "lease", {
+      usage: {}, stop_reason: code === "timeout" ? "timeout" : "error",
+    });
     expect(vi.getTimerCount()).toBe(0);
     expectFailure(f.logger, "sdk_query", code);
   });
