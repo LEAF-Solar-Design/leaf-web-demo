@@ -16,6 +16,7 @@ import { solarChainSteps } from './probes.mjs'
 
 function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser', studioPresent = true } = {}) {
   let open = initial
+  let contentVisible = true
   const events = []
   const visible = read => ({ isVisible: async () => read() })
   const button = name => ({ ...visible(() => name !== 'Studio' || studioPresent), click: async () => {
@@ -41,8 +42,11 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
         return surface
       } }) }
       if (selector === '#project-workspace-activity') return visible(() => open === 'Studio')
-      assert.equal(selector, '#environment-project-panel .ground-pane')
-      return visible(() => open === 'Project' && pane)
+      assert.equal(selector, '#environment-project-panel :is(.ground-pane, .ground-tile, .project-material-intake):visible')
+      // Only the current state's content exists, even though all three are valid oracle targets.
+      const content = pane === 'material' ? '.project-material-intake' : pane ? '.ground-pane' : '.ground-tile'
+      assert.ok(selector.includes(content))
+      return { first: () => visible(() => open === 'Project' && contentVisible) }
     },
     getByRole: (role, options) => {
       assert.equal(options.exact, true)
@@ -65,19 +69,21 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
     toBeHidden: async () => assert.equal(await locator.isVisible(), false, 'sidebar must start closed'),
   })
   return { page, assertions, events, open: () => open, pane: () => pane,
-    clearContent: () => { pane = false } }
+    clearContent: () => { contentVisible = false } }
 }
 
-test('WL36b shared sidebars start closed, activate once and restore the original sidebar and pane', async () => {
+test('WL36c shared sidebars observe each current pane state and restore only sidebar visibility', async () => {
   const map = buildFeatureMap()
   for (const tab of ['activity', 'project']) {
     for (const initial of ['none', 'Studio', 'Project']) {
-      for (const pane of [false, true]) {
+      for (const pane of [false, true, 'material']) {
         const fake = projectSidebarFake({ initial, pane })
         const runtime = { page: fake.page, cleanup: [] }
         const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
         const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
         assert.equal(fake.open(), 'none')
+        assert.equal(fake.pane(), pane)
+        assert.deepEqual(fake.events, initial === 'none' ? [] : [`Close ${initial}`])
         if (initial !== 'none') assert.equal(fake.events[0], `Close ${initial}`)
         const control = fake.page.getByRole('navigation', resolved.locator.scope)
           .getByRole(resolved.locator.role, { name: resolved.locator.name, exact: true })
@@ -88,12 +94,18 @@ test('WL36b shared sidebars start closed, activate once and restore the original
         for (const cleanup of runtime.cleanup.reverse()) await cleanup()
         assert.equal(fake.open(), initial)
         assert.equal(fake.pane(), pane)
+        assert.deepEqual(fake.events, [
+          ...(initial === 'none' ? [] : [`Close ${initial}`]),
+          tab === 'activity' ? 'Studio' : 'Project',
+          `Close ${tab === 'activity' ? 'Studio' : 'Project'}`,
+          ...(initial === 'none' ? [] : [initial]),
+        ])
       }
     }
   }
 })
 
-test('WL36b shared sidebar oracle rejects a hidden region and missing ProjectWorkspacePanels content', async () => {
+test('WL36c shared sidebar oracle rejects a hidden region and a visible Project sidebar without content', async () => {
   for (const tab of ['activity', 'project']) {
     const fake = projectSidebarFake()
     const runtime = { page: fake.page, cleanup: [] }
@@ -123,16 +135,17 @@ test('WL36b runtime resolver leaves legacy Ribbon recipes untouched without Stud
   }
 })
 
-test('WL36b cleanup restores original sidebars after an oracle failure', async () => {
+test('WL36c cleanup restores original sidebars after an oracle failure without losing Material', async () => {
   for (const tab of ['activity', 'project']) {
-    const fake = projectSidebarFake({ initial: tab === 'activity' ? 'Project' : 'Studio' })
+    const fake = projectSidebarFake({ initial: tab === 'activity' ? 'Project' : 'Studio', pane: 'material' })
     const runtime = { page: fake.page, cleanup: [] }
     const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === `tab:project:${tab}`), 'ready')
     const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
     await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions))
     for (const cleanup of runtime.cleanup.reverse()) await cleanup()
     assert.equal(fake.open(), tab === 'activity' ? 'Project' : 'Studio')
-    assert.equal(fake.pane(), false)
+    assert.equal(fake.pane(), 'material')
+    assert.ok(fake.events.every(name => ['Studio', 'Project', 'Close Studio', 'Close Project'].includes(name)))
   }
 })
 import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses, setupRequestHeaders, observeProbeRequests } from './fixtures.mjs'

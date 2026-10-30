@@ -62,17 +62,11 @@ export async function prepareProjectSharedShell(probe, runtime, assertions = exp
   }))
   const original = []
   for (const panel of regions) if (await panel.region.isVisible()) original.push(panel)
-  let panePrepared = false
   const close = async panel => {
     await panel.region.getByRole('button', { name: `Close ${panel.name}`, exact: true }).click()
     await assertions(panel.region).toBeHidden()
   }
   runtime.cleanup.push(async () => {
-    const project = regions[1]
-    if (panePrepared) {
-      if (!await project.region.isVisible()) await project.button.click()
-      await project.region.getByRole('button', { name: 'Back to board', exact: true }).click()
-    }
     for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
     for (const panel of original) {
       await panel.button.click()
@@ -80,21 +74,12 @@ export async function prepareProjectSharedShell(probe, runtime, assertions = exp
     }
   })
   for (const panel of original) await close(panel)
-  if (probe.featureId === 'tab:project:project') {
-    const project = regions[1]
-    if (!await project.region.isVisible()) await project.button.click()
-    // ProjectWorkspacePanels renders a pane only after a board selection.
-    // Seed Versions through Shared everywhere, then exercise Project from closed.
-    const pane = page.locator('#environment-project-panel .ground-pane')
-    if (!await pane.isVisible()) {
-      await project.region.getByRole('button', { name: 'Open versions', exact: true }).click()
-      panePrepared = true
-      await assertions(pane).toBeVisible()
-    }
-  }
   for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
   await assertions(page.getByRole('region', { name: resolved.assertion.region, exact: true })).toBeHidden()
-  return resolved
+  return probe.featureId === 'tab:project:project'
+    ? { ...resolved, assertion: { ...resolved.assertion,
+      content: '#environment-project-panel :is(.ground-pane, .ground-tile, .project-material-intake):visible' } }
+    : resolved
 }
 
 export function redactSolarDiagnostic(value, { maxLength = 300 } = {}) {
@@ -3918,7 +3903,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const target = effect.target || ''
   if (target === 'project-shared-sidebar') {
     await expect(page.getByRole('region', { name: effect.region, exact: true })).toBeVisible()
-    await expect(page.locator(effect.content)).toBeVisible()
+    const content = page.locator(effect.content)
+    await expect(effect.region === 'Project sidebar' ? content.first() : content).toBeVisible()
     return
   }
   if (target === 'chooser-project-sidebar') {
