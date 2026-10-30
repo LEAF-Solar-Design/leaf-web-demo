@@ -1830,6 +1830,10 @@ def build_suites() -> List[Suite]:
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_org_invitations.py"), 30,
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-native-service-binding", "platform pinned native service binding", "pytest",
+              REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_native_service_binding.py"), 8,
+              uses_database=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         # Explicit file target keeps 19 pure tests running without DATABASE_URL.
         Suite("platform-tenant-cost-store", "platform tenant cost ledger and add-on settings", "pytest",
               REPO_PARENT, _py_pytest(f"{repo_name}/platform/tests/test_tenant_cost_store.py"), 19,

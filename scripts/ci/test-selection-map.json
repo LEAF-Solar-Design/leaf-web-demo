@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "platform-native-service-binding",
     "platform-org-invitations",
     "server-lab-activation",
     "server-lab-worker",
