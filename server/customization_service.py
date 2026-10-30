@@ -85,6 +85,8 @@ def finish_stage_authority_for_change(change: ChangeSet) -> None:
 
 
 _REPOSITORY_VISIBILITY_DELAYS = (0.0, 1.0, 2.0, 4.0, 8.0, 15.0, 30.0)
+# Bound the extra wait to the rare dangling-worktree recovery path.
+_DANGLING_RECHECK_S = 0.25
 # The harness's closed 409 codes for a publish that lost for good (a lost
 # expected-head CAS, a remote that did not accept). Only these end a change
 # SUPERSEDED; anything else, including an unreadable 409, stays recoverable.
@@ -117,6 +119,7 @@ _DIAGNOSTIC_CODES = frozenset({
     "catalog_process_lock_timeout",
     "catalog_worker_lock_timeout",
     "catalog_worktree_add_failed",
+    "catalog_dangling_move_failed",
     "catalog_head_probe_failed",
     "catalog_head_pending",
     "catalog_commit_mismatch",
@@ -2822,13 +2825,68 @@ def _discard_timed_out_add(target: Path) -> SimpleNamespace:
     return SimpleNamespace(returncode=124, stderr="git worktree add timed out")
 
 
+def _dangling_worktree(target: Path, bare: Path) -> bool:
+    """Return true only for a valid pointer into bare/worktrees, a readable bare,
+    an absent listing entry, and two stat misses separated by a recheck delay.
+
+    Any doubt (OSError other than the required missing-path evidence,
+    unexpected layout, or unreadable listing) returns False so nothing is moved.
+    """
+    try:
+        dotgit = target / ".git"
+        if not dotgit.is_file():
+            return False
+        lines = dotgit.read_text(encoding="utf-8").splitlines()
+        if len(lines) != 1 or not lines[0].startswith("gitdir: "):
+            return False
+        raw = lines[0][8:].strip()
+        if not raw:
+            return False
+        gitdir = Path(raw)
+        if not gitdir.is_absolute():
+            gitdir = target / gitdir
+        if os.path.normcase(os.path.realpath(gitdir.parent)) != os.path.normcase(
+            os.path.realpath(bare / "worktrees")
+        ):
+            return False
+        if not (bare / "HEAD").is_file():
+            return False
+        try:
+            if gitdir.name in os.listdir(bare / "worktrees"):
+                return False
+        except FileNotFoundError:
+            pass  # The readable bare above makes a missing worktrees directory safe.
+        try:
+            gitdir.stat()
+        except FileNotFoundError:
+            pass
+        else:
+            return False
+        time.sleep(_DANGLING_RECHECK_S)
+        try:
+            gitdir.stat()
+        except FileNotFoundError:
+            return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return False
+
+
 def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
     """Ensure `target` holds `commit`, serialized against every other worker."""
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.parent / ".materialize.lock"
     with _exclusive_materialize(bare, lock_path):
         if target.exists():
-            return  # another holder materialized it while we waited
+            if not _dangling_worktree(target, bare):
+                return  # another holder materialized it while we waited
+            try:
+                os.replace(
+                    target, target.with_name(f"{target.name}.dangling-{time.time_ns()}"),
+                )
+            except OSError as exc:
+                raise _unavailable("catalog_dangling_move_failed", cause=exc)
+            _LOG.warning("effective_catalog_worktree_dangling: moved_aside")
         add_cause = None
         try:
             first = _worktree_add(bare, target, commit)

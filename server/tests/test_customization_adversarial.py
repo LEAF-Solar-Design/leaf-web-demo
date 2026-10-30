@@ -3,6 +3,7 @@ from __future__ import annotations
 import errno
 import hashlib
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -551,6 +552,81 @@ def test_materialization_recovers_from_a_deleted_worktree(tmp_path, monkeypatch)
 
     assert effective_catalog_dir("tenant-a") == path
     assert (path / "registry.json").exists()
+
+
+def test_materialization_recovers_from_a_dangling_worktree(tmp_path, monkeypatch):
+    monkeypatch.setattr(customization_service, "_DANGLING_RECHECK_S", 0)
+    bare, _effective, commit = _published_pin(tmp_path, monkeypatch)
+    path = effective_catalog_dir("tenant-a")
+    assert path is not None
+
+    shutil.rmtree(bare / "worktrees")
+
+    assert effective_catalog_dir("tenant-a") == path
+    assert git(path, "rev-parse", "HEAD") == commit
+    assert (path / "registry.json").exists()
+    siblings = list(path.parent.glob(f"{commit}.dangling-*"))
+    assert len(siblings) == 1
+
+
+def test_unreadable_dotgit_is_not_treated_as_dangling(tmp_path):
+    bare = tmp_path / "bare"
+    dotgit = tmp_path / ".git"
+    dotgit.mkdir()
+    assert not customization_service._dangling_worktree(tmp_path, bare)
+
+    dotgit.rmdir()
+    dotgit.write_text("not a gitdir pointer\n", encoding="utf-8")
+    assert not customization_service._dangling_worktree(tmp_path, bare)
+
+    gitdir = tmp_path / "metadata"
+    gitdir.mkdir()
+    dotgit.write_text("gitdir: metadata\n", encoding="utf-8")
+    assert not customization_service._dangling_worktree(tmp_path, bare)
+
+
+def test_transient_stat_miss_does_not_move_a_live_worktree(tmp_path, monkeypatch):
+    monkeypatch.setattr(customization_service, "_DANGLING_RECHECK_S", 0)
+    bare, _effective, commit = _published_pin(tmp_path, monkeypatch)
+    path = effective_catalog_dir("tenant-a")
+    assert path is not None
+    gitdir = Path((path / ".git").read_text(encoding="utf-8").strip()[8:])
+    assert gitdir.is_dir()
+    assert gitdir.name in os.listdir(bare / "worktrees")
+    real_stat = Path.stat
+    calls = {"n": 0}
+
+    def transient_stat(self, *args, **kwargs):
+        if self == gitdir:
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise FileNotFoundError(str(self))
+        return real_stat(self, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", transient_stat)
+
+    assert not customization_service._dangling_worktree(path, bare)
+    assert not list(path.parent.glob(f"{commit}.dangling-*"))
+
+
+def test_gitdir_outside_bare_worktrees_is_not_dangling(tmp_path, monkeypatch):
+    monkeypatch.setattr(customization_service, "_DANGLING_RECHECK_S", 0)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    (bare / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (tmp_path / ".git").write_text("gitdir: missing-metadata\n", encoding="utf-8")
+
+    assert not customization_service._dangling_worktree(tmp_path, bare)
+
+
+def test_unreadable_bare_is_not_dangling(tmp_path, monkeypatch):
+    monkeypatch.setattr(customization_service, "_DANGLING_RECHECK_S", 0)
+    bare = tmp_path / "bare"
+    bare.mkdir()
+    gitdir = bare / "worktrees" / "missing-metadata"
+    (tmp_path / ".git").write_text(f"gitdir: {gitdir}\n", encoding="utf-8")
+
+    assert not customization_service._dangling_worktree(tmp_path, bare)
 
 
 def test_concurrent_materialization_never_loses_the_worktree(tmp_path, monkeypatch):
