@@ -390,7 +390,10 @@ leaf-automation-aws-terraform's
 `terraform/environments/staging/us-east-1/leaf_platform.tf`.
 
 **Check:** Confirm every Lab endpoint answers 404 with
-`{"ok": false, "status": "refused", "reason": "lab_surface_disabled"}`.
+the standard error envelope (`ok: false`, `error.error_code: "BAD_PARAMS"`,
+`error.retryable: false`) whose `error.message` contains `lab_surface_disabled`
+(`lab_rail` in `server/routers/lab_surface.py`, serialized by
+`_http_exc_handler` in `server/envelopes.py`).
 The `lab_rail` in `server/routers/lab_surface.py` treats `0`, `false`, `no`
 and `off` as disabled. An unset value enables the rail only when the posture
 is staging.
