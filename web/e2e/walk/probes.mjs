@@ -273,6 +273,7 @@ export function locatorRecipe(entry, state) {
     return { ...role('button', drawerNames[entry.source_id], role('group', 'Workspace panels')),
       trigger: entry.source_id === 'none' ? 'keyboard' : 'click', key: 'Escape',
       ...(entry.source_id === 'none' ? { studioDrawer: 'jobs' } : {}),
+      ...(entry.source_id === 'result' ? { studioDrawer: 'result' } : {}),
       ...(entry.source_id === 'plan' ? {
         phone: { ...role('button', 'properties', role('toolbar', 'Drafting tools')), phonePanel: 'Plan' },
       } : entry.source_id === 'none' ? {
