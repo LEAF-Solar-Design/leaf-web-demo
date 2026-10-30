@@ -136,7 +136,6 @@ def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[st
     digest = _sha256(encoded)
     reference = {
         "drawing_id": identity.store_id,
-        "source_id": identity.source_id,
         "version_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"leaf:{identity.store_id}:{digest}")),
         "content_digest": digest,
         "geometry_ref": f"drawing-context:{digest.removeprefix(_DIGEST)}",
