@@ -425,11 +425,17 @@ each listed activation carries `interval_s`.
 When a tenant may have more, find every activation to replace with a read-only
 query on the Lab database:
 `SELECT activation_id, doc_id, interval_s FROM lab_activations WHERE tenant_id = <tenant> AND state = 'stopped' AND reason IN ('lab_activation_tools_disabled', 'readmit_unavailable')`.
-For every activation that is `stopped` with reason `lab_activation_tools_disabled`
+For activations that are `stopped` with reason `lab_activation_tools_disabled`
 or `readmit_unavailable`, create one replacement activation per document with
 `POST /api/lab/activations` using the stopped activation's `doc_id` and `interval_s`
 from the listing or query: stopped activations cannot be resumed or renewed
-(409 `lab_activation_state_conflict`). An activation that was paused before the
+(409 `lab_activation_state_conflict`). A tenant can hold at most 10 active, paused
+and expired activations combined; create in `server/lab_activation.py` refuses
+with 409 `lab_activation_limit` at that cap. Create replacements only while the
+tenant is under the cap. If more stopped activations need replacing than the cap
+allows, replace the highest priority ones first and record the rest for the owner
+to decide whether to turn off or retire an existing activation first.
+An activation that was paused before the
 flag went off and never ticked can still be resumed as described in
 [Activations](#activations).
 
@@ -445,10 +451,10 @@ image through the delivery rail.
 Lab reads and writes work in ledger mode.
 
 **Recover:** Roll forward to the intended image and confirm its `source_sha`.
-For each tenant that was git-mode, call
-`lab_artifacts_git.enable_mirror(tenant, actor)` and then
-`lab_artifacts_git.cutover(tenant, actor)`, and confirm its mirror status is
-`complete`.
+For each tenant that was git-mode, re-enter git-authoritative mode by following
+the [Git-authoritative mode](#git-authoritative-mode) procedure exactly as written
+there, including waiting for mirror catch-up to finish before cutover, and confirm
+its mirror status is `complete`.
 
 ### Relay gate (ops-dashboard)
 
