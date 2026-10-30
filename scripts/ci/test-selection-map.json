@@ -136,6 +136,7 @@
     "scripts-native-preview-worker",
     "scripts-native-preview-service",
     "scripts-native-preview-session",
+    "scripts-native-preview-host",
     "scripts-proof-string-sizer",
     "scripts-proof-project-pg",
     "scripts-proof-project",
