@@ -318,6 +318,9 @@ export function stateRecipe(entry, state) {
   const projectSteps = () => entry.id === 'tab:project:tools' && state === 'ready' ? []
     : context.openProjectId || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`)
     ? [step('open-real-project')] : []
+  if (entry.id === 'tab:project:tools' && state === 'ready') return { context, steps: [
+    step('open-browser-workspace', { url: '/app?surface=browser' }),
+  ] }
   if (entry.id === 'surface:solar' && context.projectSolar) {
     if (context.projectSolar === 'proposal-offline') return { context, steps: [step('require-local-state', {
       reason: 'cloud_service_offline: project Solar proposal requires server/solar_project_solve.py (cloud stringer) and a retained proposal for review',

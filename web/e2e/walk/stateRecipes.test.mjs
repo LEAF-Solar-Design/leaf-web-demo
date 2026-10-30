@@ -3144,6 +3144,22 @@ test('Studio rail features contain exactly the four rail controls', () => {
   ])
 })
 
+test('WL46b Tools enters the browser front door once without a drawing or upload', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const resume of [true, false]) {
+    const { page, events } = workspaceEnvironmentFake({ resume })
+    page.goto = async url => { events.push(`goto:${url}`) }
+    page.request = { post: async () => assert.fail('Tools entry must not upload a drawing') }
+    const runtime = { page, evidence: {} }
+    for (const recipe of probe.setup.steps) await setupStep(probe, runtime, recipe)
+    assert.deepEqual(events, ['goto:/app?surface=browser', ...(resume
+      ? ['Continue workspace', 'assert:data-entered=true']
+      : ['Open project or material', 'Close Project panel', 'assert:aria-expanded=false', 'assert:data-entered=true'])])
+    assert.equal(runtime.drawingId, undefined)
+    assert.equal(runtime.evidence.drawingId, undefined)
+  }
+})
+
 test('workspace entry continues an existing workspace and waits for entry', async () => {
   const { page, events } = workspaceEnvironmentFake()
   await enterWorkspaceEnvironment(page)

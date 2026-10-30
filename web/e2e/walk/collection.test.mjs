@@ -120,6 +120,7 @@ test('the feature map assigns every project probe to the PostgreSQL spec exactly
   assert.equal(cases.postgres.filter(({ entry, state }) => entry.id === 'tab:project:tools' && state === 'ready').length, 1)
   const tools = cases.postgres.find(({ entry, state }) => entry.id === 'tab:project:tools' && state === 'ready').probe
   assert.equal(tools.setup.steps.some(step => step.kind === 'open-real-project'), false)
+  assert.deepEqual(tools.setup.steps, [{ kind: 'open-browser-workspace', url: '/app?surface=browser' }])
   assert.deepEqual(tools.workerOptions, { walkPostgres: true })
   for (const tab of ['activity', 'project']) {
     assert.ok(cases.ordinary.some(({ entry, state }) => entry.id === `tab:project:${tab}` && state === 'ready'))

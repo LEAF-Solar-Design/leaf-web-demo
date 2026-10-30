@@ -3006,6 +3006,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'census-disclosure', 'census-script', 'census-download-only',
   'fresh-sign-out-page', 'baseline-three-state', 'prepare-engine-transport', 'hold-engine-boot',
   'navigate', 'chooser-start', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
+  'open-browser-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
   'select-entity', 'vertex-index', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
@@ -3434,6 +3435,11 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       await expect(toolbar).toBeVisible()
       return
     }
+    case 'open-browser-workspace':
+      // Browser front-door pattern: web/e2e/workspace-create-no-prompt.spec.mjs:86.
+      await page.goto(recipe.url)
+      await enterWorkspaceEnvironment(page, assertions)
+      return
     case 'open-empty-workspace':
       if (recipe.signedOut) await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
       await page.goto(`/try?surface=${recipe.surface}`)
