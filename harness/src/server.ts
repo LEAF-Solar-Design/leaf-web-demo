@@ -1739,7 +1739,8 @@ export function createEnabledProductionInstantExecutorClient<T>(
 export async function startReal(port = 8130): Promise<Server> {
   const { AgentSdkRunner } = await import("./ports/impl/agentSdkRunner.js");
   const { BrokerApsClientHttp } = await import("./ports/impl/brokerApsClient.js");
-  const { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir } = await import("./ports/impl/oauthGrantProvider.js");
+  const { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir, resolveGrantStoreBackend } = await import("./ports/impl/oauthGrantProvider.js");
+  const { grantKeyProviderFromEnv } = await import("./security/grantEnvelope/fromEnv.js");
   const { TenantRepoProviderImpl } = await import("./ports/impl/tenantRepoProvider.js");
   const { CustomizationCoordinationClient } = await import("./ports/impl/customizationCoordinationClient.js");
   const { ProjectRepositoryEditCoordinationClient } = await import("./ports/impl/projectRepositoryEditCoordinationClient.js");
@@ -1766,22 +1767,25 @@ export async function startReal(port = 8130): Promise<Server> {
   const instantExecutor = createEnabledProductionInstantExecutorClient(
     (options) => new HttpInstantExecutorClient(options),
   );
-  // F18 seam: per-tenant grant + admin (one store); LEAF_GRANT_STORE=vault fails loudly.
+  // F18 seam: per-tenant grant + admin (one store); vault requires a KMS key provider.
   // The grant directory is resolved once and handed to both the store and its
   // readiness probe, so the two can never name different directories.
   const grantsDir = resolveGrantsDir();
-  const grantStore = createTenantGrantStore({ dir: grantsDir });
+  // Build the provider first so a bad LEAF_GRANT_STORE fails with the value-free error.
+  const grantKeyProvider = grantKeyProviderFromEnv(process.env);
+  const grantBackend = resolveGrantStoreBackend();
+  const grantStore = createTenantGrantStore({ dir: grantsDir, keyProvider: grantKeyProvider });
+  console.log(`grant_store_backend=${grantBackend}`);
   const standardServicesResolver = standardServicesResolverFromEnv();
   const oauth = new StandardServicesOAuthGrantProvider(
     new OAuthGrantProviderImpl({ store: grantStore }),
   );
   const sessionStore = appUrl && dispatchSecret ? createProbedSessionStore() : null;
   // GET /ready probes exactly the stores built above; nothing is constructed per request.
-  // createTenantGrantStore has already failed loudly for an unwired vault, so the
-  // grant store here is the file store.
+  // File and vault records share the grant directory, so both use its directory probe.
   const readiness = createReadinessCheck({
     session: sessionStore ? sessionStore.readiness : null,
-    grants: { kind: "file", probe: createFileStoreProbe(grantsDir) },
+    grants: { kind: grantBackend, probe: createFileStoreProbe(grantsDir) },
   });
   const converseRunner = sessionStore
     ? new SpineTurnAdapter({
