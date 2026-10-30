@@ -894,7 +894,10 @@ test('late observer exceptions drop only that persona after other facts were col
   }
 })
 
-function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal = false } = {}) {
+function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal = false,
+  featureId = 'control:linked-services', state = 'ready', escapeClosed = true } = {}) {
+  const sessionDetails = featureId === 'control:session-details'
+  const name = sessionDetails ? 'Session details' : 'Linked services'
   const calls = [], cleanup = [], child = {}, outside = {}
   const opener = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
   const initial = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
@@ -907,16 +910,16 @@ function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal
   const document = { activeElement: initial }
   const locatorFor = handle => ({ count: async () => 1, isVisible: async () => handle.visible !== false,
     elementHandle: async () => handle,
-    ariaSnapshot: async () => '- dialog "Linked services":\n  - button "Close"' })
+    ariaSnapshot: async () => `- dialog "${name}":\n  - button "Close"` })
   const locator = locatorFor(opener), dialog = locatorFor(root)
   const page = {
     getByRole(role, options) {
       if (role === 'button') {
-        assert.deepEqual(options, { name: 'Close linked services panel', exact: true })
+        assert.deepEqual(options, { name: sessionDetails ? 'Close details' : 'Close linked services panel', exact: true })
         return locatorFor(initial)
       }
       assert.equal(role, 'dialog')
-      assert.deepEqual(options, { name: 'Linked services', exact: true })
+      assert.deepEqual(options, { name, exact: true })
       return dialog
     },
     evaluate: async (callback, argument) => {
@@ -934,12 +937,12 @@ function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal
         document.activeElement = tabOutside ? outside : child
       } else {
         assert.equal(key, 'Escape')
-        root.visible = false
+        root.visible = !escapeClosed
         document.activeElement = opener
       }
     } },
   }
-  const probe = { featureId: 'control:linked-services', state: 'ready' }
+  const probe = { featureId, state }
   const mobile = { reference: 'mobile-touch:control:linked-services[ready]@phone',
     input: { touch: true, coarsePointer: true }, viewport: { width: 390, height: 844 },
     control: { reachable: true, clipped: false, rect: { x: 10, y: 20, width: 44, height: 44 } } }
@@ -1114,9 +1117,10 @@ test('only the declared desktop dialog states can create an accessibility captur
 })
 
 test('each declared dialog capture receives its initial focus target and emits its modality expectation', async () => {
-  for (const [featureId, name, role, focusName, key] of [
+  for (const [featureId, name, role, focusName, key, expectedModal = false] of [
     ['control:linked-services', 'Linked services', 'button', 'Close linked services panel', 'close-linked-services'],
     ['control:claude-accounts', 'Claude accounts', 'button', 'Close Claude account panel', 'close-claude-accounts'],
+    ['control:session-details', 'Session details', 'button', 'Close details', 'close-session-details', true],
     ['control:version-history', 'Version history', null, null, 'control:version-history'],
     ['action:bar-shortcuts', 'Keyboard shortcuts', 'switch', 'Single-key shortcuts', 'single-key-shortcuts'],
   ]) for (const state of ACCESSIBILITY_DIALOG_SCOPE[featureId].states) {
@@ -1145,14 +1149,33 @@ test('each declared dialog capture receives its initial focus target and emits i
           dispose: async () => {}, result: () => ({ reference: options.reference,
             overlay: { role: 'dialog', name, modal: false } }) }
       } })
-    assert.equal(ACCESSIBILITY_DIALOG_SCOPE[featureId].expectedModal, false)
+    assert.equal(ACCESSIBILITY_DIALOG_SCOPE[featureId].expectedModal, expectedModal)
     assert.equal(ACCESSIBILITY_DIALOG_SCOPE[featureId].expectedEscapeClosed, true)
     await followAccessibilityCapture({ capture, page, evidence })
-    assert.equal(evidence.personaFragments[0].measurements.overlay.expectedModal, false)
-    assert.equal(evidence.measurements.overlay.expectedModal, false)
+    assert.equal(evidence.personaFragments[0].measurements.overlay.expectedModal, expectedModal)
+    assert.equal(evidence.measurements.overlay.expectedModal, expectedModal)
     assert.equal(evidence.measurements.overlay.modal, false)
     assert.equal(accessibility.evaluate(evidence).status, 'unknown')
     for (const dispose of cleanup) await dispose()
+  }
+})
+
+test('session-details desktop traces pass the real lens only when Escape closes the dialog', async () => {
+  for (const state of ['ready', 'failed-load']) for (const escapeClosed of [true, false]) {
+    const fake = accessibilityWalkFixture({ featureId: 'control:session-details', state, modal: true, escapeClosed })
+    const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+    await followAccessibilityCapture({ ...fake, capture })
+    const { overlay, focus } = fake.evidence.measurements
+    assert.deepEqual(overlay, { role: 'dialog', name: 'Session details', modal: true, expectedModal: true })
+    assert.equal(focus.openTarget, 'close-session-details')
+    assert.equal(focus.actualOpenTarget, 'close-session-details')
+    assert.equal(focus.tabRemainsInside, true)
+    assert.equal(focus.escapeClosed, escapeClosed)
+    assert.equal(focus.returnTarget, 'control:session-details')
+    assert.equal(focus.actualReturnTarget, 'control:session-details')
+    assert.equal(accessibility.evaluate(fake.evidence).status, escapeClosed ? 'pass' : 'finding')
+    assert.equal(fake.evidence.result.result, 'passed')
+    for (const dispose of fake.cleanup) await dispose()
   }
 })
 

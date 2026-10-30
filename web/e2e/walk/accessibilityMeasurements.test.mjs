@@ -127,6 +127,54 @@ test('Escape treats inert or aria-hidden exit animations on the dialog or an anc
   await interactive.capture.dispose()
 })
 
+test('Escape waits for a dialog to detach or become hidden after its 180 ms exit', async () => {
+  for (const property of ['isConnected', 'visible']) {
+    const fake = fixture()
+    await fake.capture.opened()
+    const exit = setTimeout(() => {
+      fake.original[property] = false
+      fake.document.activeElement = fake.returning
+    }, 180)
+    try {
+      await fake.capture.afterEscape()
+      assert.equal(fake.capture.result().focus.escapeClosed, true, property)
+      assert.equal(fake.capture.result().focus.actualReturnTarget, 'launch-control')
+    } finally {
+      clearTimeout(exit)
+      await fake.capture.dispose()
+    }
+  }
+})
+
+test('Escape waits for an ancestor to become inert within the settle window', async () => {
+  const fake = fixture()
+  await fake.capture.opened()
+  const ancestor = { inert: false, parentElement: null }
+  fake.original.parentElement = ancestor
+  const exit = setTimeout(() => { ancestor.inert = true }, 180)
+  try {
+    await fake.capture.afterEscape()
+    assert.equal(fake.original.isConnected, true)
+    assert.equal(fake.original.visible, true)
+    assert.equal(fake.capture.result().focus.escapeClosed, true)
+  } finally {
+    clearTimeout(exit)
+    await fake.capture.dispose()
+  }
+})
+
+test('Escape reports an interactive dialog still open after the 500 ms settle window', async () => {
+  const fake = fixture()
+  await fake.capture.opened()
+  const started = Date.now()
+  await fake.capture.afterEscape()
+  assert.ok(Date.now() - started >= 500)
+  assert.equal(fake.original.isConnected, true)
+  assert.equal(fake.original.visible, true)
+  assert.equal(fake.capture.result().focus.escapeClosed, false)
+  await fake.capture.dispose()
+})
+
 test('omitted phases and out-of-order phases stay absent and unknown', async () => {
   const fake = fixture()
   await fake.capture.afterTab()
