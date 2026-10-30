@@ -450,6 +450,23 @@ def test_database_queries_are_scoped_selects(monkeypatch):
     assert seen[-1][1][2] == "lab:run-1:"
 
 
+def test_database_jobs_reads_async_jobs(monkeypatch):
+    seen = []
+
+    def read(self, statement, parameters):
+        seen.append((statement, parameters))
+        return []
+
+    monkeypatch.setattr(c.Database, "_read", read)
+    c.Database("postgresql://unused").jobs("tenant-x", "run-1")
+
+    assert len(seen) == 1
+    statement, parameters = seen[0]
+    assert "FROM async_jobs WHERE tenant_id = %s" in statement
+    assert " FROM jobs " not in statement
+    assert parameters == ("tenant-x", len("lab:run-1:"), "lab:run-1:")
+
+
 def test_credentials_environment_routing_only():
     payload = base64.urlsafe_b64encode(json.dumps({"https://leafdesign.ai/tenant_id": DOC}).encode()).decode().rstrip("=")
     token = "e30." + payload + ".c2ln"
