@@ -676,7 +676,8 @@ export async function preparePanelPerformanceCapture({ page, probe, viewport, lo
 }
 
 export function studioDrawerLocator(page, drawer) {
-  if (!['jobs', 'nav'].includes(drawer)) throw new Error(`Unknown Studio drawer: ${drawer}`)
+  if (!['jobs', 'nav', 'result'].includes(drawer)) throw new Error(`Unknown Studio drawer: ${drawer}`)
+  if (drawer === 'result') return page.locator('.result-block')
   return drawer === 'jobs' ? studioJobMonitorContent(page) : page.locator('aside.nav')
 }
 
@@ -3464,7 +3465,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         .getByRole('button', { name: ACTIONS.find((action) => action.op === 'copyClip').label, exact: true }).click()
       return
     case 'drawer-state':
-      if (probe.featureId === 'drawer:jobs' && recipe.name === 'Jobs' && await studioRailButton(page).isVisible()) {
+      if (runtime.testInfo?.project.name === 'phone' && probe.featureId === 'drawer:result'
+        && recipe.name === 'Result' && await studioRailButton(page).isVisible()) {
+        await setStudioDrawer(page, 'result', recipe.open, assertions)
+      } else if (probe.featureId === 'drawer:jobs' && recipe.name === 'Jobs' && await studioRailButton(page).isVisible()) {
         await setStudioDrawer(page, 'jobs', recipe.open, assertions)
       } else if (runtime.testInfo?.project.name === 'phone' && (probe.featureId === 'drawer:none'
         || probe.featureId === 'action:bar-escape' && probe.state === 'drawer-open') && await studioRailButton(page).isVisible()) {
@@ -4308,6 +4312,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target.startsWith('drawer:')) {
+    if (runtime.testInfo.project.name === 'phone' && probe.featureId === 'drawer:result'
+      && target === 'drawer:result' && await studioRailButton(page).isVisible()) {
+      await assertStudioDrawer(page, 'result', effect.value !== 'none', assertions)
+      return
+    }
     if (['drawer:jobs', 'drawer:nav'].includes(probe.featureId)
       && ['drawer:jobs', 'drawer:nav'].includes(target) && await studioRailButton(page).isVisible()) {
       await assertStudioDrawer(page, target.slice(7), effect.value !== 'none', assertions)
@@ -4619,6 +4628,7 @@ export async function runProbe(probe, runtime) {
       : control(page, phoneRecipe || (runtime.testInfo.project.name === 'phone' && probe.locator.phone ? probe.locator.phone : targetRecipe))
     if (typeof studioDrawerProbeLocator === 'function'
       && (['drawer:jobs', 'drawer:nav'].includes(probe.featureId)
+        || probe.featureId === 'drawer:result' && runtime.testInfo.project.name === 'phone'
         || probe.featureId === 'drawer:none' && probe.state === 'drawer-open' && runtime.testInfo.project.name === 'phone')) {
       locator = await studioDrawerProbeLocator(page, probe) || locator
     }

@@ -2344,8 +2344,8 @@ test('Studio rail reveal tolerates builds without Workspace controls', async () 
 })
 
 function phonePanelFake({ modern = true, studio = false, content = true, drawer = 'none', ledger = true,
-  empty = false, skeleton = false, navStaysVisible = false, sidebarStaysVisible = false } = {}) {
-  const events = [], legacy = { Jobs: false, Plan: false }
+  empty = false, skeleton = false, navStaysVisible = false, sidebarStaysVisible = false, result = true } = {}) {
+  const events = [], legacy = { Catalog: false, Jobs: false, Result: false, Plan: false }
   let view = false, more = false
   class Locator {
     constructor(kind) { this.kind = kind; this._apiName = 'Locator' }
@@ -2356,6 +2356,7 @@ function phonePanelFake({ modern = true, studio = false, content = true, drawer 
       if (this.kind === 'job content') return studio && content && (skeleton || empty || ledger)
       if (this.kind === 'heading') return studio && content
       if (this.kind === 'nav') return studio || navStaysVisible
+      if (this.kind === 'result') return studio && result
       if (this.kind === 'Close Studio') return studio
       if (this.kind === 'Entitlements') return drawer === 'plan' && content
       if (this.kind === 'View panel') return view && more
@@ -2434,7 +2435,8 @@ function phonePanelFake({ modern = true, studio = false, content = true, drawer 
       return locator('heading')
     },
     locator: selector => {
-      assert.ok(['.app', '#project-workspace-activity', 'aside.rail .rail-ledger', 'aside.nav', 'aside.rail'].includes(selector))
+      assert.ok(['.app', '#project-workspace-activity', 'aside.rail .rail-ledger', 'aside.nav', 'aside.rail', '.result-block'].includes(selector))
+      if (selector === '.result-block') return locator('result')
       return locator(selector === '.app' ? 'app' : selector === '#project-workspace-activity' ? 'sidebar'
         : selector === 'aside.nav' ? 'nav' : selector === 'aside.rail' ? 'job rail' : 'ledger')
     },
@@ -2476,6 +2478,64 @@ test('desktop Studio Jobs opens once, requires its ledger, and closes through Cl
   const stuck = phonePanelFake({ studio: true, sidebarStaysVisible: true })
   await assert.rejects(setStudioDrawer(stuck.page, 'jobs', false, stuck.assertions), assert.AssertionError)
   assert.deepEqual(stuck.events, ['Close Studio'])
+})
+
+test('phone Studio Result opens once, requires the result block, and proves the sidebar closed', async () => {
+  const fake = phonePanelFake()
+  for (const open of [true, true, false, false]) await setStudioDrawer(fake.page, 'result', open, fake.assertions)
+  assert.deepEqual(fake.events, ['Studio', 'Close Studio'])
+  const missing = phonePanelFake({ result: false })
+  await assert.rejects(setStudioDrawer(missing.page, 'result', true, missing.assertions), assert.AssertionError)
+  assert.deepEqual(missing.events, ['Studio'])
+  await assert.rejects(assertStudioDrawer(missing.page, 'result', true, missing.assertions), assert.AssertionError)
+  const stuck = phonePanelFake({ studio: true, sidebarStaysVisible: true })
+  await assert.rejects(setStudioDrawer(stuck.page, 'result', false, stuck.assertions), assert.AssertionError)
+  assert.deepEqual(stuck.events, ['Close Studio'])
+})
+
+test('phone Result setup, activation and effect use Studio and require visible result content', async () => {
+  const entry = buildFeatureMap().entries.find(entry => entry.id === 'drawer:result')
+  for (const state of ['closed', 'open']) {
+    const fake = phonePanelFake()
+    const probe = resolveProbe(entry, state)
+    const runtime = { page: fake.page, testInfo: { project: { name: 'phone' } } }
+    await setupStep(probe, runtime, probe.setup.steps.at(-1), fake.assertions)
+    const locator = await studioDrawerProbeLocator(fake.page, probe)
+    assert.equal(locator.kind, state === 'open' ? 'Close Studio' : 'Studio')
+    await locator.click()
+    await assertEffect(probe, runtime, locator, {}, fake.assertions)
+    assert.deepEqual(fake.events, state === 'open' ? ['Studio', 'Close Studio'] : ['Studio'])
+  }
+  const hidden = phonePanelFake({ result: false })
+  const probe = resolveProbe(entry, 'closed')
+  const locator = await studioDrawerProbeLocator(hidden.page, probe)
+  await locator.click()
+  await assert.rejects(assertEffect(probe, { page: hidden.page, testInfo: { project: { name: 'phone' } } },
+    locator, {}, hidden.assertions), assert.AssertionError)
+})
+
+test('Result retains legacy Workspace panels without Studio on phone and with Studio on desktop', async () => {
+  const entry = buildFeatureMap().entries.find(entry => entry.id === 'drawer:result')
+  for (const viewport of ['phone', 'desktop']) {
+    const legacy = phonePanelFake({ modern: false })
+    const modern = phonePanelFake()
+    const page = viewport === 'phone' ? legacy.page : { ...modern.page, getByRole: (role, options) =>
+      (role === 'group' ? legacy.page : modern.page).getByRole(role, options) }
+    const runtime = { page, testInfo: { project: { name: viewport } } }
+    for (const state of ['closed', 'open']) {
+      const probe = resolveProbe(entry, state)
+      await setupStep(probe, runtime, probe.setup.steps.at(-1), legacy.assertions)
+      if (viewport === 'phone') assert.equal(await studioDrawerProbeLocator(page, probe), null)
+      assert.equal(probe.locator.name, 'Result')
+      assert.equal(probe.locator.scope.name, 'Workspace panels')
+      const locator = page.getByRole(probe.locator.scope.role, probe.locator.scope)
+        .getByRole(probe.locator.role, probe.locator)
+      await locator.click()
+      await assertEffect(probe, runtime, locator, {}, legacy.assertions)
+    }
+    assert.deepEqual(legacy.events, ['Result', 'Result'])
+    assert.deepEqual(modern.events, [])
+  }
 })
 
 test('Studio drawer recipes resolve Jobs and nav on both viewports without using legacy controls', async () => {

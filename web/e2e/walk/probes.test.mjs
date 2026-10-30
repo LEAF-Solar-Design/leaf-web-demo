@@ -1466,6 +1466,17 @@ test('drawer recipes identify their Studio host while preserving legacy locators
   }
 })
 
+test('Result recipes identify the Studio host while retaining the legacy activation and setup', () => {
+  const entry = map.entries.find(entry => entry.id === 'drawer:result')
+  for (const state of ['closed', 'open']) {
+    const probe = resolveProbe(entry, state)
+    assert.equal(probe.locator.studioDrawer, 'result')
+    assert.equal(probe.locator.name, 'Result')
+    assert.equal(probe.locator.scope.name, 'Workspace panels')
+    assert.deepEqual(probe.setup.steps.at(-1), { kind: 'drawer-state', name: 'Result', open: state === 'open' })
+  }
+})
+
 test('phone panel overrides preserve legacy locators and use the redesigned disclosures', () => {
   const jobs = resolveProbe(map.entries.find(entry => entry.id === 'drawer:jobs'), 'closed')
   assert.equal(jobs.locator.phone.legacy.name, 'Jobs')
