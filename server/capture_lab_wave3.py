@@ -278,7 +278,7 @@ class Database:
     def jobs(self, scope, run_id):
         # Literal prefix comparison avoids LIKE wildcards in opaque run ids.
         prefix = "lab:" + run_id + ":"
-        return self._read("SELECT status, idempotency_key FROM jobs WHERE tenant_id = %s "
+        return self._read("SELECT status, idempotency_key FROM async_jobs WHERE tenant_id = %s "
                           "AND substr(idempotency_key, 1, %s) = %s", (scope, len(prefix), prefix))
 
 
