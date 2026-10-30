@@ -413,13 +413,15 @@ unavailable.
 
 **Recover:** Set `LEAF_LAB_TOOL_NODES=1` and roll again. Confirm the tool shows
 available in `GET /api/lab/tools`, then list `GET /api/lab/activations`.
-The listing includes only the 20 most recently created stopped or off activations.
+The listing includes only the 20 most recently created stopped or off activations;
+each listed activation carries `interval_s`.
 When a tenant may have more, find every activation to replace with a read-only
 query on the Lab database:
-`SELECT activation_id, doc_id FROM lab_activations WHERE tenant_id = <tenant> AND state = 'stopped' AND reason IN ('lab_activation_tools_disabled', 'readmit_unavailable')`.
+`SELECT activation_id, doc_id, interval_s FROM lab_activations WHERE tenant_id = <tenant> AND state = 'stopped' AND reason IN ('lab_activation_tools_disabled', 'readmit_unavailable')`.
 For every activation that is `stopped` with reason `lab_activation_tools_disabled`
 or `readmit_unavailable`, create one replacement activation per document with
-`POST /api/lab/activations`: stopped activations cannot be resumed or renewed
+`POST /api/lab/activations` using the stopped activation's `doc_id` and `interval_s`
+from the listing or query: stopped activations cannot be resumed or renewed
 (409 `lab_activation_state_conflict`). An activation that was paused before the
 flag went off and never ticked can still be resumed as described in
 [Activations](#activations).
