@@ -4511,6 +4511,25 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   throw new Error(`No effect oracle for ${probe.featureId}/${probe.state}: ${effect.kind} ${target}`)
 }
 
+export async function runProbeOracle(probe, runtime, locator, before, assertions = expect,
+  oracle = () => assertEffect(probe, runtime, locator, before, assertions)) {
+  try {
+    await oracle()
+  } catch (error) {
+    if (probe.assertion.target === 'engine-refusal' && typeof runtime.walkPersonaObservers?.finish === 'function') {
+      try {
+        await runtime.walkPersonaObservers.finish()
+      } catch {
+        runtime.evidence.measurementDiagnostics ||= []
+        runtime.evidence.measurementDiagnostics.push({ persona: 'red-hat', message: 'Optional persona observation failed' })
+      }
+    }
+    throw error
+  }
+  if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
+  if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+}
+
 export async function runProbe(probe, runtime) {
   const { evidence } = runtime
   let page = runtime.page
@@ -4701,12 +4720,17 @@ export async function runProbe(probe, runtime) {
           evidence, activate: () => activate(probe, runtime, locator) })
         : activate(probe, runtime, locator))
     }
-    await test.step(probe.assertion.assertionId, () => {
+    const runOracle = () => test.step(probe.assertion.assertionId, () => {
       evidence.oracleReached = probe.assertion.assertionId
       return assertEffect(probe, runtime, locator, before)
     })
-    if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
-    if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+    if (typeof runProbeOracle === 'function') {
+      await runProbeOracle(probe, runtime, locator, before, undefined, runOracle)
+    } else {
+      await runOracle()
+      if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
+      if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+    }
     if (typeof followAccessibilityCapture === 'function') {
       await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence,
         bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })

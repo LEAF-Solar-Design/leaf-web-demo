@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
-  captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
+  captureEngineRefusal, assertEngineRefusal, runProbeOracle, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
@@ -5865,15 +5865,49 @@ test('WL39b fake activation uses the real refusal oracle and typed red-hat verdi
       if (fault === 'dispatches') state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
     } }
     await locator.click()
-    const check = () => assertEffect(probe, runtime, locator, before, oracleAssertions)
-    if (fault) await assert.rejects(check())
+    let originalError
+    const assertions = value => ({ ...oracleAssertions(value),
+      toEqual: expected => {
+        try { oracleAssertions(value).toEqual(expected) }
+        catch (error) { originalError = error; throw error }
+      },
+      toHaveText: async expected => {
+        try { await oracleAssertions(value).toHaveText(expected) }
+        catch (error) { originalError = error; throw error }
+      },
+    })
+    const check = () => runProbeOracle(probe, runtime, locator, before, assertions)
+    if (fault) await assert.rejects(check(), error => error === originalError)
     else await check()
-    await observers.finish()
     assert.equal(clicks, 1)
     assert.equal(evidence.engineRefusal.observed, state.status)
     const verdict = redHat.evaluate(evidence).status
     assert.equal(verdict, fault === 'status' ? 'unknown' : fault ? 'finding' : 'pass', `${viewport}/${fault}`)
+    if (fault !== 'status') {
+      assert.ok(evidence.personaFragments.some(fragment => fragment.persona === 'red-hat'))
+      assert.equal(evidence.measurements.reference, `walk:${probe.featureId}[${probe.state}]@${viewport}`)
+    }
   }
+})
+
+test('WL39c failure-path observer errors are value-free and preserve the original oracle error', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'control:delete-vertex'), 'invalid-vertex')
+  const { runtime, state } = refusalRuntime()
+  const before = await captureEngineRefusal(runtime)
+  state.status = probe.assertion.refusal
+  state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
+  const originalError = new Error('original functional error')
+  const assertions = value => ({ ...oracleAssertions(value), toEqual: () => { throw originalError } })
+  let finishes = 0
+  runtime.walkPersonaObservers = { observe: async () => {}, finish: async () => {
+    finishes++
+    throw new Error('private-observer-value')
+  } }
+  await assert.rejects(runProbeOracle(probe, runtime, {}, before, assertions), error => error === originalError)
+  assert.equal(finishes, 1)
+  assert.deepEqual(runtime.evidence.measurementDiagnostics,
+    [{ persona: 'red-hat', message: 'Optional persona observation failed' }])
+  assert.equal(JSON.stringify(runtime.evidence).includes('private-observer-value'), false)
 })
 
 test('engine refusal requires exact text and preserves geometry, selection, history, clipboard and dispatch', async () => {
