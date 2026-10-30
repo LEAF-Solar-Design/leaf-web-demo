@@ -1,5 +1,7 @@
-// Run sealing in maintenance posture with no concurrent grant writes. These checks
-// narrow the race window but do not replace that operational requirement.
+// CONTRACT: run with grant writers quiesced (the staging harness accepts no grant writes during the seal
+// window). Concurrent grant writers are OUT OF SCOPE: this is a one-shot pre-GA staging migration and the
+// vault store's mutation lock is process-local, so nothing in this tool can serialize against a live harness.
+// The byte checks, run lock and changed_during_migration outcome below are best-effort guards, not a substitute.
 // Stale lock recovery: the run lock is <grants dir>/.sealLegacyGrants.lock (grants dir = LEAF_GRANTS_DIR). A killed run can leave it; delete it only after confirming no seal task is running
 // (ecs list-tasks started-by r10-ge-m, no recent sealLegacyGrants log output, lock older than 30 minutes). Never delete it while a seal run is alive: it is the only guard against two concurrent migrations.
 // Classification's `sealed` means envelope-shaped only; only --seal opens it.
