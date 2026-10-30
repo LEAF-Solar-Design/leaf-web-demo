@@ -134,6 +134,7 @@
     "reconcile-upload-authority",
     "scripts-native-release-producer",
     "scripts-native-preview-worker",
+    "scripts-native-preview-service",
     "scripts-proof-string-sizer",
     "scripts-proof-project-pg",
     "scripts-proof-project",
