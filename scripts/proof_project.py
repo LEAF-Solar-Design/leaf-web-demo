@@ -200,6 +200,7 @@ class CanonicalRequest:
     evidence: CanonicalEvidence | None = None
     deadline: float = 0.0
     worker_id: str = ""
+    sizing_attachment: Mapping | None = None
 
     def __post_init__(self):
         object.__setattr__(self, "environment", _RedactedEnvironment(self.environment))
@@ -314,17 +315,19 @@ class ResourceKind(str, Enum):
     ROOT = "root"
     POOL = "pool"
     GUARDIAN = "guardian"
+    REPLAY = "replay"
 
 
 # Within a dependency group, the newest acquisition is closed first.
 _CLEANUP_ORDER = (
     ResourceKind.BROWSER_PROCESS, ResourceKind.STACK_PROCESS,
     ResourceKind.SEED_PROCESS, ResourceKind.MIGRATION_PROCESS, ResourceKind.RUNTIME_PROCESS,
-    ResourceKind.IDENTITY, ResourceKind.POOL, ResourceKind.AUTHORITY,
+    ResourceKind.REPLAY, ResourceKind.IDENTITY, ResourceKind.POOL, ResourceKind.AUTHORITY,
     ResourceKind.ROOT, ResourceKind.GUARDIAN)
 _CLEANUP_CODES = {
     **{kind: FailureCode.CLEANUP_PROCESS for kind in _CLEANUP_ORDER[:5]},
     ResourceKind.IDENTITY: FailureCode.CLEANUP_IDENTITY,
+    ResourceKind.REPLAY: FailureCode.CLEANUP_PRIVATE,
     ResourceKind.POOL: FailureCode.CLEANUP_POOL,
     ResourceKind.AUTHORITY: FailureCode.CLEANUP_AUTHORITY,
     ResourceKind.ROOT: FailureCode.CLEANUP_PRIVATE,
@@ -496,6 +499,12 @@ class RunScope:
         self.acquire(ResourceKind.BROWSER_PROCESS,
                      lambda: stop(self.effects.clock.monotonic() + CLEANUP_TIMEOUT_S))
 
+    @_remember_refusal
+    def own_replay(self, replay):
+        # Register before private files/listeners; their process handles also go
+        # through process_launcher to the existing parent-loss guardian.
+        self.acquire(ResourceKind.REPLAY, replay.close)  # OMIT_REPLAY_CLEANUP
+
     def _settled(self):
         return all(task.done() for task in self._pending)
 
@@ -567,7 +576,7 @@ class RunScope:
         processes = not failed.intersection(_CLEANUP_ORDER[:5])
         proof = CleanupProof(processes, ResourceKind.IDENTITY not in failed,
             ResourceKind.POOL not in failed, ResourceKind.AUTHORITY not in failed,
-            ResourceKind.ROOT not in failed, ResourceKind.GUARDIAN not in failed,
+            not failed.intersection({ResourceKind.ROOT, ResourceKind.REPLAY}), ResourceKind.GUARDIAN not in failed,
             tuple(failures), self.effects.clock.monotonic() - started,
             () if failures else ("P10",))
         self._closed = proof
@@ -780,6 +789,7 @@ class Effects:
     clock: Clock
     host: Host
     receipt_writer: ReceiptWriter
+    replay_factory: Callable | None = None
 
 
 def _hash_ok(value):
@@ -914,12 +924,16 @@ def _managed_public_ui_environment(app_origin, organization_id):
 
 
 def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
-                        profile_env: Mapping[str, str], organization_id: str) -> dict[str, str]:
+                        profile_env: Mapping[str, str], organization_id: str,
+                        replay_environment: Mapping[str, str] | None = None) -> dict[str, str]:
     """Project consumers receive one authority and no ambient policy or credentials."""
     try:
         root, ports = plan.config.run_root, plan.config.ports
         if any(key.upper() in {"DATABASE_URL", "LEAF_HARNESS_DATABASE_URL"}
                or (key.upper() == "LEAF_AUTH_LIVE" and value != "1")
+               or ("SYNTHETIC" in key.upper() and value not in ("", "0", "false"))
+               or key.upper() in {"SIZING_CLASSIFICATION", "SIZING_URL", "LEAF_PROJECT_REPLAY_CONFIG",
+                                  "LEAF_PROJECT_REPLAY_CONFIG_SHA256"}
                for key, value in os_env.items()):
             _refuse(FailureCode.ENVIRONMENT)
         expected = {"LEAF_PROOF_PROFILE", "LEAF_PROOF_PROJECT_RUN_ID",
@@ -962,6 +976,14 @@ def project_environment(plan: Plan, *, os_env: Mapping[str, str], dsn: str,
                   "LEAF_AGENT_LEDGER": "agent-ledger.jsonl", "BROKER_LEDGER": "broker-ledger.jsonl",
                   "BROKER_TENANTS": "broker-tenants.json", "LEAF_GRANT_FILE": "no-legacy-grant.token"}
         env.update({key: str(root / relative) for key, relative in stores.items()})
+        if replay_environment is not None:
+            sizing = _sizing_module()
+            if set(replay_environment) != {sizing.CONFIG_KEY, sizing.CONFIG_HASH_KEY}:
+                _refuse(FailureCode.ENVIRONMENT)
+            if (Path(replay_environment[sizing.CONFIG_KEY]) != root / "project-replay/private.json"
+                    or not _hash_ok(replay_environment[sizing.CONFIG_HASH_KEY])):
+                _refuse(FailureCode.ENVIRONMENT)
+            env.update(replay_environment)
         return env
     except ProofRefused:
         raise
@@ -1536,6 +1558,8 @@ class CanonicalProof:
     evidence: CanonicalEvidence
     stored_settings_sha256: str
     reopened_settings_sha256: str
+    replay_facts: Mapping | None = None
+    sizing_evidence: Mapping | None = None
 
 
 @dataclass(frozen=True, repr=False)
@@ -1599,6 +1623,8 @@ class ExecutionProof:
     stack_seconds: float
     browser_seconds: float
     observed_rows: tuple[str, ...] = ("P01", "P04", "P08", "P09", "P11")
+    replay_facts: Mapping | None = None
+    sizing_evidence: Mapping | None = None
 
 
 def _remaining(deadline, effects, code, stage):
@@ -1752,6 +1778,15 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
             profile_env=prepared.identity_lease.profile, organization_id=prepared.binding.organization_id)
         start = effects.clock.monotonic()
         deadline = start + STACK_TIMEOUT_S
+        replay = None
+        if effects.replay_factory is not None:
+            replay = effects.replay_factory(prepared, effects=effects, scope=scope)
+            scope.own_replay(replay)
+            replay_env = replay.start(env, deadline)
+            sizing = _sizing_module()
+            env = project_environment(plan, os_env=plan.host.environment, dsn=prepared.dsn,
+                profile_env=prepared.identity_lease.profile, organization_id=prepared.binding.organization_id,
+                replay_environment={key: replay_env[key] for key in (sizing.CONFIG_KEY, sizing.CONFIG_HASH_KEY)})
         root, ports = plan.config.run_root, plan.config.ports
         argv = (sys.executable, "-B", str(REPO / "scripts/start-leaf.py"), "--strict-ports",
             "--with-harness", "--canonical-worker-tool", WORKER_TOOL,
@@ -1760,7 +1795,11 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
             "--web-port", str(ports.web), "--app-port", str(ports.app),
             "--broker-port", str(ports.broker), "--harness-port", str(ports.harness))
         plan.reservation.release_ports()
+        if replay is not None:
+            argv = replay.launcher_argv(argv)
         launcher = effects.process_launcher(ProcessSpec("stack-launcher", argv, REPO, env, deadline), scope=scope)
+        if replay is not None:
+            replay.launch_worker(deadline)
         bearer = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=180)
         request = ReadyRequest(plan, launcher, env, prepared.binding.organization_id,
             prepared.binding.binding_id, prepared.identity.public_key_thumbprint, bearer, deadline)
@@ -1768,6 +1807,8 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
         if type(ready) is not ReadyProof or not ready.authenticated_org or not ready.bearerless_refused:
             _refuse(FailureCode.READINESS, Stage.READINESS)
         _remaining(deadline, effects, FailureCode.READINESS, Stage.READINESS)
+        if replay is not None:
+            replay.heartbeat(deadline)
         stack_ready = effects.clock.monotonic()
         code, stage = FailureCode.BROWSER_EXIT, Stage.BROWSER
         browser_deadline = stack_ready + BROWSER_TIMEOUT_S
@@ -1788,6 +1829,8 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
             if _owned_stack(request, effects) != ready.owned_process_identities:
                 _refuse(FailureCode.OWNERSHIP, Stage.STACK)
             final_heartbeat = _heartbeat(request, effects)
+            if replay is not None:
+                replay.heartbeat(browser_deadline)
             result = browser.poll()
             exit_code = browser.process.poll()
             if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
@@ -1810,12 +1853,17 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
         if (canonical.stored_settings_sha256 != result.canonical.settings_sha256
                 or canonical.reopened_settings_sha256 != result.canonical.reopened_settings_sha256):
             _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        if replay is not None and canonical.replay_facts != replay.plan.public():
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
         _remaining(browser_deadline, effects, code, stage)
         if _owned_stack(request, effects) != ready.owned_process_identities:
             _refuse(FailureCode.OWNERSHIP, Stage.STACK)
         final_heartbeat = _heartbeat(request, effects)
+        if replay is not None:
+            replay.heartbeat(browser_deadline)
         return ExecutionProof(ready, request.worker_id, ready.heartbeat, final_heartbeat,
-            result, canonical, stack_ready - start, effects.clock.monotonic() - stack_ready)
+            result, canonical, stack_ready - start, effects.clock.monotonic() - stack_ready,
+            replay_facts=canonical.replay_facts, sizing_evidence=canonical.sizing_evidence)
     except ProofRefused:
         raise
     except Exception:
@@ -2053,6 +2101,17 @@ def _canonical_database_proof(request, *, graph, connection):
     """Verify stored job and historical publication via the canonical verifier."""
     from uuid import UUID
     evidence = request.evidence
+    replay = sizing_evidence = None
+    if _sizing_module().CONFIG_KEY in request.environment:
+        sizing = _sizing_module()
+        replay = sizing.read_private_plan(request.environment)
+        if (replay.organization_id != evidence.organization_id
+                or graph.cloud.SIZING_URL != replay.endpoint
+                or graph.cloud.SIZING_CLASSIFICATION != "synthetic"
+                or graph.SYNTHETIC_SIZING_PROOF_ACCEPTED is not True):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    elif request.sizing_attachment is not None:
+        _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
     # The canonical verifier takes share locks; allow them but never commit proof statements.
     with connection(request.environment, request.deadline, read_only=False) as conn, conn.transaction(force_rollback=True):
         job = conn.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL",
@@ -2083,7 +2142,10 @@ def _canonical_database_proof(request, *, graph, connection):
     with connection(request.environment, request.deadline, read_only=False) as conn, conn.transaction(force_rollback=True):
         reopened, _ = graph._stored_context(expected, UUID(evidence.output_version_id), conn)
         reopened_hash = _settings_hash(reopened, digest=graph.local.digest)
-    return CanonicalProof(evidence, stored_hash, reopened_hash)
+        if request.sizing_attachment is not None:
+            sizing_evidence = sizing.observe_database_sizing(replay, request.sizing_attachment, graph=graph, conn=conn)
+    return CanonicalProof(evidence, stored_hash, reopened_hash,
+                          replay.public() if replay is not None else None, sizing_evidence)
 
 
 def _canonical_child_entry():
@@ -2094,8 +2156,13 @@ def _canonical_child_entry():
         _nonempty_dsn(environment)
         raw = json.loads(environment.pop("LEAF_PROJECT_CANONICAL_REQUEST"))
         evidence = None if raw["evidence"] is None else CanonicalEvidence(**raw["evidence"])
-        request = CanonicalRequest(raw["purpose"], WORKER_TOOL, environment, evidence, raw["deadline"], raw["worker_id"])
+        request = CanonicalRequest(raw["purpose"], raw.get("tool_name", WORKER_TOOL), environment,
+            evidence, raw["deadline"], raw["worker_id"], raw.get("sizing_attachment"))
         with open(os.devnull, "w") as sink, redirect_stdout(sink):
+            sizing = _sizing_module()
+            if sizing.CONFIG_KEY in environment:
+                replay = sizing.read_private_plan(environment)
+                environment = sizing.bootstrap_child(replay, "canonical", environment)
             if request.purpose == "heartbeat":
                 with _project_connection(environment, request.deadline) as conn:
                     row = conn.execute("SELECT worker_id, tool_name, runtime, source_revision, source_sha256, observed_at "
@@ -2111,6 +2178,9 @@ def _canonical_child_entry():
                     proof = _canonical_database_proof(request, graph=graph, connection=_project_connection)
                     public = {"stored_settings_sha256": proof.stored_settings_sha256,
                               "reopened_settings_sha256": proof.reopened_settings_sha256}
+                    if proof.replay_facts is not None:
+                        public["replay_facts"] = dict(proof.replay_facts)
+                        public["sizing_evidence"] = proof.sizing_evidence
                 finally:
                     sys.path.remove(str(REPO / "server"))
                     db.reset_pool()
@@ -2139,7 +2209,8 @@ def _canonical_execution(request):
         "input_version_id", "output_version_id", "job_id", "binding_id", "worker_id", "checkout_fence",
         "before_settings_sha256", "settings_sha256", "reopened_settings_sha256")}
     environment["LEAF_PROJECT_CANONICAL_REQUEST"] = json.dumps({"evidence": public, "deadline": request.deadline,
-        "purpose": request.purpose, "worker_id": request.worker_id})
+        "purpose": request.purpose, "worker_id": request.worker_id, "tool_name": request.tool_name,
+        "sizing_attachment": request.sizing_attachment})
     output = Path(environment["LEAF_STORE_DIR"]).parent / (request.purpose + "-readback.json")
     code = ("import runpy,sys; m=runpy.run_path(sys.argv[1]); "
             "sys.exit(m['_canonical_child_entry']())")
@@ -2160,10 +2231,16 @@ def _canonical_execution(request):
                 return None
             heartbeat = HeartbeatProof(**dict(raw, observed_at=datetime.fromisoformat(raw["observed_at"])))
             return heartbeat
-        if (type(raw) is not dict or set(raw) != {"stored_settings_sha256", "reopened_settings_sha256"}
-                or any(not _hash_ok(value) for value in raw.values())):
+        fields = {"stored_settings_sha256", "reopened_settings_sha256"}
+        if _sizing_module().CONFIG_KEY in environment:
+            fields.update(("replay_facts", "sizing_evidence"))
+        if (type(raw) is not dict or set(raw) != fields
+                or any(not _hash_ok(raw[key]) for key in ("stored_settings_sha256", "reopened_settings_sha256"))):
             _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
-        return CanonicalProof(evidence, raw["stored_settings_sha256"], raw["reopened_settings_sha256"])
+        if raw.get("sizing_evidence") != request.sizing_attachment:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        return CanonicalProof(evidence, raw["stored_settings_sha256"], raw["reopened_settings_sha256"],
+                              raw.get("replay_facts"), raw.get("sizing_evidence"))
     finally:
         stopped = process.stop(request.deadline)
         if stopped:
@@ -2657,7 +2734,9 @@ class _Host:
         return HostFacts(
             os.environ.get("LEAF_RUNTIME_ENV", "local").strip().lower(),
             os.environ.get("LEAF_ENV", "").strip().lower(),
-            any(os.environ.get(k, "0") != "0" for k in ("LEAF_SYNTHETIC_STRING_SIZING", "LEAF_SYNTHETIC_ROOFTOP")),
+            any(("SYNTHETIC" in k.upper() and v not in ("", "0", "false"))
+                or k.upper() in {"SIZING_CLASSIFICATION", "SIZING_URL", "LEAF_PROJECT_REPLAY_CONFIG",
+                                 "LEAF_PROJECT_REPLAY_CONFIG_SHA256"} for k, v in os.environ.items()),
             root.exists(), safe, config.artifact_root == root / "artifacts",
             (config.artifact_root / "receipt.json").exists(), tuple(occupied),
             tuple(name for name in REQUIRED_MODULES if importlib.util.find_spec(name) is None),
@@ -2908,7 +2987,7 @@ class _RuntimeProcess:
 
     def start(self):
         spec = self.spec
-        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child", "project-browser"}:
+        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child", "project-browser", "sizing-replay", "sizing-worker"}:
             raise RuntimeError("unknown process role")
         with self._lock:
             if self._start_attempted or self._stop_requested:
@@ -3060,6 +3139,16 @@ def _launch_runtime(spec, *, scope):
     scope.acquire(kind, lambda: process.stop(time.monotonic() + 5.0))
     process.start()
     return process
+
+
+def _sizing_module():
+    with _IMPORT_LOCK:
+        name = "_leaf_project_sizing_proof"
+        return sys.modules.get(name) or _load_file(name, REPO / "scripts/proof_project_sizing.py")
+
+
+def _project_replay_factory(prepared, *, effects, scope):
+    return _sizing_module().ReplayRuntime(prepared, effects, scope, sys.modules[__name__])
 
 
 def _pg_module():
@@ -3267,7 +3356,7 @@ def production_effects() -> Effects:
         reservation=getattr(host, "_reservation", None), environ=getattr(host, "_authority_environment", None)),
                    _issuer_factory, None, None,
                    _launch_supervised, None, _run_project_browser, _canonical_reader,
-                   _Clock(), host, _ReceiptWriter())
+                   _Clock(), host, _ReceiptWriter(), _project_replay_factory)
     return replace(effects,
         readiness_probe=lambda request: check_readiness(request, effects=effects),
         migration_runner=lambda request, *, scope: _run_database_child(request, effects=effects, scope=scope),
@@ -3624,6 +3713,16 @@ def _receipt_document(plan, runtime, prepared, execution, cleanup_proof, failure
             "annotation_types": list(browser.annotation_types)}
         document["canonical"] = {name: getattr(canonical.evidence, name) for name in _CANONICAL_FIELDS[:-1]}
         document["canonical"]["settings_readback_sha256"] = canonical.stored_settings_sha256
+        if (execution.replay_facts != canonical.replay_facts
+                or execution.sizing_evidence != canonical.sizing_evidence
+                or (execution.sizing_evidence is not None and execution.replay_facts is None)):
+            _receipt_refused()
+        if execution.replay_facts is not None:
+            document["replay"] = {"facts": dict(execution.replay_facts),
+                "sizing_required": execution.sizing_evidence is not None,
+                "sizing_evidence": execution.sizing_evidence,
+                "canonical_sizing_sha256": (_sizing_attachment_hash(canonical.sizing_evidence)
+                                             if canonical.sizing_evidence is not None else None)}
         document["timings"].update(stack_ready=execution.stack_seconds, browser=execution.browser_seconds)
         for row in execution.observed_rows:
             if row in REQUIRED_ROWS:
@@ -3649,8 +3748,22 @@ def _validate_files(rows, *, names=None):
         _receipt_refused()
 
 
+def _sizing_attachment_hash(value):
+    return hashlib.sha256(json.dumps(value, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+
+
+def _validate_replay_sizing(replay):
+    sizing = _sizing_module()
+    sizing.validate_sizing_attachment(replay["sizing_evidence"], replay["facts"])
+    if replay["canonical_sizing_sha256"] != _sizing_attachment_hash(replay["sizing_evidence"]):
+        _receipt_refused()
+
+
 def _validate_receipt_structure(document, *, project=True):
-    _exact(document, _RECEIPT_FIELDS)
+    # F1 is additive: legacy receipts omit replay. When present its shape is
+    # closed. F2 must require sizing and its seven-test walk at its boundary.
+    fields = _RECEIPT_FIELDS | ({"replay"} if type(document) is dict and "replay" in document else set())
+    _exact(document, fields)
     if (document["schema"] != (SCHEMA if project else MIGRATION_SCHEMA) or document["profile"] != PROFILE
             or type(document["run_id"]) is not str
             or re.fullmatch(r"[a-z0-9][a-z0-9-]{7,63}", document["run_id"]) is None
@@ -3691,6 +3804,16 @@ def _validate_receipt_structure(document, *, project=True):
                 or identity["issuer"] != "https://proof-project.leaf.invalid/" + document["run_id"] + "/"
                 or identity["audience"] != "leaf-proof-project:" + document["run_id"]
                 or identity["subject"] != "leaf-proof-project|" + document["run_id"] or identity["tier"] != TIER):
+            _receipt_refused()
+    if "replay" in document:
+        replay = _exact(document["replay"], ("facts", "sizing_required", "sizing_evidence", "canonical_sizing_sha256"))
+        if not project or identity is None or type(replay["sizing_required"]) is not bool:
+            _receipt_refused()
+        _sizing_module().validate_public_replay(replay["facts"], run_id=document["run_id"],
+            organization_id=identity["organization_id"], source_sha256=source["tested_source_manifest_sha256"])
+        if replay["sizing_required"]:
+            _validate_replay_sizing(replay)  # IGNORE_SIZING_EVIDENCE
+        elif replay["sizing_evidence"] is not None or replay["canonical_sizing_sha256"] is not None:
             _receipt_refused()
     database = document["database"]
     if database is not None:
@@ -4352,17 +4475,25 @@ def _child_public(spec, raw):
             if value is None:
                 return None
             _exact(value, ("worker_id", "tool_name", "runtime", "source_revision", "source_sha256", "observed_at"))
-            if (value["worker_id"] != request["worker_id"] or value["tool_name"] != WORKER_TOOL
+            if (value["worker_id"] != request["worker_id"] or value["tool_name"] != request.get("tool_name", WORKER_TOOL)
                     or not _hash_ok(value["source_sha256"]) or value["source_revision"] != "sha256:" + value["source_sha256"]
                     or re.fullmatch(r"python-[0-9]+\.[0-9]+\.[0-9]+", value["runtime"]) is None):
                 return None
             beat = HeartbeatProof(**dict(value, observed_at=datetime.fromisoformat(value["observed_at"])))
             return _heartbeat_public(beat)
-        _exact(value, ("stored_settings_sha256", "reopened_settings_sha256"))
-        if not all(_hash_ok(item) for item in value.values()):
+        fields = {"stored_settings_sha256", "reopened_settings_sha256"}
+        if _sizing_module().CONFIG_KEY in spec.environment:
+            fields.update(("replay_facts", "sizing_evidence"))
+        _exact(value, fields)
+        if not all(_hash_ok(value[key]) for key in ("stored_settings_sha256", "reopened_settings_sha256")):
             return None
-        return {"stored_settings_sha256": value["stored_settings_sha256"],
-            "reopened_settings_sha256": value["reopened_settings_sha256"]}
+        if "replay_facts" in value:
+            plan = _sizing_module().read_private_plan(spec.environment)
+            if value["replay_facts"] != plan.public():
+                return None
+            if value["sizing_evidence"] is not None:
+                _sizing_module().validate_sizing_attachment(value["sizing_evidence"], value["replay_facts"])
+        return value
     return _approved_event(raw)
 
 

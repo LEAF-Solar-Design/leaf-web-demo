@@ -68,7 +68,7 @@ def test_pp3a_gate_registration():
     assert suite.cwd == SCRIPTS
     assert suite.argv == runner._py_pytest("test_proof_project.py")
     assert suite.label == "scripts test_proof_project.py"
-    assert suite.kind == "pytest" and suite.expected == 317
+    assert suite.kind == "pytest" and suite.expected == 335
     assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
     assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
@@ -4820,7 +4820,7 @@ class TestProjectDispatch:
             assert ids.count("scripts-proof-project") == 1
             assert ids.index("scripts-proof-project") == ids.index("scripts-proof-project-pg") + 1
             assert [name for name in ids if name.startswith("scripts-proof-project-")] == [
-                "scripts-proof-project-pg"]
+                "scripts-proof-project-pg", "scripts-proof-project-sizing"]
 
     def test_fake_only_gate_policy(self):
         catalog = self._catalog()
@@ -4969,3 +4969,22 @@ def test_pp3b_gate_registration():
     assert len(re.findall(r"^it\('", source, re.MULTILINE)) == 22
     assert runner.serial_suite_reason(suite)
     assert runner.conflict_resources(suite) == frozenset({"web-tree"})
+
+
+def test_r14f1_gate_registration():
+    runner = _load_runner()
+    catalog = runner.build_suites()
+    suites = [suite for suite in catalog if suite.id == "scripts-proof-project-sizing"]
+    assert len(suites) == 1
+    suite = suites[0]
+    assert suite.cwd == SCRIPTS and suite.kind == "pytest" and suite.expected == 29
+    assert suite.argv == runner._py_pytest("test_proof_project_sizing.py")
+    assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
+    assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    mandatory = selection["mandatory_suite_ids"]
+    assert mandatory.count(suite.id) == 1
+    assert mandatory.index(suite.id) == mandatory.index("scripts-proof-project") + 1
+    ids = [item.id for item in catalog]
+    assert ids.index(suite.id) == ids.index("scripts-proof-project") + 1
+    assert next(item for item in catalog if item.id == "scripts-proof-project").expected == 335

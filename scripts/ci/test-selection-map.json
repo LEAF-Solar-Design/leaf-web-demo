@@ -141,6 +141,7 @@
     "scripts-proof-string-sizer",
     "scripts-proof-project-pg",
     "scripts-proof-project",
+    "scripts-proof-project-sizing",
     "scripts-seed-proof-drawings",
     "scripts-solar-batch2-simple-evidence",
     "scripts-solar-design-profiles-evidence",
