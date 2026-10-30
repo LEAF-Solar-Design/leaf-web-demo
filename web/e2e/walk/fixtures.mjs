@@ -11,7 +11,7 @@ import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { buildViewSearch } from '../../src/lib/urlState.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
-import { normalizedControlKey, solarChainSteps } from './probes.mjs'
+import { normalizedControlKey, solarChainSteps, projectSharedShellProbe } from './probes.mjs'
 import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
@@ -45,6 +45,56 @@ export async function revealStudioRail(page) {
   await expect(button).toHaveAttribute('aria-expanded', 'true')
   await expect(page.locator('#project-workspace-activity')).toBeVisible()
   return true
+}
+
+export async function prepareProjectSharedShell(probe, runtime, assertions = expect) {
+  if (probe.profile !== 'project' || probe.state !== 'ready'
+    || !['tab:project:activity', 'tab:project:project'].includes(probe.featureId)) return probe
+  const { page } = runtime
+  const surface = await page.locator('.app').first().getAttribute('data-surface')
+  if (surface !== 'browser') return probe
+  const resolved = projectSharedShellProbe(probe, { surface, studioPresent: await studioRailButton(page).isVisible() })
+  if (resolved === probe) return probe
+  const navigation = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  const regions = ['Studio', 'Project'].map(name => ({ name,
+    region: page.getByRole('region', { name: `${name} sidebar`, exact: true }),
+    button: navigation.getByRole('button', { name, exact: true }),
+  }))
+  const original = []
+  for (const panel of regions) if (await panel.region.isVisible()) original.push(panel)
+  let panePrepared = false
+  const close = async panel => {
+    await panel.region.getByRole('button', { name: `Close ${panel.name}`, exact: true }).click()
+    await assertions(panel.region).toBeHidden()
+  }
+  runtime.cleanup.push(async () => {
+    const project = regions[1]
+    if (panePrepared) {
+      if (!await project.region.isVisible()) await project.button.click()
+      await project.region.getByRole('button', { name: 'Back to board', exact: true }).click()
+    }
+    for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
+    for (const panel of original) {
+      await panel.button.click()
+      await assertions(panel.region).toBeVisible()
+    }
+  })
+  for (const panel of original) await close(panel)
+  if (probe.featureId === 'tab:project:project') {
+    const project = regions[1]
+    if (!await project.region.isVisible()) await project.button.click()
+    // ProjectWorkspacePanels renders a pane only after a board selection.
+    // Seed Versions through Shared everywhere, then exercise Project from closed.
+    const pane = page.locator('#environment-project-panel .ground-pane')
+    if (!await pane.isVisible()) {
+      await project.region.getByRole('button', { name: 'Open versions', exact: true }).click()
+      panePrepared = true
+      await assertions(pane).toBeVisible()
+    }
+  }
+  for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
+  await assertions(page.getByRole('region', { name: resolved.assertion.region, exact: true })).toBeHidden()
+  return resolved
 }
 
 export function redactSolarDiagnostic(value, { maxLength = 300 } = {}) {
@@ -3866,6 +3916,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (target === 'project-shared-sidebar') {
+    await expect(page.getByRole('region', { name: effect.region, exact: true })).toBeVisible()
+    await expect(page.locator(effect.content)).toBeVisible()
+    return
+  }
   if (target === 'chooser-project-sidebar') {
     await assertChooserOpen(runtime, assertions)
     return
@@ -4444,6 +4499,10 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
+    if (typeof prepareProjectSharedShell === 'function') {
+      probe = await prepareProjectSharedShell(probe, runtime)
+      if (probe.assertion.target === 'project-shared-sidebar') evidence.effectiveEffect = probe.assertion
+    }
     if (probe.featureId === 'control:chooser-open' && typeof runChooserOpen === 'function') {
       await runChooserOpen(probe, runtime, runtime.recipeAssertions || expect)
       evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }

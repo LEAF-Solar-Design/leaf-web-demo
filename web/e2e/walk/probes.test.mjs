@@ -3,13 +3,42 @@ import test from 'node:test'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS,
-  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps } from './probes.mjs'
+  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { ENGINE_WASM_ROUTE, observeSolarEditorRequests, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('WL36b project Activity and Project resolve to shared-shell controls and content oracles', () => {
+  for (const [tab, name, region, content] of [
+    ['activity', 'Studio', 'Studio sidebar', '#project-workspace-activity'],
+    ['project', 'Project', 'Project sidebar', '#environment-project-panel .ground-pane'],
+  ]) {
+    const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    const resolved = projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true })
+    assert.deepEqual(resolved.locator, { role: 'button', name, exact: true,
+      scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click' })
+    assert.deepEqual(resolved.assertion, { ...probe.assertion, target: 'project-shared-sidebar', region, content })
+    assert.equal(resolved.setup, probe.setup)
+    assert.equal(resolved.featureId, probe.featureId)
+    assert.equal(resolved.state, probe.state)
+  }
+})
+
+test('WL36b absent Studio, other surfaces, other profiles and Tools retain their Ribbon recipes', () => {
+  for (const entry of map.entries.filter(row => row.kind === 'tab')) {
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: false }), probe)
+      assert.equal(projectSharedShellProbe(probe, { surface: 'cad', studioPresent: true }), probe)
+      if (entry.profile !== 'project' || entry.source_id === 'tools' || state !== 'ready') {
+        assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true }), probe)
+      }
+    }
+  }
+})
 
 test('WL32 chooser-open declares one desktop ready task using the provisioned drawing and visible label', () => {
   const entry = map.entries.find(row => row.id === 'control:chooser-open')
