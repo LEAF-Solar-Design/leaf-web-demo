@@ -403,6 +403,9 @@ tasks again. Confirm `GET /api/lab/tools` answers 200.
 
 ### Tool nodes (R7)
 
+Before stopping, record each tool's `available` value and `reason` from
+`GET /api/lab/tools`.
+
 **Stop:** Set `LEAF_LAB_TOOL_NODES=0` on the app and worker task environments
 using the entries in the same staging Terraform file, and roll them through
 the existing staging delivery rail.
@@ -411,8 +414,12 @@ the existing staging delivery rail.
 `lab_graph_effect_refused` policy and the tools listing reports the tools
 unavailable.
 
-**Recover:** Set `LEAF_LAB_TOOL_NODES=1` and roll again. Confirm the tool shows
-available in `GET /api/lab/tools`, then list `GET /api/lab/activations`.
+**Recover:** Set `LEAF_LAB_TOOL_NODES=1` and roll again. Confirm each tool returns
+to its recorded availability in `GET /api/lab/tools`, using the recorded `reason`
+to interpret unavailable tools. A tool can also be unavailable because
+tenant-authored execution is disabled or the broker sandbox tier is not
+`microvm`; this rollback does not change those gates.
+Then list `GET /api/lab/activations`.
 The listing includes only the 20 most recently created stopped or off activations;
 each listed activation carries `interval_s`.
 When a tenant may have more, find every activation to replace with a read-only
