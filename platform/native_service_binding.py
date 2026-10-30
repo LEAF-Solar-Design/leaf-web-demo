@@ -136,7 +136,7 @@ def execute(mode):
         if org is None or org["status"] != "active":
             raise Refused("org_inactive")
         cur.execute("SELECT org_id, status, deleted_at FROM projects "
-                    "WHERE project_id = %s FOR UPDATE", (PROJECT,))
+                    "WHERE project_id = %s AND deleted_at IS NULL FOR UPDATE", (PROJECT,))
         project = cur.fetchone()
         if (project is None or project["org_id"] != ORG
                 or project["status"] != "active" or project["deleted_at"] is not None):
