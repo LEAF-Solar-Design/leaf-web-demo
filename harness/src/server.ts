@@ -1771,8 +1771,10 @@ export async function startReal(port = 8130): Promise<Server> {
   // The grant directory is resolved once and handed to both the store and its
   // readiness probe, so the two can never name different directories.
   const grantsDir = resolveGrantsDir();
+  // Build the provider first so a bad LEAF_GRANT_STORE fails with the value-free error.
+  const grantKeyProvider = grantKeyProviderFromEnv(process.env);
   const grantBackend = resolveGrantStoreBackend();
-  const grantStore = createTenantGrantStore({ dir: grantsDir, keyProvider: grantKeyProviderFromEnv(process.env) });
+  const grantStore = createTenantGrantStore({ dir: grantsDir, keyProvider: grantKeyProvider });
   console.log(`grant_store_backend=${grantBackend}`);
   const standardServicesResolver = standardServicesResolverFromEnv();
   const oauth = new StandardServicesOAuthGrantProvider(
