@@ -57,7 +57,8 @@ test('WL40 Tools resolves to the empty-board opener and Tools content oracle', (
   assert.equal(resolved.assertion.target, 'project-shared-tools')
   assert.equal(resolved.assertion.region, 'Tools')
   assert.equal(resolved.assertion.content, '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible')
-  assert.equal(resolved.setup, probe.setup)
+  assert.deepEqual(resolved.setup, { ...probe.setup,
+    steps: [...probe.setup.steps, { kind: 'open-real-project' }] })
   assert.equal(resolved.featureId, probe.featureId)
   assert.equal(resolved.state, probe.state)
 })

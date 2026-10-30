@@ -522,6 +522,7 @@ export function projectSharedShellProbe(probe, { surface, studioPresent } = {}) 
   if (surface !== 'browser' || !studioPresent || probe.profile !== 'project' || probe.state !== 'ready'
     || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
   if (probe.featureId === 'tab:project:tools') return { ...probe,
+    setup: { ...probe.setup, steps: [...probe.setup.steps, step('open-real-project')] },
     locator: { ...role('button', 'Open tools', role('region', 'Project sidebar')), trigger: 'click' },
     assertion: { ...probe.assertion, target: 'project-shared-tools', region: 'Tools',
       content: '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible' },

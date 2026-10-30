@@ -47,6 +47,18 @@ export async function revealStudioRail(page) {
   return true
 }
 
+export async function prepareProjectSharedShellSetup(probe, runtime, execute = setupStep) {
+  if (probe.featureId !== 'tab:project:tools' || probe.profile !== 'project' || probe.state !== 'ready') return
+  const { page } = runtime
+  const surface = await page.locator('.app').first().getAttribute('data-surface')
+  if (surface !== 'browser') return
+  const resolved = projectSharedShellProbe(probe, { surface, studioPresent: await studioRailButton(page).isVisible() })
+  for (const recipe of resolved.setup.steps.slice(probe.setup.steps.length)) {
+    await execute(probe, runtime, recipe)
+    runtime.evidence.steps.push({ phase: 'setup', ...recipe })
+  }
+}
+
 export async function prepareProjectSharedShell(probe, runtime, assertions = expect) {
   if (probe.profile !== 'project' || probe.state !== 'ready'
     || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
@@ -705,7 +717,8 @@ export async function assertStudioDrawer(page, drawer, open, assertions = expect
     await assertions(studioRailButton(page)).toHaveAttribute('aria-expanded', 'true')
     await assertions(sidebar).toBeVisible()
     if (drawer === 'jobs') await assertions(page.getByRole('heading', { name: /Job monitor/ })).toBeVisible()
-    await assertions(content).toBeVisible()
+    if (drawer === 'result') await assertions(sidebar.locator('.result-block')).toHaveCount(1)
+    else await assertions(content).toBeVisible()
   } else {
     await assertions(sidebar).toBeHidden()
     if (drawer === 'nav') await assertions(content).toBeHidden()
@@ -1421,9 +1434,20 @@ const baselineThreePanels = Object.freeze({
   'cost-panel': { role: 'region', name: 'What Leaf costs to operate', close: 'Close cost panel' },
 })
 const namedPanel = (page, spec) => page.getByRole(spec.role, { name: spec.name, exact: true })
-async function closeBaselinePanel(page, spec) {
+export async function closeBaselinePanel(page, spec, evidence = {}) {
   const panel = namedPanel(page, spec)
-  if (await panel.isVisible()) await panel.getByRole('button', { name: spec.close, exact: true }).click()
+  if (await panel.isVisible()) {
+    const close = panel.getByRole('button', { name: spec.close, exact: true })
+    let exiting = false
+    try {
+      await close.waitFor({ state: 'attached', timeout: 2000 })
+    } catch (error) {
+      if (error.name !== 'TimeoutError') throw error
+      exiting = true
+      evidence.baselineCloseSkipped = 'panel-exiting'
+    }
+    if (!exiting) await close.click()
+  }
   await expect(panel).toBeHidden()
 }
 async function clearComposer(page) {
@@ -2854,8 +2878,8 @@ async function baselineThreeState(probe, runtime, recipe) {
   const target = recipe.target
   const panel = baselineThreePanels[target]
   if (panel) {
-    await closeBaselinePanel(page, panel)
-    runtime.cleanup.push(() => closeBaselinePanel(page, panel))
+    await closeBaselinePanel(page, panel, runtime.evidence)
+    runtime.cleanup.push(() => closeBaselinePanel(page, panel, runtime.evidence))
   }
   if (recipe.expanded !== undefined) await expect(locator).toHaveAttribute('aria-expanded', String(recipe.expanded))
   if (target === 'project-board') {
@@ -4668,6 +4692,7 @@ export async function runProbe(probe, runtime) {
       })
     }
     page = runtime.page
+    if (typeof prepareProjectSharedShellSetup === 'function') await prepareProjectSharedShellSetup(probe, runtime)
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
     if (typeof prepareProjectSharedShell === 'function') {
       probe = await prepareProjectSharedShell(probe, runtime)
