@@ -389,11 +389,14 @@ staging, these are the `LEAF_LAB_SURFACE_ENABLED` entries in
 leaf-automation-aws-terraform's
 `terraform/environments/staging/us-east-1/leaf_platform.tf`.
 
-**Check:** Confirm every Lab endpoint answers 404 with
+**Check:** Confirm every endpoint behind the Lab rail (the routers
+included by `server/routers/lab_router.py`, which apply `lab_rail`) answers 404 with
 the standard error envelope (`ok: false`, `error.error_code: "BAD_PARAMS"`,
 `error.retryable: false`) whose `error.message` contains `lab_surface_disabled`
 (`lab_rail` in `server/routers/lab_surface.py`, serialized by
 `_http_exc_handler` in `server/envelopes.py`).
+Endpoints mounted directly in `server/app.py`, such as the internal
+`POST /internal/ops/lab/mirror/enable`, are not gated by this flag.
 The `lab_rail` in `server/routers/lab_surface.py` treats `0`, `false`, `no`
 and `off` as disabled. An unset value enables the rail only when the posture
 is staging.
@@ -406,7 +409,10 @@ tasks again. Confirm `GET /api/lab/tools` answers 200.
 **Stop:** First record each tool's `available` value and `reason` from
 `GET /api/lab/tools`, and every activation in `GET /api/lab/activations` with its
 `activation_id`, `doc_id`, `interval_s` and `state`. This pre-stop record is the
-recovery source. Set `LEAF_LAB_TOOL_NODES=0` on the app and worker task environments
+recovery source. `GET /api/lab/tools` lists at most 200 tools with no pagination,
+so the record and recovery comparison cover the tools that listing returns;
+a tenant with more tools records the ones it needs to watch.
+Set `LEAF_LAB_TOOL_NODES=0` on the app and worker task environments
 using the entries in the same staging Terraform file, and roll them through
 the existing staging delivery rail.
 
