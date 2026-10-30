@@ -25,7 +25,7 @@ export function classifyTenant(dir: string, tenant: string): { tenant: string; c
   const token = existsSync(join(dir, `${tenant}.token`));
   const legacy_sidecar = token || existsSync(join(dir, `${tenant}.kind`));
   const path = join(dir, `${tenant}.grant.json`);
-  let classification: Classification = token ? "token_only" : "absent";
+  let classification: Classification = legacy_sidecar ? "token_only" : "absent";
   if (existsSync(path)) {
     classification = "corrupt";
     try {

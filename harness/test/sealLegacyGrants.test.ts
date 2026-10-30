@@ -65,7 +65,7 @@ describe("sealLegacyGrants", () => {
     expect(classifyTenant(dir, "sealed").class).toBe("sealed");
     for (const tenant of ["mixed", "null", "wrong", "broken"]) expect(classifyTenant(dir, tenant).class).toBe("corrupt");
     expect(classifyTenant(dir, "only")).toEqual({ tenant: "only", class: "token_only", legacy_sidecar: true });
-    expect(classifyTenant(dir, "kindonly")).toEqual({ tenant: "kindonly", class: "absent", legacy_sidecar: true });
+    expect(classifyTenant(dir, "kindonly")).toEqual({ tenant: "kindonly", class: "token_only", legacy_sidecar: true });
     expect(classifyTenant(dir, "missing")).toEqual({ tenant: "missing", class: "absent", legacy_sidecar: false });
     expect(() => classifyTenant(dir, "../escape")).toThrow();
   });
@@ -228,6 +228,18 @@ describe("sealLegacyGrants", () => {
     expect(readFileSync(path("only", ".token"))).toEqual(only);
     expect(readFileSync(path("corrupt"))).toEqual(corrupt);
     for (const secret of [TOKEN, LABEL, ACCOUNT, dir]) expect([...output, ...errors].join("\n")).not.toContain(secret);
+  });
+
+  it("blocks a kind-only tenant with a non-zero exit and preserves the sidecar", async () => {
+    writeFileSync(path("kindonly", ".kind"), "oauth");
+    const before = snapshot();
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(keys);
+    expect(await main(["--seal"], env())).toBe(1);
+    expect(output.map(line => JSON.parse(line))).toEqual([
+      { tenant: "kindonly", outcome: "blocked", reason: "token_only_relink" },
+      { sealed: 0, legacy_remaining: 1, blocked_tenants: 1, outside_scope_legacy: 0 },
+    ]);
+    expect(snapshot()).toEqual(before);
   });
 
   it("limits scope, counts outside legacy and makes the CLI rerun a no-op", async () => {
