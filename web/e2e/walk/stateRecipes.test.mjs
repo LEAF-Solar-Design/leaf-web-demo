@@ -15,7 +15,7 @@ import { seedSolarChain } from './fixtures.mjs'
 import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
 
-function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser', studioPresent = true } = {}) {
+function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser', studioPresent = true, toolsHidden = false } = {}) {
   let open = initial
   let contentVisible = true
   const events = []
@@ -32,6 +32,7 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
       events.push(options.name)
       if (options.name === `Close ${name}`) open = 'none'
       else if (options.name === 'Open versions') pane = true
+      else if (options.name === 'Open tools') pane = 'tools'
       else if (options.name === 'Back to board') pane = false
       else assert.fail(`Unexpected sidebar control: ${options.name}`)
     } }
@@ -43,6 +44,13 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
         return surface
       } }) }
       if (selector === '#project-workspace-activity') return visible(() => open === 'Studio')
+      if (selector === '#environment-project-panel .ground-pane') return { count: async () => pane ? 1 : 0 }
+      if (selector === '#environment-project-panel .ground-tile') {
+        return { first: () => visible(() => open === 'Project' && !pane && contentVisible) }
+      }
+      if (selector === '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible') {
+        return { first: () => visible(() => open === 'Project' && pane === 'tools' && !toolsHidden && contentVisible) }
+      }
       assert.equal(selector, '#environment-project-panel :is(.ground-pane, .ground-tile, .project-material-intake):visible')
       // Only the current state's content exists, even though all three are valid oracle targets.
       const content = pane === 'material' ? '.project-material-intake' : pane ? '.ground-pane' : '.ground-tile'
@@ -61,6 +69,13 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
         } }
       }
       assert.equal(role, 'region')
+      if (options.name === 'Tools') return {
+        ...visible(() => open === 'Project' && pane === 'tools' && !toolsHidden),
+        getAttribute: async name => {
+          assert.equal(name, 'data-pane')
+          return pane
+        },
+      }
       assert.ok(['Studio sidebar', 'Project sidebar'].includes(options.name))
       return region(options.name.replace(' sidebar', ''))
     },
@@ -68,10 +83,73 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
   const assertions = locator => ({
     toBeVisible: async () => assert.equal(await locator.isVisible(), true, 'content must be visible'),
     toBeHidden: async () => assert.equal(await locator.isVisible(), false, 'sidebar must start closed'),
+    toHaveAttribute: async (name, value) => assert.equal(await locator.getAttribute(name), value),
   })
   return { page, assertions, events, open: () => open, pane: () => pane,
-    clearContent: () => { contentVisible = false } }
+    clearContent: () => { contentVisible = false }, restoreContent: () => { contentVisible = true } }
 }
+
+test('WL40 Tools starts from the board, opens once, observes content and restores sidebars', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const initial of ['none', 'Studio', 'Project']) {
+    const fake = projectSidebarFake({ initial })
+    const runtime = { page: fake.page, cleanup: [] }
+    const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+    assert.equal(fake.open(), 'Project')
+    assert.equal(fake.pane(), false)
+    assert.deepEqual(fake.events, initial === 'Project' ? [] : ['Project'])
+    await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+    const control = fake.page.getByRole(resolved.locator.scope.role, resolved.locator.scope)
+      .getByRole(resolved.locator.role, { name: resolved.locator.name, exact: true })
+    await control.click()
+    await assertEffect(resolved, runtime, control, {}, fake.assertions)
+    assert.equal(fake.events.filter(name => name === 'Open tools').length, 1)
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.open(), initial)
+    assert.equal(fake.pane(), false)
+    assert.deepEqual(fake.events, [
+      ...(initial === 'Project' ? [] : ['Project']), 'Open tools', 'Back to board', 'Close Project',
+      ...(initial === 'none' ? [] : [initial]),
+    ])
+  }
+})
+
+test('WL40 Tools rejects any existing pane before clicking or registering cleanup', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const initial of ['none', 'Studio', 'Project']) {
+    for (const pane of [true, 'material', 'tools']) {
+      const fake = projectSidebarFake({ initial, pane })
+      const runtime = { page: fake.page, cleanup: [] }
+      await assert.rejects(prepareProjectSharedShell(probe, runtime, fake.assertions),
+        /Open tools precondition: Project must start on the board with no pane open/)
+      assert.deepEqual(fake.events, [])
+      assert.deepEqual(runtime.cleanup, [])
+      assert.equal(fake.pane(), pane)
+    }
+  }
+})
+
+test('WL40 Tools rejects hidden pane or missing content after clicking and cleans up', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const initial of ['none', 'Studio', 'Project']) {
+    for (const toolsHidden of [true, false]) {
+      const fake = projectSidebarFake({ initial, toolsHidden })
+      const runtime = { page: fake.page, cleanup: [] }
+      const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+      await fake.page.getByRole('region', resolved.locator.scope)
+        .getByRole('button', { name: 'Open tools', exact: true }).click()
+      if (!toolsHidden) fake.clearContent()
+      await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+      // Restore board visibility independently of the failed Tools content oracle.
+      fake.restoreContent()
+      for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+      assert.equal(fake.open(), initial)
+      assert.equal(fake.pane(), false)
+      assert.equal(fake.events.filter(name => name === 'Open tools').length, 1)
+      assert.equal(fake.events.filter(name => name === 'Back to board').length, 1)
+    }
+  }
+})
 
 test('WL36c shared sidebars observe each current pane state and restore only sidebar visibility', async () => {
   const map = buildFeatureMap()

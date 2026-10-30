@@ -27,13 +27,26 @@ test('WL36b project Activity and Project resolve to shared-shell controls and co
   }
 })
 
-test('WL36b absent Studio, other surfaces, other profiles and Tools retain their Ribbon recipes', () => {
+test('WL40 Tools resolves to the empty-board opener and Tools content oracle', () => {
+  const probe = resolveProbe(map.entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  const resolved = projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true })
+  assert.deepEqual(resolved.locator, { role: 'button', name: 'Open tools', exact: true,
+    scope: { role: 'region', name: 'Project sidebar', exact: true }, trigger: 'click' })
+  assert.equal(resolved.assertion.target, 'project-shared-tools')
+  assert.equal(resolved.assertion.region, 'Tools')
+  assert.equal(resolved.assertion.content, '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible')
+  assert.equal(resolved.setup, probe.setup)
+  assert.equal(resolved.featureId, probe.featureId)
+  assert.equal(resolved.state, probe.state)
+})
+
+test('WL36b absent Studio, other surfaces and other profiles retain their Ribbon recipes', () => {
   for (const entry of map.entries.filter(row => row.kind === 'tab')) {
     for (const state of entry.states) {
       const probe = resolveProbe(entry, state)
       assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: false }), probe)
       assert.equal(projectSharedShellProbe(probe, { surface: 'cad', studioPresent: true }), probe)
-      if (entry.profile !== 'project' || entry.source_id === 'tools' || state !== 'ready') {
+      if (entry.profile !== 'project' || state !== 'ready') {
         assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true }), probe)
       }
     }

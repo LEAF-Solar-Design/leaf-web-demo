@@ -517,7 +517,12 @@ export function resolveProbe(entry, state) {
 
 export function projectSharedShellProbe(probe, { surface, studioPresent } = {}) {
   if (surface !== 'browser' || !studioPresent || probe.profile !== 'project' || probe.state !== 'ready'
-    || !['tab:project:activity', 'tab:project:project'].includes(probe.featureId)) return probe
+    || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
+  if (probe.featureId === 'tab:project:tools') return { ...probe,
+    locator: { ...role('button', 'Open tools', role('region', 'Project sidebar')), trigger: 'click' },
+    assertion: { ...probe.assertion, target: 'project-shared-tools', region: 'Tools',
+      content: '#environment-project-panel .ground-pane[data-pane="tools"] > p:visible, #environment-project-panel .ground-pane[data-pane="tools"] > ul > li:visible' },
+  }
   const activity = probe.featureId === 'tab:project:activity'
   return { ...probe,
     locator: { ...role('button', activity ? 'Studio' : 'Project', role('navigation', 'Workspace controls')), trigger: 'click' },

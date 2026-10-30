@@ -49,12 +49,17 @@ export async function revealStudioRail(page) {
 
 export async function prepareProjectSharedShell(probe, runtime, assertions = expect) {
   if (probe.profile !== 'project' || probe.state !== 'ready'
-    || !['tab:project:activity', 'tab:project:project'].includes(probe.featureId)) return probe
+    || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
   const { page } = runtime
   const surface = await page.locator('.app').first().getAttribute('data-surface')
   if (surface !== 'browser') return probe
   const resolved = projectSharedShellProbe(probe, { surface, studioPresent: await studioRailButton(page).isVisible() })
   if (resolved === probe) return probe
+  const tools = probe.featureId === 'tab:project:tools'
+  const pane = tools ? page.locator('#environment-project-panel .ground-pane') : null
+  if (tools && await pane.count() !== 0) {
+    throw new Error('Open tools precondition: Project must start on the board with no pane open')
+  }
   const navigation = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
   const regions = ['Studio', 'Project'].map(name => ({ name,
     region: page.getByRole('region', { name: `${name} sidebar`, exact: true }),
@@ -67,12 +72,24 @@ export async function prepareProjectSharedShell(probe, runtime, assertions = exp
     await assertions(panel.region).toBeHidden()
   }
   runtime.cleanup.push(async () => {
+    if (tools && await pane.count() !== 0) {
+      await page.getByRole('region', { name: 'Project sidebar', exact: true })
+        .getByRole('button', { name: 'Back to board', exact: true }).click()
+      await assertions(page.locator('#environment-project-panel .ground-tile').first()).toBeVisible()
+    }
     for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
     for (const panel of original) {
       await panel.button.click()
       await assertions(panel.region).toBeVisible()
     }
   })
+  if (tools) {
+    const project = regions.find(panel => panel.name === 'Project')
+    if (!await project.region.isVisible()) await project.button.click()
+    await assertions(project.region).toBeVisible()
+    await assertions(page.locator('#environment-project-panel .ground-tile').first()).toBeVisible()
+    return resolved
+  }
   for (const panel of original) await close(panel)
   for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
   await assertions(page.getByRole('region', { name: resolved.assertion.region, exact: true })).toBeHidden()
@@ -4032,6 +4049,13 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (target === 'project-shared-tools') {
+    const region = page.getByRole('region', { name: effect.region, exact: true })
+    await expect(region).toBeVisible()
+    await expect(region).toHaveAttribute('data-pane', 'tools')
+    await expect(page.locator(effect.content).first()).toBeVisible()
+    return
+  }
   if (target === 'project-shared-sidebar') {
     await expect(page.getByRole('region', { name: effect.region, exact: true })).toBeVisible()
     const content = page.locator(effect.content)
@@ -4623,7 +4647,7 @@ export async function runProbe(probe, runtime) {
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
     if (typeof prepareProjectSharedShell === 'function') {
       probe = await prepareProjectSharedShell(probe, runtime)
-      if (probe.assertion.target === 'project-shared-sidebar') evidence.effectiveEffect = probe.assertion
+      if (['project-shared-sidebar', 'project-shared-tools'].includes(probe.assertion.target)) evidence.effectiveEffect = probe.assertion
     }
     if (probe.featureId === 'control:chooser-open' && typeof runChooserOpen === 'function') {
       await runChooserOpen(probe, runtime, runtime.recipeAssertions || expect)
