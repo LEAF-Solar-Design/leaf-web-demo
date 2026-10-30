@@ -143,6 +143,15 @@ def execute(mode):
             raise Refused("project")
         binding = _binding(cur)
         membership = _membership(cur, binding)
+        if mode != "revoke" and binding is not None and membership is None:
+            cur.execute(
+                "SELECT membership_id FROM project_member_bindings "
+                "WHERE binding_id = %s AND org_id = %s AND project_id = %s "
+                "AND status <> 'active' FOR UPDATE",
+                (binding["binding_id"], ORG, PROJECT),
+            )
+            if cur.fetchone():
+                raise Refused("membership_revoked")
         if mode == "plan":
             return receipt(mode, "unchanged" if binding and membership else "would_create",
                            binding=binding, membership=membership)
