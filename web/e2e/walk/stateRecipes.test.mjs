@@ -5,7 +5,7 @@ import { EventEmitter } from 'node:events'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
-  captureEngineRefusal, assertEngineRefusal, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
+  captureEngineRefusal, assertEngineRefusal, runProbeOracle, assertCopiedGeometry, expectedVersionHead, assertVersionTransition, establishZoomBaseline } from './fixtures.mjs'
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
@@ -6054,6 +6054,97 @@ function refusalRuntime() {
   } }
   return { runtime, state }
 }
+
+test('WL39b vertex-index setup fills the named input and requires idle Delete vertex', async () => {
+  const events = []
+  const button = { disabled: false }
+  const runtime = { evidence: {}, page: { getByTestId: (id) => {
+    assert.equal(id, 'cad-edit-workbench')
+    return { getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'textbox') {
+        assert.equal(options.name, 'vertex index')
+        return { fill: async value => events.push(['fill', value]) }
+      }
+      assert.equal(role, 'button'); assert.equal(options.name, 'Delete vertex')
+      return button
+    } }
+  } } }
+  await setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions)
+  assert.deepEqual(events, [['fill', '-1']])
+  button.disabled = true
+  await assert.rejects(setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions))
+})
+
+test('WL39b fake activation uses the real refusal oracle and typed red-hat verdict on both viewports', async () => {
+  const entry = buildFeatureMap().entries.find(row => row.id === 'control:delete-vertex')
+  for (const viewport of entry.viewports) for (const fault of [null, 'geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches', 'status']) {
+    const probe = resolveProbe(entry, 'invalid-vertex')
+    const { runtime, state } = refusalRuntime()
+    state.geometry.entities = [{ id: '1', type: 'LINE', vertices: [[0, 0], [10, 0]], layer: 'Walk' }]
+    state.selection = 'LINE #1; layer Walk'
+    state.status = ''
+    const evidence = runtime.evidence
+    Object.assign(evidence, { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId, state: probe.state, viewport })
+    const observers = runtime.walkPersonaObservers = createWalkPersonaObservers({ probe, viewport, evidence })
+    const before = await captureEngineRefusal(runtime)
+    await observers.observe('red-hat', 'before', before)
+    let clicks = 0
+    const locator = { click: async () => {
+      clicks++
+      state.status = fault === 'status' ? '' : probe.assertion.refusal
+      if (fault === 'geometry') state.geometry.entities[0].layer = 'Changed'
+      if (fault === 'selection') state.selection = 'no selection'
+      if (fault === 'history') state.history[0].disabled = false
+      if (fault === 'clipboard') state.clipboard.title = 'changed'
+      if (fault === 'versions') state.versions.head++
+      if (fault === 'dispatches') state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
+    } }
+    await locator.click()
+    let originalError
+    const assertions = value => ({ ...oracleAssertions(value),
+      toEqual: expected => {
+        try { oracleAssertions(value).toEqual(expected) }
+        catch (error) { originalError = error; throw error }
+      },
+      toHaveText: async expected => {
+        try { await oracleAssertions(value).toHaveText(expected) }
+        catch (error) { originalError = error; throw error }
+      },
+    })
+    const check = () => runProbeOracle(probe, runtime, locator, before, assertions)
+    if (fault) await assert.rejects(check(), error => error === originalError)
+    else await check()
+    assert.equal(clicks, 1)
+    assert.equal(evidence.engineRefusal.observed, state.status)
+    const verdict = redHat.evaluate(evidence).status
+    assert.equal(verdict, fault === 'status' ? 'unknown' : fault ? 'finding' : 'pass', `${viewport}/${fault}`)
+    if (fault !== 'status') {
+      assert.ok(evidence.personaFragments.some(fragment => fragment.persona === 'red-hat'))
+      assert.equal(evidence.measurements.reference, `walk:${probe.featureId}[${probe.state}]@${viewport}`)
+    }
+  }
+})
+
+test('WL39c failure-path observer errors are value-free and preserve the original oracle error', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'control:delete-vertex'), 'invalid-vertex')
+  const { runtime, state } = refusalRuntime()
+  const before = await captureEngineRefusal(runtime)
+  state.status = probe.assertion.refusal
+  state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
+  const originalError = new Error('original functional error')
+  const assertions = value => ({ ...oracleAssertions(value), toEqual: () => { throw originalError } })
+  let finishes = 0
+  runtime.walkPersonaObservers = { observe: async () => {}, finish: async () => {
+    finishes++
+    throw new Error('private-observer-value')
+  } }
+  await assert.rejects(runProbeOracle(probe, runtime, {}, before, assertions), error => error === originalError)
+  assert.equal(finishes, 1)
+  assert.deepEqual(runtime.evidence.measurementDiagnostics,
+    [{ persona: 'red-hat', message: 'Optional persona observation failed' }])
+  assert.equal(JSON.stringify(runtime.evidence).includes('private-observer-value'), false)
+})
 
 test('engine refusal requires exact text and preserves geometry, selection, history, clipboard and dispatch', async () => {
   for (const field of ['status', 'geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches']) {

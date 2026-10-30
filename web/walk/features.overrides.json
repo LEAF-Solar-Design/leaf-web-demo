@@ -2387,6 +2387,20 @@
         "desktop"
       ],
       "certify": "both"
+    },
+    {
+      "id": "control:delete-vertex",
+      "source_id": "delete-vertex",
+      "title": "Delete vertex",
+      "sources": ["web/src/cadedit/CadEditSurface.jsx", "web/src/cadedit/engineSession.test.jsx"],
+      "states": ["invalid-vertex"],
+      "state_contexts": {"invalid-vertex": {"document": true, "name": "Delete vertex"}},
+      "expected_effect": {"invalid-vertex": {
+        "kind": "renders", "target": "engine-refusal",
+        "refusal": "Delete vertex refused: vertex must be a non-negative integer."
+      }},
+      "viewports": ["desktop", "phone"],
+      "certify": "both"
     }
   ],
   "state_cases": {

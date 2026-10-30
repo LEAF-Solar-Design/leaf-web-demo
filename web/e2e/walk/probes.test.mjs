@@ -11,6 +11,28 @@ import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, disc
 
 const map = buildFeatureMap()
 
+test('WL39b resolves the bounded Delete vertex refusal on desktop and phone', () => {
+  const entry = map.entries.find(row => row.id === 'control:delete-vertex')
+  assert.deepEqual(entry.states, ['invalid-vertex'])
+  assert.deepEqual(entry.viewports, ['desktop', 'phone'])
+  assert.deepEqual(entry.sources, ['web/src/cadedit/CadEditSurface.jsx', 'web/src/cadedit/engineSession.test.jsx',
+    'web/walk/features.overrides.json'].sort())
+  for (const viewport of entry.viewports) {
+    const probe = resolveProbe(entry, 'invalid-vertex')
+    assert.equal(probe.assertion.target, 'engine-refusal', viewport)
+    assert.equal(probe.assertion.refusal, 'Delete vertex refused: vertex must be a non-negative integer.')
+    assert.equal(probe.locator.role, 'button')
+    assert.equal(probe.locator.name, 'Delete vertex')
+    assert.equal(probe.locator.exact, true)
+    assert.equal(probe.locator.trigger, 'click')
+    assert.deepEqual(probe.setup.steps, [
+      { kind: 'open-private-drawing', surface: 'cad' }, { kind: 'engine-ready' },
+      { kind: 'select-entity', type: 'LINE', editable: true }, { kind: 'vertex-index', value: '-1' },
+    ])
+    assert.equal(unsupportedBeforeSetup(probe, { engineMounted: true }), null)
+  }
+})
+
 test('WL36b project Activity and Project resolve to shared-shell controls and content oracles', () => {
   for (const [tab, name, region, content] of [
     ['activity', 'Studio', 'Studio sidebar', '#project-workspace-activity'],

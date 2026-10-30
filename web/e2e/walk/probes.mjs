@@ -361,6 +361,9 @@ export function stateRecipe(entry, state) {
       : step('open-private-drawing', { surface: 'cad' }))
     const locator = locatorRecipe(entry, state)
     if (entry.source_id === 'find-drawing-submit') steps.push(step('find-submit-state'))
+    if (entry.id === 'control:delete-vertex' && state === 'invalid-vertex') steps.push(
+      step('engine-ready'), step('select-entity', { type: 'LINE', editable: true }),
+      step('vertex-index', { value: '-1' }))
     if (["control:scope-add","control:demo-return","control:claude-accounts","control:drawing-close-start","control:notification-collapse","control:session-details","control:version-history","control:linked-services","control:project-board","control:prompt-run","control:prompt-scope","control:sign-out","control:start-board","control:take-edit-lock","control:cost-panel","control:command-bar","control:find-drawing"].includes(entry.id)) {
       steps.push(step('baseline-three-state', { sourceId: entry.source_id, target: effect.target, control: locator, expanded: context.expanded }))
     }

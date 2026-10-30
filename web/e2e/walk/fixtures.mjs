@@ -1508,6 +1508,7 @@ export async function captureEngineRefusal(runtime) {
 
 export async function assertEngineRefusal(probe, runtime, before, assertions = expect) {
   const status = runtime.page.getByTestId('cad-edit-workbench').getByRole('status')
+  runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before }
   await assertions(status).toHaveText(probe.assertion.refusal)
   const after = await captureEngineRefusal(runtime)
   runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before, after }
@@ -2960,7 +2961,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'navigate', 'chooser-start', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
-  'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
+  'select-entity', 'vertex-index', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
   'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
   'open-escape-owner', 'find-submit-state', 'open-real-project',
@@ -2974,7 +2975,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'require-solar-document', 'hold-solar-projection',
 ]))
 export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
-  'engine-ready', 'select-entity', 'create-line', 'hold-engine-edit',
+  'engine-ready', 'select-entity', 'vertex-index', 'create-line', 'hold-engine-edit',
   'require-engine-state', 'crash-engine-worker',
   'require-solar-document',
 ]))
@@ -3515,6 +3516,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'engine-ready': await engineReady(probe, runtime); return
+    case 'vertex-index':
+      await page.getByTestId('cad-edit-workbench').getByRole('textbox', { name: 'vertex index', exact: true }).fill(recipe.value)
+      await assertions(page.getByTestId('cad-edit-workbench').getByRole('button', { name: 'Delete vertex', exact: true })).toBeEnabled()
+      return
     case 'select-entity': await selectEntity(probe, runtime, recipe); return
     case 'clear-selection': await page.keyboard.press('Escape'); return
     case 'copy-selection':
@@ -4580,6 +4585,25 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   throw new Error(`No effect oracle for ${probe.featureId}/${probe.state}: ${effect.kind} ${target}`)
 }
 
+export async function runProbeOracle(probe, runtime, locator, before, assertions = expect,
+  oracle = () => assertEffect(probe, runtime, locator, before, assertions)) {
+  try {
+    await oracle()
+  } catch (error) {
+    if (probe.assertion.target === 'engine-refusal' && typeof runtime.walkPersonaObservers?.finish === 'function') {
+      try {
+        await runtime.walkPersonaObservers.finish()
+      } catch {
+        runtime.evidence.measurementDiagnostics ||= []
+        runtime.evidence.measurementDiagnostics.push({ persona: 'red-hat', message: 'Optional persona observation failed' })
+      }
+    }
+    throw error
+  }
+  if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
+  if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+}
+
 export async function runProbe(probe, runtime) {
   const { evidence } = runtime
   let page = runtime.page
@@ -4772,12 +4796,17 @@ export async function runProbe(probe, runtime) {
           evidence, activate: () => activate(probe, runtime, locator) })
         : activate(probe, runtime, locator))
     }
-    await test.step(probe.assertion.assertionId, () => {
+    const runOracle = () => test.step(probe.assertion.assertionId, () => {
       evidence.oracleReached = probe.assertion.assertionId
       return assertEffect(probe, runtime, locator, before)
     })
-    if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
-    if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+    if (typeof runProbeOracle === 'function') {
+      await runProbeOracle(probe, runtime, locator, before, undefined, runOracle)
+    } else {
+      await runOracle()
+      if (typeof runtime.panelPerformanceCapture?.finish === 'function') await runtime.panelPerformanceCapture.finish()
+      if (typeof runtime.walkPersonaObservers?.finish === 'function') await runtime.walkPersonaObservers.finish()
+    }
     if (typeof followAccessibilityCapture === 'function') {
       await followAccessibilityCapture({ capture: accessibilityCapture, page, evidence,
         bundleReference: `walk:${probe.featureId}[${probe.state}]@${runtime.testInfo.project.name}` })
