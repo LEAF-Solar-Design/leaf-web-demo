@@ -403,10 +403,10 @@ tasks again. Confirm `GET /api/lab/tools` answers 200.
 
 ### Tool nodes (R7)
 
-Before stopping, record each tool's `available` value and `reason` from
-`GET /api/lab/tools`.
-
-**Stop:** Set `LEAF_LAB_TOOL_NODES=0` on the app and worker task environments
+**Stop:** First record each tool's `available` value and `reason` from
+`GET /api/lab/tools`, and every activation in `GET /api/lab/activations` with its
+`activation_id`, `doc_id`, `interval_s` and `state`. This pre-stop record is the
+recovery source. Set `LEAF_LAB_TOOL_NODES=0` on the app and worker task environments
 using the entries in the same staging Terraform file, and roll them through
 the existing staging delivery rail.
 
@@ -414,30 +414,25 @@ the existing staging delivery rail.
 `lab_graph_effect_refused` policy and the tools listing reports the tools
 unavailable.
 
-**Recover:** Set `LEAF_LAB_TOOL_NODES=1` and roll again. Confirm each tool returns
-to its recorded availability in `GET /api/lab/tools`, using the recorded `reason`
-to interpret unavailable tools. A tool can also be unavailable because
-tenant-authored execution is disabled or the broker sandbox tier is not
-`microvm`; this rollback does not change those gates.
-Then list `GET /api/lab/activations`.
-The listing includes only the 20 most recently created stopped or off activations;
-each listed activation carries `interval_s`.
-When a tenant may have more, find every activation to replace with a read-only
-query on the Lab database:
-`SELECT activation_id, doc_id, interval_s FROM lab_activations WHERE tenant_id = <tenant> AND state = 'stopped' AND reason IN ('lab_activation_tools_disabled', 'readmit_unavailable')`.
-For activations that are `stopped` with reason `lab_activation_tools_disabled`
-or `readmit_unavailable`, create one replacement activation per document with
-`POST /api/lab/activations` using the stopped activation's `doc_id` and `interval_s`
-from the listing or query: stopped activations cannot be resumed or renewed
-(409 `lab_activation_state_conflict`). A tenant can hold at most 10 active, paused
-and expired activations combined; create in `server/lab_activation.py` refuses
-with 409 `lab_activation_limit` at that cap. Create replacements only while the
-tenant is under the cap. If more stopped activations need replacing than the cap
-allows, replace the highest priority ones first and record the rest for the owner
-to decide whether to turn off or retire an existing activation first.
-An activation that was paused before the
-flag went off and never ticked can still be resumed as described in
-[Activations](#activations).
+**Recover:**
+
+1. Set `LEAF_LAB_TOOL_NODES=1` and roll again. Confirm each tool returns
+   to its recorded availability in `GET /api/lab/tools`, using the recorded `reason`
+   to interpret unavailable tools. A tool can also be unavailable because
+   tenant-authored execution is disabled or the broker sandbox tier is not
+   `microvm`; this rollback does not change those gates.
+2. List `GET /api/lab/activations`. For each activation that was active or paused
+   in the pre-stop record and is now `stopped`, decide per stopped activation,
+   not per document, whether to replace it. Resume and renew refuse `stopped`
+   with 409 `lab_activation_state_conflict`. Create each chosen replacement with
+   `POST /api/lab/activations` using that activation's recorded `doc_id` and
+   `interval_s`, only while the tenant is under the cap of 10 active, paused and
+   expired activations combined. Otherwise creation refuses with 409
+   `lab_activation_limit`; the owner turns off or retires an activation first.
+3. Observe the recovery limits: the listing shows all active, paused and expired
+   activations but only the 20 most recent stopped or off ones. The scheduler
+   purges stopped and off rows after seven days. Activations not in the pre-stop
+   record cannot be reconstructed by this guide; refer them to their owner.
 
 ### Image downgrade (R8)
 
