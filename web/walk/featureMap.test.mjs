@@ -20,6 +20,34 @@ const map = buildFeatureMap()
 const ids = map.entries.map((entry) => entry.id)
 const entryFor = (id) => map.entries.find((entry) => entry.id === id)
 
+test('WL39b only renders engine-refusal controls may carry a non-empty refusal', () => {
+  const entry = entryFor('control:delete-vertex')
+  assert.deepEqual(entry.expected_effect['invalid-vertex'], {
+    kind: 'renders', target: 'engine-refusal',
+    refusal: 'Delete vertex refused: vertex must be a non-negative integer.',
+  })
+  assert.doesNotThrow(() => buildFeatureMap({ overrides: clone(overrides) }))
+  for (const refusal of ['', '   ', null, undefined, 42]) {
+    const invalid = clone(overrides)
+    invalid.controls.find(row => row.id === entry.id).expected_effect['invalid-vertex'].refusal = refusal
+    assert.throws(() => validateOverrides(invalid), /refusal/)
+  }
+  for (const [kind, target] of [['renders', 'other-target'], ['opens', 'engine-refusal'],
+    ['submits', 'engine-refusal'], ['navigates', 'engine-refusal'], ['toggles', 'engine-refusal']]) {
+    const invalid = clone(overrides)
+    const row = invalid.controls.find(row => row.id === entry.id)
+    Object.assign(row.expected_effect['invalid-vertex'], { kind, target })
+    if (kind === 'toggles') {
+      row.state_contexts['invalid-vertex'].pressed = false
+      row.expected_effect['invalid-vertex'].value = true
+    }
+    assert.throws(() => validateOverrides(invalid), /control/)
+  }
+  const invalid = clone(overrides)
+  invalid.controls.find(row => row.id === 'control:new-drawing').expected_effect.unavailable.refusal = 'not permitted'
+  assert.throws(() => validateOverrides(invalid), /unknown control effect field/)
+})
+
 test('unavailable Quick access declarations carry the current product reasons', () => {
   for (const [id, label, reason] of [
     ['control:new-drawing', 'New drawing', "Start a new drawing from the project board's Start button"],
@@ -225,7 +253,7 @@ test('Script controls name scoped effects, native running locks and the Run refu
     ['choose-script', 'Choose script', 'opens', 'script-file-picker'],
     ['run-script', 'Run script', 'submits', 'script-run'],
   ]
-  assert.deepEqual(overrides.controls.slice(-3).map((row) => row.id), expected.map(([id]) => `control:${id}`))
+  assert.deepEqual(overrides.controls.slice(-4, -1).map((row) => row.id), expected.map(([id]) => `control:${id}`))
   for (const [id, title, kind, target] of expected) {
     const entry = entryFor(`control:${id}`)
     assert.equal(entry.title, title)
@@ -301,8 +329,9 @@ test('reachable map states and phone-only drawers remove exactly thirty-four tri
   // WL16b adds four desktop project Solar states to both inventories.
   // Ops adds ready/desktop and signed-out/desktop triples.
   // WL32 adds one ready/desktop chooser-open triple.
-  assert.equal(previousTriples.length, 865)
-  assert.equal(triples(map).length, 831)
+  // WL39b adds invalid-vertex on desktop and phone.
+  assert.equal(previousTriples.length, 867)
+  assert.equal(triples(map).length, 833)
   assert.deepEqual(triples(map), previousTriples.filter((triple) =>
     !triple.includes('/read-only-entity/') && !triple.includes('/no-versioned-drawing/')
       && !/^drawer:(plan|result)\/(closed|open)\/desktop$/.test(triple)))
@@ -619,8 +648,8 @@ test('completeness rejects every omitted row, including tools and the none drawe
   assert.throws(() => checkCompleteness({ ...map, entries: [...map.entries, map.entries[0]] }), /duplicate/)
 })
 
-test('fifty-two exact control declarations participate in independent completeness', () => {
-  const expected = ['chooser-open', 'fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
+test('fifty-three exact control declarations participate in independent completeness', () => {
+  const expected = ['delete-vertex', 'chooser-open', 'fullscreen', 'grid-display', 'new-drawing', 'object-snap', 'ortho-mode',
     'polar-tracking', 'print', 'snap-mode', 'view-back', 'view-up',
     'properties-close', 'properties-drawing', 'properties-layers', 'properties-panels', 'properties-plan',
     'properties-selection', 'properties-walk', 'layer-panels', 'layer-walk', 'job-monitor-expand',
@@ -628,8 +657,8 @@ test('fifty-two exact control declarations participate in independent completene
     'scope-add', 'demo-return', 'claude-accounts', 'drawing-close-start', 'notification-collapse', 'session-details', 'version-history', 'linked-services', 'project-board', 'prompt-run', 'prompt-scope', 'sign-out', 'start-board', 'take-edit-lock', 'cost-panel', 'command-bar', 'find-drawing',
     'open-dxf', 'save-version', 'undo-edit', 'redo-edit', 'more-panels', 'open-dxf-browser', 'objects',
     'ribbon-script', 'choose-script', 'run-script', 'object-snap-modes', 'find-drawing-submit'].map((id) => 'control:' + id).sort()
-  // Chooser-open joins the previous 51 declarations.
-  assert.equal(expected.length, 52)
+  // Delete vertex joins the previous 52 declarations.
+  assert.equal(expected.length, 53)
   assert.deepEqual(map.entries.filter((row) => row.kind === 'control').map((row) => row.id), expected)
   for (const declaration of overrides.controls) {
     const entry = entryFor(declaration.id)
@@ -643,7 +672,7 @@ test('fifty-two exact control declarations participate in independent completene
       assert.equal(entry.certify_reason, undefined)
     }
     assert.equal(entry.certify, declaration.certify)
-    assert.deepEqual(entry.viewports, ['desktop'])
+    assert.deepEqual(entry.viewports, declaration.id === 'control:delete-vertex' ? ['desktop', 'phone'] : ['desktop'])
     const reference = overrides.controls.filter((row) => row.id !== declaration.id)
     assert.throws(() => checkCompleteness(map, DEFAULT_REGISTRIES, snapshot, reference), /unexpected/)
   }

@@ -1414,6 +1414,7 @@ export async function captureEngineRefusal(runtime) {
 
 export async function assertEngineRefusal(probe, runtime, before, assertions = expect) {
   const status = runtime.page.getByTestId('cad-edit-workbench').getByRole('status')
+  runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before }
   await assertions(status).toHaveText(probe.assertion.refusal)
   const after = await captureEngineRefusal(runtime)
   runtime.evidence.engineRefusal = { expected: probe.assertion.refusal, observed: await status.innerText(), before, after }
@@ -2780,7 +2781,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'navigate', 'chooser-start', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
-  'select-entity', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
+  'select-entity', 'vertex-index', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
   'properties-state', 'properties-section-state', 'properties-close-state', 'layer-visible-state',
   'job-monitor-collapsed', 'overview-expanded-state', 'overview-pan-state', 'open-start',
   'open-escape-owner', 'find-submit-state', 'open-real-project',
@@ -2794,7 +2795,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'require-solar-document', 'hold-solar-projection',
 ]))
 export const ENGINE_SETUP_KINDS = Object.freeze(new Set([
-  'engine-ready', 'select-entity', 'create-line', 'hold-engine-edit',
+  'engine-ready', 'select-entity', 'vertex-index', 'create-line', 'hold-engine-edit',
   'require-engine-state', 'crash-engine-worker',
   'require-solar-document',
 ]))
@@ -3335,6 +3336,10 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'engine-ready': await engineReady(probe, runtime); return
+    case 'vertex-index':
+      await page.getByTestId('cad-edit-workbench').getByRole('textbox', { name: 'vertex index', exact: true }).fill(recipe.value)
+      await assertions(page.getByTestId('cad-edit-workbench').getByRole('button', { name: 'Delete vertex', exact: true })).toBeEnabled()
+      return
     case 'select-entity': await selectEntity(probe, runtime, recipe); return
     case 'clear-selection': await page.keyboard.press('Escape'); return
     case 'copy-selection':

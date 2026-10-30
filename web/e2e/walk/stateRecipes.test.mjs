@@ -5454,6 +5454,63 @@ function refusalRuntime() {
   return { runtime, state }
 }
 
+test('WL39b vertex-index setup fills the named input and requires idle Delete vertex', async () => {
+  const events = []
+  const button = { disabled: false }
+  const runtime = { evidence: {}, page: { getByTestId: (id) => {
+    assert.equal(id, 'cad-edit-workbench')
+    return { getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'textbox') {
+        assert.equal(options.name, 'vertex index')
+        return { fill: async value => events.push(['fill', value]) }
+      }
+      assert.equal(role, 'button'); assert.equal(options.name, 'Delete vertex')
+      return button
+    } }
+  } } }
+  await setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions)
+  assert.deepEqual(events, [['fill', '-1']])
+  button.disabled = true
+  await assert.rejects(setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions))
+})
+
+test('WL39b fake activation uses the real refusal oracle and typed red-hat verdict on both viewports', async () => {
+  const entry = buildFeatureMap().entries.find(row => row.id === 'control:delete-vertex')
+  for (const viewport of entry.viewports) for (const fault of [null, 'geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches', 'status']) {
+    const probe = resolveProbe(entry, 'invalid-vertex')
+    const { runtime, state } = refusalRuntime()
+    state.geometry.entities = [{ id: '1', type: 'LINE', vertices: [[0, 0], [10, 0]], layer: 'Walk' }]
+    state.selection = 'LINE #1; layer Walk'
+    state.status = ''
+    const evidence = runtime.evidence
+    Object.assign(evidence, { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId, state: probe.state, viewport })
+    const observers = runtime.walkPersonaObservers = createWalkPersonaObservers({ probe, viewport, evidence })
+    const before = await captureEngineRefusal(runtime)
+    await observers.observe('red-hat', 'before', before)
+    let clicks = 0
+    const locator = { click: async () => {
+      clicks++
+      state.status = fault === 'status' ? '' : probe.assertion.refusal
+      if (fault === 'geometry') state.geometry.entities[0].layer = 'Changed'
+      if (fault === 'selection') state.selection = 'no selection'
+      if (fault === 'history') state.history[0].disabled = false
+      if (fault === 'clipboard') state.clipboard.title = 'changed'
+      if (fault === 'versions') state.versions.head++
+      if (fault === 'dispatches') state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
+    } }
+    await locator.click()
+    const check = () => assertEffect(probe, runtime, locator, before, oracleAssertions)
+    if (fault) await assert.rejects(check())
+    else await check()
+    await observers.finish()
+    assert.equal(clicks, 1)
+    assert.equal(evidence.engineRefusal.observed, state.status)
+    const verdict = redHat.evaluate(evidence).status
+    assert.equal(verdict, fault === 'status' ? 'unknown' : fault ? 'finding' : 'pass', `${viewport}/${fault}`)
+  }
+})
+
 test('engine refusal requires exact text and preserves geometry, selection, history, clipboard and dispatch', async () => {
   for (const field of ['status', 'geometry', 'selection', 'history', 'clipboard', 'versions', 'dispatches']) {
     const { runtime, state } = refusalRuntime()
