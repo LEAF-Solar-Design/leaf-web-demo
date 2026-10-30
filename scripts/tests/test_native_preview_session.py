@@ -22,7 +22,7 @@ CREDS = {'client_id': 'synthetic-client', 'client_secret': SECRET}
 
 
 def payload(**changes):
-    return json.dumps({'access_token': 'synthetic-token', 'token_type': 'Bearer',
+    return json.dumps({'access_token': 'fixture', 'token_type': 'Bearer',
                        'expires_in': 60, **changes}).encode()
 
 
@@ -101,7 +101,7 @@ def test_exact_token_contract_and_fixed_platform(audience):
     assert response.reads == [32769]
     assert opener.platform[0].full_url == (worker.ORIGIN + '/api/projects/' +
         SCOPE['project_id'] + '/native-previews/worker/claim')
-    assert opener.platform[0].get_header('Authorization') == 'Bearer synthetic-token'
+    assert opener.platform[0].get_header('Authorization') == 'Bearer fixture'
     assert SECRET not in repr(http) + repr(native)
 
 
@@ -247,7 +247,7 @@ def test_refresh_at_skew_and_fresh_credentials():
         http.request('POST', 'complete', {})
     assert len(resolutions) == 2
     assert [r.get_header('Authorization') for r in opener.platform] == [
-        'Bearer synthetic-token', 'Bearer new', 'Bearer new']
+        'Bearer fixture', 'Bearer new', 'Bearer new']
 
 
 def test_concurrent_refresh_only_once():
