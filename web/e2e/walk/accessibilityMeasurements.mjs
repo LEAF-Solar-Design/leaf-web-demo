@@ -109,7 +109,8 @@ export function createAccessibilityMeasurementCapture({ page, dialog, openTarget
       return enqueue(async () => {
         if (!ready || escaped) return
         escaped = true
-        const closed = await observe(async () => {
+        const deadline = Date.now() + 500
+        const readClosed = () => observe(async () => {
           const connected = await page.evaluate((target) => target.isConnected, original)
           if (connected === false) return true
           if (connected === true) {
@@ -121,6 +122,11 @@ export function createAccessibilityMeasurementCapture({ page, dialog, openTarget
           }
           return undefined
         })
+        let closed = await readClosed()
+        while (closed === false && Date.now() < deadline) {
+          await new Promise(resolve => setTimeout(resolve, Math.min(25, deadline - Date.now())))
+          closed = await readClosed()
+        }
         if (typeof closed === 'boolean') measured.focus.escapeClosed = closed
         const actual = await observe(() => focusKey(returnHandle, targets.return.key))
         if (actual === targets.return.key || actual === mismatch) {
