@@ -4773,7 +4773,7 @@ export default function App() {
         wideViewport,
         jobRailExpanded: studioShell || jobRailExpanded,
         onJobRailExpand: () => setJobRailExpanded(true),
-        onJobRailCollapse: () => setJobRailExpanded(false),
+        onJobRailCollapse: studioShell ? undefined : () => setJobRailExpanded(false),
       }}
       entitlement={{
         tier: entTier,

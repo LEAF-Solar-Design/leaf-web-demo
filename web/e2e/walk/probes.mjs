@@ -516,3 +516,15 @@ export function resolveProbe(entry, state) {
     ...(entry.state_contexts?.[state]?.openProjectId ? { workerOptions: { walkPostgres: true } } : {}),
   }
 }
+
+export function projectSharedShellProbe(probe, { surface, studioPresent } = {}) {
+  if (surface !== 'browser' || !studioPresent || probe.profile !== 'project' || probe.state !== 'ready'
+    || !['tab:project:activity', 'tab:project:project'].includes(probe.featureId)) return probe
+  const activity = probe.featureId === 'tab:project:activity'
+  return { ...probe,
+    locator: { ...role('button', activity ? 'Studio' : 'Project', role('navigation', 'Workspace controls')), trigger: 'click' },
+    assertion: { ...probe.assertion, target: 'project-shared-sidebar',
+      region: activity ? 'Studio sidebar' : 'Project sidebar',
+      content: activity ? '#project-workspace-activity' : '#environment-project-panel .ground-pane' },
+  }
+}

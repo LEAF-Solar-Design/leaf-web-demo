@@ -9,9 +9,146 @@ import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, 
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
+import { prepareProjectSharedShell } from './fixtures.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
+import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
+
+function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser', studioPresent = true } = {}) {
+  let open = initial
+  let contentVisible = true
+  const events = []
+  const visible = read => ({ isVisible: async () => read() })
+  const button = name => ({ ...visible(() => name !== 'Studio' || studioPresent), click: async () => {
+    events.push(name)
+    open = open === name ? 'none' : name
+  } })
+  const region = name => ({ ...visible(() => open === name), getByRole: (role, options) => {
+    assert.equal(role, 'button')
+    assert.equal(options.exact, true)
+    return { click: async () => {
+      assert.equal(open, name, 'only visible close/content controls may be clicked')
+      events.push(options.name)
+      if (options.name === `Close ${name}`) open = 'none'
+      else if (options.name === 'Open versions') pane = true
+      else if (options.name === 'Back to board') pane = false
+      else assert.fail(`Unexpected sidebar control: ${options.name}`)
+    } }
+  } })
+  const page = {
+    locator: selector => {
+      if (selector === '.app') return { first: () => ({ getAttribute: async name => {
+        assert.equal(name, 'data-surface')
+        return surface
+      } }) }
+      if (selector === '#project-workspace-activity') return visible(() => open === 'Studio')
+      assert.equal(selector, '#environment-project-panel :is(.ground-pane, .ground-tile, .project-material-intake):visible')
+      // Only the current state's content exists, even though all three are valid oracle targets.
+      const content = pane === 'material' ? '.project-material-intake' : pane ? '.ground-pane' : '.ground-tile'
+      assert.ok(selector.includes(content))
+      return { first: () => visible(() => open === 'Project' && contentVisible) }
+    },
+    getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'navigation') {
+        assert.equal(options.name, 'Workspace controls')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          assert.equal(options.exact, true)
+          assert.ok(['Studio', 'Project'].includes(options.name))
+          return button(options.name)
+        } }
+      }
+      assert.equal(role, 'region')
+      assert.ok(['Studio sidebar', 'Project sidebar'].includes(options.name))
+      return region(options.name.replace(' sidebar', ''))
+    },
+  }
+  const assertions = locator => ({
+    toBeVisible: async () => assert.equal(await locator.isVisible(), true, 'content must be visible'),
+    toBeHidden: async () => assert.equal(await locator.isVisible(), false, 'sidebar must start closed'),
+  })
+  return { page, assertions, events, open: () => open, pane: () => pane,
+    clearContent: () => { contentVisible = false } }
+}
+
+test('WL36c shared sidebars observe each current pane state and restore only sidebar visibility', async () => {
+  const map = buildFeatureMap()
+  for (const tab of ['activity', 'project']) {
+    for (const initial of ['none', 'Studio', 'Project']) {
+      for (const pane of [false, true, 'material']) {
+        const fake = projectSidebarFake({ initial, pane })
+        const runtime = { page: fake.page, cleanup: [] }
+        const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+        const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+        assert.equal(fake.open(), 'none')
+        assert.equal(fake.pane(), pane)
+        assert.deepEqual(fake.events, initial === 'none' ? [] : [`Close ${initial}`])
+        if (initial !== 'none') assert.equal(fake.events[0], `Close ${initial}`)
+        const control = fake.page.getByRole('navigation', resolved.locator.scope)
+          .getByRole(resolved.locator.role, { name: resolved.locator.name, exact: true })
+        const activations = fake.events.length
+        await control.click()
+        assert.deepEqual(fake.events.slice(activations), [tab === 'activity' ? 'Studio' : 'Project'])
+        await assertEffect(resolved, runtime, control, {}, fake.assertions)
+        for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+        assert.equal(fake.open(), initial)
+        assert.equal(fake.pane(), pane)
+        assert.deepEqual(fake.events, [
+          ...(initial === 'none' ? [] : [`Close ${initial}`]),
+          tab === 'activity' ? 'Studio' : 'Project',
+          `Close ${tab === 'activity' ? 'Studio' : 'Project'}`,
+          ...(initial === 'none' ? [] : [initial]),
+        ])
+      }
+    }
+  }
+})
+
+test('WL36c shared sidebar oracle rejects a hidden region and a visible Project sidebar without content', async () => {
+  for (const tab of ['activity', 'project']) {
+    const fake = projectSidebarFake()
+    const runtime = { page: fake.page, cleanup: [] }
+    const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+    await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+    await fake.page.getByRole('navigation', resolved.locator.scope)
+      .getByRole('button', { name: resolved.locator.name, exact: true }).click()
+    if (tab === 'project') {
+      fake.clearContent()
+      await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions), /content must be visible/)
+    }
+  }
+})
+
+test('WL36b runtime resolver leaves legacy Ribbon recipes untouched without Studio or browser surface', async () => {
+  const map = buildFeatureMap()
+  for (const options of [{ studioPresent: false }, { surface: 'cad' }]) {
+    for (const tab of ['activity', 'project', 'tools']) {
+      const fake = projectSidebarFake(options)
+      const runtime = { page: fake.page, cleanup: [] }
+      const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+      assert.equal(await prepareProjectSharedShell(probe, runtime, fake.assertions), probe)
+      assert.deepEqual(fake.events, [])
+      assert.deepEqual(runtime.cleanup, [])
+    }
+  }
+})
+
+test('WL36c cleanup restores original sidebars after an oracle failure without losing Material', async () => {
+  for (const tab of ['activity', 'project']) {
+    const fake = projectSidebarFake({ initial: tab === 'activity' ? 'Project' : 'Studio', pane: 'material' })
+    const runtime = { page: fake.page, cleanup: [] }
+    const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
+    await assert.rejects(assertEffect(resolved, runtime, null, {}, fake.assertions))
+    for (const cleanup of runtime.cleanup.reverse()) await cleanup()
+    assert.equal(fake.open(), tab === 'activity' ? 'Project' : 'Studio')
+    assert.equal(fake.pane(), 'material')
+    assert.ok(fake.events.every(name => ['Studio', 'Project', 'Close Studio', 'Close Project'].includes(name)))
+  }
+})
 import { projectSolarResponse, projectSolarStep, switchProjectSolarForms, assertProjectSolarDrawing, observeProjectSolarResponses, setupRequestHeaders, observeProbeRequests } from './fixtures.mjs'
 import { inspectJob, inspectContext } from '../local/solarProjectWalk.mjs'
 import { expect as walkExpect, selectProjectSolarVersion, openProjectSolarTool,
@@ -3288,6 +3425,234 @@ test('project Solar drawing opens a collapsed flow seat once and leaves open or 
     await assertProjectSolarDrawing(runtime, stagingAssertions)
     await assertProjectSolarDrawing(runtime, stagingAssertions)
     assert.equal(clicks, initial === 'false' ? 1 : 0)
+  }
+})
+
+function solarRequiredFormFake(tool, { blocked = false, prefilled = false, title = '', titleThrows = false,
+  fieldAlerts = [], equipmentReason = 'This form cannot run in the current scope.' } = {}) {
+  const fields = SOLAR_REQUIRED_FORM_INPUTS[tool] || {}
+  const schema = JSON.parse(readFileSync(new URL(`../../../server/solar_tools/${tool.replaceAll('-', '_')}.json`, import.meta.url), 'utf8')).record.params
+  const values = new Map(Object.keys(schema.properties).map(key => [key,
+    prefilled && fields[key] ? String(fields[key].value) : '']))
+  const inputs = [], checks = []
+  let visible = true, decisionVisible = false
+  const locator = { isVisible: async () => true }
+  const review = { click: async () => { decisionVisible = true }, getAttribute: async name => {
+    assert.equal(name, 'title')
+    if (titleThrows) throw new Error('Title read failed')
+    return title
+  } }
+  const reasonText = equipmentReason
+  const reason = { isVisible: async () => blocked && equipmentReason !== null, innerText: async () => reasonText }
+  const region = {
+    isVisible: async () => visible,
+    getByLabel: (name, options) => {
+      assert.deepEqual(options, { exact: true })
+      const key = Object.keys(schema.properties).find(key => {
+        const label = (schema.properties[key].title || key).replaceAll('_', ' ')
+        return label.charAt(0).toUpperCase() + label.slice(1) === name
+      })
+      const record = async (value, method) => { inputs.push({ key, value, method }); values.set(key, value) }
+      return { count: async () => Number(key !== undefined), inputValue: async () => values.get(key),
+        fill: value => record(value, 'fill'), selectOption: option => record(option.label, 'select') }
+    },
+    getByTestId: id => { assert.equal(id, 'project-solar-equipment-reason'); return reason },
+    getByRole: (role, options) => {
+      if (role === 'alert') return { count: async () => fieldAlerts.length, nth: index => ({
+        isVisible: async () => fieldAlerts[index].visible !== false,
+        innerText: async () => fieldAlerts[index].text,
+      }) }
+      return options.name === 'Review & run' ? review : { click: async () => { visible = false } }
+    },
+  }
+  const decision = { focus: async () => {} }
+  const runtime = { evidence: {}, page: {
+    getByRole: (role, options) => {
+      if (role === 'region') { assert.equal(options.name, `${tool} parameters`); return region }
+      assert.equal(options.name, `Run ${tool}`)
+      return decision
+    },
+    keyboard: { press: async () => { decisionVisible = false } },
+  } }
+  const assertions = value => ({
+    toBeVisible: async () => assert.equal(value === region ? visible : decisionVisible, true),
+    toBeHidden: async () => assert.equal(value === region ? visible : decisionVisible, false),
+    toBeFocused: async () => assert.equal(value, locator),
+    toEqual: expected => assert.deepEqual(value, expected),
+    toBeEnabled: async () => {
+      checks.push('enabled')
+      assert.equal(value, review)
+      for (const key of schema.required) assert.notEqual(values.get(key), '', `${key} must be filled before enabled check`)
+      assert.equal(blocked, false, 'Review & run remains disabled')
+    },
+  })
+  return { runtime, locator, assertions, inputs, checks, reasonText,
+    run: () => assertSolarStepEditor({ assertion: { tool } }, runtime, locator, { runRequests: [] }, assertions) }
+}
+
+for (const tool of Object.keys(SOLAR_REQUIRED_FORM_INPUTS)) {
+  test(`WL35 ${tool} fills every empty required field before checking Review & run`, async () => {
+    const fake = solarRequiredFormFake(tool)
+    await fake.run()
+    const fields = SOLAR_REQUIRED_FORM_INPUTS[tool]
+    assert.equal(fake.inputs.length, Object.keys(fields).length)
+    for (const [key, field] of Object.entries(fields)) {
+      assert.deepEqual(fake.inputs.filter(input => input.key === key), [{ key,
+        value: field.select ?? String(field.value), method: field.select === undefined ? 'fill' : 'select' }])
+    }
+    assert.deepEqual(fake.checks, ['enabled'])
+    assert.equal(fake.runtime.evidence.solarStepEditor.reviewed, true)
+  })
+  test(`WL35 ${tool} preserves required inputs already present`, async () => {
+    const fake = solarRequiredFormFake(tool, { prefilled: true })
+    await fake.run()
+    assert.deepEqual(fake.inputs, [])
+  })
+}
+
+test('WL35 a Solar tool outside the five receives no extra inputs', async () => {
+  const fake = solarRequiredFormFake('solar-unit-sync')
+  await fake.run()
+  assert.deepEqual(fake.inputs, [{ key: 'expected_rev', value: '0', method: 'fill' },
+    { key: 'distance_unit', value: 'Meters', method: 'select' }])
+})
+
+test('WL35 a disabled run records its visible reason and still fails', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, title: 'Reading the drawing revision', equipmentReason: null,
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'button-title', text: 'Reading the drawing revision',
+  })
+  assert.equal(fake.runtime.evidence.solarStepEditor, undefined)
+})
+
+test('WL35b field alerts precede equipment text and include only non-empty visible reasons', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true, title: '  ', fieldAlerts: [
+    { text: '  First field is required.  ' }, { text: 'Hidden field reason', visible: false },
+    { text: ' ' }, { text: 'Second field is required.' },
+  ] })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'field-alerts', text: 'First field is required.; Second field is required.',
+  })
+})
+
+test('WL35b equipment text is the final non-empty reason source', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'equipment-reason', text: fake.reasonText })
+})
+
+test('WL35b an absent or empty reason is explicit and preserves the enabled failure', async () => {
+  for (const equipmentReason of [null, '  ']) {
+    const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true, title: null, equipmentReason })
+    await assert.rejects(fake.run(), /Review & run remains disabled/)
+    assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'none', text: '' })
+    assert.equal(fake.runtime.evidence.solarStepEditor, undefined)
+  }
+})
+
+test('WL35b a throwing title read falls back to the next reason source', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, titleThrows: true, fieldAlerts: [{ text: 'A field is required.' }],
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'field-alerts', text: 'A field is required.' })
+})
+
+test('WL35b a non-empty button title precedes field alerts and equipment text', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, title: '  Reading the drawing revision  ', fieldAlerts: [{ text: 'A field is required.' }],
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'button-title', text: 'Reading the drawing revision',
+  })
+})
+
+test('WL35 the frozen table covers exactly the required schemas with auditable sources', () => {
+  assert.deepEqual(Object.keys(SOLAR_REQUIRED_FORM_INPUTS), ['solar-nec-ac-voltage-drop',
+    'solar-nec-ampacity-correction', 'solar-nec-conduit-fill', 'solar-nec-feeder-ocpd', 'solar-trench-manual'])
+  assert.ok(Object.isFrozen(SOLAR_REQUIRED_FORM_INPUTS))
+  for (const [tool, fields] of Object.entries(SOLAR_REQUIRED_FORM_INPUTS)) {
+    const schema = JSON.parse(readFileSync(new URL(`../../../server/solar_tools/${tool.replaceAll('-', '_')}.json`, import.meta.url), 'utf8')).record.params
+    assert.deepEqual(Object.keys(fields).sort(), [...schema.required].sort())
+    assert.ok(Object.isFrozen(fields))
+    for (const [key, field] of Object.entries(fields)) {
+      assert.ok(Object.isFrozen(field))
+      assert.match(field.source, /^(scenario\/test input|schema default|first enum option|schema numeric minimum): /)
+      const property = schema.properties[key]
+      assert.equal(typeof field.value, property.type === 'integer' ? 'number' : property.type)
+      if (property.enum) assert.ok(property.enum.includes(field.value))
+      if (property.minimum !== undefined) assert.ok(field.value >= property.minimum)
+      if (property.maximum !== undefined) assert.ok(field.value <= property.maximum)
+    }
+  }
+})
+
+test('G1 Solar editor reviews, dismisses and cancels without submitting a run', async () => {
+  for (const [tool, submitted, railVisible] of [
+    ['solar-unit-sync', false, true], ['solar-unit-sync', true, true], ['solar-design-presets', false, true],
+    ['solar-unit-sync', false, false], ['solar-unit-sync', true, false], ['solar-design-presets', false, false],
+  ]) {
+    const calls = []
+    const inputs = []
+    let listener, visible = true, decisionVisible = false, focused = null
+    const locator = { click: async () => { visible = true }, isVisible: async () => railVisible }
+    const more = {}
+    const field = { count: async () => 0 }
+    const review = { click: async () => {
+      calls.push('review'); decisionVisible = true
+      if (submitted) listener({ method: () => 'POST', url: () => 'http://walk/api/run?wait=1' })
+    } }
+    const cancel = { click: async () => { calls.push('cancel'); visible = false; focused = railVisible ? locator : more } }
+    const region = { getByLabel: (name) => {
+      if (name === 'Expected rev') return { count: async () => 1, inputValue: async () => '',
+        fill: async (value) => { inputs.push([name, value]) } }
+      if (name === 'Distance unit' && tool === 'solar-unit-sync' || name === 'Subcommand' && tool === 'solar-design-presets') {
+        return { count: async () => 1, selectOption: async (option) => { inputs.push([name, option]) } }
+      }
+      if (name === 'Name' && tool === 'solar-design-presets') return { count: async () => 1,
+        fill: async (value) => { inputs.push([name, value]) } }
+      return field
+    }, isVisible: async () => visible,
+      getByRole: (role, options) => options.name === 'Review & run' ? review : cancel }
+    const decision = { focus: async () => { calls.push('decision-focus') } }
+    const page = {
+      locator: (selector) => { assert.equal(selector, 'button[aria-controls="drafting-ribbon-panels"]'); return more },
+      on: (event, handler) => { assert.equal(event, 'request'); listener = handler },
+      off: (event, handler) => { assert.equal(event, 'request'); assert.equal(handler, listener); calls.push('unobserve') },
+      getByRole: (role, options) => {
+        if (role === 'region') { assert.equal(options.name, `${tool} parameters`); return region }
+        assert.equal(options.name, `Run ${tool}`); return decision
+      },
+      keyboard: { press: async (key) => { assert.equal(key, 'Escape'); calls.push('dismiss'); decisionVisible = false } },
+    }
+    const assertions = (value) => ({
+      toBeVisible: async () => assert.equal(value === region ? visible : decisionVisible, true),
+      toBeHidden: async () => assert.equal(value === region ? visible : decisionVisible, false),
+      toBeEnabled: async () => assert.equal(value, review),
+      toBeFocused: async () => { assert.equal(value, railVisible ? locator : more); assert.equal(focused, value) },
+      toEqual: (expected) => assert.deepEqual(value, expected),
+    })
+    const runtime = { page, cleanup: [], evidence: {} }
+    const before = observeSolarEditorRequests(runtime)
+    listener({ method: () => 'GET', url: () => 'http://walk/api/run' })
+    listener({ method: () => 'POST', url: () => 'http://walk/api/other' })
+    const probe = { kind: 'tool', assertion: { target: 'solar-step-editor', tool } }
+    const pending = assertEffect(probe, runtime, locator, before, assertions)
+    if (submitted) await assert.rejects(pending, assert.AssertionError)
+    else {
+      await pending
+      assert.deepEqual(runtime.evidence.solarStepEditor, { tool, reviewed: true, cancelled: true, runRequests: [] })
+    }
+    assert.deepEqual(inputs, tool === 'solar-unit-sync'
+      ? [['Expected rev', '0'], ['Distance unit', { label: 'Meters' }]]
+      : [['Expected rev', '0'], ['Subcommand', { label: 'Create' }], ['Name', 'Walk proof preset']])
+    await runtime.cleanup[0]()
+    assert.deepEqual(calls, ['review', 'decision-focus', 'dismiss', 'cancel', 'unobserve'])
   }
 })
 

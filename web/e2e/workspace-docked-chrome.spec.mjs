@@ -393,6 +393,44 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 709 }], ['pho
   })
 }
 
+for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['phone', { width: 390, height: 844 }]]) {
+  test(`Studio monitor dismissal at ${size}`, async ({ page }, info) => {
+    test.setTimeout(60_000)
+    page.setDefaultTimeout(15_000)
+    await page.setViewportSize(viewport)
+    const mutations = await backend(page)
+    await page.goto('/app?surface=browser')
+    const opener = page.getByRole('navigation', { name:'Workspace controls', exact:true })
+      .getByRole('button', { name:'Studio', exact:true })
+    const sidebar = page.getByRole('region', { name:'Studio sidebar', exact:true })
+    const monitor = sidebar.getByRole('heading', { name:/^Job monitor/ })
+    const expectNoOverflow = async () => {
+      await expect.poll(() => page.evaluate(() =>
+        Math.max(document.documentElement.scrollWidth, document.body.scrollWidth) <= innerWidth
+      )).toBe(true)
+    }
+    const expectOpenMonitor = async phase => {
+      await expect(sidebar).toBeVisible()
+      await expect(monitor).toBeVisible()
+      await expect(sidebar.getByRole('button', { name:'Collapse the job monitor', exact:true })).toHaveCount(0)
+      await expectNoOverflow()
+      await info.attach(`studio-monitor-${size}-${phase}`, { body:await page.screenshot(), contentType:'image/png' })
+    }
+    await opener.click()
+    await expectOpenMonitor('open')
+    const close = sidebar.getByRole('button', { name:'Close Studio', exact:true })
+    await expectCenterHit(close)
+    await close.click()
+    await expect(sidebar).toBeHidden()
+    await expect(monitor).toBeHidden()
+    await expect(opener).toBeFocused()
+    await expectNoOverflow()
+    await opener.click()
+    await expectOpenMonitor('reopened')
+    expect(mutations).toEqual([])
+  })
+}
+
 for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wide-desktop', { width: 1600, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`docked workspace chrome remains usable at ${size}`, async ({ page }, info) => {
     test.setTimeout(120_000)

@@ -3,10 +3,10 @@ import test from 'node:test'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS,
-  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps } from './probes.mjs'
+  SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
-import { ENGINE_WASM_ROUTE, observeSolarEditorRequests, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
+import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
@@ -30,6 +30,35 @@ test('WL39b resolves the bounded Delete vertex refusal on desktop and phone', ()
       { kind: 'select-entity', type: 'LINE', editable: true }, { kind: 'vertex-index', value: '-1' },
     ])
     assert.equal(unsupportedBeforeSetup(probe, { engineMounted: true }), null)
+  }
+})
+
+test('WL36b project Activity and Project resolve to shared-shell controls and content oracles', () => {
+  for (const [tab, name, region, content] of [
+    ['activity', 'Studio', 'Studio sidebar', '#project-workspace-activity'],
+    ['project', 'Project', 'Project sidebar', '#environment-project-panel .ground-pane'],
+  ]) {
+    const probe = resolveProbe(map.entries.find(row => row.id === `tab:project:${tab}`), 'ready')
+    const resolved = projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true })
+    assert.deepEqual(resolved.locator, { role: 'button', name, exact: true,
+      scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click' })
+    assert.deepEqual(resolved.assertion, { ...probe.assertion, target: 'project-shared-sidebar', region, content })
+    assert.equal(resolved.setup, probe.setup)
+    assert.equal(resolved.featureId, probe.featureId)
+    assert.equal(resolved.state, probe.state)
+  }
+})
+
+test('WL36b absent Studio, other surfaces, other profiles and Tools retain their Ribbon recipes', () => {
+  for (const entry of map.entries.filter(row => row.kind === 'tab')) {
+    for (const state of entry.states) {
+      const probe = resolveProbe(entry, state)
+      assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: false }), probe)
+      assert.equal(projectSharedShellProbe(probe, { surface: 'cad', studioPresent: true }), probe)
+      if (entry.profile !== 'project' || entry.source_id === 'tools' || state !== 'ready') {
+        assert.equal(projectSharedShellProbe(probe, { surface: 'browser', studioPresent: true }), probe)
+      }
+    }
   }
 })
 
@@ -276,70 +305,6 @@ test('Repeat uses Enter from eligible focus and seeds an accepted LINE only for 
   }
 })
 
-test('G1 Solar editor reviews, dismisses and cancels without submitting a run', async () => {
-  for (const [tool, submitted, railVisible] of [
-    ['solar-unit-sync', false, true], ['solar-unit-sync', true, true], ['solar-design-presets', false, true],
-    ['solar-unit-sync', false, false], ['solar-unit-sync', true, false], ['solar-design-presets', false, false],
-  ]) {
-    const calls = []
-    const inputs = []
-    let listener, visible = true, decisionVisible = false, focused = null
-    const locator = { click: async () => { visible = true }, isVisible: async () => railVisible }
-    const more = {}
-    const field = { count: async () => 0 }
-    const review = { click: async () => {
-      calls.push('review'); decisionVisible = true
-      if (submitted) listener({ method: () => 'POST', url: () => 'http://walk/api/run?wait=1' })
-    } }
-    const cancel = { click: async () => { calls.push('cancel'); visible = false; focused = railVisible ? locator : more } }
-    const region = { getByLabel: (name) => {
-      if (name === 'Expected rev') return { count: async () => 1, inputValue: async () => '',
-        fill: async (value) => { inputs.push([name, value]) } }
-      if (name === 'Distance unit' && tool === 'solar-unit-sync' || name === 'Subcommand' && tool === 'solar-design-presets') {
-        return { count: async () => 1, selectOption: async (option) => { inputs.push([name, option]) } }
-      }
-      if (name === 'Name' && tool === 'solar-design-presets') return { count: async () => 1,
-        fill: async (value) => { inputs.push([name, value]) } }
-      return field
-    }, isVisible: async () => visible,
-      getByRole: (role, options) => options.name === 'Review & run' ? review : cancel }
-    const decision = { focus: async () => { calls.push('decision-focus') } }
-    const page = {
-      locator: (selector) => { assert.equal(selector, 'button[aria-controls="drafting-ribbon-panels"]'); return more },
-      on: (event, handler) => { assert.equal(event, 'request'); listener = handler },
-      off: (event, handler) => { assert.equal(event, 'request'); assert.equal(handler, listener); calls.push('unobserve') },
-      getByRole: (role, options) => {
-        if (role === 'region') { assert.equal(options.name, `${tool} parameters`); return region }
-        assert.equal(options.name, `Run ${tool}`); return decision
-      },
-      keyboard: { press: async (key) => { assert.equal(key, 'Escape'); calls.push('dismiss'); decisionVisible = false } },
-    }
-    const assertions = (value) => ({
-      toBeVisible: async () => assert.equal(value === region ? visible : decisionVisible, true),
-      toBeHidden: async () => assert.equal(value === region ? visible : decisionVisible, false),
-      toBeEnabled: async () => assert.equal(value, review),
-      toBeFocused: async () => { assert.equal(value, railVisible ? locator : more); assert.equal(focused, value) },
-      toEqual: (expected) => assert.deepEqual(value, expected),
-    })
-    const runtime = { page, cleanup: [], evidence: {} }
-    const before = observeSolarEditorRequests(runtime)
-    listener({ method: () => 'GET', url: () => 'http://walk/api/run' })
-    listener({ method: () => 'POST', url: () => 'http://walk/api/other' })
-    const probe = { kind: 'tool', assertion: { target: 'solar-step-editor', tool } }
-    const pending = assertEffect(probe, runtime, locator, before, assertions)
-    if (submitted) await assert.rejects(pending, assert.AssertionError)
-    else {
-      await pending
-      assert.deepEqual(runtime.evidence.solarStepEditor, { tool, reviewed: true, cancelled: true, runRequests: [] })
-    }
-    assert.deepEqual(inputs, tool === 'solar-unit-sync'
-      ? [['Expected rev', '0'], ['Distance unit', { label: 'Meters' }]]
-      : [['Expected rev', '0'], ['Subcommand', { label: 'Create' }], ['Name', 'Walk proof preset']])
-    await runtime.cleanup[0]()
-    assert.deepEqual(calls, ['review', 'decision-focus', 'dismiss', 'cancel', 'unobserve'])
-  }
-})
-
 test('G1 run observation starts before activation and remains through Cancel', () => {
   const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
   const capture = source.slice(source.indexOf('async function captureBefore('), source.indexOf('async function activate('))
@@ -353,7 +318,8 @@ test('G1 Solar form probes retain the editor effect and catalog setup', () => {
   const snapshot = JSON.parse(readFileSync(new URL('../../walk/fixtures/capabilities.snapshot.json', import.meta.url), 'utf8'))
   for (const tool of snapshot.response.families.flatMap((family) => family.capabilities)) delete tool.availability
   const readyMap = buildFeatureMap({ snapshot })
-  for (const id of ['tool:solar-unit-sync', 'tool:solar-design-presets']) {
+  for (const id of ['tool:solar-unit-sync', 'tool:solar-design-presets', 'tool:solar-nec-ac-voltage-drop',
+    'tool:solar-nec-ampacity-correction', 'tool:solar-nec-conduit-fill', 'tool:solar-nec-feeder-ocpd', 'tool:solar-trench-manual']) {
     const probe = resolveProbe(readyMap.entries.find((row) => row.id === id), 'ready')
     assert.equal(probe.assertion.target, 'solar-step-editor')
     assert.equal(probe.assertion.tool, probe.sourceId)

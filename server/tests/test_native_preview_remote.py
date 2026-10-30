@@ -1,12 +1,14 @@
 """Remote protocol source proofs. All worker receipts here are synthetic test
 evidence, never a simulator run. Durable cases use the existing PostgreSQL spine.
 """
+import asyncio
 import base64
 import binascii
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
 import struct
+import threading
 from types import SimpleNamespace
 import time
 import uuid
@@ -532,6 +534,90 @@ def test_real_postgres_reaper_settles_expired_remote_and_mirror_once(linked_remo
     jobs._reap_orphans_once()
     assert expiry_rows(db, jid, mirror) == (authority, platform)
     assert not any(e.calls for e in executors.values())
+
+
+def test_real_postgres_startup_expires_remote_without_submission(linked_remote, monkeypatch):
+    import app as application
+
+    _, db, executors, jid, _, ident, mirror = linked_remote
+    expire_original_budget(db, jid)
+    before = jobs.get_job(jid)
+    handler = application.initialize_job_runtime
+    assert handler in application.app.router.on_startup
+    monkeypatch.setattr(application.app.router, 'on_startup', [handler])
+    monkeypatch.setattr(application.app.router, 'on_shutdown', [])
+
+    async def run_lifespan():
+        async with application.app.router.lifespan_context(application.app):
+            pass
+    monkeypatch.setattr(jobs, '_executors', {})
+    monkeypatch.setattr(jobs, '_reaper_started', False)
+    monkeypatch.setattr(jobs, 'ThreadPoolExecutor', lambda **kwargs:
+        executors[kwargs['thread_name_prefix'].removeprefix('jobworker-')])
+
+    def no_submission(*args, **kwargs):
+        raise AssertionError('startup must not submit a job')
+
+    monkeypatch.setattr(jobs, 'submit_job', no_submission)
+    monkeypatch.setattr(remote, 'submit', no_submission)
+    original_loop = jobs._reaper_loop
+    threads, errors, sleeps = [], [], []
+    finished = threading.Event()
+
+    class StopReaper(Exception):
+        pass
+
+    def reaper_thread(**kwargs):
+        thread = threading.Thread(**kwargs)
+        threads.append(thread)
+        return thread
+
+    def one_interval(seconds):
+        # Run the real loop's first sweep immediately, then end this simulated
+        # process daemon before the fixture removes its PostgreSQL rows.
+        if sleeps:
+            raise StopReaper()
+        sleeps.append(seconds)
+
+    def bounded_loop():
+        try:
+            original_loop()
+        except StopReaper:
+            pass
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            finished.set()
+
+    monkeypatch.setattr(jobs, 'time', SimpleNamespace(
+        time=time.time, monotonic=time.monotonic, sleep=one_interval))
+    monkeypatch.setattr(jobs, 'threading', SimpleNamespace(Thread=reaper_thread))
+    monkeypatch.setattr(jobs, '_reaper_loop', bounded_loop)
+    try:
+        asyncio.run(run_lifespan())
+        assert finished.wait(10), 'startup reaper did not finish its bounded sweep'
+        # Re-entry must reuse the same process owners, even without submission.
+        asyncio.run(run_lifespan())
+    finally:
+        for thread in threads:
+            thread.join(timeout=10)
+            assert not thread.is_alive(), 'startup reaper leaked into another test'
+    assert not errors
+    assert len(threads) == 1 and threads[0].daemon
+    assert jobs._reaper_started
+    assert jobs._executors == executors
+    assert sleeps == [jobs.REAPER_INTERVAL_S]
+    rec = jobs.get_job(jid)
+    assert rec['status'] == 'failed' and rec['result'] is None and rec['lease'] is None
+    assert rec['started_at'] == before['started_at']
+    assert rec['native_preview'] == before['native_preview']
+    assert rec['attempt'] == before['attempt'] == ident['attempt']
+    assert rec['error'] == jobs.error_obj(jobs.ErrorCode.TIMEOUT,
+        'native preview execution budget expired', False)
+    authority, platform = expiry_rows(db, jid, mirror)
+    assert authority['status'] == platform['status'] == 'failed'
+    assert not any(e.calls for e in executors.values())
+    assert native._executor is None
 
 
 @pytest.mark.parametrize('unstarted', [False, True])

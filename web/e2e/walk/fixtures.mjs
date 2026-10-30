@@ -11,7 +11,7 @@ import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { buildViewSearch } from '../../src/lib/urlState.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
-import { normalizedControlKey, solarChainSteps } from './probes.mjs'
+import { normalizedControlKey, solarChainSteps, projectSharedShellProbe } from './probes.mjs'
 import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
@@ -45,6 +45,41 @@ export async function revealStudioRail(page) {
   await expect(button).toHaveAttribute('aria-expanded', 'true')
   await expect(page.locator('#project-workspace-activity')).toBeVisible()
   return true
+}
+
+export async function prepareProjectSharedShell(probe, runtime, assertions = expect) {
+  if (probe.profile !== 'project' || probe.state !== 'ready'
+    || !['tab:project:activity', 'tab:project:project'].includes(probe.featureId)) return probe
+  const { page } = runtime
+  const surface = await page.locator('.app').first().getAttribute('data-surface')
+  if (surface !== 'browser') return probe
+  const resolved = projectSharedShellProbe(probe, { surface, studioPresent: await studioRailButton(page).isVisible() })
+  if (resolved === probe) return probe
+  const navigation = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+  const regions = ['Studio', 'Project'].map(name => ({ name,
+    region: page.getByRole('region', { name: `${name} sidebar`, exact: true }),
+    button: navigation.getByRole('button', { name, exact: true }),
+  }))
+  const original = []
+  for (const panel of regions) if (await panel.region.isVisible()) original.push(panel)
+  const close = async panel => {
+    await panel.region.getByRole('button', { name: `Close ${panel.name}`, exact: true }).click()
+    await assertions(panel.region).toBeHidden()
+  }
+  runtime.cleanup.push(async () => {
+    for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
+    for (const panel of original) {
+      await panel.button.click()
+      await assertions(panel.region).toBeVisible()
+    }
+  })
+  for (const panel of original) await close(panel)
+  for (const panel of regions) if (await panel.region.isVisible()) await close(panel)
+  await assertions(page.getByRole('region', { name: resolved.assertion.region, exact: true })).toBeHidden()
+  return probe.featureId === 'tab:project:project'
+    ? { ...resolved, assertion: { ...resolved.assertion,
+      content: '#environment-project-panel :is(.ground-pane, .ground-tile, .project-material-intake):visible' } }
+    : resolved
 }
 
 export function redactSolarDiagnostic(value, { maxLength = 300 } = {}) {
@@ -512,6 +547,47 @@ export function studioJobMonitorContent(page) {
   return page.locator('aside.rail').filter({ has: page.getByRole('heading', { name: /^Job monitor/ }) })
     .locator('.rail-ske, .rail-empty, .rail-ledger > *').first()
 }
+
+// Values are from same-tool server inputs, before schema defaults/enums/minima.
+// Labels and select option text follow SchemaForm's accessible names.
+export const SOLAR_REQUIRED_FORM_INPUTS = Object.freeze(Object.fromEntries(Object.entries({
+  'solar-nec-ac-voltage-drop': {
+    current_a: { label: 'Current a', value: 100 },
+    one_way_length_ft: { label: 'One way length ft', value: 100 },
+    r_ohm_per_1000ft: { label: 'R ohm per 1000ft', value: 0.1 },
+    x_ohm_per_1000ft: { label: 'X ohm per 1000ft', value: 0 },
+    power_factor: { label: 'Power factor', value: 1 },
+    phase: { label: 'Phase', value: 1, select: '1' },
+    source_voltage: { label: 'Source voltage', value: 480 },
+  },
+  'solar-nec-ampacity-correction': {
+    base_ampacity: { label: 'Base ampacity', value: 100 },
+    temp_factor: { label: 'Temp factor', value: 0.91 },
+    conduit_factor: { label: 'Conduit factor', value: 0.8 },
+  },
+  'solar-nec-conduit-fill': {
+    conductor_gauge: { label: 'Conductor gauge', value: '12 AWG', select: '12 AWG' },
+    current_carrying_count: { label: 'Current carrying count', value: 3 },
+    conduit_type: { label: 'Conduit type', value: 'EMT', select: 'EMT' },
+    conductor_insulation: { label: 'Conductor insulation', value: 'THWN2', select: 'THWN2' },
+  },
+  'solar-nec-feeder-ocpd': {
+    continuous_current_a: { label: 'Continuous current a', value: 100 },
+    is_continuous: { label: 'Is continuous', value: true, select: 'True' },
+    egc_material: { label: 'Egc material', value: 'Copper', select: 'Copper' },
+  },
+  'solar-trench-manual': {
+    operation: { label: 'Operation', value: 'add-trench', select: 'add-trench' },
+    expected_rev: { label: 'Expected rev', value: 0 },
+    start_x: { label: 'Start x', value: -80 },
+    start_y: { label: 'Start y', value: 0 },
+    end_x: { label: 'End x', value: 320 },
+    end_y: { label: 'End y', value: 0 },
+  },
+}).map(([tool, fields]) => [tool, Object.freeze(Object.fromEntries(Object.entries(fields).map(([key, field]) =>
+  [key, Object.freeze({ ...field, source: tool === 'solar-trench-manual'
+    ? `scenario/test input: server/tests/test_solar_tool_solar_trench_manual.py:${key === 'operation' ? 140 : 40}`
+    : 'scenario/test input: server/tests/test_sip_r6_read.py:28-33' })])))])))
 
 export const PANEL_PERFORMANCE_BUDGET_SOURCE = 'WL28-PANEL-PERFORMANCE-BUDGETS.md'
 export const PANEL_PERFORMANCE_VIEWPORTS = Object.freeze({
@@ -2506,6 +2582,13 @@ export async function assertSolarStepEditor(probe, runtime, locator, before, ass
   }
   const unit = region.getByLabel('Distance unit', { exact: true })
   if (await unit.count()) await unit.selectOption({ label: 'Meters' })
+  for (const fieldInput of Object.values(SOLAR_REQUIRED_FORM_INPUTS[tool] || {})) {
+    const field = region.getByLabel(fieldInput.label, { exact: true })
+    if (await field.count() && await field.inputValue() === '') {
+      if (fieldInput.select !== undefined) await field.selectOption({ label: fieldInput.select })
+      else await field.fill(String(fieldInput.value))
+    }
+  }
   if (tool === 'solar-design-presets') {
     for (const name of ['Subcommand', 'Action']) {
       const field = region.getByLabel(name, { exact: true })
@@ -2517,7 +2600,45 @@ export async function assertSolarStepEditor(probe, runtime, locator, before, ass
     }
   }
   const review = region.getByRole('button', { name: 'Review & run', exact: true })
-  await assertions(review).toBeEnabled()
+  try {
+    await assertions(review).toBeEnabled()
+  } catch (error) {
+    if (SOLAR_REQUIRED_FORM_INPUTS[tool]) {
+      let blockedReason = { source: 'none', text: '' }
+      try {
+        const text = (await review.getAttribute('title') || '').trim()
+        if (text) blockedReason = { source: 'button-title', text }
+      } catch {}
+      if (!blockedReason.text) {
+        const visibleReasons = []
+        // GenericSolarToolForm exposes invalid required fields as SchemaForm alerts.
+        try {
+          const alerts = region.getByRole('alert')
+          for (let index = 0; index < await alerts.count(); index++) {
+            try {
+              const alert = alerts.nth(index)
+              if (await alert.isVisible()) {
+                const text = (await alert.innerText()).trim()
+                if (text) visibleReasons.push(text)
+              }
+            } catch {}
+          }
+        } catch {}
+        if (visibleReasons.length) blockedReason = { source: 'field-alerts', text: visibleReasons.join('; ') }
+      }
+      if (!blockedReason.text) {
+        try {
+          const reason = region.getByTestId('project-solar-equipment-reason')
+          if (await reason.isVisible()) {
+            const text = (await reason.innerText()).trim()
+            if (text) blockedReason = { source: 'equipment-reason', text }
+          }
+        } catch {}
+      }
+      runtime.evidence.solarRunBlockedReason = blockedReason
+    }
+    throw error
+  }
   await review.click()
   const decision = page.getByRole('button', { name: `Run ${tool}`, exact: true })
   await assertions(decision).toBeVisible()
@@ -3871,6 +3992,12 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
   const { page } = runtime
   const effect = probe.assertion
   const target = effect.target || ''
+  if (target === 'project-shared-sidebar') {
+    await expect(page.getByRole('region', { name: effect.region, exact: true })).toBeVisible()
+    const content = page.locator(effect.content)
+    await expect(effect.region === 'Project sidebar' ? content.first() : content).toBeVisible()
+    return
+  }
   if (target === 'chooser-project-sidebar') {
     await assertChooserOpen(runtime, assertions)
     return
@@ -4449,6 +4576,10 @@ export async function runProbe(probe, runtime) {
     }
     page = runtime.page
     evidence.setupCompleted = { elapsedMs: Date.now() - setupStartedAt }
+    if (typeof prepareProjectSharedShell === 'function') {
+      probe = await prepareProjectSharedShell(probe, runtime)
+      if (probe.assertion.target === 'project-shared-sidebar') evidence.effectiveEffect = probe.assertion
+    }
     if (probe.featureId === 'control:chooser-open' && typeof runChooserOpen === 'function') {
       await runChooserOpen(probe, runtime, runtime.recipeAssertions || expect)
       evidence.result = { result: 'passed', featureId: probe.featureId, state: probe.state }
