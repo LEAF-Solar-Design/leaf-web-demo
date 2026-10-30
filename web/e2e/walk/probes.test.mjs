@@ -60,7 +60,6 @@ test('WL40 Tools resolves to the empty-board opener and Tools content oracle', (
   assert.deepEqual(probe.workerOptions, { walkPostgres: true })
   assert.deepEqual(probe.setup.steps, [
     { kind: 'open-private-drawing', surface: 'browser', signedOut: false },
-    { kind: 'open-real-project' },
   ])
   assert.equal(unsupportedBeforeSetup(probe), 'walk_postgres_required')
   assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true }), null)
