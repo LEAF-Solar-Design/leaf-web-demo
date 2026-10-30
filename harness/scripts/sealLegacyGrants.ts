@@ -1,0 +1,213 @@
+import { randomUUID } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
+import { pathToFileURL } from "node:url";
+import { EnvelopeTenantGrantStore, resolveGrantsDir } from "../src/ports/impl/oauthGrantProvider.js";
+import type { GrantStatus } from "../src/ports/index.js";
+import { grantKeyProviderFromEnv } from "../src/security/grantEnvelope/fromEnv.js";
+import type { KeyProvider } from "../src/security/grantEnvelope/keyProvider.js";
+
+const TENANT = /^[a-z0-9][a-z0-9_-]{0,62}$/;
+const USAGE = "Usage: sealLegacyGrants.js (--dry-run | --seal) [--tenant <id>]...";
+const REFUSAL = "Seal requires vault mode and a configured KMS key provider";
+type Classification = "sealed" | "plaintext" | "token_only" | "corrupt" | "absent";
+type Outcome = { tenant: string; outcome: "sealed" | "already_sealed" | "blocked" | "absent"; reason: string | null };
+type Summary = { sealed: number; legacy_remaining: number; blocked_tenants: number; outside_scope_legacy: number };
+export type RestoreWriter = (path: string, bytes: Buffer) => void | Promise<void>;
+
+function plaintext(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && "version" in value
+    && [1, 2, 3].includes((value as Record<string, unknown>).version as number);
+}
+
+export function classifyTenant(dir: string, tenant: string): { tenant: string; class: Classification; legacy_sidecar: boolean } {
+  if (!TENANT.test(tenant)) throw new Error("Invalid tenant");
+  const token = existsSync(join(dir, `${tenant}.token`));
+  const legacy_sidecar = token || existsSync(join(dir, `${tenant}.kind`));
+  const path = join(dir, `${tenant}.grant.json`);
+  let classification: Classification = token ? "token_only" : "absent";
+  if (existsSync(path)) {
+    classification = "corrupt";
+    try {
+      const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (plaintext(value)) classification = "plaintext";
+      else if (typeof value === "object" && value !== null) {
+        const record = value as Record<string, unknown>;
+        if (!("version" in record) && record.v === 1 && record.alg === "A256GCM"
+          && ["iv", "ct", "tag", "wk"].every(key => typeof record[key] === "string")) classification = "sealed";
+      }
+    } catch (error) {
+      if (!(error instanceof SyntaxError)) throw error;
+    }
+  }
+  return { tenant, class: classification, legacy_sidecar };
+}
+
+function inventory(dir: string): { tenants: string[]; skipped_names: number } {
+  const tenants = new Set<string>();
+  let skipped_names = 0;
+  for (const name of existsSync(dir) ? readdirSync(dir) : []) {
+    const suffix = [".grant.json", ".token", ".kind"].find(ending => name.endsWith(ending));
+    if (!suffix) continue;
+    const tenant = name.slice(0, -suffix.length);
+    if (TENANT.test(tenant)) tenants.add(tenant);
+    else skipped_names++;
+  }
+  return { tenants: [...tenants].sort(), skipped_names };
+}
+
+class MigratingEnvelopeStore extends EnvelopeTenantGrantStore {
+  protected override async readRecordPayload(tenantId: string, path: string): Promise<unknown> {
+    if (existsSync(path)) {
+      const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+      if (plaintext(value)) return value;
+    }
+    return super.readRecordPayload(tenantId, path);
+  }
+}
+
+const atomicRestore: RestoreWriter = (path, bytes) => {
+  const temp = `${path}.${process.pid}.${randomUUID()}.tmp`;
+  let fd: number | undefined;
+  try {
+    fd = openSync(temp, "wx", 0o600);
+    writeFileSync(fd, bytes);
+    fsyncSync(fd);
+    closeSync(fd);
+    fd = undefined;
+    renameSync(temp, path);
+    // Directory fsync is unavailable on Windows. Other failures must surface.
+    if (process.platform !== "win32") {
+      try {
+        const directory = openSync(dirname(path), "r");
+        try { fsyncSync(directory); } finally { closeSync(directory); }
+      } catch (error) {
+        if (!["EINVAL", "ENOTSUP", "EOPNOTSUPP"].includes((error as NodeJS.ErrnoException).code ?? "")) throw error;
+      }
+    }
+  } finally {
+    if (fd !== undefined) closeSync(fd);
+    rmSync(temp, { force: true });
+  }
+};
+
+async function verified(store: EnvelopeTenantGrantStore, tenant: string, before: GrantStatus): Promise<boolean> {
+  const diagnostic = await store.diagnostic(tenant);
+  const after = await store.status(tenant);
+  const ids = (status: GrantStatus) => (status.accounts ?? []).map(account => account.id).sort();
+  return diagnostic.backend === "vault" && diagnostic.record_format === "v3" && diagnostic.linked
+    && before.linked && after.linked && !!before.active_account_id
+    && after.active_account_id === before.active_account_id
+    && ids(before).length > 0 && JSON.stringify(ids(before)) === JSON.stringify(ids(after));
+}
+
+function summarize(dir: string, scope: string[], all: string[], sealed: number, blocked_tenants: number): Summary {
+  const legacy = (tenant: string) => {
+    try {
+      const record = classifyTenant(dir, tenant);
+      return record.class === "plaintext" || record.legacy_sidecar;
+    } catch {
+      // An unreadable record cannot be certified free of legacy credentials.
+      return true;
+    }
+  };
+  return {
+    sealed, legacy_remaining: scope.filter(legacy).length, blocked_tenants,
+    outside_scope_legacy: all.filter(tenant => !scope.includes(tenant) && legacy(tenant)).length,
+  };
+}
+
+export async function sealTenants(dir: string, tenantScope: readonly string[] | undefined, keyProvider: KeyProvider, restore: RestoreWriter = atomicRestore) {
+  if (tenantScope?.some(tenant => !TENANT.test(tenant))) throw new Error("Invalid tenant");
+  const found = inventory(dir);
+  const scope = [...new Set(tenantScope?.length ? tenantScope : found.tenants)].sort();
+  const migrating = new MigratingEnvelopeStore({ dir, keyProvider });
+  const reader = new EnvelopeTenantGrantStore({ dir, keyProvider });
+  const outcomes: Outcome[] = [];
+  for (const tenant of scope) {
+    let outcome: Outcome = { tenant, outcome: "blocked", reason: "error" };
+    try {
+      const record = classifyTenant(dir, tenant);
+      if (record.class === "token_only" || record.class === "corrupt") {
+        outcome.reason = record.class === "token_only" ? "token_only_relink" : "corrupt_record";
+      } else if (record.class === "absent") {
+        outcome = { tenant, outcome: "absent", reason: null };
+      } else if (record.class === "sealed" && !record.legacy_sidecar) {
+        outcome = { tenant, outcome: "already_sealed", reason: null };
+      } else {
+        const path = join(dir, `${tenant}.grant.json`);
+        const original = record.class === "plaintext" ? readFileSync(path) : undefined;
+        const before = await (original ? migrating : reader).status(tenant);
+        let pass = false;
+        try {
+          if (original) {
+            if (!before.active_account_id) throw new Error("Missing active account");
+            await migrating.activate(tenant, before.active_account_id);
+          }
+          pass = await verified(reader, tenant, before);
+        } catch {
+          // activate itself reads back after publishing; include that read in verification.
+          let unchanged = false;
+          try { unchanged = !!original && readFileSync(path).equals(original); } catch { /* Restore even if read-back is unavailable. */ }
+          if (unchanged) throw new Error("Conversion failed");
+        }
+        if (!pass) {
+          if (original) await restore(path, original);
+          outcome.reason = "verify_failed";
+        } else {
+          for (const suffix of [".token", ".kind"]) rmSync(join(dir, `${tenant}${suffix}`), { force: true });
+          outcome = { tenant, outcome: original ? "sealed" : "already_sealed", reason: null };
+        }
+      }
+    } catch { /* Never expose store errors or tenant credential metadata. */ }
+    outcomes.push(outcome);
+  }
+  return {
+    outcomes, skipped_names: found.skipped_names,
+    summary: summarize(dir, scope, found.tenants, outcomes.filter(row => row.outcome === "sealed").length,
+      outcomes.filter(row => row.outcome === "blocked").length),
+  };
+}
+
+export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
+  let summary: Summary = { sealed: 0, legacy_remaining: 0, blocked_tenants: 0, outside_scope_legacy: 0 };
+  const print = (value: unknown) => console.log(JSON.stringify(value));
+  try {
+    let mode: string | undefined;
+    const tenants: string[] = [];
+    for (let index = 0; index < argv.length; index++) {
+      const arg = argv[index];
+      if ((arg === "--dry-run" || arg === "--seal") && !mode) mode = arg;
+      else if (arg === "--tenant" && TENANT.test(argv[index + 1] ?? "")) tenants.push(argv[++index]);
+      else { console.error(USAGE); return 2; }
+    }
+    if (!mode) { console.error(USAGE); return 2; }
+    let provider: KeyProvider | undefined;
+    if (mode === "--seal") {
+      try {
+        if ((env.LEAF_GRANT_STORE ?? "").trim().toLowerCase() === "vault") provider = grantKeyProviderFromEnv(env);
+      } catch { /* Configuration details must not enter output. */ }
+      if (!provider) { console.error(REFUSAL); return 2; }
+    }
+    const dir = resolveGrantsDir(env);
+    if (provider) {
+      const result = await sealTenants(dir, tenants, provider);
+      summary = result.summary;
+      result.outcomes.forEach(print);
+    } else {
+      const found = inventory(dir);
+      const scope = [...new Set(tenants.length ? tenants : found.tenants)].sort();
+      scope.forEach(tenant => print(classifyTenant(dir, tenant)));
+      summary = summarize(dir, scope, found.tenants, 0, 0);
+    }
+    return summary.blocked_tenants ? 1 : 0;
+  } catch {
+    console.error("Grant sealing failed");
+    summary.blocked_tenants++;
+    return 1;
+  } finally { print(summary); }
+}
+
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
+  process.exitCode = await main(process.argv.slice(2), process.env);
+}
