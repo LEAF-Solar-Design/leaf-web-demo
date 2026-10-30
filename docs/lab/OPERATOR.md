@@ -379,6 +379,71 @@ activation ticks, including expiry processing. Resume the worker through
 tick. Only the active worker color schedules, at most once every five seconds.
 The same tenant transaction serializes enqueueing and the activation pointer.
 
+## Rollback controls
+
+### Surface rail (R9)
+
+**Stop:** Set `LEAF_LAB_SURFACE_ENABLED=0` on the app and worker task
+environments and roll them through the existing staging delivery rail. On
+staging, these are the `LEAF_LAB_SURFACE_ENABLED` entries in
+leaf-automation-aws-terraform's
+`terraform/environments/staging/us-east-1/leaf_platform.tf`.
+
+**Check:** Confirm every Lab endpoint answers 404 with
+`{"ok": false, "status": "refused", "reason": "lab_surface_disabled"}`.
+The `lab_rail` in `server/routers/lab_surface.py` treats `0`, `false`, `no`
+and `off` as disabled. An unset value enables the rail only when the posture
+is staging.
+
+**Recover:** Set `LEAF_LAB_SURFACE_ENABLED=1` and roll the app and worker
+tasks again. Confirm `GET /api/lab/tools` answers 200.
+
+### Tool nodes (R7)
+
+**Stop:** Set `LEAF_LAB_TOOL_NODES=0` on the app and worker task environments
+using the entries in the same staging Terraform file, and roll them through
+the existing staging delivery rail.
+
+**Check:** Confirm runs of graphs with tool nodes keep the existing
+`lab_graph_effect_refused` policy and the tools listing reports the tools
+unavailable.
+
+**Recover:** Set `LEAF_LAB_TOOL_NODES=1` and roll again. Confirm the tool shows
+available in `GET /api/lab/tools`, then readmit activations as described in
+[Activations](#activations): resume a paused activation and renew an expired
+one. A successful tick resets the failure count for `readmit_unavailable`.
+
+### Image downgrade (R8)
+
+**Stop:** First roll every git-mode tenant back with
+`lab_artifacts_git.flip_back(tenant, actor)` as described in
+[Git-authoritative mode](#git-authoritative-mode), preserving the additive
+tables, generations and receipts. Then roll the app and worker to the previous
+image through the delivery rail.
+
+**Check:** Confirm `GET /api/health` reports the previous `source_sha` and
+Lab reads and writes work in ledger mode.
+
+**Recover:** Roll forward to the intended image and confirm its `source_sha`.
+For each tenant that was git-mode, call
+`lab_artifacts_git.enable_mirror(tenant, actor)` and then
+`lab_artifacts_git.cutover(tenant, actor)`, and confirm its mirror status is
+`complete`.
+
+### Relay gate (ops-dashboard)
+
+**Stop:** Set the ops-dashboard environment `STUDIO_LAB_RELAY=0` and redeploy
+the dashboard.
+
+**Check:** Confirm `GET /api/studio-lab/relay` answers 404 with
+`{"ok": false, "state": "gated", "gate": "STUDIO_LAB_RELAY"}` and the
+dashboard Lab frame stops relaying. Sources fall back to legacy reads only
+when permitted: a 200 `available: false` for the matching source or a 404
+`lab_sources.disabled`. Confirm markets stays on `/api/leafhft/mobile/books`.
+
+**Recover:** Set `STUDIO_LAB_RELAY=1`, redeploy the dashboard, and confirm the
+frame's relay stats show a host again.
+
 ## Production migration order
 
 Production migrations must run **forward-normal** through
