@@ -1,4 +1,5 @@
 // Optional observations only: failure to measure leaves the persona UNKNOWN.
+// Return the diagnostic alongside measurements so persona fragments keep their existing shape.
 export async function collectMobileTouchMeasurements({ page, handle, viewport, reference, locatorDescription = {} } = {}) {
   try {
     if (viewport !== 'phone' || !handle || typeof reference !== 'string'
@@ -11,8 +12,10 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
       const width = window.innerWidth
       const height = window.innerHeight
       const inside = (x, y) => x >= 0 && y >= 0 && x < width && y < height
+      const hits = new Map()
       const hitsTarget = (x, y) => {
         const hit = document.elementFromPoint(x, y)
+        hits.set(`${x},${y}`, hit)
         return hit !== null && (hit === target || target.contains(hit))
       }
       const cx = box.x + box.width / 2
@@ -23,7 +26,7 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
         [box.x + 2, box.y + box.height - 2],
         [box.x + box.width - 2, box.y + box.height - 2],
       ]
-      return {
+      const measurements = {
         input: { touch: navigator.maxTouchPoints > 0, coarsePointer: window.matchMedia('(pointer: coarse)').matches },
         viewport: { width, height, deviceScaleFactor: window.devicePixelRatio },
         control: {
@@ -32,18 +35,60 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
             || corners.some(([x, y]) => inside(x, y) && !hitsTarget(x, y)),
         },
       }
+      let diagnostic
+      if (measurements.control.clipped) {
+        try {
+          const style = window.getComputedStyle(target)
+          const nameOf = (element) => {
+            const labelledBy = element.getAttribute('aria-labelledby')
+            if (labelledBy) {
+              const labels = labelledBy.trim().split(/\s+/).map(id => document.getElementById(id)).filter(Boolean)
+              if (labels.length) return labels.map(label => label.textContent || '').join(' ')
+            }
+            const label = element.getAttribute('aria-label')
+            if (label?.trim()) return label
+            if (element.labels?.length) return Array.from(element.labels, label => label.textContent || '').join(' ')
+            const tag = element.tagName.toLowerCase()
+            if (tag === 'img' || (tag === 'input' && element.type === 'image')) return element.getAttribute('alt') || ''
+            if (tag === 'input' && ['button', 'submit', 'reset'].includes(element.type)) return element.value || ''
+            const role = element.getAttribute('role') || ''
+            if (['button', 'a', 'summary', 'option'].includes(tag)
+              || ['button', 'link', 'checkbox', 'radio', 'tab', 'menuitem', 'option', 'heading'].includes(role)) {
+              return element.textContent || ''
+            }
+            return element.getAttribute('title') || ''
+          }
+          diagnostic = {
+            corners: corners.map(([x, y], index) => {
+              const offscreen = !inside(x, y)
+              const key = `${x},${y}`
+              const hit = offscreen ? null : hits.has(key) ? hits.get(key) : document.elementFromPoint(x, y)
+              return {
+                position: ['top-left', 'top-right', 'bottom-left', 'bottom-right'][index],
+                hit: hit ? { tag: hit.tagName.toLowerCase(), role: hit.getAttribute('role') || '',
+                  name: nameOf(hit).trim().slice(0, 60) } : null,
+                insideTarget: hit !== null && (hit === target || target.contains(hit)), offscreen,
+              }
+            }),
+            borderRadiusPx: { topLeft: parseFloat(style.borderTopLeftRadius), topRight: parseFloat(style.borderTopRightRadius),
+              bottomLeft: parseFloat(style.borderBottomLeftRadius), bottomRight: parseFloat(style.borderBottomRightRadius) },
+          }
+        } catch { /* A diagnostic read must not discard a valid measurement. */ }
+      }
+      return { ...measurements, diagnostic }
     }, { target: handle, box })
     if (!sample || !Object.values(sample.viewport).every((value) => Number.isFinite(value) && value > 0)) return null
     const rect = Object.fromEntries(['x', 'y', 'width', 'height'].map((key) => [key, box[key]]))
-    return { reference, input: sample.input, viewport: sample.viewport,
+    const measurements = { reference, input: sample.input, viewport: sample.viewport,
       target: { role: typeof locatorDescription.role === 'string' ? locatorDescription.role : '',
         name: typeof locatorDescription.name === 'string' ? locatorDescription.name : '', box: rect },
       control: { ...sample.control, rect } }
+    return { measurements, ...(sample.diagnostic ? { diagnostic: sample.diagnostic } : {}) }
   } catch { return null }
 }
 
 // Keep activation outside the optional-evidence catches so its verdict is preserved.
-export async function activateWithMobileTouchMeasurements({ page, locator, probe, viewport, addFragment, activate, locatorDescription }) {
+export async function activateWithMobileTouchMeasurements({ page, locator, probe, viewport, addFragment, activate, locatorDescription, evidence }) {
   let handle
   try {
     if (viewport === 'phone' && (!probe.locator.trigger || probe.locator.trigger === 'click')
@@ -61,9 +106,16 @@ export async function activateWithMobileTouchMeasurements({ page, locator, probe
   await activate()
   try {
     if (!handle) return
-    const measurements = await collectMobileTouchMeasurements({ page, handle, viewport,
+    const after = await collectMobileTouchMeasurements({ page, handle, viewport,
       reference: `mobile-touch:${probe.featureId}[${probe.state}]@${viewport}`,
       locatorDescription: locatorDescription || probe.locator.phone || probe.locator })
-    if (measurements || before) addFragment('mobile-touch', measurements || before)
+    const sample = after || before
+    if (sample) {
+      addFragment('mobile-touch', sample.measurements)
+      if (sample.measurements.control.clipped && sample.diagnostic && evidence) {
+        evidence.touchClipDiagnostic = { ...evidence.touchClipDiagnostic,
+          [sample.measurements.reference]: sample.diagnostic }
+      }
+    }
   } catch { /* Optional evidence never changes the functional verdict. */ }
 }
