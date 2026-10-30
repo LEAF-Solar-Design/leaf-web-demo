@@ -15,6 +15,84 @@ import { seedSolarChain } from './fixtures.mjs'
 import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
 import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
+import { jobMonitorLauncherRecipe } from './probes.mjs'
+import { prepareStudioJobMonitor, assertStudioJobMonitor } from './fixtures.mjs'
+
+function monitorStudioFake({ present = true, open = false, content = true, heading = true, collapse = '', spine = false } = {}) {
+  const clicks = []
+  const node = (visible, count = () => Number(visible())) => ({
+    isVisible: async () => visible(), count: async () => count(),
+  })
+  const studio = { ...node(() => present), getAttribute: async () => String(open),
+    click: async () => { clicks.push('Studio'); open = !open } }
+  const close = { ...node(() => open), click: async () => { clicks.push('Close Studio'); open = false } }
+  const sidebar = { ...node(() => open), getByRole: (role, options) => {
+    if (role === 'heading') {
+      assert.ok(options.name.test('Job monitor (2 live)'))
+      return node(() => open && heading)
+    }
+    assert.equal(role, 'button')
+    assert.equal(options.exact, true)
+    assert.equal(options.includeHidden, true)
+    return node(() => open && collapse === options.name, () => Number(collapse === options.name))
+  } }
+  const page = { getByRole: (role, options) => {
+    if (role === 'navigation') {
+      assert.equal(options.name, 'Workspace controls')
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'button'); assert.equal(options.name, 'Studio')
+        return studio
+      } }
+    }
+    if (role === 'button') { assert.equal(options.name, 'Close Studio'); return close }
+    if (role === 'region') { assert.equal(options.name, 'Studio sidebar'); return sidebar }
+    if (role === 'heading') return node(() => open && heading)
+    assert.equal(role, 'toolbar'); assert.equal(options.name, 'Job monitor')
+    return node(() => spine, () => Number(spine))
+  }, locator: selector => {
+    assert.equal(selector, 'aside.rail')
+    return { filter: () => ({ locator: selector => {
+      assert.equal(selector, '.rail-ske, .rail-empty, .rail-ledger > *')
+      return { first: () => node(() => open && content) }
+    } }) }
+  } }
+  const assertions = value => ({
+    toBeVisible: async () => assert.equal(await value.isVisible(), true),
+    toBeHidden: async () => assert.equal(await value.isVisible(), false),
+    toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+    toHaveCount: async expected => assert.equal(await value.count(), expected),
+  })
+  return { page, clicks, assertions }
+}
+
+test('WL47 Studio monitor setup closes only an open sidebar and activation clicks Studio once', async () => {
+  const map = buildFeatureMap()
+  for (const state of ['ready', 'failed-load']) for (const open of [true, false]) {
+    const fake = monitorStudioFake({ open })
+    assert.equal(await prepareStudioJobMonitor(fake.page, fake.assertions), true)
+    assert.deepEqual(fake.clicks, open ? ['Close Studio'] : [])
+    const probe = resolveProbe(map.entries.find(row => row.id === 'control:job-monitor-expand'), state)
+    const recipe = jobMonitorLauncherRecipe(probe, true)
+    await fake.page.getByRole(recipe.scope.role, recipe.scope).getByRole(recipe.role, recipe).click()
+    assert.equal(fake.clicks.filter(name => name === 'Studio').length, 1)
+    assert.equal(await assertStudioJobMonitor(fake.page, fake.assertions), true)
+  }
+})
+
+test('WL47 Studio monitor oracle rejects missing content, heading, either Collapse and the spine', async () => {
+  for (const options of [{ content: false }, { heading: false }, { collapse: 'Collapse the job monitor' },
+    { collapse: 'Collapse the job monitor to a spine' }, { spine: true }, { open: false }]) {
+    const fake = monitorStudioFake({ open: true, ...options })
+    await assert.rejects(assertStudioJobMonitor(fake.page, fake.assertions))
+  }
+})
+
+test('WL47 absent Studio leaves setup and the oracle to the existing spine branches', async () => {
+  const fake = monitorStudioFake({ present: false })
+  assert.equal(await prepareStudioJobMonitor(fake.page, fake.assertions), false)
+  assert.equal(await assertStudioJobMonitor(fake.page, fake.assertions), false)
+  assert.deepEqual(fake.clicks, [])
+})
 
 function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser', studioPresent = true, toolsHidden = false } = {}) {
   let open = initial

@@ -11,7 +11,7 @@ import { familiesForSurface } from '../../src/lib/surfaceRails.js'
 import { buildViewSearch } from '../../src/lib/urlState.js'
 import { ACTIONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { PROMPTS } from '../../src/cadedit/promptKeys.js'
-import { normalizedControlKey, solarChainSteps, projectSharedShellProbe } from './probes.mjs'
+import { normalizedControlKey, solarChainSteps, projectSharedShellProbe, jobMonitorLauncherRecipe } from './probes.mjs'
 import { solarToolReadyEffect } from '../../walk/featureMap.mjs'
 import { buildDrawingObjectIndex } from '../../src/lib/drawingObjectIndex.js'
 import { collectProbeUxEvidence, packUxEvidence } from './uxEvidence.mjs'
@@ -563,6 +563,31 @@ export async function discloseControlPanel(page, recipe) {
 export function studioJobMonitorContent(page) {
   return page.locator('aside.rail').filter({ has: page.getByRole('heading', { name: /^Job monitor/ }) })
     .locator('.rail-ske, .rail-empty, .rail-ledger > *').first()
+}
+
+export async function prepareStudioJobMonitor(page, assertions = expect) {
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) return false
+  const close = page.getByRole('button', { name: 'Close Studio', exact: true })
+  if (await close.isVisible()) await close.click()
+  await assertions(studio).toHaveAttribute('aria-expanded', 'false')
+  await assertions(page.getByRole('region', { name: 'Studio sidebar', exact: true })).toBeHidden()
+  return true
+}
+
+export async function assertStudioJobMonitor(page, assertions = expect) {
+  const studio = studioRailButton(page)
+  if (!await studio.isVisible()) return false
+  const sidebar = page.getByRole('region', { name: 'Studio sidebar', exact: true })
+  await assertions(studio).toHaveAttribute('aria-expanded', 'true')
+  await assertions(sidebar).toBeVisible()
+  await assertions(sidebar.getByRole('heading', { name: /^Job monitor/ })).toBeVisible()
+  await assertions(studioJobMonitorContent(page)).toBeVisible()
+  for (const name of ['Collapse the job monitor', 'Collapse the job monitor to a spine']) {
+    await assertions(sidebar.getByRole('button', { name, exact: true, includeHidden: true })).toHaveCount(0)
+  }
+  await assertions(page.getByRole('toolbar', { name: 'Job monitor', exact: true, includeHidden: true })).toHaveCount(0)
+  return true
 }
 
 // Values are from same-tool server inputs, before schema defaults/enums/minima.
@@ -3236,7 +3261,7 @@ export async function prepareStudioRail(probe, runtime, recipe, { enter = requir
 export async function setupStep(probe, runtime, recipe, assertions = runtime.recipeAssertions || expect) {
   const { page, stack, evidence } = runtime
   if (probe.setup?.context?.projectSolar && !runtime.projectSolar) observeProjectSolarResponses(runtime)
-  await prepareStudioRail(probe, runtime, recipe)
+  if (recipe.kind !== 'job-monitor-collapsed') await prepareStudioRail(probe, runtime, recipe)
   switch (recipe.kind) {
     case 'chooser-start': await prepareChooserStart(runtime, assertions); return
     case 'open-project-solar': await openProjectSolar(runtime, assertions); return
@@ -3610,6 +3635,11 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       return
     }
     case 'job-monitor-collapsed': {
+      if (await prepareStudioJobMonitor(page, assertions)) {
+        await requireWorkspace(runtime)
+        return
+      }
+      await prepareStudioRail(probe, runtime, recipe)
       const collapse = page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })
       if (await collapse.isVisible()) await collapse.click()
       const toolbar = page.getByRole('toolbar', { name: 'Job monitor', exact: true })
@@ -4322,6 +4352,8 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'job-monitor') {
+    const studio = await assertStudioJobMonitor(page, expect)
+    if (!studio) {
     await expect(page.getByRole('toolbar', { name: 'Job monitor', exact: true })).toHaveCount(0)
     await expect(page.getByRole('button', { name: /^Expand the job monitor \([0-9]+ live\)$/ })).toHaveCount(0)
     const rail = page.locator('aside.rail').filter({ has: page.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true }) })
@@ -4329,13 +4361,14 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await expect(rail.locator('.rail-ledger')).toHaveCount(1)
     await expect(rail.locator('.rail-ske, .rail-empty, .rail-ledger > *').first()).toBeVisible()
     await expect(rail.getByRole('button', { name: 'Collapse the job monitor to a spine', exact: true })).toBeVisible()
+    }
     const beforeUrl = new URL(before.url)
     const afterUrl = new URL(page.url())
     expect(afterUrl.origin).toBe(beforeUrl.origin)
     expect(afterUrl.pathname).toBe(beforeUrl.pathname)
     expect(afterUrl.hash).toBe(beforeUrl.hash)
-    // App.jsx setJobRailExpanded seats drawer=jobs via useViewParamSeat in both ready and failed-load states.
-    expect(afterUrl.search).toBe(buildViewSearch(beforeUrl.search, { drawer: 'jobs' }))
+    // Studio toggles browserPanel; the legacy spine seats drawer=jobs via useViewParamSeat.
+    expect(afterUrl.search).toBe(studio ? beforeUrl.search : buildViewSearch(beforeUrl.search, { drawer: 'jobs' }))
     runtime.evidence.jobMonitorUrl = { before: before.url, after: page.url() }
     if (runtime.failedDrawing) await expect(page.getByRole('alert').filter({ hasText: /Couldn['’]t load drawing/ }))
       .toHaveText(before.workspace, { useInnerText: true })
@@ -4715,6 +4748,10 @@ export async function runProbe(probe, runtime) {
       }
     }
     let targetRecipe = runtime.catalogPanelName ? { ...probe.locator, panelName: runtime.catalogPanelName } : probe.locator
+    if (probe.featureId === 'control:job-monitor-expand' && typeof jobMonitorLauncherRecipe === 'function'
+      && typeof studioRailButton === 'function') {
+      targetRecipe = jobMonitorLauncherRecipe(probe, await studioRailButton(page).isVisible())
+    }
     if (probe.kind === 'action' && probe.assertion.kind === 'disabled_with_reason' && probe.locator?.keyboardAction !== 'engine:repeat') {
       // A changed refusal is an oracle verdict; only a missing action is a
       // pre-oracle failure. Match the stable label with any refusal suffix.

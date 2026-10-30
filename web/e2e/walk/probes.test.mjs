@@ -4,12 +4,31 @@ import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/actionRegistry.js'
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS,
   SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
+import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('WL47 monitor launcher uses Studio while retaining the legacy recipe and identity', () => {
+  const entry = map.entries.find(row => row.id === 'control:job-monitor-expand')
+  assert.deepEqual([...entry.states].sort(), ['failed-load', 'ready'])
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    const before = structuredClone(probe)
+    assert.equal(jobMonitorLauncherRecipe(probe, false), probe.locator)
+    assert.equal(probe.setup.steps.at(-1).kind, 'job-monitor-collapsed')
+    assert.deepEqual(jobMonitorLauncherRecipe(probe, true), {
+      role: 'button', name: 'Studio', exact: true,
+      scope: { role: 'navigation', name: 'Workspace controls', exact: true }, trigger: 'click',
+    })
+    assert.deepEqual(probe, before)
+  }
+  const other = { featureId: 'control:linked-services', locator: { role: 'button', name: 'Linked services' } }
+  assert.equal(jobMonitorLauncherRecipe(other, true), other.locator)
+})
 
 test('WL39b resolves the bounded Delete vertex refusal on desktop and phone', () => {
   const entry = map.entries.find(row => row.id === 'control:delete-vertex')
