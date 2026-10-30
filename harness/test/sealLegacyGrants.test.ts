@@ -76,12 +76,12 @@ describe("sealLegacyGrants", () => {
     writeFileSync(join(dir, "INVALID.token"), TOKEN);
     const configure = vi.spyOn(fromEnv, "grantKeyProviderFromEnv");
     const before = snapshot();
-    expect(await main(["--dry-run"], env())).toBe(0);
+    expect(await main(["--dry-run"], env())).toBe(1);
     expect(snapshot()).toEqual(before);
     expect(configure).not.toHaveBeenCalled();
     expect(output.map(line => JSON.parse(line))).toEqual([
       { tenant: "plain", class: "plaintext", legacy_sidecar: true },
-      { sealed: 0, legacy_remaining: 1, blocked_tenants: 0, outside_scope_legacy: 0 },
+      { sealed: 0, legacy_remaining: 1, blocked_tenants: 0, outside_scope_legacy: 0, skipped_names: 1 },
     ]);
     expect((await sealTenants(dir, ["missing"], keys)).skipped_names).toBe(1);
     expect(readFileSync(join(dir, "INVALID.token"), "utf8")).toBe(TOKEN);
@@ -97,7 +97,7 @@ describe("sealLegacyGrants", () => {
     sidecars("tenant");
     const result = await sealTenants(dir, undefined, keys);
     expect(result.outcomes).toEqual([{ tenant: "tenant", outcome: "sealed", reason: null }]);
-    expect(result.summary).toEqual({ sealed: 1, legacy_remaining: 0, blocked_tenants: 0, outside_scope_legacy: 0 });
+    expect(result.summary).toEqual({ sealed: 1, legacy_remaining: 0, blocked_tenants: 0, outside_scope_legacy: 0, skipped_names: 0 });
     const reader = new EnvelopeTenantGrantStore({ dir, keyProvider: keys });
     expect(await reader.get("tenant")).toEqual(grant);
     const after = await reader.status("tenant");
@@ -122,6 +122,140 @@ describe("sealLegacyGrants", () => {
       { tenant: "tenant", outcome: "already_sealed", reason: null },
     ]);
     expect(snapshot()).toEqual(sealed);
+  });
+
+  it.each(["--dry-run", "--seal"])("reports invalid names and fails only unscoped %s runs", async mode => {
+    writeFileSync(join(dir, "INVALID.token"), TOKEN);
+    const before = snapshot();
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(keys);
+    expect(await main([mode], env())).toBe(1);
+    expect(output.map(line => JSON.parse(line))).toEqual([
+      { sealed: 0, legacy_remaining: 0, blocked_tenants: mode === "--seal" ? 1 : 0,
+        outside_scope_legacy: 0, skipped_names: 1 },
+    ]);
+    expect(snapshot()).toEqual(before);
+    output.length = 0;
+    expect(await main([mode, "--tenant", "good"], env())).toBe(0);
+    expect(summary()).toEqual({ sealed: 0, legacy_remaining: 0, blocked_tenants: 0,
+      outside_scope_legacy: 0, skipped_names: 1 });
+    expect(snapshot()).toEqual(before);
+    for (const secret of [TOKEN, dir, "INVALID"]) expect([...output, ...errors].join("\n")).not.toContain(secret);
+  });
+
+  it.each([
+    [".token", false], [".kind", false], [".token", true], [".kind", true],
+  ] as const)("preserves both sidecars when %s changes during sealing (new: %s)", async (suffix, newlyCreated) => {
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    sidecars("tenant");
+    if (newlyCreated) rmSync(path("tenant", suffix));
+    const replacement = Buffer.from([0, 255, 10, 13]);
+    const provider: KeyProvider = {
+      keyId: () => keys.keyId(),
+      wrap: async (key, context) => {
+        await Promise.resolve();
+        writeFileSync(path("tenant", suffix), replacement);
+        return keys.wrap(key, context);
+      },
+      unwrap: (wrapped, context) => keys.unwrap(wrapped, context),
+    };
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(provider);
+    expect(await main(["--seal"], env())).toBe(1);
+    expect(JSON.parse(output[0])).toEqual({ tenant: "tenant", outcome: "blocked", reason: "changed_during_migration" });
+    expect(summary()).toMatchObject({ sealed: 0, legacy_remaining: 1, blocked_tenants: 1 });
+    expect(readFileSync(path("tenant", suffix))).toEqual(replacement);
+    const other = suffix === ".token" ? ".kind" : ".token";
+    expect(readFileSync(path("tenant", other), "utf8")).toBe(other === ".token" ? TOKEN : "oauth");
+    expect(existsSync(join(dir, ".sealLegacyGrants.lock"))).toBe(false);
+    for (const secret of [TOKEN, LABEL, ACCOUNT, dir]) expect([...output, ...errors].join("\n")).not.toContain(secret);
+  });
+
+  it("fails when an absent outcome still has legacy remaining at the end of the run", async () => {
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    const provider: KeyProvider = {
+      keyId: () => keys.keyId(),
+      wrap: async (key, context) => {
+        // Inject a late legacy write after the absent tenant was classified.
+        writeFileSync(path("absent", ".token"), TOKEN);
+        return keys.wrap(key, context);
+      },
+      unwrap: (wrapped, context) => keys.unwrap(wrapped, context),
+    };
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(provider);
+    expect(await main(["--seal", "--tenant", "absent", "--tenant", "tenant"], env())).toBe(1);
+    expect(output.slice(0, -1).map(line => JSON.parse(line))).toEqual([
+      { tenant: "absent", outcome: "absent", reason: null },
+      { tenant: "tenant", outcome: "sealed", reason: null },
+    ]);
+    expect(summary()).toMatchObject({ sealed: 1, legacy_remaining: 1, blocked_tenants: 0 });
+    expect(readFileSync(path("absent", ".token"), "utf8")).toBe(TOKEN);
+  });
+
+  it("locks the whole seal run, rejects a second run without writes, and permits dry-run", async () => {
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    sidecars("tenant");
+    let wrapping!: () => void;
+    let release!: () => void;
+    const started = new Promise<void>(resolve => { wrapping = resolve; });
+    const waiting = new Promise<void>(resolve => { release = resolve; });
+    const provider: KeyProvider = {
+      keyId: () => keys.keyId(),
+      wrap: async (key, context) => {
+        wrapping();
+        await waiting;
+        return keys.wrap(key, context);
+      },
+      unwrap: (wrapped, context) => keys.unwrap(wrapped, context),
+    };
+    const sealing = sealTenants(dir, undefined, provider);
+    await started;
+    try {
+      const lock = join(dir, ".sealLegacyGrants.lock");
+      expect(existsSync(lock)).toBe(true);
+      if (process.platform !== "win32") expect(statSync(lock).mode & 0o777).toBe(0o600);
+      const before = snapshot();
+      vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(keys);
+      expect(await main(["--seal"], env())).toBe(1);
+      expect(output.map(line => JSON.parse(line))).toEqual([
+        { sealed: 0, legacy_remaining: 1, blocked_tenants: 1, outside_scope_legacy: 0, skipped_names: 0 },
+      ]);
+      expect(snapshot()).toEqual(before);
+      expect(await main(["--dry-run"], env())).toBe(0);
+      expect(snapshot()).toEqual(before);
+    } finally { release(); }
+    expect((await sealing).outcomes).toEqual([{ tenant: "tenant", outcome: "sealed", reason: null }]);
+    expect(existsSync(join(dir, ".sealLegacyGrants.lock"))).toBe(false);
+    for (const secret of [TOKEN, LABEL, ACCOUNT, dir]) expect([...output, ...errors].join("\n")).not.toContain(secret);
+  });
+
+  it("removes the lock after a failing seal run", async () => {
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    const before = snapshot();
+    vi.spyOn(keys, "wrap").mockRejectedValue(new Error(TOKEN));
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(keys);
+    expect(await main(["--seal"], env())).toBe(1);
+    expect(summary()).toMatchObject({ blocked_tenants: 1, legacy_remaining: 1 });
+    expect(existsSync(join(dir, ".sealLegacyGrants.lock"))).toBe(false);
+    expect(snapshot()).toEqual(before);
+  });
+
+  it.each(["ct", "tag"] as const)("blocks an envelope with garbage %s without writes or disclosing values", async field => {
+    const store = new EnvelopeTenantGrantStore({ dir, keyProvider: keys });
+    await store.put("tenant", TOKEN);
+    const envelope = JSON.parse(readFileSync(path("tenant"), "utf8"));
+    envelope[field] = "private-corrupt-envelope-value";
+    write("tenant", envelope);
+    expect(classifyTenant(dir, "tenant")).toEqual({ tenant: "tenant", class: "sealed", legacy_sidecar: false });
+    const before = snapshot();
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(keys);
+    expect(await main(["--seal"], env())).toBe(1);
+    expect(output.map(line => JSON.parse(line))).toEqual([
+      { tenant: "tenant", outcome: "blocked", reason: "sealed_unreadable" },
+      { sealed: 0, legacy_remaining: 0, blocked_tenants: 1, outside_scope_legacy: 0, skipped_names: 0 },
+    ]);
+    expect(snapshot()).toEqual(before);
+    for (const secret of [TOKEN, LABEL, ACCOUNT, dir, KEY_ARN, envelope.iv, envelope.ct, envelope.tag, envelope.wk]) {
+      expect([...output, ...errors].join("\n")).not.toContain(secret);
+    }
   });
 
   it("restores exact original bytes on a read-back failure and keeps sidecars", async () => {
@@ -298,7 +432,7 @@ describe("sealLegacyGrants", () => {
     expect(await main(["--seal"], env())).toBe(1);
     expect(output.map(line => JSON.parse(line))).toEqual([
       { tenant: "kindonly", outcome: "blocked", reason: "token_only_relink" },
-      { sealed: 0, legacy_remaining: 1, blocked_tenants: 1, outside_scope_legacy: 0 },
+      { sealed: 0, legacy_remaining: 1, blocked_tenants: 1, outside_scope_legacy: 0, skipped_names: 0 },
     ]);
     expect(snapshot()).toEqual(before);
   });
@@ -310,7 +444,7 @@ describe("sealLegacyGrants", () => {
     vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(keys);
     const outside = readFileSync(path("outside"));
     expect(await main(["--seal", "--tenant", "chosen", "--tenant", "chosen"], env())).toBe(0);
-    expect(summary()).toEqual({ sealed: 1, legacy_remaining: 0, blocked_tenants: 0, outside_scope_legacy: 2 });
+    expect(summary()).toEqual({ sealed: 1, legacy_remaining: 0, blocked_tenants: 0, outside_scope_legacy: 2, skipped_names: 0 });
     expect(readFileSync(path("outside"))).toEqual(outside);
     const before = snapshot();
     output.length = 0;

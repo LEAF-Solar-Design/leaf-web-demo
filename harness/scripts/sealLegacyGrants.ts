@@ -1,5 +1,6 @@
 // Run sealing in maintenance posture with no concurrent grant writes. These checks
 // narrow the race window but do not replace that operational requirement.
+// Classification's `sealed` means envelope-shaped only; only --seal opens it.
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
@@ -15,7 +16,7 @@ const USAGE = "Usage: sealLegacyGrants.js (--dry-run | --seal) [--tenant <id>]..
 const REFUSAL = "Seal requires vault mode and a configured KMS key provider";
 type Classification = "sealed" | "plaintext" | "token_only" | "corrupt" | "absent";
 type Outcome = { tenant: string; outcome: "sealed" | "already_sealed" | "blocked" | "absent"; reason: string | null };
-type Summary = { sealed: number; legacy_remaining: number; blocked_tenants: number; outside_scope_legacy: number };
+type Summary = { sealed: number; legacy_remaining: number; blocked_tenants: number; outside_scope_legacy: number; skipped_names: number };
 export type RestoreWriter = (path: string, bytes: Buffer) => void | Promise<void>;
 
 function plaintext(value: unknown): value is Record<string, unknown> {
@@ -61,6 +62,18 @@ function inventory(dir: string): { tenants: string[]; skipped_names: number } {
 
 class GrantChangedDuringMigration extends Error {
   constructor() { super("grant changed during migration"); }
+}
+
+function sidecarBytes(path: string): Buffer | undefined {
+  try { return readFileSync(path); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+    throw error;
+  }
+}
+
+function requireSidecarBytes(path: string, expected: Buffer | undefined): void {
+  const current = sidecarBytes(path);
+  if (expected ? !current?.equals(expected) : current !== undefined) throw new GrantChangedDuringMigration();
 }
 
 function requireCurrentBytes(path: string, expected: readonly Buffer[]): void {
@@ -150,7 +163,7 @@ async function verified(store: EnvelopeTenantGrantStore, tenant: string, before:
     && ids(before).length > 0 && JSON.stringify(ids(before)) === JSON.stringify(ids(after));
 }
 
-function summarize(dir: string, scope: string[], all: string[], sealed: number, blocked_tenants: number): Summary {
+function summarize(dir: string, scope: string[], all: string[], sealed: number, blocked_tenants: number, skipped_names: number): Summary {
   const legacy = (tenant: string) => {
     try {
       const record = classifyTenant(dir, tenant);
@@ -161,13 +174,30 @@ function summarize(dir: string, scope: string[], all: string[], sealed: number, 
     }
   };
   return {
-    sealed, legacy_remaining: scope.filter(legacy).length, blocked_tenants,
+    sealed, legacy_remaining: scope.filter(legacy).length, blocked_tenants, skipped_names,
     outside_scope_legacy: all.filter(tenant => !scope.includes(tenant) && legacy(tenant)).length,
   };
 }
 
 export async function sealTenants(dir: string, tenantScope: readonly string[] | undefined, keyProvider: KeyProvider, restore: RestoreWriter = atomicRestore) {
   if (tenantScope?.some(tenant => !TENANT.test(tenant))) throw new Error("Invalid tenant");
+  const lock = join(dir, ".sealLegacyGrants.lock");
+  let fd: number;
+  try { fd = openSync(lock, "wx", 0o600); } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    const found = inventory(dir);
+    const scope = [...new Set(tenantScope?.length ? tenantScope : found.tenants)].sort();
+    return { outcomes: [] as Outcome[], skipped_names: found.skipped_names,
+      summary: summarize(dir, scope, found.tenants, 0, 1, found.skipped_names) };
+  }
+  try {
+    return await sealTenantsLocked(dir, tenantScope, keyProvider, restore);
+  } finally {
+    try { closeSync(fd); } finally { rmSync(lock, { force: true }); }
+  }
+}
+
+async function sealTenantsLocked(dir: string, tenantScope: readonly string[] | undefined, keyProvider: KeyProvider, restore: RestoreWriter) {
   const found = inventory(dir);
   const scope = [...new Set(tenantScope?.length ? tenantScope : found.tenants)].sort();
   const migrating = new MigratingEnvelopeStore({ dir, keyProvider });
@@ -177,12 +207,21 @@ export async function sealTenants(dir: string, tenantScope: readonly string[] | 
     let outcome: Outcome = { tenant, outcome: "blocked", reason: "error" };
     try {
       const record = classifyTenant(dir, tenant);
+      const sidecars = [".token", ".kind"].map(suffix => {
+        const path = join(dir, `${tenant}${suffix}`);
+        return { path, bytes: sidecarBytes(path) };
+      });
       if (record.class === "token_only" || record.class === "corrupt") {
         outcome.reason = record.class === "token_only" ? "token_only_relink" : "corrupt_record";
       } else if (record.class === "absent") {
         outcome = { tenant, outcome: "absent", reason: null };
       } else if (record.class === "sealed" && !record.legacy_sidecar) {
-        outcome = { tenant, outcome: "already_sealed", reason: null };
+        outcome.reason = "sealed_unreadable";
+        const status = await reader.status(tenant);
+        const diagnostic = await reader.diagnostic(tenant);
+        if (diagnostic.backend === "vault" && diagnostic.record_format === "v3" && diagnostic.linked && status.linked) {
+          outcome = { tenant, outcome: "already_sealed", reason: null };
+        }
       } else {
         const path = join(dir, `${tenant}.grant.json`);
         const original = record.class === "plaintext" ? readFileSync(path) : undefined;
@@ -212,7 +251,12 @@ export async function sealTenants(dir: string, tenantScope: readonly string[] | 
           }
           outcome.reason = "verify_failed";
         } else {
-          for (const suffix of [".token", ".kind"]) rmSync(join(dir, `${tenant}${suffix}`), { force: true });
+          // Check both before deleting either, then recheck immediately before each removal.
+          for (const sidecar of sidecars) requireSidecarBytes(sidecar.path, sidecar.bytes);
+          for (const sidecar of sidecars) {
+            requireSidecarBytes(sidecar.path, sidecar.bytes);
+            if (sidecar.bytes) rmSync(sidecar.path, { force: true });
+          }
           outcome = { tenant, outcome: original ? "sealed" : "already_sealed", reason: null };
         }
       }
@@ -225,12 +269,12 @@ export async function sealTenants(dir: string, tenantScope: readonly string[] | 
   return {
     outcomes, skipped_names: found.skipped_names,
     summary: summarize(dir, scope, found.tenants, outcomes.filter(row => row.outcome === "sealed").length,
-      outcomes.filter(row => row.outcome === "blocked").length),
+      outcomes.filter(row => row.outcome === "blocked").length + (tenantScope?.length ? 0 : found.skipped_names), found.skipped_names),
   };
 }
 
 export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env): Promise<number> {
-  let summary: Summary = { sealed: 0, legacy_remaining: 0, blocked_tenants: 0, outside_scope_legacy: 0 };
+  let summary: Summary = { sealed: 0, legacy_remaining: 0, blocked_tenants: 0, outside_scope_legacy: 0, skipped_names: 0 };
   const print = (value: unknown) => console.log(JSON.stringify(value));
   try {
     let mode: string | undefined;
@@ -258,9 +302,10 @@ export async function main(argv: string[], env: NodeJS.ProcessEnv = process.env)
       const found = inventory(dir);
       const scope = [...new Set(tenants.length ? tenants : found.tenants)].sort();
       scope.forEach(tenant => print(classifyTenant(dir, tenant)));
-      summary = summarize(dir, scope, found.tenants, 0, 0);
+      summary = summarize(dir, scope, found.tenants, 0, 0, found.skipped_names);
     }
-    return summary.blocked_tenants ? 1 : 0;
+    return summary.blocked_tenants || (!tenants.length && summary.skipped_names)
+      || (mode === "--seal" && summary.legacy_remaining) ? 1 : 0;
   } catch {
     console.error("Grant sealing failed");
     summary.blocked_tenants++;
