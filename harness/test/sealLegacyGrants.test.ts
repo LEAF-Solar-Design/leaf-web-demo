@@ -274,6 +274,44 @@ describe("sealLegacyGrants", () => {
     expect(result.summary).toMatchObject({ sealed: 0, legacy_remaining: 1, blocked_tenants: 1 });
   });
 
+  it.each(["overwrite", "unlink", "corrupt", "envelope"] as const)("blocks a concurrent %s before the store snapshot without publishing or restoring", async change => {
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    sidecars("tenant");
+    const replacement = Buffer.from(change === "corrupt" ? "not json\n" : change === "envelope"
+      ? JSON.stringify({ v: 1, alg: "A256GCM", iv: "", ct: "", tag: "", wk: "" })
+      : ` { "version": 1, "kind": "oauth", "token": "replacement" }\n`);
+    const status = FileTenantGrantStore.prototype.status;
+    const changeBeforeRead = function(this: FileTenantGrantStore, tenant: string) {
+      // status is called after classification and the original-byte read, before the store read.
+      if (change === "unlink") rmSync(path("tenant"));
+      else writeFileSync(path("tenant"), replacement);
+      return status.call(this, tenant);
+    };
+    const statusSpy = vi.spyOn(FileTenantGrantStore.prototype, "status").mockImplementationOnce(changeBeforeRead);
+    const wrap = vi.spyOn(keys, "wrap");
+    const restore = vi.fn((target: string, bytes: Buffer) => { writeFileSync(target, bytes); });
+    const result = await sealTenants(dir, undefined, keys, restore);
+    expect(result.outcomes).toEqual([{ tenant: "tenant", outcome: "blocked", reason: "changed_during_migration" }]);
+    expect(restore).not.toHaveBeenCalled();
+    expect(wrap).not.toHaveBeenCalled();
+    if (change === "unlink") expect(existsSync(path("tenant"))).toBe(false);
+    else expect(readFileSync(path("tenant"))).toEqual(replacement);
+
+    // Exercise the same race through the CLI to check its exit code.
+    write("tenant", { version: 1, kind: "oauth", token: TOKEN });
+    statusSpy.mockImplementationOnce(changeBeforeRead);
+    vi.spyOn(fromEnv, "grantKeyProviderFromEnv").mockReturnValue(keys);
+    expect(await main(["--seal"], env())).toBe(1);
+    expect(JSON.parse(output[0])).toEqual({ tenant: "tenant", outcome: "blocked", reason: "changed_during_migration" });
+    expect(wrap).not.toHaveBeenCalled();
+    if (change === "unlink") expect(existsSync(path("tenant"))).toBe(false);
+    else expect(readFileSync(path("tenant"))).toEqual(replacement);
+    expect(existsSync(path("tenant", ".token"))).toBe(true);
+    expect(existsSync(path("tenant", ".kind"))).toBe(true);
+    expect(readdirSync(dir).some(name => name.endsWith(".tmp"))).toBe(false);
+    expect(existsSync(join(dir, ".sealLegacyGrants.lock"))).toBe(false);
+  });
+
   it.each(["unlink", "overwrite"] as const)("blocks a concurrent %s during KMS wrapping without publishing or restoring", async change => {
     write("tenant", { version: 1, kind: "oauth", token: TOKEN });
     sidecars("tenant");

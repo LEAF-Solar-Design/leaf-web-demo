@@ -1,5 +1,7 @@
 // Run sealing in maintenance posture with no concurrent grant writes. These checks
 // narrow the race window but do not replace that operational requirement.
+// Stale lock recovery: the run lock is <grants dir>/.sealLegacyGrants.lock (grants dir = LEAF_GRANTS_DIR). A killed run can leave it; delete it only after confirming no seal task is running
+// (ecs list-tasks started-by r10-ge-m, no recent sealLegacyGrants log output, lock older than 30 minutes). Never delete it while a seal run is alive: it is the only guard against two concurrent migrations.
 // Classification's `sealed` means envelope-shaped only; only --seal opens it.
 import { randomUUID } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, openSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
@@ -96,11 +98,13 @@ class MigratingEnvelopeStore extends EnvelopeTenantGrantStore {
   }
 
   protected override async readRecordPayload(tenantId: string, path: string): Promise<unknown> {
-    if (existsSync(path)) {
+    if (!this.published.has(path) && existsSync(path)) {
       const bytes = readFileSync(path);
+      const snapshot = this.snapshots.get(path);
+      if (snapshot && !bytes.equals(snapshot)) throw new GrantChangedDuringMigration();
       const value: unknown = JSON.parse(bytes.toString("utf8"));
       if (plaintext(value)) {
-        this.snapshots.set(path, bytes);
+        if (!snapshot) this.snapshots.set(path, bytes);
         return value;
       }
     }
@@ -119,7 +123,14 @@ class MigratingEnvelopeStore extends EnvelopeTenantGrantStore {
       () => { this.published.set(path, bytes); });
   }
 
-  requireRestorable(path: string, original: Buffer): void {
+  snapshot(path: string): Buffer {
+    const snapshot = this.snapshots.get(path);
+    if (!snapshot) throw new GrantChangedDuringMigration();
+    return snapshot;
+  }
+
+  requireRestorable(path: string): void {
+    const original = this.snapshot(path);
     const sealed = this.published.get(path);
     requireCurrentBytes(path, sealed ? [original, sealed] : [original]);
   }
@@ -225,7 +236,13 @@ async function sealTenantsLocked(dir: string, tenantScope: readonly string[] | u
       } else {
         const path = join(dir, `${tenant}.grant.json`);
         const original = record.class === "plaintext" ? readFileSync(path) : undefined;
-        const before = await (original ? migrating : reader).status(tenant);
+        let before: GrantStatus;
+        try {
+          before = await (original ? migrating : reader).status(tenant);
+        } finally {
+          // Check even when status rejects a replacement that is no longer plaintext.
+          if (original && !migrating.snapshot(path).equals(original)) throw new GrantChangedDuringMigration();
+        }
         let pass = false;
         try {
           if (original) {
@@ -242,11 +259,12 @@ async function sealTenantsLocked(dir: string, tenantScope: readonly string[] | u
         }
         if (!pass) {
           if (original) {
-            const guard = () => migrating.requireRestorable(path, original);
-            if (restore === atomicRestore) atomicRestore(path, original, guard);
+            const snapshot = migrating.snapshot(path);
+            const guard = () => migrating.requireRestorable(path);
+            if (restore === atomicRestore) atomicRestore(path, snapshot, guard);
             else {
               guard();
-              await restore(path, original);
+              await restore(path, snapshot);
             }
           }
           outcome.reason = "verify_failed";
