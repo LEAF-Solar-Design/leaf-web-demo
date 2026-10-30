@@ -3254,7 +3254,8 @@ test('project Solar drawing opens a collapsed flow seat once and leaves open or 
   }
 })
 
-function solarRequiredFormFake(tool, { blocked = false, prefilled = false, alertReason = false } = {}) {
+function solarRequiredFormFake(tool, { blocked = false, prefilled = false, title = '', titleThrows = false,
+  fieldAlerts = [], equipmentReason = 'This form cannot run in the current scope.' } = {}) {
   const fields = SOLAR_REQUIRED_FORM_INPUTS[tool] || {}
   const schema = JSON.parse(readFileSync(new URL(`../../../server/solar_tools/${tool.replaceAll('-', '_')}.json`, import.meta.url), 'utf8')).record.params
   const values = new Map(Object.keys(schema.properties).map(key => [key,
@@ -3262,9 +3263,13 @@ function solarRequiredFormFake(tool, { blocked = false, prefilled = false, alert
   const inputs = [], checks = []
   let visible = true, decisionVisible = false
   const locator = { isVisible: async () => true }
-  const review = { click: async () => { decisionVisible = true } }
-  const reasonText = 'This form cannot run in the current scope.'
-  const reason = { isVisible: async () => blocked, innerText: async () => reasonText }
+  const review = { click: async () => { decisionVisible = true }, getAttribute: async name => {
+    assert.equal(name, 'title')
+    if (titleThrows) throw new Error('Title read failed')
+    return title
+  } }
+  const reasonText = equipmentReason
+  const reason = { isVisible: async () => blocked && equipmentReason !== null, innerText: async () => reasonText }
   const region = {
     isVisible: async () => visible,
     getByLabel: (name, options) => {
@@ -3277,11 +3282,12 @@ function solarRequiredFormFake(tool, { blocked = false, prefilled = false, alert
       return { count: async () => Number(key !== undefined), inputValue: async () => values.get(key),
         fill: value => record(value, 'fill'), selectOption: option => record(option.label, 'select') }
     },
-    getByTestId: id => { assert.equal(id, 'project-solar-equipment-reason'); return {
-      ...reason, isVisible: async () => blocked && !alertReason,
-    } },
+    getByTestId: id => { assert.equal(id, 'project-solar-equipment-reason'); return reason },
     getByRole: (role, options) => {
-      if (role === 'alert') return { count: async () => Number(alertReason), nth: () => reason }
+      if (role === 'alert') return { count: async () => fieldAlerts.length, nth: index => ({
+        isVisible: async () => fieldAlerts[index].visible !== false,
+        innerText: async () => fieldAlerts[index].text,
+      }) }
       return options.name === 'Review & run' ? review : { click: async () => { visible = false } }
     },
   }
@@ -3338,12 +3344,58 @@ test('WL35 a Solar tool outside the five receives no extra inputs', async () => 
 })
 
 test('WL35 a disabled run records its visible reason and still fails', async () => {
-  for (const alertReason of [false, true]) {
-    const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true, alertReason })
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, title: 'Reading the drawing revision', equipmentReason: null,
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'button-title', text: 'Reading the drawing revision',
+  })
+  assert.equal(fake.runtime.evidence.solarStepEditor, undefined)
+})
+
+test('WL35b field alerts precede equipment text and include only non-empty visible reasons', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true, title: '  ', fieldAlerts: [
+    { text: '  First field is required.  ' }, { text: 'Hidden field reason', visible: false },
+    { text: ' ' }, { text: 'Second field is required.' },
+  ] })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'field-alerts', text: 'First field is required.; Second field is required.',
+  })
+})
+
+test('WL35b equipment text is the final non-empty reason source', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'equipment-reason', text: fake.reasonText })
+})
+
+test('WL35b an absent or empty reason is explicit and preserves the enabled failure', async () => {
+  for (const equipmentReason of [null, '  ']) {
+    const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', { blocked: true, title: null, equipmentReason })
     await assert.rejects(fake.run(), /Review & run remains disabled/)
-    assert.equal(fake.runtime.evidence.solarRunBlockedReason, fake.reasonText)
+    assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'none', text: '' })
     assert.equal(fake.runtime.evidence.solarStepEditor, undefined)
   }
+})
+
+test('WL35b a throwing title read falls back to the next reason source', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, titleThrows: true, fieldAlerts: [{ text: 'A field is required.' }],
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, { source: 'field-alerts', text: 'A field is required.' })
+})
+
+test('WL35b a non-empty button title precedes field alerts and equipment text', async () => {
+  const fake = solarRequiredFormFake('solar-nec-feeder-ocpd', {
+    blocked: true, title: '  Reading the drawing revision  ', fieldAlerts: [{ text: 'A field is required.' }],
+  })
+  await assert.rejects(fake.run(), /Review & run remains disabled/)
+  assert.deepEqual(fake.runtime.evidence.solarRunBlockedReason, {
+    source: 'button-title', text: 'Reading the drawing revision',
+  })
 })
 
 test('WL35 the frozen table covers exactly the required schemas with auditable sources', () => {

@@ -2568,16 +2568,38 @@ export async function assertSolarStepEditor(probe, runtime, locator, before, ass
     await assertions(review).toBeEnabled()
   } catch (error) {
     if (SOLAR_REQUIRED_FORM_INPUTS[tool]) {
-      const reason = region.getByTestId('project-solar-equipment-reason')
-      const visibleReasons = []
-      if (await reason.isVisible()) visibleReasons.push(await reason.innerText())
-      // GenericSolarToolForm exposes invalid required fields as SchemaForm alerts.
-      const alerts = region.getByRole('alert')
-      for (let index = 0; index < await alerts.count(); index++) {
-        const alert = alerts.nth(index)
-        if (await alert.isVisible()) visibleReasons.push(await alert.innerText())
+      let blockedReason = { source: 'none', text: '' }
+      try {
+        const text = (await review.getAttribute('title') || '').trim()
+        if (text) blockedReason = { source: 'button-title', text }
+      } catch {}
+      if (!blockedReason.text) {
+        const visibleReasons = []
+        // GenericSolarToolForm exposes invalid required fields as SchemaForm alerts.
+        try {
+          const alerts = region.getByRole('alert')
+          for (let index = 0; index < await alerts.count(); index++) {
+            try {
+              const alert = alerts.nth(index)
+              if (await alert.isVisible()) {
+                const text = (await alert.innerText()).trim()
+                if (text) visibleReasons.push(text)
+              }
+            } catch {}
+          }
+        } catch {}
+        if (visibleReasons.length) blockedReason = { source: 'field-alerts', text: visibleReasons.join('; ') }
       }
-      runtime.evidence.solarRunBlockedReason = visibleReasons.join('\n')
+      if (!blockedReason.text) {
+        try {
+          const reason = region.getByTestId('project-solar-equipment-reason')
+          if (await reason.isVisible()) {
+            const text = (await reason.innerText()).trim()
+            if (text) blockedReason = { source: 'equipment-reason', text }
+          }
+        } catch {}
+      }
+      runtime.evidence.solarRunBlockedReason = blockedReason
     }
     throw error
   }
