@@ -241,6 +241,19 @@ def test_plan_writes_nothing(rail):
     assert _snapshot(rail) == before
 
 
+def test_revoked_membership_with_active_binding_refuses(rail):
+    assert native.execute("apply")["outcome"] == "created"
+    with rail.cursor() as cur:
+        cur.execute("UPDATE project_member_bindings SET status = 'revoked', revoked_at = NOW() "
+                    "WHERE org_id = %s", (native.ORG,))
+    before = _snapshot(rail)
+    for mode in ("plan", "apply"):
+        with pytest.raises(native.Refused, match="membership_revoked"):
+            native.execute(mode)
+        assert _snapshot(rail) == before
+    assert native.execute("revoke")["outcome"] == "revoked"
+
+
 def test_revoke_readback_and_reapply(rail):
     created = native.execute("apply")
     revoked = native.execute("revoke")
