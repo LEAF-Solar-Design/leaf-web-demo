@@ -15,9 +15,11 @@ const mobileResult = (measurements) => evaluateLenses(evidenceFor(measurements))
 
 // Execute the real browser callback against a small DOM fake, without changing globals.
 function phone({ box = { x: 10, y: 20, width: 44, height: 44 }, connected = true,
-  coarsePointer = true, touchPoints = 1, hit, evaluateError = false } = {}) {
+  coarsePointer = true, touchPoints = 1, hit, evaluateError = false, diagnosticError = false,
+  radii = ['8px', '9px', '10px', '11px'], labels = {} } = {}) {
   const descendant = {}
   const handle = { isConnected: connected, contains: (node) => node === descendant,
+    tagName: 'BUTTON', getAttribute: () => null, textContent: 'Open drawing',
     boundingBox: async () => box }
   const calls = []
   const page = { evaluate: async (callback, argument) => {
@@ -26,12 +28,17 @@ function phone({ box = { x: 10, y: 20, width: 44, height: 44 }, connected = true
     return structuredClone(runInNewContext(`(${callback.toString()})(argument)`, {
       argument,
       window: { innerWidth: 390, innerHeight: 844, devicePixelRatio: 3,
+        getComputedStyle: () => {
+          if (diagnosticError) throw new Error('style unavailable')
+          return { borderTopLeftRadius: radii[0], borderTopRightRadius: radii[1],
+            borderBottomLeftRadius: radii[2], borderBottomRightRadius: radii[3] }
+        },
         matchMedia: (query) => {
           assert.equal(query, '(pointer: coarse)')
           return { matches: coarsePointer }
         } },
       navigator: { maxTouchPoints: touchPoints },
-      document: { elementFromPoint: (x, y) => {
+      document: { getElementById: id => labels[id] || null, elementFromPoint: (x, y) => {
         calls.push([x, y])
         return hit ? hit(x, y, handle, descendant) : handle
       } },
@@ -41,8 +48,104 @@ function phone({ box = { x: 10, y: 20, width: 44, height: 44 }, connected = true
   return { page, handle, locator, calls }
 }
 
-const collect = (fake, options = {}) => collectMobileTouchMeasurements({ ...fake, viewport: 'phone',
+const collectSample = (fake, options = {}) => collectMobileTouchMeasurements({ ...fake, viewport: 'phone',
   reference, locatorDescription: probe.locator, ...options })
+const collect = async (fake, options = {}) => (await collectSample(fake, options))?.measurements || null
+
+const element = (tag, attributes = {}, textContent = '') => ({ tagName: tag.toUpperCase(), textContent,
+  getAttribute: name => attributes[name] ?? null })
+
+test('rounded corners report the parent and target radii separately from the unchanged measurement', async () => {
+  const parent = element('div')
+  const fake = phone({ hit: (x, y, target) => x === 32 && y === 42 ? target : parent })
+  const { measurements, diagnostic } = await collectSample(fake)
+  const rect = { x: 10, y: 20, width: 44, height: 44 }
+  assert.equal(JSON.stringify(measurements), JSON.stringify({ reference,
+    input: { touch: true, coarsePointer: true }, viewport: { width: 390, height: 844, deviceScaleFactor: 3 },
+    target: { role: 'button', name: 'Open drawing', box: rect }, control: { reachable: true, clipped: true, rect } }))
+  assert.deepEqual(diagnostic, {
+    corners: ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map(position => ({ position,
+      hit: { tag: 'div', role: '', name: '' }, insideTarget: false, offscreen: false })),
+    borderRadiusPx: { topLeft: 8, topRight: 9, bottomLeft: 10, bottomRight: 11 },
+  })
+  assert.equal(mobileResult(measurements).status, 'finding')
+})
+
+test('an overlapping sibling records its tag, explicit role and trimmed bounded accessible name', async () => {
+  const sibling = element('aside', { role: 'region', 'aria-label': `  ${'Overlap'.repeat(12)}  ` })
+  const { diagnostic } = await collectSample(phone({ hit: (x, y, target) => x === 52 && y === 22 ? sibling : target }))
+  assert.deepEqual(diagnostic.corners[1], { position: 'top-right',
+    hit: { tag: 'aside', role: 'region', name: 'Overlap'.repeat(12).slice(0, 60) }, insideTarget: false, offscreen: false })
+  assert.deepEqual(diagnostic.corners.filter(corner => corner.insideTarget).map(corner => corner.position),
+    ['top-left', 'bottom-left', 'bottom-right'])
+})
+
+test('corner names resolve labelledby before aria-label and native button text', async () => {
+  for (const [sibling, labels, name] of [
+    [element('div', { role: 'region', 'aria-labelledby': 'first second', 'aria-label': 'ignored' }),
+      { first: { textContent: 'First' }, second: { textContent: 'label' } }, 'First label'],
+    [element('button', {}, '  Close Studio  '), {}, 'Close Studio'],
+  ]) {
+    const { diagnostic } = await collectSample(phone({ labels,
+      hit: (x, y, target) => x === 12 && y === 22 ? sibling : target }))
+    assert.equal(diagnostic.corners[0].hit.name, name)
+  }
+})
+
+test('offscreen and empty corner hits are distinguished', async () => {
+  const { diagnostic } = await collectSample(phone({ box: { x: -10, y: 20, width: 44, height: 44 },
+    hit: (x, y, target) => x === 32 && y === 22 ? null : target }))
+  assert.deepEqual(diagnostic.corners[0], { position: 'top-left', hit: null, insideTarget: false, offscreen: true })
+  assert.deepEqual(diagnostic.corners[1], { position: 'top-right', hit: null, insideTarget: false, offscreen: false })
+})
+
+test('unclipped targets skip diagnostic reads and failed diagnostic reads preserve measurements', async () => {
+  assert.equal(Object.hasOwn(await collectSample(phone({ diagnosticError: true })), 'diagnostic'), false)
+  const parent = element('div')
+  const hit = (x, y, target) => x === 12 && y === 22 ? parent : target
+  const successful = await collectSample(phone({ hit }))
+  const failed = await collectSample(phone({ hit, diagnosticError: true }))
+  assert.deepEqual(failed.measurements, successful.measurements)
+  assert.equal(Object.hasOwn(failed, 'diagnostic'), false)
+  assert.equal(mobileResult(failed.measurements).status, 'finding')
+})
+
+test('activation emits only the selected sample diagnostic and keeps it outside persona measurements', async () => {
+  for (const mode of ['detach', 'persist', 'unclipped-after', 'clipped-after', 'diagnostic-error']) {
+    const parent = element('div')
+    const fake = phone({ hit: (x, y, target) => x === 12 && y === 22 ? parent : target,
+      diagnosticError: mode === 'diagnostic-error' })
+    if (mode === 'clipped-after') fake.handle.boundingBox = async () => ({ x: 20, y: 20, width: 44, height: 44 })
+    const evidence = { ...evidenceFor(), result: { result: 'passed' }, touchClipDiagnostic: { existing: { kept: true } } }
+    const result = evidence.result
+    const fragments = []
+    await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence,
+      addFragment: (persona, measurements) => { fragments.push({ persona, measurements }); evidence.measurements = measurements },
+      activate: async () => {
+        if (mode === 'detach') fake.handle.isConnected = false
+        if (mode === 'unclipped-after') fake.handle.boundingBox = async () => ({ x: 20, y: 20, width: 44, height: 44 })
+        if (mode === 'clipped-after') fake.handle.boundingBox = async () => ({ x: 10, y: 20, width: 44, height: 44 })
+      } })
+    assert.equal(fragments.length, 1)
+    assert.equal(fragments[0].persona, 'mobile-touch')
+    assert.equal(evidence.result, result)
+    assert.deepEqual(evidence.touchClipDiagnostic.existing, { kept: true })
+    assert.equal(Object.hasOwn(evidence.measurements, 'diagnostic'), false)
+    assert.equal(Object.hasOwn(evidence.touchClipDiagnostic, reference), !['unclipped-after', 'diagnostic-error'].includes(mode))
+    if (evidence.touchClipDiagnostic[reference]) assert.equal(evidence.touchClipDiagnostic[reference].corners[0].hit.tag, 'div')
+  }
+})
+
+test('a diagnostic evidence write failure preserves the emitted measurement and functional verdict', async () => {
+  const fake = phone({ hit: (x, y, target) => x === 12 && y === 22 ? element('div') : target })
+  const evidence = Object.freeze({ result: { result: 'passed' } })
+  const fragments = []
+  await activateWithMobileTouchMeasurements({ ...fake, probe, viewport: 'phone', evidence,
+    addFragment: (...args) => fragments.push(args), activate: async () => {} })
+  assert.equal(fragments.length, 1)
+  assert.equal(fragments[0][1].control.clipped, true)
+  assert.equal(evidence.result.result, 'passed')
+})
 
 test('real 44px phone geometry passes only mobile-touch and records the actual page values', async () => {
   const fake = phone()
@@ -127,6 +230,7 @@ test('the call-site helper captures before activation, measures after, and prese
   assert.deepEqual(fake.calls.filter(call => typeof call === 'string'), ['handle', 'evaluate', 'activate', 'evaluate'])
   assert.equal(evidence.result, result)
   assert.deepEqual(evidence.measurements.unrelated, { value: 7 })
+  assert.equal(Object.hasOwn(evidence, 'touchClipDiagnostic'), false)
   assert.equal(evidence.measurements.input.otherInput, true)
   assert.equal(evidence.measurements.control.otherControl, true)
   assert.equal(evidence.measurements.control.rect.otherRect, true)

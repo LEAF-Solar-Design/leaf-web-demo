@@ -14,6 +14,7 @@ import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtu
 import { seedSolarChain } from './fixtures.mjs'
 import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
 import { solarChainSteps } from './probes.mjs'
+import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
 
 function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser', studioPresent = true, toolsHidden = false } = {}) {
   let open = initial
@@ -2819,6 +2820,47 @@ test('phone drawer activation descriptions identify the substituted Studio contr
         }
       }
     }
+  }
+})
+
+test('WL45 phone drawer close receipts keep clipping diagnostics separate from persona measurements', async () => {
+  const map = buildFeatureMap()
+  for (const drawer of ['jobs', 'nav', 'result']) {
+    const fake = phonePanelFake({ studio: true })
+    const probe = resolveProbe(map.entries.find(entry => entry.id === `drawer:${drawer}`), 'open')
+    let locatorDescription, detached = false
+    const locator = await studioDrawerProbeLocator(fake.page, probe, description => { locatorDescription = description })
+    const parent = { tagName: 'SECTION', getAttribute: name => name === 'aria-label' ? 'Studio controls' : null }
+    const handle = { get isConnected() { return !detached }, contains: () => false,
+      boundingBox: async () => ({ x: 270.9, y: 365, width: 106, height: 44 }) }
+    locator.elementHandle = async () => handle
+    const page = { evaluate: async (callback, argument) => structuredClone(runInNewContext(`(${callback.toString()})(argument)`, {
+      argument, navigator: { maxTouchPoints: 1 },
+      window: { innerWidth: 390, innerHeight: 844, devicePixelRatio: 3, matchMedia: () => ({ matches: true }),
+        getComputedStyle: () => ({ borderTopLeftRadius: '8px', borderTopRightRadius: '8px',
+          borderBottomLeftRadius: '8px', borderBottomRightRadius: '8px' }) },
+      document: { elementFromPoint: (x, y) => x === 323.9 && y === 387 ? handle : parent },
+    })) }
+    const reference = `mobile-touch:drawer:${drawer}[open]@phone`
+    const bundleReference = `walk:drawer:${drawer}[open]@phone`
+    const evidence = { schema: 'leaf.walk-evidence.v1', featureId: probe.featureId, state: 'open', viewport: 'phone',
+      result: { result: 'passed' } }
+    const verdict = evidence.result
+    await activateWithMobileTouchMeasurements({ page, locator, probe, viewport: 'phone', locatorDescription, evidence,
+      addFragment: (persona, measurements) => addPersonaFragment(evidence, { persona, measurements, bundleReference }),
+      activate: async () => { await locator.click(); detached = true } })
+    await assertEffect(probe, { page: fake.page, testInfo: { project: { name: 'phone' } } }, locator, {}, fake.assertions)
+    assert.equal(evidence.result, verdict)
+    assert.equal(evidence.measurements.target.name, 'Close Studio')
+    assert.equal(evidence.measurements.control.reachable, true)
+    assert.equal(evidence.measurements.control.clipped, true)
+    assert.deepEqual(evidence.touchClipDiagnostic[reference].corners.map(corner => corner.hit),
+      Array.from({ length: 4 }, () => ({ tag: 'section', role: '', name: 'Studio controls' })))
+    assert.deepEqual(evidence.touchClipDiagnostic[reference].borderRadiusPx,
+      { topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 })
+    assert.equal(Object.hasOwn(evidence.measurements, 'diagnostic'), false)
+    assert.equal(Object.hasOwn(evidence.personaFragments[0].measurements, 'diagnostic'), false)
+    assert.equal(mobileTouch.evaluate(evidence).status, 'finding')
   }
 })
 
