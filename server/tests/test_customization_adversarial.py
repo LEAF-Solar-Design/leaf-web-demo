@@ -553,6 +553,35 @@ def test_materialization_recovers_from_a_deleted_worktree(tmp_path, monkeypatch)
     assert (path / "registry.json").exists()
 
 
+def test_materialization_recovers_from_a_dangling_worktree(tmp_path, monkeypatch):
+    bare, _effective, commit = _published_pin(tmp_path, monkeypatch)
+    path = effective_catalog_dir("tenant-a")
+    assert path is not None
+
+    shutil.rmtree(bare / "worktrees")
+
+    assert effective_catalog_dir("tenant-a") == path
+    assert git(path, "rev-parse", "HEAD") == commit
+    assert (path / "registry.json").exists()
+    siblings = list(path.parent.glob(f"{commit}.dangling-*"))
+    assert len(siblings) == 1
+
+
+def test_unreadable_dotgit_is_not_treated_as_dangling(tmp_path):
+    dotgit = tmp_path / ".git"
+    dotgit.mkdir()
+    assert not customization_service._dangling_worktree(tmp_path)
+
+    dotgit.rmdir()
+    dotgit.write_text("not a gitdir pointer\n", encoding="utf-8")
+    assert not customization_service._dangling_worktree(tmp_path)
+
+    gitdir = tmp_path / "metadata"
+    gitdir.mkdir()
+    dotgit.write_text("gitdir: metadata\n", encoding="utf-8")
+    assert not customization_service._dangling_worktree(tmp_path)
+
+
 def test_concurrent_materialization_never_loses_the_worktree(tmp_path, monkeypatch):
     """Many callers racing one pin all get the same materialized path.
 

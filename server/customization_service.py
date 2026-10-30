@@ -117,6 +117,7 @@ _DIAGNOSTIC_CODES = frozenset({
     "catalog_process_lock_timeout",
     "catalog_worker_lock_timeout",
     "catalog_worktree_add_failed",
+    "catalog_dangling_move_failed",
     "catalog_head_probe_failed",
     "catalog_head_pending",
     "catalog_commit_mismatch",
@@ -2822,13 +2823,45 @@ def _discard_timed_out_add(target: Path) -> SimpleNamespace:
     return SimpleNamespace(returncode=124, stderr="git worktree add timed out")
 
 
+def _dangling_worktree(target: Path) -> bool:
+    """Recognize a linked worktree whose Git metadata is provably missing."""
+    try:
+        dotgit = target / ".git"
+        if not dotgit.is_file():
+            return False
+        lines = dotgit.read_text(encoding="utf-8").splitlines()
+        if len(lines) != 1 or not lines[0].startswith("gitdir: "):
+            return False
+        raw = lines[0][8:].strip()
+        if not raw:
+            return False
+        gitdir = Path(raw)
+        if not gitdir.is_absolute():
+            gitdir = target / gitdir
+        try:
+            gitdir.stat()
+        except FileNotFoundError:
+            return True
+    except (OSError, UnicodeError, ValueError):
+        return False
+    return False
+
+
 def _materialize_worktree(bare: Path, target: Path, commit: str) -> None:
     """Ensure `target` holds `commit`, serialized against every other worker."""
     target.parent.mkdir(parents=True, exist_ok=True)
     lock_path = target.parent / ".materialize.lock"
     with _exclusive_materialize(bare, lock_path):
         if target.exists():
-            return  # another holder materialized it while we waited
+            if not _dangling_worktree(target):
+                return  # another holder materialized it while we waited
+            try:
+                os.replace(
+                    target, target.with_name(f"{target.name}.dangling-{time.time_ns()}"),
+                )
+            except OSError as exc:
+                raise _unavailable("catalog_dangling_move_failed", cause=exc)
+            _LOG.warning("effective_catalog_worktree_dangling: moved_aside")
         add_cause = None
         try:
             first = _worktree_add(bare, target, commit)
