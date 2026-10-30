@@ -47,6 +47,36 @@ export async function revealStudioRail(page) {
   return true
 }
 
+export async function prepareBrowserToolsProject(sidebar, assertions = expect) {
+  const openTools = sidebar.getByRole('button', { name: 'Open tools', exact: true })
+  try {
+    if (await openTools.isVisible()) return
+    // ProjectStartPanel.jsx:56-90 owns both bootstrap and project selection.
+    const unbound = sidebar.getByRole('region', { name: 'Create your workspace', exact: true })
+    const projects = sidebar.getByRole('region', { name: 'Workspace projects', exact: true })
+    await assertions(openTools.or(unbound).or(projects)).toBeVisible()
+    if (await openTools.isVisible()) return
+    if (await unbound.isVisible()) {
+      await unbound.getByRole('button', { name: 'Create workspace', exact: true }).click()
+      await assertions(projects).toBeVisible()
+    }
+    const listed = projects.getByRole('list', { name: 'Projects', exact: true }).getByRole('button')
+    // Wait for the loaded list or its explicit empty state before deciding to create.
+    await assertions(listed.first().or(projects.getByText('No projects yet.', { exact: true }))).toBeVisible()
+    if (await listed.count()) {
+      const name = await listed.first().innerText()
+      await projects.getByRole('list', { name: 'Projects', exact: true })
+        .getByRole('button', { name, exact: true }).first().click()
+    } else {
+      await projects.getByRole('textbox', { name: 'Project name', exact: true }).fill('WL46 walk project')
+      await projects.getByRole('button', { name: 'Create project', exact: true }).click()
+    }
+    await assertions(openTools).toBeVisible()
+  } catch (error) {
+    throw new Error(`Open tools setup: browser workspace journey did not reach the Open tools board: ${error.message}`, { cause: error })
+  }
+}
+
 export async function prepareProjectSharedShell(probe, runtime, assertions = expect) {
   if (probe.profile !== 'project' || probe.state !== 'ready'
     || !['tab:project:activity', 'tab:project:project', 'tab:project:tools'].includes(probe.featureId)) return probe
@@ -87,6 +117,7 @@ export async function prepareProjectSharedShell(probe, runtime, assertions = exp
     const project = regions.find(panel => panel.name === 'Project')
     if (!await project.region.isVisible()) await project.button.click()
     await assertions(project.region).toBeVisible()
+    await prepareBrowserToolsProject(project.region, assertions)
     await assertions(page.locator('#environment-project-panel .ground-tile').first()).toBeVisible()
     return resolved
   }
@@ -3000,6 +3031,7 @@ export const HANDLED_SETUP_KINDS = Object.freeze(new Set([
   'census-disclosure', 'census-script', 'census-download-only',
   'fresh-sign-out-page', 'baseline-three-state', 'prepare-engine-transport', 'hold-engine-boot',
   'navigate', 'chooser-start', 'open-failed-drawing', 'failed-drawing-ribbon-tab', 'open-empty-workspace',
+  'open-browser-workspace',
   'open-private-drawing', 'ribbon-tab', 'control-pressed-state', 'engine-mode-state', 'fullscreen-state',
   'empty-view-history', 'previous-view-history', 'whole-drawing-view', 'engine-ready',
   'select-entity', 'vertex-index', 'clear-selection', 'copy-selection', 'drawer-state', 'tool-rail-state', 'job-rail-state', 'zoom-inside-extents',
@@ -3428,6 +3460,11 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
       await expect(toolbar).toBeVisible()
       return
     }
+    case 'open-browser-workspace':
+      // Browser front-door pattern: web/e2e/workspace-create-no-prompt.spec.mjs:86.
+      await page.goto(recipe.url)
+      await enterWorkspaceEnvironment(page, assertions)
+      return
     case 'open-empty-workspace':
       if (recipe.signedOut) await page.addInitScript(() => localStorage.removeItem('leaf.jwt'))
       await page.goto(`/try?surface=${recipe.surface}`)

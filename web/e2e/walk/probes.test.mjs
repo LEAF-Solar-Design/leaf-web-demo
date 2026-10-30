@@ -78,9 +78,9 @@ test('WL40 Tools resolves to the empty-board opener and Tools content oracle', (
   assert.deepEqual(PROJECT_WORKSPACE_PROBES, ['tab:project:tools/ready'])
   assert.deepEqual(probe.workerOptions, { walkPostgres: true })
   assert.deepEqual(probe.setup.steps, [
-    { kind: 'open-private-drawing', surface: 'browser', signedOut: false },
-    { kind: 'open-real-project' },
+    { kind: 'open-browser-workspace', url: '/app?surface=browser' },
   ])
+  assert.doesNotMatch(JSON.stringify(probe.setup.steps), /open-private-drawing|drawing=|upload/)
   assert.equal(unsupportedBeforeSetup(probe), 'walk_postgres_required')
   assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true }), null)
   assert.equal(unsupportedBeforeSetup(probe, { walkPostgres: true,

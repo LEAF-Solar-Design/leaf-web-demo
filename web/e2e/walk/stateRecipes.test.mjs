@@ -9,7 +9,7 @@ import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, 
 import { solarDocumentProbe, authorAvailability, disclosureEvidence, phoneRailAvailability, completeSolarReadiness, UnsupportedLocalError, recoverFailedCatalog } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { resolveProbe } from './probes.mjs'
-import { prepareProjectSharedShell, closeBaselinePanel } from './fixtures.mjs'
+import { prepareBrowserToolsProject, prepareProjectSharedShell, closeBaselinePanel } from './fixtures.mjs'
 import { captureMultipleSelection, assertMultipleSelectionDelete } from './fixtures.mjs'
 import { seedSolarChain } from './fixtures.mjs'
 import { assertSolarStepEditor, observeSolarEditorRequests, SOLAR_REQUIRED_FORM_INPUTS } from './fixtures.mjs'
@@ -106,7 +106,7 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
   const region = name => ({ ...visible(() => open === name), getByRole: (role, options) => {
     assert.equal(role, 'button')
     assert.equal(options.exact, true)
-    return { click: async () => {
+    return { ...visible(() => open === name && !pane && contentVisible && options.name === 'Open tools'), click: async () => {
       assert.equal(open, name, 'only visible close/content controls may be clicked')
       events.push(options.name)
       if (options.name === `Close ${name}`) open = 'none'
@@ -168,12 +168,123 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
     clearContent: () => { contentVisible = false }, restoreContent: () => { contentVisible = true } }
 }
 
-test('WL43c provisions Tools project once in setup before the shared Project sidebar preparation', async () => {
+function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears = true, loaded = true } = {}) {
+  let state = initial
+  let projectName = ''
+  const events = []
+  const visible = (read, extra = {}) => ({
+    isVisible: async () => read(),
+    or(other) { return visible(async () => await this.isVisible() || await other.isVisible()) },
+    ...extra,
+  })
+  const button = (name, read, action) => visible(read, {
+    click: async () => {
+      assert.equal(await read(), true, `${name} must be visible before clicking`)
+      events.push(name)
+      action()
+    },
+  })
+  const projectList = options => {
+    const matching = options?.name === undefined ? names : names.filter(name => name === options.name)
+    const first = () => ({
+      ...button(matching[0], () => state === 'bound' && loaded && matching.length > 0,
+        () => { state = boardAppears ? 'board' : 'stalled' }),
+      innerText: async () => matching[0],
+    })
+    return { first, count: async () => state === 'bound' && loaded ? matching.length : 0 }
+  }
+  const regions = kind => visible(() => state === kind, {
+    getByRole: (role, options = {}) => {
+      assert.equal(options.exact, true)
+      if (role === 'list') {
+        assert.equal(kind, 'bound')
+        assert.equal(options.name, 'Projects')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'button')
+          return projectList(options)
+        } }
+      }
+      if (role === 'textbox') {
+        assert.equal(kind, 'bound')
+        assert.equal(options.name, 'Project name')
+        return { fill: async value => {
+          assert.equal(state, 'bound')
+          projectName = value
+          events.push(`fill:${value}`)
+        } }
+      }
+      assert.equal(role, 'button')
+      assert.equal(options.name, kind === 'unbound' ? 'Create workspace' : 'Create project')
+      return button(options.name, () => state === kind, () => {
+        if (kind === 'bound') assert.equal(projectName, 'WL46 walk project')
+        state = kind === 'unbound' ? 'bound' : boardAppears ? 'board' : 'stalled'
+      })
+    },
+    getByText: (text, options) => {
+      assert.equal(text, 'No projects yet.')
+      assert.deepEqual(options, { exact: true })
+      return visible(() => state === 'bound' && loaded && names.length === 0)
+    },
+  })
+  const sidebar = { getByRole: (role, options) => {
+    assert.equal(options.exact, true)
+    if (role === 'button') {
+      assert.equal(options.name, 'Open tools')
+      return button(options.name, () => state === 'board', () => assert.fail('setup must not activate Open tools'))
+    }
+    assert.equal(role, 'region')
+    assert.ok(['Create your workspace', 'Workspace projects'].includes(options.name))
+    return regions(options.name === 'Create your workspace' ? 'unbound' : 'bound')
+  } }
+  const assertions = locator => ({ toBeVisible: async () => {
+    assert.equal(await locator.isVisible(), true, 'expected browser journey control to be visible')
+  } })
+  return { sidebar, assertions, events }
+}
+
+test('WL46 unbound browser journey creates workspace then project once and reaches the board', async () => {
+  const fake = browserToolsJourneyFake()
+  await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+  assert.deepEqual(fake.events, ['Create workspace', 'fill:WL46 walk project', 'Create project'])
+  assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+})
+
+test('WL46 bound browser journey opens the first listed project or creates only when empty', async () => {
+  for (const names of [[], ['Existing walk project', 'Second project']]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names })
+    await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+    assert.deepEqual(fake.events, names.length ? [names[0]] : ['fill:WL46 walk project', 'Create project'])
+    assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+  }
+  const board = browserToolsJourneyFake({ initial: 'board' })
+  await prepareBrowserToolsProject(board.sidebar, board.assertions)
+  assert.deepEqual(board.events, [])
+})
+
+test('WL46 missing Open tools fails setup clearly without retry or activation clicks', async () => {
+  for (const names of [[], ['Existing walk project']]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names, boardAppears: false })
+    await assert.rejects(prepareBrowserToolsProject(fake.sidebar, fake.assertions),
+      /Open tools setup: browser workspace journey did not reach the Open tools board/)
+    assert.deepEqual(fake.events, names.length ? [names[0]] : ['fill:WL46 walk project', 'Create project'])
+  }
+  for (const options of [{ initial: 'unavailable' }, { initial: 'bound', loaded: false }]) {
+    const fake = browserToolsJourneyFake(options)
+    await assert.rejects(prepareBrowserToolsProject(fake.sidebar, fake.assertions), /Open tools setup:/)
+    assert.deepEqual(fake.events, [])
+  }
+})
+
+test('WL46 leaves Tools project provisioning to the browser journey after sidebar preparation', async () => {
   const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
   const runner = source.slice(source.indexOf('export async function runProbe(probe, runtime) {'), source.indexOf('\n// This reporter'))
   const setup = runner.indexOf('for (const recipe of probe.setup.steps)')
   const sidebar = runner.indexOf('probe = await prepareProjectSharedShell(probe, runtime)')
   assert.ok(setup >= 0 && sidebar > setup)
+  const preparation = source.slice(source.indexOf('export async function prepareProjectSharedShell'),
+    source.indexOf('export function redactSolarDiagnostic'))
+  assert.ok(preparation.indexOf('await prepareBrowserToolsProject(project.region, assertions)')
+    > preparation.indexOf('await assertions(project.region).toBeVisible()'))
   assert.doesNotMatch(source, /prepareProjectSharedShellSetup/)
   for (const tab of ['tools', 'activity', 'project']) {
     for (const surface of ['browser', 'cad']) {
@@ -189,9 +300,9 @@ test('WL43c provisions Tools project once in setup before the shared Project sid
         const resolved = await prepareProjectSharedShell(probe, runtime, fake.assertions)
         const sharedTools = tab === 'tools' && surface === 'browser' && studioPresent
         assert.deepEqual(fake.events, [
-          ...(tab === 'tools' ? ['open-real-project'] : []), ...(sharedTools ? ['Project'] : []),
+          ...(sharedTools ? ['Project'] : []),
         ])
-        assert.deepEqual(runtime.evidence.steps, tab === 'tools' ? [{ phase: 'setup', kind: 'open-real-project' }] : [])
+        assert.deepEqual(runtime.evidence.steps, [])
         assert.deepEqual(probe.setup, originalSetup)
         assert.deepEqual(resolved.setup.steps, originalSetup.steps)
       }
@@ -3151,6 +3262,22 @@ test('Studio rail features contain exactly the four rail controls', () => {
   assert.deepEqual([...STUDIO_RAIL_FEATURES].sort(), [
     'control:job-monitor-expand', 'control:linked-services', 'control:notification-collapse', 'control:objects',
   ])
+})
+
+test('WL46b Tools enters the browser front door once without a drawing or upload', async () => {
+  const probe = resolveProbe(buildFeatureMap().entries.find(row => row.id === 'tab:project:tools'), 'ready')
+  for (const resume of [true, false]) {
+    const { page, events } = workspaceEnvironmentFake({ resume })
+    page.goto = async url => { events.push(`goto:${url}`) }
+    page.request = { post: async () => assert.fail('Tools entry must not upload a drawing') }
+    const runtime = { page, evidence: {} }
+    for (const recipe of probe.setup.steps) await setupStep(probe, runtime, recipe)
+    assert.deepEqual(events, ['goto:/app?surface=browser', ...(resume
+      ? ['Continue workspace', 'assert:data-entered=true']
+      : ['Open project or material', 'Close Project panel', 'assert:aria-expanded=false', 'assert:data-entered=true'])])
+    assert.equal(runtime.drawingId, undefined)
+    assert.equal(runtime.evidence.drawingId, undefined)
+  }
 })
 
 test('workspace entry continues an existing workspace and waits for entry', async () => {

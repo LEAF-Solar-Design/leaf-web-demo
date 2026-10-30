@@ -313,10 +313,14 @@ export function stateRecipe(entry, state) {
       : entry.kind === 'tool' && entry.source_id.startsWith('solar-') && state === 'ready' ? 'solar'
       : entry.kind === 'action' && actionRecord(entry).panel === 'solar-panels' ? 'solar' : 'cad'
   const steps = []
-  // A project context or declared workspace probe requires a real project.
-  // Open it after the drawing/surface setup so navigation cannot clear it.
-  const projectSteps = () => context.openProjectId || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`)
+  // Tools follows the browser workspace journey after shared-sidebar preparation.
+  // Other project contexts retain their existing drawing-backed setup.
+  const projectSteps = () => entry.id === 'tab:project:tools' && state === 'ready' ? []
+    : context.openProjectId || PROJECT_WORKSPACE_PROBES.includes(`${entry.id}/${state}`)
     ? [step('open-real-project')] : []
+  if (entry.id === 'tab:project:tools' && state === 'ready') return { context, steps: [
+    step('open-browser-workspace', { url: '/app?surface=browser' }),
+  ] }
   if (entry.id === 'surface:solar' && context.projectSolar) {
     if (context.projectSolar === 'proposal-offline') return { context, steps: [step('require-local-state', {
       reason: 'cloud_service_offline: project Solar proposal requires server/solar_project_solve.py (cloud stringer) and a retained proposal for review',
