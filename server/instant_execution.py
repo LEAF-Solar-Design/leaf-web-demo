@@ -135,7 +135,7 @@ def _sanitized_drawing_context(drawing_id: str) -> Tuple[Dict[str, Any], Dict[st
         raise ValueError("instant drawing context exceeds the assignment limit")
     digest = _sha256(encoded)
     reference = {
-        "drawing_id": identity.store_id,
+        "drawing_id": drawing_id,
         "version_id": str(uuid.uuid5(uuid.NAMESPACE_URL, f"leaf:{identity.store_id}:{digest}")),
         "content_digest": digest,
         "geometry_ref": f"drawing-context:{digest.removeprefix(_DIGEST)}",

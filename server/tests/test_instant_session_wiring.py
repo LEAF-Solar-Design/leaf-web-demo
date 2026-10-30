@@ -61,7 +61,10 @@ def _assignment(tenant_id="tenant-demo", session_id="22222222-2222-4222-8222-222
     }
 
 
-def test_request_drawing_reference_matches_executor_assignment_schema(monkeypatch):
+@pytest.mark.parametrize(
+    "drawing_id", sorted(instant_execution.drawing_identity.CURATED_DEMO.aliases),
+)
+def test_request_drawing_reference_matches_executor_assignment_schema(monkeypatch, drawing_id):
     schema_path = (
         Path(__file__).resolve().parents[2]
         / "executor/contracts/schemas/session-assignment.v1.schema.json"
@@ -71,9 +74,6 @@ def test_request_drawing_reference_matches_executor_assignment_schema(monkeypatc
     assert drawing_schema["additionalProperties"] is False
 
     identity = instant_execution.drawing_identity.CURATED_DEMO
-    monkeypatch.setattr(
-        instant_execution.drawing_identity, "curated_identity", lambda _drawing: identity,
-    )
     monkeypatch.setattr(
         instant_execution.deps, "load_cached_intake", lambda: {"layers": ["Panels"]},
     )
@@ -86,10 +86,18 @@ def test_request_drawing_reference_matches_executor_assignment_schema(monkeypatc
         source=b"def run(intake, params): return {'ok': True}\n",
     )
     body = instant_execution._request_body(
-        "tenant-demo", _assignment()["session_id"], identity.source_id,
+        "tenant-demo", _assignment()["session_id"], drawing_id,
         artifact, "sha256:" + "e" * 64,
     )
     reference = body["drawing_context"]["reference"]
+    assert reference["drawing_id"] == drawing_id
+    store_body = instant_execution._request_body(
+        "tenant-demo", _assignment()["session_id"], identity.store_id,
+        artifact, "sha256:" + "e" * 64,
+    )
+    store_reference = store_body["drawing_context"]["reference"]
+    for key in ("version_id", "content_digest", "geometry_ref"):
+        assert reference[key] == store_reference[key], key
     properties = drawing_schema["properties"]
     assert set(reference) == set(properties)
     for key, field_schema in properties.items():
@@ -226,6 +234,7 @@ def test_control_transport_requires_mtls_and_rejects_nonloopback_http(monkeypatc
 
 def test_assignment_validation_rejects_digest_substitution_and_expiry():
     assignment = _assignment()
+    assignment["drawing_context"]["drawing_id"] = "rooftop_demo"
     expected = {
         "effective_catalog_digest": assignment["effective_catalog_digest"],
         "artifact": {
@@ -243,6 +252,13 @@ def test_assignment_validation_rejects_digest_substitution_and_expiry():
     assert not instant_execution._assignment_valid(
         substituted, assignment["tenant_id"], assignment["session_id"], expected,
     )
+
+    for key, value in (("content_digest", "sha256:" + "f" * 64), ("drawing_id", "demo")):
+        substituted = dict(assignment)
+        substituted["drawing_context"] = {**assignment["drawing_context"], key: value}
+        assert not instant_execution._assignment_valid(
+            substituted, assignment["tenant_id"], assignment["session_id"], expected,
+        ), key
 
     expired = dict(assignment)
     expired["expires_at"] = "2000-01-01T00:00:00Z"
