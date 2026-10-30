@@ -2651,6 +2651,31 @@ test('phone nav open closes via Close Studio and rejects a still-visible nav', a
   }
 })
 
+test('phone drawer activation descriptions identify the substituted Studio control only when present', async () => {
+  const map = buildFeatureMap()
+  for (const drawer of ['nav', 'jobs']) {
+    for (const state of ['open', 'closed']) {
+      const probe = resolveProbe(map.entries.find(entry => entry.id === `drawer:${drawer}`), state)
+      for (const modern of [true, false]) {
+        const fake = phonePanelFake({ modern, studio: state === 'open' })
+        const activationOptions = {}
+        const locator = await studioDrawerProbeLocator(fake.page, probe, locatorDescription => {
+          activationOptions.locatorDescription = locatorDescription
+        })
+        if (modern) {
+          assert.deepEqual(activationOptions, {
+            locatorDescription: { role: 'button', name: state === 'open' ? 'Close Studio' : 'Studio' },
+          })
+          assert.equal(locator.kind, activationOptions.locatorDescription.name)
+        } else {
+          assert.equal(locator, null)
+          assert.deepEqual(activationOptions, {})
+        }
+      }
+    }
+  }
+})
+
 test('phone drawer:none resolves a visible Close Studio target while preserving keyboard Escape', async () => {
   const map = buildFeatureMap()
   const fake = phonePanelFake({ studio: true })
@@ -2750,8 +2775,10 @@ test('rail-expand selects the first visible family launcher and requires its con
     }
     const probe = { featureId: 'action:rail-expand', state: 'ready', assertion: { target: 'drawer:nav', value: 'nav' } }
     const runtime = { page, testInfo: { project: { name: 'desktop' } } }
-    const launcher = await railExpandLauncher(probe, runtime, registry)
+    let locatorDescription
+    const launcher = await railExpandLauncher(probe, runtime, registry, description => { locatorDescription = description })
     assert.equal(launcher, launchers[1])
+    assert.deepEqual(locatorDescription, { role: 'button', name: 'Open Family 1 in the tool rail (2 tools)' })
     await launcher.click()
     assert.deepEqual(fake.events, ['Family 1', 'Studio'])
     assert.equal(runtime.railExpandFamily, 'Family 1')

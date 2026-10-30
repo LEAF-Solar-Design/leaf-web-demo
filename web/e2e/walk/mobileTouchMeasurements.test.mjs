@@ -161,6 +161,33 @@ test('persistent controls emit their post-activation sample once', async () => {
   assert.deepEqual(fragments[0][1].target.box, afterBox)
 })
 
+test('activation descriptions label both self-hiding and persistent controls, with the declared locator as fallback', async () => {
+  const phoneDescription = { role: 'button', name: 'Phone launcher' }
+  const phoneProbe = { ...probe, locator: { ...probe.locator, phone: phoneDescription } }
+  for (const selfHiding of [true, false]) {
+    for (const activeProbe of [probe, phoneProbe]) {
+      for (const locatorDescription of [undefined, { role: 'button', name: 'Close Studio' },
+        { role: 'combobox', name: 'Workspace profile' }]) {
+        const fake = phone()
+        const fragments = []
+        const afterBox = { x: 30, y: 40, width: 48, height: 48 }
+        await activateWithMobileTouchMeasurements({ ...fake, probe: activeProbe, viewport: 'phone', locatorDescription,
+          addFragment: (...args) => fragments.push(args),
+          activate: async () => {
+            if (selfHiding) fake.handle.isConnected = false
+            else fake.handle.boundingBox = async () => afterBox
+          } })
+        assert.equal(fragments.length, 1)
+        assert.equal(fragments[0][0], 'mobile-touch')
+        assert.deepEqual(fragments[0][1].target, {
+          ...(locatorDescription || activeProbe.locator.phone || { role: probe.locator.role, name: probe.locator.name }),
+          box: selfHiding ? { x: 10, y: 20, width: 44, height: 44 } : afterBox,
+        })
+      }
+    }
+  }
+})
+
 test('a throwing pre-activation sample leaves the post-activation sample available', async () => {
   const fake = phone()
   const expected = await collect(fake)
