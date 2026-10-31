@@ -5,12 +5,71 @@ import { ACTIONS, REASONS, accessibleName, reasonCode } from '../../src/lib/acti
 import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCensusBatch, CONTROL_CENSUS_BATCH, CENSUS_RECIPE_CONTROLS,
   SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
 import { jobMonitorLauncherRecipe } from './probes.mjs'
+import { assertCountControlIdentity } from './fixtures.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('WL48 substituted monitor launcher records Studio identity and requires the inventoried spine absent', async () => {
+  const entry = map.entries.find(row => row.id === 'control:job-monitor-expand')
+  for (const state of entry.states) {
+    const probe = resolveProbe(entry, state)
+    const targetRecipe = jobMonitorLauncherRecipe(probe, true)
+    for (const count of [0, 1]) {
+      const evidence = {}
+      let absenceChecks = 0
+      const page = { getByRole: (role, options) => {
+        absenceChecks++
+        assert.equal(role, 'button')
+        assert.equal(options.includeHidden, true)
+        assert.equal(options.name.source, '^Expand the job monitor \\([0-9]+ live\\)$')
+        assert.match('Expand the job monitor (42 live)', options.name)
+        assert.doesNotMatch('Expand the job monitor (42 live) extra', options.name)
+        return { count: async () => count }
+      } }
+      const locator = { ariaSnapshot: () => assert.fail('Studio must not use the inventory name comparison') }
+      const assertions = value => ({ toHaveCount: async expected => assert.equal(await value.count(), expected) })
+      const check = assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions)
+      if (count) await assert.rejects(check)
+      else await check
+      assert.equal(absenceChecks, 1)
+      assert.deepEqual(evidence.controlIdentity, { launcher: { role: 'button', name: 'Studio' },
+        inventoryName: probe.locator.normalizedName, inventoryRendered: false })
+    }
+  }
+})
+
+test('WL48 legacy and spread recipes retain the exact normalized count comparison and evidence', async () => {
+  const probe = resolveProbe(map.entries.find(row => row.id === 'control:job-monitor-expand'), 'ready')
+  const renamed = 'Linked services {n} linked'
+  for (const targetRecipe of [jobMonitorLauncherRecipe(probe, false),
+    { ...probe.locator, panelName: 'Catalog' },
+    { ...probe.locator, exact: false, name: /unavailable/ },
+    { ...probe.locator, normalizedName: renamed }]) {
+    const liveName = targetRecipe.normalizedName === renamed ? 'Linked services 12 linked' : 'Expand the job monitor (12 live)'
+    for (const name of [liveName, 'Studio']) {
+      const evidence = {}
+      const comparisons = []
+      const assertions = value => ({
+        toBeTruthy: () => assert.ok(value),
+        toBe: expected => { comparisons.push([value, expected]); assert.equal(value, expected) },
+      })
+      const page = { getByRole: () => assert.fail('normalized recipes must not check inventory absence') }
+      const locator = { ariaSnapshot: async () => `- button ${JSON.stringify(name)}` }
+      const check = assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions)
+      if (name === 'Studio') await assert.rejects(check)
+      else {
+        await check
+        assert.deepEqual(evidence.controlIdentity, { rawName: liveName, normalizedName: targetRecipe.normalizedName })
+      }
+      assert.deepEqual(comparisons, [[normalizedControlKey({ scope: 'document', role: 'button', name }),
+        normalizedControlKey({ scope: 'document', role: 'button', name: targetRecipe.normalizedName })]])
+    }
+  }
+})
 
 test('WL47 monitor launcher uses Studio while retaining the legacy recipe and identity', () => {
   const entry = map.entries.find(row => row.id === 'control:job-monitor-expand')
