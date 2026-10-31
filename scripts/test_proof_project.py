@@ -31,6 +31,70 @@ OTHER_HASH = "b" * 64
 ROOT = Path("C:/fake/run-test") if sys.platform == "win32" else Path("/fake/run-test")
 
 
+def r14f2_browser_records(organization_id="fakeorg"):
+    recovery = dict(scenario="capture-recovery", organization_id=organization_id, project_id="recovery-project",
+        drawing_id="recovery-drawing", input_version_id="panels-1", job_id="sizing-1", output_version_id="sized-1",
+        exchange_job_id="sizing-1", evidence_sha256=HASH, panels_in_sequence=27)
+    return {
+        "capture-recovery": recovery,
+        "read-custody": dict(scenario="read-custody", organization_id=organization_id, project_id="recovery-project",
+            drawing_id="recovery-drawing", source_version_id="sized-1", groups_job_id="groups-1", input_version_id="groups-output",
+            frame_count=1, tool="solar-string-data", request_sha256=HASH, output_sha256=OTHER_HASH),
+        "browser-response-discard": dict(recovery, scenario="browser-response-discard", project_id="submission-project",
+            drawing_id="submission-drawing", input_version_id="panels-2", job_id="sizing-2", output_version_id="sized-2",
+            exchange_job_id="sizing-2", submissions=2, same_submission=True),
+        "service-response-drop": dict(scenario="service-response-drop", organization_id=organization_id, project_id="service-project",
+            drawing_id="service-drawing", input_version_id="panels-3", job_id="sizing-3", status="failed",
+            reason_code="SIZING_OUTCOME_UNKNOWN", retryable=False),
+    }
+
+
+def r14f2_fixture_digests():
+    sizing = p._sizing_module()
+    fixture = json.loads((sizing.REPO / sizing.MANIFEST).read_bytes())["fixtures"][0]
+    return fixture["request_wire_sha256"], fixture["response_wire_sha256"]
+
+
+def r14f2_evidence(c):
+    facts, sizing = r14f1_facts(c), p._sizing_module()
+    request_sha256, response_sha256 = r14f2_fixture_digests()
+    prefix = "project:" + c.config.run_id + ":sizing:"
+    base = {key: facts[key] for key in ("run_id", "organization_id", "classification", "endpoint_sha256", "fixture_sha256")}
+    recovery = dict(base, project_id="recovery-project", job_id="sizing-1", output_version_id="sized-1", exchange_job_id="sizing-1",
+        evidence_sha256=HASH, request_sha256=request_sha256, response_sha256=response_sha256, panels_in_sequence=27, job_attempt=2,
+        sender_worker_id=prefix + "1", published_worker_id=prefix + "2", service_posts=1)
+    submission = {key: value for key, value in recovery.items() if key not in {"job_attempt", "sender_worker_id", "published_worker_id"}}
+    submission.update(project_id="submission-project", job_id="sizing-2", exchange_job_id="sizing-2", output_version_id="sized-2",
+                      submissions=2, same_submission=True, jobs_in_project=1, service_posts=2)
+    return {
+        "capture-recovery": recovery,
+        "read-custody": dict(run_id=c.config.run_id, organization_id=facts["organization_id"], project_id="recovery-project", source_version_id="sized-1",
+            input_version_id="groups-output", groups_job_id="groups-1", frame_count=1, request_sha256=HASH, output_sha256=OTHER_HASH,
+            refusals=dict(sizing.REFUSALS), control_read_passed=True, inventories_unchanged=True),
+        "browser-response-discard": submission,
+        "service-response-drop": dict(run_id=c.config.run_id, organization_id=facts["organization_id"], project_id="service-project", job_id="sizing-3",
+            status="failed", reason_code="SIZING_OUTCOME_UNKNOWN", retryable=False, exchange_state="outcome_unknown",
+            sender_worker_id=prefix + "2", reclaim_worker_id=prefix + "3", job_attempt=2, output_version_id=None,
+            service_posts=3, service_posts_final=3),
+    }
+
+
+def r14f2_replay(c):
+    sizing = p._sizing_module()
+    evidence = r14f2_evidence(c)
+    driver = {key: {name: value for name, value in evidence[key].items() if name in
+        {"job_id", "sender_worker_id", "published_worker_id", "reclaim_worker_id", "service_posts", "submissions", "same_submission"}}
+        for key in sizing.SCENARIOS}
+    driver["service_posts_final"] = 3
+    runtime = SimpleNamespace(plan=SimpleNamespace(public=lambda: r14f1_facts(c)), facts=driver,
+        start=lambda environment, deadline: dict(environment, **{
+            sizing.CONFIG_KEY: str(c.config.run_root / "project-replay/private.json"), sizing.CONFIG_HASH_KEY: HASH}),
+        launcher_argv=lambda argv: argv, launch_worker=lambda deadline: None, heartbeat=lambda deadline: None,
+        drive=lambda deadline: None, complete=lambda: True, close=lambda: True)
+    runtime.loop_heartbeat = lambda deadline: runtime.heartbeat(deadline)
+    return runtime
+
+
 def file(name, digest=HASH):
     return p.FileProof(name, digest, 8)
 
@@ -80,6 +144,7 @@ def fake_host():
 def fake_scope():
     scope = SimpleNamespace(cleanups=[])
     scope.acquire = lambda name, cleanup: scope.cleanups.append((name, cleanup))
+    scope.own_replay = lambda replay: scope.acquire(p.ResourceKind.REPLAY, replay.close)
     return scope
 
 
@@ -362,7 +427,8 @@ class TestProjectBoundary:
         assert plan.descriptor is c.descriptor
         assert c.reads == [p.CanonicalRequest("descriptor", "solar-settings")]
         assert plan.required_test_ids == ("project_browser_create_import", "project_browser_bearer_required",
-                                          "project_settings_worker_readback")
+            "project_settings_worker_readback", "project_sizing_recovery_reopen", "project_sizing_read_custody",
+            "project_sizing_submission_unknown", "project_sizing_service_unknown")
         # Exercise the production reader with fake modules, never import server code here.
         loaded, descriptor_calls = [], []
         def descriptor(tool, *, server_dir):
@@ -1245,8 +1311,8 @@ def execution_case():
     c.result = p.BrowserResult("run-test", c.plan.source, "fakekey", 0,
         p.REQUIRED_TEST_IDS, p.REQUIRED_TEST_IDS, p.REQUIRED_TEST_IDS,
         tuple(p.TestOutcome(name, "passed", 0) for name in p.REQUIRED_TEST_IDS), (),
-        dict.fromkeys(p.CHECKPOINTS, True), c.evidence)
-    c.canonical = p.CanonicalProof(c.evidence, OTHER_HASH, OTHER_HASH)
+        dict.fromkeys(p.CHECKPOINTS, True), c.evidence, r14f2_browser_records())
+    c.canonical = p.CanonicalProof(c.evidence, OTHER_HASH, OTHER_HASH, r14f1_facts(c), r14f2_evidence(c))
     def children(pids):
         if c.dead:
             raise RuntimeError("dead")
@@ -1274,13 +1340,13 @@ def execution_case():
         return handle
     def canonical(request):
         c.canonical_requests.append(request)
-        return c.canonical
+        return c.canonical.sizing_evidence["read-custody"] if request.purpose == "custody" else c.canonical
     c.host.read_stack_ready = lambda path: c.stack_ready
     c.host.app_readiness = lambda request: c.app
     c.host.worker_heartbeat = lambda request: c.heartbeat
     c.host.organization_read = lambda request, *, authenticated: c.auth if authenticated else c.denied
     c.effects = replace(c.effects, process_launcher=launch, readiness_probe=readiness,
-        browser_runner=browser, canonical_reader=canonical)
+        browser_runner=browser, canonical_reader=canonical, replay_factory=lambda prepared, **kwargs: r14f2_replay(c))
     return c
 
 
@@ -1687,7 +1753,7 @@ class TestProjectExecution:
             return old_mint(*args, **kwargs)
         c.prepared.identity_lease.issuer.mint = mint
         execute(c)
-        assert len(c.mints) == 2 and c.mints[0][1]["lifetime_s"] == 180 and c.mints[1][1]["lifetime_s"] == 360
+        assert len(c.mints) == 2 and c.mints[0][1]["lifetime_s"] == 180 and c.mints[1][1]["lifetime_s"] == 900
         assert "ready-done" not in order[0] and "ready-done" in order[1]
         assert "LEAF_E2E_TOKEN" not in c.launches[0].environment
         request = c.browser_requests[0]
@@ -1810,10 +1876,10 @@ class TestProjectExecution:
         execution_refused(c, p.FailureCode.CANONICAL)
         c = execution_case()
         proof = execute(c)
-        assert len(c.canonical_requests) == 1
+        assert len(c.canonical_requests) == 2
         request = c.canonical_requests[0]
         assert request.purpose == "execution" and request.environment["DATABASE_URL"] == "fakedb"
-        assert request.evidence == c.evidence and proof.canonical is c.canonical
+        assert request.evidence == c.evidence and proof.canonical == c.canonical
         assert "fakedb" not in repr(request) + repr(request.environment)
         # Exercise the independent production verifier with fake SQL and canonical library.
         c = canonical_case()
@@ -4023,7 +4089,9 @@ def receipt_case():
         scope.acquire(kind, lambda: c.events.append("stop:" + spec.role))
         return SimpleNamespace(poll=lambda: 0, stop=lambda deadline: True)
     def canonical(request):
-        return c.descriptor if request.purpose == "descriptor" else c.canonical
+        if request.purpose == "descriptor":
+            return c.descriptor
+        return c.canonical.sizing_evidence["read-custody"] if request.purpose == "custody" else c.canonical
     def journal(path, value):
         c.journals.append((path, value))
         c.events.append("intent" if type(value) is p.PublicationIntent else path.stem)
@@ -4357,7 +4425,7 @@ class TestProjectReceipt:
 
     def test_receipt_unknown_fields(self, monkeypatch):
         c = successful_receipt()
-        assert set(c.document) == p._RECEIPT_FIELDS
+        assert set(c.document) == p._RECEIPT_FIELDS | {"replay"}
         for key in (None, "source", "identity", "database", "stack", "worker", "playwright", "rows", "canonical", "timings", "cleanup"):
             malformed = clone_document(c.document)
             (malformed if key is None else malformed[key])["diagnostic"] = "raw@key"
@@ -4758,8 +4826,8 @@ class TestProjectReceipt:
         c.binding = replace(c.binding, organization_id=password)
         c.auth = (200, password, "hosted_pro", "active")
         c.evidence = replace(c.evidence, organization_id=password)
-        c.result = replace(c.result, canonical=c.evidence)
-        c.canonical = replace(c.canonical, evidence=c.evidence)
+        c.result = replace(c.result, canonical=c.evidence, sizing=r14f2_browser_records(password))
+        c.canonical = replace(c.canonical, evidence=c.evidence, replay_facts=r14f1_facts(c), sizing_evidence=r14f2_evidence(c))
         outcome = p.supervise(c.config, effects=c.effects)
         assert outcome.exit_code != 0 and outcome.failure == p.Failure(p.Stage.VERIFICATION, p.FailureCode.RECEIPT)
         assert outcome.receipt_path is None and c.receipts == {}
@@ -5034,7 +5102,7 @@ def browser_case(tmp_path, monkeypatch):
         "outcomes": [{"test_id": name, "status": "passed", "retry": 0} for name in p.REQUIRED_TEST_IDS],
         "annotation_types": [], "checkpoints": dict.fromkeys(p.CHECKPOINTS, True),
         "canonical": asdict(p.CanonicalEvidence("fakeorg", "project", "drawing", "input", "output", "job",
-            "fakebind", "project:run-test", 1, HASH, OTHER_HASH, OTHER_HASH))}
+            "fakebind", "project:run-test", 1, HASH, OTHER_HASH, OTHER_HASH)), "sizing": r14f2_browser_records()}
     def child(spec):
         c.spec = spec
         def start():
@@ -5083,10 +5151,12 @@ def _pp3b_c1_pipeline(tmp_path, monkeypatch):
     c.stack_ready["ports"] = dict(zip(("web", "app", "broker", "harness"), ports.values()))
     c.auth = (200, "org-1", "hosted_pro", "active")
     c.evidence = replace(c.evidence, organization_id="org-1")
-    c.result = replace(c.result, canonical=c.evidence)
-    c.canonical = replace(c.canonical, evidence=c.evidence)
+    c.result = replace(c.result, canonical=c.evidence, sizing=r14f2_browser_records("org-1"))
+    c.canonical = replace(c.canonical, evidence=c.evidence, replay_facts=r14f1_facts(c), sizing_evidence=r14f2_evidence(c))
     execute(c)
     b.request = c.browser_requests[0]
+    b.raw["canonical"]["organization_id"] = b.request.organization_id
+    b.raw["sizing"] = r14f2_browser_records(b.request.organization_id)
     b.launch()
     return c, b
 
@@ -5534,17 +5604,18 @@ def test_contract_heartbeat_runtime_python_form():
 
 def r14f1_facts(c):
     sizing = p._sizing_module()
-    return dict(classification="synthetic", run_id=c.config.run_id, organization_id="fakeorg",
+    return dict(classification="synthetic", run_id=c.config.run_id, organization_id=c.evidence.organization_id,
         source_sha256=c.plan.source.tested_source_manifest_sha256, endpoint_sha256=HASH,
         manifest_sha256=sizing.MANIFEST_SHA256, fixture_sha256=sizing.FIXTURE_SHA256)
 
 
 def r14f1_attachment(facts):
+    request_sha256, response_sha256 = r14f2_fixture_digests()
     return {**{key: facts[key] for key in ("run_id", "organization_id", "classification",
             "endpoint_sha256", "fixture_sha256")},
         "project_id": "sizing-project", "job_id": "sizing-job", "exchange_job_id": "sizing-job",
         "output_version_id": "sizing-output", "evidence_sha256": HASH,
-        "request_sha256": HASH, "response_sha256": OTHER_HASH}
+        "request_sha256": request_sha256, "response_sha256": response_sha256}
 
 
 def r14f1_runtime(c):
@@ -5571,6 +5642,10 @@ def r14f1_runtime(c):
         return child
     runtime.launch_worker = launch_worker
     runtime.heartbeat = lambda deadline: runtime.calls.append("sizing-heartbeat")
+    runtime.loop_heartbeat = lambda deadline: runtime.heartbeat(deadline)
+    runtime.drive = lambda deadline: runtime.calls.append("drive")
+    runtime.complete = lambda: True
+    runtime.facts = r14f2_replay(c).facts
     c.effects = replace(c.effects, replay_factory=lambda prepared, **kwargs: runtime)
     c.canonical = replace(c.canonical, replay_facts=facts)
     return runtime
@@ -5581,11 +5656,11 @@ def test_r14f1_supervisor_replay_lifecycle():
     runtime = r14f1_runtime(c)
     outcome = p.supervise(c.config, effects=c.effects)
     assert outcome.exit_code == 0, outcome
-    assert runtime.calls == ["start", "sizing-worker", "sizing-heartbeat", "sizing-heartbeat",
+    assert runtime.calls == ["start", "sizing-worker", "sizing-heartbeat", "drive", "sizing-heartbeat",
                              "sizing-heartbeat", "stop-sizing", "close"]
     document = c.receipts[outcome.receipt_path]
     assert document["replay"]["facts"] == r14f1_facts(c)
-    assert document["replay"]["sizing_required"] is False
+    assert document["replay"]["sizing_required"] is True
     assert document["worker"]["tool"] == "solar-settings"
     assert document["worker"]["initial_heartbeat"]["worker_id"] == "project:run-test"
     assert document["worker"]["final_heartbeat"]["worker_id"] == "project:run-test"
@@ -5640,11 +5715,12 @@ def test_r14f1_parent_loss_reaps_replay_and_replacements():
 
 def test_r14f1_receipt_legacy_and_exact_replay():
     c = successful_receipt()
-    assert "replay" not in c.document
+    assert c.document["replay"]["sizing_required"] is True
     document = clone_document(c.document)
     document["replay"] = dict(facts=r14f1_facts(c), sizing_required=False,
                                sizing_evidence=None, canonical_sizing_sha256=None)
-    assert verify_document(c, document).ok
+    assert not verify_document(c, document).ok
+    document = clone_document(c.document)
     for field in document["replay"]:
         corrupt = clone_document(document)
         del corrupt["replay"][field]
@@ -5659,15 +5735,16 @@ def test_r14f1_required_sizing_evidence():
     c = successful_receipt()
     document = clone_document(c.document)
     facts = r14f1_facts(c)
-    evidence = r14f1_attachment(facts)
+    evidence = r14f2_evidence(c)
     document["replay"] = dict(facts=facts, sizing_required=True, sizing_evidence=evidence,
                                canonical_sizing_sha256=p._sizing_attachment_hash(evidence))
     assert verify_document(c, document).ok
     execution = execute(execution_case())
-    for broken in (replace(execution, sizing_evidence=evidence),
-                   replace(execution, sizing_evidence=evidence,
-                           canonical=replace(execution.canonical, sizing_evidence=evidence)),
-                   replace(execution, replay_facts=facts)):
+    bad_evidence = r14f1_attachment(facts)
+    for broken in (replace(execution, sizing_evidence=bad_evidence),
+                   replace(execution, sizing_evidence=bad_evidence,
+                           canonical=replace(execution.canonical, sizing_evidence=bad_evidence)),
+                   replace(execution, replay_facts=dict(facts, endpoint_sha256=OTHER_HASH))):
         with pytest.raises(p.ProofRefused):
             p._receipt_document(c.plan, None, c.prepared, broken, c.run_scope._closed, None)
     corrupt = clone_document(document)
@@ -5676,7 +5753,7 @@ def test_r14f1_required_sizing_evidence():
     for key, value in (("classification", "live"), ("output_version_id", "substituted"),
                        ("exchange_job_id", "foreign-job")):
         corrupt = clone_document(document)
-        corrupt["replay"]["sizing_evidence"][key] = value
+        corrupt["replay"]["sizing_evidence"]["capture-recovery"][key] = value
         assert not verify_document(c, corrupt).ok
 
 
@@ -5826,6 +5903,386 @@ def test_r14f1_private_replay_split_logs():
 
 def test_r14f1_production_replay_wired():
     assert p.production_effects().replay_factory is p._project_replay_factory
+
+
+def r14f2_request(c):
+    return p.BrowserRequest(c.config.run_id, c.plan.source, "fakekey", "fakeorg", "fakebind", "project:run-test",
+        "http://127.0.0.1:8101", "http://127.0.0.1:8102", p.REQUIRED_TEST_IDS, {}, ROOT, 900)
+
+
+def test_r14f2_seven_ids_and_explicit_checkpoints():
+    assert p.REQUIRED_TEST_IDS == ("project_browser_create_import", "project_browser_bearer_required", "project_settings_worker_readback",
+        "project_sizing_recovery_reopen", "project_sizing_read_custody", "project_sizing_submission_unknown", "project_sizing_service_unknown")
+    assert len(p.CHECKPOINTS) == len(set(p.CHECKPOINTS)) == 31
+    c = execution_case()
+    assert p._validate_browser(c.result, r14f2_request(c)) is c.result
+    for name in p.REQUIRED_TEST_IDS[3:]:
+        outcomes = tuple(replace(row, status="skipped") if row.test_id == name else row for row in c.result.outcomes)
+        browser_refused(lambda: p._validate_browser(replace(c.result, outcomes=outcomes), r14f2_request(c)))
+    browser_refused(lambda: p._validate_browser(replace(c.result, completed_test_ids=p.REQUIRED_TEST_IDS[:-1]), r14f2_request(c)))
+
+
+def test_r14f2_browser_sizing_is_read_only():
+    c = execution_case()
+    with pytest.raises(TypeError): c.result.sizing["capture-recovery"] = {}
+    with pytest.raises(TypeError): c.result.sizing["capture-recovery"]["job_id"] = "foreign"
+    raw = r14f2_browser_records()
+    result = replace(c.result, sizing=raw)
+    raw["capture-recovery"]["job_id"] = "changed"
+    assert result.sizing["capture-recovery"]["job_id"] == "sizing-1"
+
+
+def test_r14f2_browser_record_exact_keys_and_types():
+    c = execution_case()
+    for scenario, record in r14f2_browser_records().items():
+        for changed in (dict(record, extra=True), {key: value for key, value in record.items() if key != "project_id"},
+                        dict(record, organization_id="foreign"), dict(record, project_id="../foreign"), dict(record, scenario="foreign")):
+            sizing = r14f2_browser_records()
+            sizing[scenario] = changed
+            browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+
+
+def test_r14f2_browser_record_fixed_values():
+    c = execution_case()
+    mutations = {
+        "capture-recovery": {"exchange_job_id": "foreign-job", "evidence_sha256": "A" * 64, "panels_in_sequence": True, "output_version_id": "panels-1"},
+        "read-custody": {"tool": "foreign", "frame_count": 0, "request_sha256": "short", "output_sha256": "bad"},
+        "browser-response-discard": {"submissions": True, "same_submission": 1},
+        "service-response-drop": {"status": "complete", "reason_code": "other", "retryable": 0},
+    }
+    for scenario, changes in mutations.items():
+        for key, value in changes.items():
+            sizing = r14f2_browser_records()
+            sizing[scenario][key] = value
+            browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+
+
+def test_r14f2_browser_cross_record_binding():
+    c = execution_case()
+    for scenario, key, value in (("read-custody", "project_id", "foreign"), ("read-custody", "drawing_id", "foreign"),
+        ("read-custody", "source_version_id", "foreign"), ("service-response-drop", "job_id", "sizing-1"),
+        ("service-response-drop", "project_id", "recovery-project")):
+        sizing = r14f2_browser_records()
+        sizing[scenario][key] = value
+        browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+    for scenario in r14f2_browser_records():
+        sizing = r14f2_browser_records()
+        del sizing[scenario]
+        browser_refused(lambda: p._validate_browser(replace(c.result, sizing=sizing), r14f2_request(c)))
+
+
+def test_r14f2_report_reader_requires_sizing(tmp_path, monkeypatch):
+    c = browser_case(tmp_path, monkeypatch)
+    c.launch()
+    c.write()
+    assert set(p._read_browser_report(c.report, c.request).sizing) == set(r14f2_browser_records())
+    for bad in ({}, {"extra": {}}, None, []):
+        c.raw["sizing"] = bad
+        c.write()
+        browser_refused(lambda: p._read_browser_report(c.report, c.request))
+    del c.raw["sizing"]
+    c.write()
+    browser_refused(lambda: p._read_browser_report(c.report, c.request))
+
+
+@pytest.mark.parametrize("scenario", ("capture-recovery", "read-custody", "browser-response-discard", "service-response-drop"))
+@pytest.mark.parametrize("repeated", (False, True))
+def test_r14f2_report_reader_refuses_pair_array_records(tmp_path, monkeypatch, scenario, repeated):
+    c = browser_case(tmp_path, monkeypatch)
+    c.launch()
+    c.write()
+    assert p._read_browser_report(c.report, c.request).sizing[scenario]
+    pairs = list(c.raw["sizing"][scenario].items())
+    if repeated:
+        pairs.insert(0, ("organization_id", "foreign"))
+    c.raw["sizing"][scenario] = pairs
+    c.write()
+    browser_refused(lambda: p._read_browser_report(c.report, c.request))
+
+
+def test_r14f2_report_reader_refuses_cross_record_substitution(tmp_path, monkeypatch):
+    c = browser_case(tmp_path, monkeypatch)
+    c.launch()
+    c.raw["sizing"]["read-custody"]["source_version_id"] = "foreign-output"
+    c.write()
+    browser_refused(lambda: p._read_browser_report(c.report, c.request))
+
+
+def test_r14f2_pipeline_requires_replay_before_launch():
+    c = execution_case()
+    c.effects = replace(c.effects, replay_factory=None)
+    execution_refused(c, p.FailureCode.LAUNCH)
+    assert c.launches == [] and c.browser_requests == []
+
+
+def test_r14f2_pipeline_drives_and_requires_complete_schedule():
+    c = execution_case()
+    runtime = r14f2_replay(c)
+    calls = []
+    runtime.drive = lambda deadline: calls.append("drive")
+    runtime.heartbeat = lambda deadline: calls.append("heartbeat")
+    runtime.complete = lambda: calls.append("complete") or True
+    c.effects = replace(c.effects, replay_factory=lambda *args, **kwargs: runtime)
+    execute(c)
+    assert calls == ["heartbeat", "drive", "heartbeat", "complete", "heartbeat"]
+    runtime.complete = lambda: False
+    execution_refused(c, p.FailureCode.CANONICAL)
+
+
+def test_r14f2_budgets_and_independent_verification_deadline():
+    assert p.BROWSER_TIMEOUT_S == 840.0 and p.VERIFICATION_TIMEOUT_S == 300.0
+    c = execution_case()
+    runner, reader = c.effects.browser_runner, c.effects.canonical_reader
+    def browser(request, *, scope):
+        c.effects.clock.now += 800
+        return runner(request, scope=scope)
+    def canonical(request):
+        if request.purpose == "execution": c.effects.clock.now += 200
+        return reader(request)
+    c.effects = replace(c.effects, browser_runner=browser, canonical_reader=canonical)
+    execute(c)
+    assert c.canonical_requests[0].deadline == 1101.0 and c.effects.clock.now == 1001.0
+    assert c.mints[-1][1]["lifetime_s"] == 900
+    source = Path(p.__file__).read_text(encoding="utf-8")
+    assert "STACK_TIMEOUT_S + BROWSER_TIMEOUT_S + VERIFICATION_TIMEOUT_S + 5" in source
+
+
+def r14f2_observation():
+    sizing = p._sizing_module()
+    value = dict.fromkeys(sizing.OBSERVATION_FIELDS)
+    value.update(job_id="job-one", organization_id="fakeorg", project_id="project-one", project_name="PP3B run-test sizing recovery",
+        tool=sizing.TOOL, status="running", attempt=1, jobs_in_project=1, version_count=3, versions_before_job=3,
+        classification="synthetic", exchange_state="send_started", sender_worker="project:run-test:sizing:1", sender_attempt=1)
+    return value
+
+
+def test_r14f2_canonical_observation_closed_projection():
+    sizing = p._sizing_module()
+    value = r14f2_observation()
+    assert sizing.validate_observation(value) == value
+    for changed in (dict(value, extra=True), dict(value, attempt=True), dict(value, tool="foreign"), dict(value, classification="live"),
+                    dict(value, project_name="x" * 257), dict(value, sender_worker="../foreign")):
+        with pytest.raises(sizing.ReplayRefused): sizing.validate_observation(changed)
+
+
+def test_r14f2_canonical_purposes_and_query_shapes_refused(monkeypatch):
+    c = canonical_case()
+    for purpose, attachment in (("foreign", {}), ("replay-observe", {"query": "foreign"}), ("replay-observe", {"job_id": "../foreign"}),
+                                ("custody", {})):
+        request = p.CanonicalRequest(purpose, environment={"DATABASE_URL": "fakedb"}, evidence=c.evidence, sizing_attachment=attachment)
+        with pytest.raises(p.ProofRefused): p._canonical_execution(request)
+
+
+def test_r14f2_canonical_observation_child_response_shape(monkeypatch):
+    value = r14f2_observation()
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: value))
+    request = p.CanonicalRequest("replay-observe", environment={"DATABASE_URL": "fakedb", "LEAF_STORE_DIR": str(ROOT / "drawings"),
+        p._sizing_module().CONFIG_KEY: "private"}, deadline=10, sizing_attachment={"job_id": "job-one"})
+    assert p._canonical_execution(request) == value
+    value["job_id"] = "foreign-job"
+    with pytest.raises(p.ProofRefused): p._canonical_execution(request)
+
+
+def test_r14f2_canonical_custody_child_response_binding(monkeypatch):
+    c = execution_case()
+    value = dict(c.canonical.sizing_evidence["read-custody"])
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: value))
+    request = p.CanonicalRequest("custody", environment={"DATABASE_URL": "fakedb", "LEAF_STORE_DIR": str(ROOT / "drawings"),
+        p._sizing_module().CONFIG_KEY: "private"}, evidence=c.evidence, deadline=10,
+        sizing_attachment={"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts})
+    assert p._canonical_execution(request) == value
+    value["groups_job_id"] = "foreign-job"
+    with pytest.raises(p.ProofRefused): p._canonical_execution(request)
+
+
+def test_r14f2_canonical_execution_child_response_binding(monkeypatch):
+    c = execution_case()
+    raw = dict(stored_settings_sha256=OTHER_HASH, reopened_settings_sha256=OTHER_HASH, replay_facts=r14f1_facts(c),
+        sizing_evidence={key: dict(c.canonical.sizing_evidence[key]) for key in p._sizing_module().SCENARIOS})
+    monkeypatch.setattr(p._sizing_module(), "read_private_plan", lambda environment: SimpleNamespace(public=lambda: r14f1_facts(c)))
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(lambda path: raw))
+    request = p.CanonicalRequest("execution", environment={"DATABASE_URL": "fakedb", "LEAF_STORE_DIR": str(ROOT / "drawings"),
+        p._sizing_module().CONFIG_KEY: "private"}, evidence=c.evidence, deadline=10,
+        sizing_attachment={"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts})
+    assert p._canonical_execution(request).sizing_evidence == raw["sizing_evidence"]
+    raw["sizing_evidence"]["capture-recovery"]["job_id"] = "foreign-job"
+    with pytest.raises(p._sizing_module().ReplayRefused): p._canonical_execution(request)
+
+
+def test_r14f2_receipt_requires_sizing_and_all_scenarios():
+    c = successful_receipt()
+    assert c.document["replay"]["sizing_required"] is True
+    for key in p._sizing_module().BROWSER_SCENARIOS:
+        corrupt = clone_document(c.document)
+        del corrupt["replay"]["sizing_evidence"][key]
+        corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+        assert not verify_document(c, corrupt).ok
+    corrupt = clone_document(c.document)
+    del corrupt["replay"]
+    assert not verify_document(c, corrupt).ok
+
+
+@pytest.mark.parametrize("scenario", ("capture-recovery", "browser-response-discard"))
+@pytest.mark.parametrize("field", ("request_sha256", "response_sha256"))
+def test_r14f2_receipt_requires_pinned_fixture_digests(scenario, field):
+    c = successful_receipt()
+    corrupt = clone_document(c.document)
+    row = corrupt["replay"]["sizing_evidence"][scenario]
+    assert row[field] != "0" * 64
+    row[field] = "0" * 64
+    corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+    assert not verify_document(c, corrupt).ok
+
+
+def test_r14f2_receipt_every_fixed_sizing_value():
+    c = successful_receipt()
+    mutations = {
+        "capture-recovery": {"classification": "live", "panels_in_sequence": 26, "job_attempt": 1, "sender_worker_id": "project:run-test:sizing:2",
+            "published_worker_id": "project:run-test:sizing:1", "service_posts": 2},
+        "read-custody": {"control_read_passed": False, "inventories_unchanged": False, "frame_count": 0, "refusals": {}},
+        "browser-response-discard": {"submissions": 1, "same_submission": False, "jobs_in_project": 2, "service_posts": 3, "panels_in_sequence": 26},
+        "service-response-drop": {"status": "succeeded", "reason_code": "OTHER", "retryable": True, "exchange_state": "published",
+            "sender_worker_id": "foreign", "reclaim_worker_id": "foreign", "job_attempt": 1, "output_version_id": "foreign",
+            "service_posts": 4, "service_posts_final": 4},
+    }
+    for scenario, changes in mutations.items():
+        for key, value in changes.items():
+            corrupt = clone_document(c.document)
+            corrupt["replay"]["sizing_evidence"][scenario][key] = value
+            corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+            assert not verify_document(c, corrupt).ok, (scenario, key)
+
+
+def test_r14f2_receipt_cross_record_binding_and_digest():
+    c = successful_receipt()
+    for scenario, key, value in (("read-custody", "source_version_id", "foreign"), ("read-custody", "project_id", "foreign"),
+        ("service-response-drop", "job_id", "sizing-1"), ("service-response-drop", "project_id", "recovery-project")):
+        corrupt = clone_document(c.document)
+        corrupt["replay"]["sizing_evidence"][scenario][key] = value
+        corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+        assert not verify_document(c, corrupt).ok
+    corrupt = clone_document(c.document)
+    corrupt["replay"]["canonical_sizing_sha256"] = "0" * 64
+    assert not verify_document(c, corrupt).ok
+
+
+def test_r14f2_execution_facts_must_equal_canonical_facts():
+    c = execution_case()
+    execution = execute(c)
+    evidence = clone_document(execution.sizing_evidence)
+    evidence["capture-recovery"]["service_posts"] = 2
+    with pytest.raises(p.ProofRefused):
+        p._receipt_document(c.plan, None, c.prepared, replace(execution, sizing_evidence=evidence),
+                            p.CleanupProof(True, True, True, True, True, True, (), 0.0, ()), None)
+
+
+def test_r14f2_sizing_validation_mutation_marker_remains_single():
+    source = Path(p.__file__).read_text(encoding="utf-8")
+    assert source.count("# IGNORE_SIZING_EVIDENCE") == 1
+    assert "_validate_replay_sizing(replay)  # IGNORE_SIZING_EVIDENCE" in source
+    c = successful_receipt()
+    corrupt = clone_document(c.document)
+    corrupt["replay"]["sizing_evidence"]["service-response-drop"]["retryable"] = True
+    corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
+    assert not verify_document(c, corrupt).ok
+
+
+def test_r14f2_canonical_binding_rejects_substituted_job_and_driver_facts():
+    c = execution_case()
+    sizing = p._sizing_module()
+    records = {key: dict(c.canonical.sizing_evidence[key]) for key in sizing.SCENARIOS}
+    attachment = {"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts}
+    sizing.validate_execution_binding(records, attachment, "fakeorg")
+    for scenario, key, value in (("capture-recovery", "job_id", "foreign"), ("browser-response-discard", "submissions", 1),
+                                 ("service-response-drop", "service_posts_final", 4)):
+        corrupt = clone_document(records)
+        corrupt[scenario][key] = value
+        with pytest.raises(sizing.ReplayRefused): sizing.validate_execution_binding(corrupt, attachment, "fakeorg")
+
+
+def r14f2_child_projection(monkeypatch, purpose):
+    from dataclasses import asdict
+    c = execution_case()
+    sizing = p._sizing_module()
+    monkeypatch.setattr(sizing, "read_private_plan", lambda environment: SimpleNamespace(public=lambda: r14f1_facts(c)))
+    attachment = {"browser": r14f2_browser_records(), "driver": r14f2_replay(c).facts}
+    if purpose == "replay-observe":
+        attachment = {"job_id": "job-one"}
+        value = r14f2_observation()
+    elif purpose == "custody":
+        value = clone_document(c.canonical.sizing_evidence["read-custody"])
+    else:
+        value = dict(stored_settings_sha256=OTHER_HASH, reopened_settings_sha256=OTHER_HASH,
+            replay_facts=r14f1_facts(c), sizing_evidence={key: dict(c.canonical.sizing_evidence[key]) for key in sizing.SCENARIOS})
+    request = dict(purpose=purpose, tool_name=sizing.TOOL, evidence=asdict(c.evidence), deadline=10,
+                   worker_id="project:run-test", sizing_attachment=attachment)
+    spec = p.ProcessSpec("canonical-child", ("fake",), ROOT, {"DATABASE_URL": "fakedb", sizing.CONFIG_KEY: "private",
+        "LEAF_PROJECT_CANONICAL_REQUEST": json.dumps(request)}, 10)
+    return spec, value
+
+
+def r14f2_project_child(spec, value):
+    output = p._RetainedOutput(lambda raw: p._child_public(spec, raw))
+    output.feed(json.dumps(value).encode())
+    return output.finish()
+
+
+def test_r14f2_child_public_replay_observation_shared_validator(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "replay-observe")
+    assert json.loads(r14f2_project_child(spec, value)) == value
+    for changed in (dict(value, extra=True), dict(value, job_id="foreign-job"), dict(value, sender_worker="../foreign")):
+        assert r14f2_project_child(spec, changed) == b""
+
+
+def test_r14f2_child_public_custody_shared_validator(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "custody")
+    assert json.loads(r14f2_project_child(spec, value)) == value
+    for changed in (dict(value, extra=True), dict(value, groups_job_id="foreign-job"), dict(value, control_read_passed=False)):
+        assert r14f2_project_child(spec, changed) == b""
+
+
+def test_r14f2_child_public_execution_shared_validator(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "execution")
+    assert json.loads(r14f2_project_child(spec, value)) == value
+    for path, changed in ((('sizing_evidence', 'capture-recovery', 'service_posts'), 2),
+        (('sizing_evidence', 'browser-response-discard', 'job_id'), 'foreign-job'),
+        (('sizing_evidence', 'service-response-drop', 'retryable'), True), (('replay_facts', 'classification'), 'live')):
+        corrupt = clone_document(value)
+        target = corrupt
+        for key in path[:-1]: target = target[key]
+        target[path[-1]] = changed
+        assert r14f2_project_child(spec, corrupt) == b""
+    assert r14f2_project_child(spec, dict(value, extra=True)) == b""
+
+
+def test_r14f2_child_public_refuses_unknown_canonical_purpose(monkeypatch):
+    spec, value = r14f2_child_projection(monkeypatch, "execution")
+    environment = dict(spec.environment)
+    request = json.loads(environment["LEAF_PROJECT_CANONICAL_REQUEST"])
+    request["purpose"] = "foreign-purpose"
+    environment["LEAF_PROJECT_CANONICAL_REQUEST"] = json.dumps(request)
+    assert r14f2_project_child(replace(spec, environment=environment), value) == b""
+
+
+def test_r14f2_receipt_groups_job_must_differ_from_every_sizing_job():
+    c = successful_receipt()
+    for scenario in p._sizing_module().SCENARIOS:
+        corrupt = clone_document(c.document)
+        evidence = corrupt["replay"]["sizing_evidence"]
+        evidence["read-custody"]["groups_job_id"] = evidence[scenario]["job_id"]
+        corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(evidence)
+        assert not verify_document(c, corrupt).ok
+    corrupt = clone_document(c.document)
+    evidence = corrupt["replay"]["sizing_evidence"]
+    evidence["read-custody"]["project_id"] = evidence["service-response-drop"]["project_id"]
+    corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(evidence)
+    assert not verify_document(c, corrupt).ok
 
 
 def test_r14f1_supervisor_ambient_replay_refusal():

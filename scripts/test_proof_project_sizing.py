@@ -20,6 +20,7 @@ def _load(name, path):
 
 
 s = _load("_r14f1_sizing_under_test", Path(__file__).with_name("proof_project_sizing.py"))
+_real_receive_before = s._receive_before
 ROOT = Path("C:/fake/r14f1-owned") if sys.platform == "win32" else Path("/fake/r14f1-owned")
 TOKEN = "private-fixture-credential-" + "x" * 32
 
@@ -35,6 +36,9 @@ def no_host_effects(monkeypatch):
     monkeypatch.setattr(socket, "create_connection", forbidden)
     monkeypatch.setattr(subprocess, "Popen", forbidden)
     monkeypatch.setattr(subprocess, "run", forbidden)
+    async def receive_before(receive, deadline):
+        return await receive()
+    monkeypatch.setattr(s, "_receive_before", receive_before)
     # requests probes IPv6 by binding a socket during import. The pure parser
     # and product evidence prover need no transport, so inject that dependency.
     monkeypatch.setitem(sys.modules, "requests", SimpleNamespace(RequestException=RuntimeError, post=forbidden))
@@ -478,6 +482,17 @@ def test_r14f1_independent_sizing_evidence():
             s.verify_sizing_run(replay, value, observe=lambda *ids: evidence)
 
 
+@pytest.mark.parametrize("field", ("request_sha256", "response_sha256"))
+def test_r14f2_receipt_attachment_requires_pinned_fixture_digests(field):
+    replay = plan()
+    evidence = attachment(replay)
+    s.validate_sizing_attachment(evidence, replay.public())
+    assert evidence[field] != "0" * 64
+    evidence[field] = "0" * 64
+    with pytest.raises(s.ReplayRefused):
+        s.validate_sizing_attachment(evidence, replay.public())
+
+
 def test_r14f1_cleanup_uncertainty():
     events = []
     owner = SimpleNamespace(resources=[SimpleNamespace(stop=lambda deadline: events.append("stop") or False)],
@@ -591,3 +606,644 @@ def test_r14f1_listener_fake_transport(monkeypatch):
     s._listener_main(environment(), record_request=lambda event: calls.append(event))
     assert calls[0] == replay.public() and calls.count(200) == 1 and calls[-1] == "closed"
     assert ("X-Leaf-Synthetic-Replay", "synthetic") in calls
+
+
+def fault_payload():
+    return dict(job_id="job-one", organization_id="seeded-org", project_id="project-one", worker_id="worker-one",
+                attempt=1, response_sha256="a" * 64)
+
+
+def fault_directory(tmp_path):
+    replay, env = private_plan(tmp_path)
+    directory = replay.run_root / "project-replay/faults"
+    directory.mkdir(mode=0o700)
+    return replay, env, directory
+
+
+def finish_coroutine(coroutine):
+    try:
+        coroutine.send(None)
+    except StopIteration as result:
+        return result.value
+    raise AssertionError("fake coroutine unexpectedly suspended")
+
+
+def test_r14f2_message_mac_and_exact_shape():
+    replay = plan()
+    raw = s.fault_message(replay, "capture", 1, **fault_payload())
+    value = s.validate_fault_message(replay, raw)
+    assert value["seq"] == 1 and value["kind"] == "capture" and TOKEN.encode() not in raw
+    for changed in (dict(value, extra=True), {key: item for key, item in value.items() if key != "attempt"},
+                    dict(value, attempt=True), dict(value, mac="0" * 64)):
+        with pytest.raises(s.ReplayRefused):
+            s.validate_fault_message(replay, json.dumps(changed).encode())
+    with pytest.raises(s.ReplayRefused):
+        s.fault_message(replay, "capture", 1, **dict(fault_payload(), extra=True))
+
+
+def test_r14f2_message_size_and_sequence_bounds():
+    replay = plan()
+    for raw in (b"", b"x" * 4097, b"{}", b'{"kind":"capture","kind":"capture"}'):
+        with pytest.raises(s.ReplayRefused):
+            s.validate_fault_message(replay, raw)
+    for seq in (0, -1, True, 1025):
+        with pytest.raises(s.ReplayRefused):
+            s.fault_message(replay, "capture", seq, **fault_payload())
+
+
+def test_r14f2_atomic_private_message(tmp_path, monkeypatch):
+    replay, _, directory = fault_directory(tmp_path)
+    path = directory / "event-sizing-worker-100-1.json"
+    raw = s.fault_message(replay, "capture", 1, **fault_payload())
+    events = []
+    replace = s.os.replace
+    def observe(source, destination):
+        assert source.name.endswith(".tmp") and source.read_bytes() == raw and not destination.exists()
+        events.append("replace")
+        replace(source, destination)
+    monkeypatch.setattr(s.os, "replace", observe)
+    s.write_fault_message(path, raw)
+    assert events == ["replace"] and s.read_fault_message(replay, path)["job_id"] == "job-one"
+    assert not path.with_suffix(".tmp").exists()
+    if s.os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
+
+
+def test_r14f2_tampered_and_foreign_messages_refused(tmp_path):
+    replay, _, directory = fault_directory(tmp_path)
+    path = directory / "event-sizing-worker-100-1.json"
+    raw = s.fault_message(replay, "capture", 1, **fault_payload())
+    path.write_bytes(raw.replace(b"job-one", b"job-two"))
+    with pytest.raises(s.ReplayRefused):
+        s.read_fault_message(replay, path)
+    path.write_bytes(raw)
+    with pytest.raises(s.ReplayRefused):
+        s.read_fault_message(replace(replay, run_id="foreign-run"), path)
+    with pytest.raises(s.ReplayRefused):
+        s.read_fault_message(replay, directory.parent / path.name)
+
+
+def test_r14f2_channel_count_and_decision_timeout(tmp_path):
+    replay, _, directory = fault_directory(tmp_path)
+    clock = SimpleNamespace(now=0.0)
+    channel = s.FaultChannel(replay, "sizing-worker", clock=lambda: clock.now,
+        wait=lambda seconds: setattr(clock, "now", clock.now + seconds), pid=100)
+    channel.seq = 256
+    with pytest.raises(s.ReplayRefused):
+        channel.event("capture", **fault_payload())
+    with pytest.raises(s.ReplayRefused):
+        channel.decision("event-sizing-worker-100-1", {"continue"})
+    assert 60 <= clock.now < 60.1 and not list(directory.iterdir())
+
+
+def test_r14f2_channel_decision_replay_and_tamper(tmp_path):
+    replay, _, directory = fault_directory(tmp_path)
+    channel = s.FaultChannel(replay, "app", pid=100)
+    event = channel.event("submission", job_id="job-one", status_code=202, body_sha256="a" * 64,
+        idempotency_key_sha256="b" * 64, organization_id="seeded-org", project_id="project-one")
+    supervisor = s.FaultChannel(replay, "supervisor", pid=200)
+    supervisor.decide(event, "pass")
+    assert channel.decision(event, {"pass"}) == "pass"
+    path = directory / ("decision-" + event + ".json")
+    path.write_bytes(path.read_bytes().replace(b'"pass"', b'"hold"'))
+    with pytest.raises(s.ReplayRefused):
+        channel.decision(event, {"pass"})
+
+
+def test_r14f2_capture_continue_pause_and_timeout():
+    events, exits = [], []
+    clock = SimpleNamespace(now=0.0)
+    channel = SimpleNamespace(event=lambda kind, **payload: events.append(kind) or "event-sizing-worker-1-1",
+        decision=lambda event, allowed: "continue", clock=lambda: clock.now,
+        wait=lambda seconds: setattr(clock, "now", clock.now + seconds))
+    s.capture_handshake(channel, fault_payload(), exit_process=exits.append)
+    assert events == ["capture"] and exits == []
+    channel.decision = lambda event, allowed: "pause"
+    with pytest.raises(s.ReplayRefused):
+        s.capture_handshake(channel, fault_payload(), exit_process=exits.append)
+    assert events[-2:] == ["capture", "paused"] and exits == [70] and clock.now == 120
+    def timed_out(*args):
+        raise s.ReplayRefused()
+    channel.decision = timed_out
+    with pytest.raises(s.ReplayRefused):
+        s.capture_handshake(channel, fault_payload(), exit_process=exits.append)
+    assert exits == [70, 70]
+
+
+def submission_case(body=None, action="pass"):
+    h = SimpleNamespace(events=[], sent=[], received=[], action=action)
+    request = {"type": "http.request", "body": body if body is not None else b'{"tool":"solar-size-strings"}'}
+    messages = [{"type": "http.response.start", "status": 202, "headers": [(b"connection", b"close")]},
+                {"type": "http.response.body", "body": b'{"job_id":"job-one","status":"submitted"}'}]
+    async def receive(): return request
+    async def send(message): h.sent.append(message)
+    async def app(scope, receive, send):
+        h.received.append(await receive())
+        for message in messages: await send(message)
+    channel = SimpleNamespace(event=lambda kind, **payload: h.events.append((kind, payload)) or "event-app-100-1")
+    async def decide(channel, event, allowed): return h.action
+    scope = {"type": "http", "method": "POST", "path": "/api/run", "headers": [
+        (b"x-org-id", b"seeded-org"), (b"x-project-id", b"project-one"), (b"idempotency-key", b"private-key")]}
+    h.run = lambda: finish_coroutine(s.channel_submission_wrapper(app, channel, decide=decide)(scope, receive, send))
+    h.request, h.messages, h.scope = request, messages, scope
+    return h
+
+
+def test_r14f2_submission_pass_sends_held_messages():
+    h = submission_case()
+    h.run()
+    assert h.sent == h.messages and h.received == [h.request]
+    kind, value = h.events[0]
+    assert kind == "submission" and value["job_id"] == "job-one" and value["status_code"] == 202
+    assert value["body_sha256"] == s.digest(h.request["body"]) and value["idempotency_key_sha256"] == s.digest(b"private-key")
+    assert "private-key" not in json.dumps(h.events)
+
+
+def test_r14f2_submission_discard_sends_no_bytes():
+    h = submission_case(action="discard")
+    reset = s._ABORT_RESPONSE.set(False)
+    try:
+        with pytest.raises(s._DiscardResponse):
+            h.run()
+        assert h.sent == [] and [event[0] for event in h.events] == ["submission", "discarded"]
+        assert s._ABORT_RESPONSE.get() is True
+    finally:
+        s._ABORT_RESPONSE.reset(reset)
+
+
+def test_r14f2_submission_non_sizing_invalid_and_oversize_untouched():
+    for body in (b'{"tool":"solar-settings"}', b"invalid", b"[]", b"x" * 1048577):
+        h = submission_case(body)
+        h.run()
+        assert h.events == [] and h.sent == h.messages and h.received == [h.request]
+
+
+def test_r14f2_uvicorn_abort_is_context_local():
+    calls = []
+    class Cycle:
+        transport = SimpleNamespace(abort=lambda: calls.append("abort"))
+        async def send_500_response(self): calls.append("500")
+    s.patch_uvicorn_abort(Cycle)
+    reset = s._ABORT_RESPONSE.set(False)
+    try:
+        finish_coroutine(Cycle().send_500_response())
+        s._ABORT_RESPONSE.set(True)
+        finish_coroutine(Cycle().send_500_response())
+        assert calls == ["500", "abort"]
+    finally:
+        s._ABORT_RESPONSE.reset(reset)
+
+
+def listener_case(tmp_path, monkeypatch, operate):
+    replay, env = private_plan(tmp_path)
+    from email.message import Message
+    import io
+    class Server:
+        def __init__(self, address, handler): self.handler = handler
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def serve_forever(self, **kwargs):
+            handler = self.handler()
+            handler.headers, handler.wfile = Message(), io.BytesIO()
+            handler.headers["Authorization"] = "Bearer " + TOKEN
+            handler.connection = SimpleNamespace(settimeout=lambda seconds: None, shutdown=lambda *args: None, close=lambda: None)
+            handler.send_response = lambda status: None
+            handler.send_header = lambda key, value: None
+            handler.end_headers = lambda: None
+            operate(handler, replay)
+    monkeypatch.setitem(sys.modules, "http.server", SimpleNamespace(BaseHTTPRequestHandler=object, HTTPServer=Server))
+    monkeypatch.setattr(s, "read_private_plan", lambda environment: replay)
+    monkeypatch.setattr(s, "_write_private", lambda path, value: None)
+    return replay, env
+
+
+def test_r14f2_listener_catalog_exact_path_bearer_and_tokens(tmp_path, monkeypatch):
+    def operate(handler, replay):
+        handler.path = "/string-length/modules?q=JA_Solar_JAM72D40-595%2FMB&limit=20"
+        handler.do_GET()
+        result = json.loads(handler.wfile.getvalue())
+        assert result["modules"][0]["key"] == "JA_Solar_JAM72D40-595/MB" and result["truncated"] is False
+        handler.wfile.seek(0); handler.wfile.truncate()
+        handler.path = "/string-length/modules?q=other&limit=20"
+        handler.do_GET()
+        assert json.loads(handler.wfile.getvalue())["modules"] == []
+        for path in ("/modules?q=JA&limit=20", "/string-length/modules?q=JA&q=Solar&limit=20", "/string-length/modules?q=JA&limit=0"):
+            handler.path = path
+            with pytest.raises(s.ReplayRefused): handler.do_GET()
+        handler.path = "/string-length/modules?q=JA&limit=20"
+        handler.headers.replace_header("Authorization", "Bearer foreign")
+        with pytest.raises(s.ReplayRefused): handler.do_GET()
+    replay, env = listener_case(tmp_path, monkeypatch, operate)
+    s._listener_main(env, record_request=lambda event: pytest.fail("catalog GET journaled as service POST"))
+    assert not (replay.run_root / "project-replay/requests.jsonl").exists()
+
+
+def test_r14f2_listener_hold_drop_journals_once(tmp_path, monkeypatch):
+    events = []
+    decisions = iter(("hold", "drop"))
+    monkeypatch.setattr(s, "FaultChannel", lambda *args: SimpleNamespace(
+        event=lambda kind, **payload: events.append(kind) or "event-listener-1-1",
+        decision=lambda event, allowed: next(decisions)))
+    def operate(handler, replay):
+        import io
+        raw = json.loads((s.REPO / s.FIXTURE).read_bytes())
+        paths = sys.path[:]
+        try:
+            client = s._load_parser().sizing_module()
+            body = client.wire_bytes(client.SizingRequest.model_validate(raw["request"]))
+        finally:
+            sys.path[:] = paths
+        handler.path, handler.rfile = "/string-length", io.BytesIO(body)
+        handler.headers["Content-Type"] = "application/json"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.do_POST()
+        assert handler.wfile.getvalue() == b""
+    replay, env = listener_case(tmp_path, monkeypatch, operate)
+    s._listener_main(env)
+    assert events == ["service", "held", "dropped"]
+    assert len((replay.run_root / "project-replay/requests.jsonl").read_bytes().splitlines()) == 1
+
+
+def test_r14f2_app_catalog_fixture_custody_and_transport():
+    replay, mods, calls = plan(), modules(), []
+    class Session:
+        trust_env = True
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def get(self, url, **kwargs):
+            assert self.trust_env is False
+            calls.append(url)
+            return Session()
+    mods.catalog = SimpleNamespace()
+    mods.requests.Session, mods.requests.Timeout = Session, TimeoutError
+    s.install_app_seams(replay, mods)
+    catalog = mods.catalog
+    assert catalog.cloud.resolve_grant(s.GRANT_REF, replay.organization_id).access_token == TOKEN
+    for grant, organization in (("foreign", replay.organization_id), (s.GRANT_REF, "foreign")):
+        with pytest.raises(mods.grants.CloudError): catalog.cloud.resolve_grant(grant, organization)
+    kwargs = dict(allow_redirects=False, headers={"Authorization": "Bearer " + TOKEN})
+    with catalog.requests.get(replay.endpoint + "/modules", **kwargs): pass
+    with pytest.raises(s.ReplayRefused):
+        with catalog.requests.get("https://foreign.invalid", **kwargs): pass
+    assert calls == [replay.endpoint + "/modules"]
+
+
+def test_r14f2_auxiliary_worker_roles_and_closed_argv():
+    replay = plan()
+    for role, tool, suffix in (("panels-worker", "solar-panels-from-drawing", "panels"),
+                               ("groups-worker", "solar-panel-groups", "groups")):
+        args = ["--tool", tool, "--readiness", "--worker-id", f"project:{replay.run_id}:{suffix}:1"]
+        s.validate_worker_argv(replay, role, args)
+        for changed in (args + ["--foreign"], [*args[:4], args[4][:-1] + "2"], ["--tool", s.TOOL, *args[2:]]):
+            with pytest.raises(s.ReplayRefused): s.validate_worker_argv(replay, role, changed)
+    with pytest.raises(s.ReplayRefused): s.validate_worker_argv(replay, "foreign-worker", [])
+
+
+def test_r14f2_catalog_is_a_required_source_pin():
+    assert s.CATALOG in s.PIN_FILES and s.digest((s.REPO / s.CATALOG).read_bytes()) == s.CATALOG_SHA256
+    args = inputs()
+    args["read"] = lambda path: b"foreign" if path == s.REPO / s.CATALOG else path.read_bytes()
+    with pytest.raises(s.ReplayRefused): s.prepare_replay(**args)
+
+
+def driver_case():
+    replay = plan()
+    now, counter = SimpleNamespace(value=0.0), SimpleNamespace(value=0)
+    def launch(spec, *, scope):
+        counter.value += 1
+        return SimpleNamespace(identity=SimpleNamespace(role="sizing-worker", pid=100 + counter.value, start_id=str(counter.value)),
+                               stop=lambda deadline: True, poll=lambda: None)
+    effects = SimpleNamespace(process_launcher=launch, clock=SimpleNamespace(monotonic=lambda: now.value))
+    runtime = s.ReplayRuntime(None, effects, None, SimpleNamespace(ProcessSpec=lambda *args: args))
+    runtime.plan, runtime.environment = replay, environment()
+    runtime.schedule = s.FaultSchedule(replay)
+    runtime.decisions = []
+    runtime.channel = SimpleNamespace(decide=lambda event, action: runtime.decisions.append((event, action)))
+    runtime.heartbeat = lambda deadline, **kwargs: None
+    runtime.posts = 0
+    runtime.service_posts = lambda: runtime.posts
+    runtime.launch_worker(100)
+    runtime.observed = dict(job_id="job-1", organization_id=replay.organization_id, project_id="project-1",
+        project_name=f"PP3B {replay.run_id} sizing recovery", tool=s.TOOL, exchange_state=None)
+    runtime.observe = lambda query, deadline: dict(runtime.observed)
+    return runtime
+
+
+def test_r14f2_driver_serial_binding_and_two_recoveries():
+    runtime = driver_case()
+    def submit(job, project):
+        return dict(kind="submission", job_id=job, organization_id=runtime.plan.organization_id, project_id=project,
+                    body_sha256="a" * 64, idempotency_key_sha256="b" * 64)
+    runtime._drive_event("event-app-1-1", submit("job-1", "project-1"), 100)
+    runtime.observed.update(exchange_state="response_stored", sender_worker=runtime.worker_id, sender_attempt=1, response_sha256="c" * 64)
+    capture = dict(kind="capture", job_id="job-1", organization_id=runtime.plan.organization_id, project_id="project-1",
+        worker_id=runtime.worker_id, attempt=1, response_sha256="c" * 64)
+    runtime._drive_event("event-sizing-worker-101-1", capture, 100)
+    runtime.posts = 1
+    runtime._drive_event("event-sizing-worker-101-2", dict(kind="paused", event="event-sizing-worker-101-1"), 100)
+    assert runtime.generation == 2 and runtime.facts[s.SCENARIOS[0]]["service_posts"] == 1
+    runtime.observed.update(job_id="job-2", project_id="project-2", project_name=f"PP3B {runtime.plan.run_id} sizing submission")
+    runtime._drive_event("event-app-1-2", submit("job-2", "project-2"), 100)
+    runtime._drive_event("event-app-1-3", dict(kind="discarded", event="event-app-1-2"), 100)
+    runtime._drive_event("event-app-1-4", submit("job-2", "project-2"), 100)
+    runtime.posts = 2
+    runtime.facts[s.SCENARIOS[1]] = dict(job_id="job-2", submissions=2, same_submission=True, service_posts=2)
+    runtime.schedule.active.complete()
+    runtime.retry_event = None
+    runtime.observed.update(job_id="job-3", project_id="project-3", project_name=f"PP3B {runtime.plan.run_id} sizing service",
+                            exchange_state="send_started", sender_worker=runtime.worker_id, sender_attempt=1)
+    runtime._drive_event("event-app-1-5", submit("job-3", "project-3"), 100)
+    request = next(iter(runtime.plan.fixture_map))
+    runtime._drive_event("event-listener-1-1", dict(kind="service", request_sha256=request, content_length=100), 100)
+    runtime._drive_event("event-listener-1-2", dict(kind="held", event="event-listener-1-1"), 100)
+    runtime.posts = 3
+    runtime._drive_event("event-listener-1-3", dict(kind="dropped", event="event-listener-1-1"), 100)
+    assert runtime.generation == 3 and runtime.complete()
+    assert [runtime.facts[key]["service_posts"] for key in s.SCENARIOS] == [1, 2, 3]
+    assert [action for event, action in runtime.decisions] == ["pass", "pause", "discard", "pass", "pass", "hold", "drop"]
+
+
+def test_r14f2_driver_foreign_out_of_order_and_changed_retry_refused():
+    runtime = driver_case()
+    payload = dict(kind="submission", job_id="job-1", organization_id="foreign", project_id="project-1",
+                   body_sha256="a" * 64, idempotency_key_sha256="b" * 64)
+    with pytest.raises(s.ReplayRefused): runtime._drive_event("event-app-1-1", payload, 100)
+    runtime = driver_case()
+    runtime.observed["project_name"] = "PP3B foreign sizing recovery"
+    payload["organization_id"] = runtime.plan.organization_id
+    with pytest.raises(s.ReplayRefused): runtime._drive_event("event-app-1-1", payload, 100)
+    runtime = driver_case()
+    runtime.schedule.next_index = 1
+    with pytest.raises(s.ReplayRefused): runtime._drive_event("event-app-1-1", payload, 100)
+    runtime = driver_case()
+    runtime.jobs = ["job-0", "job-1"]
+    runtime.discard_ack = "event-app-1-1"
+    runtime.submissions["job-1"] = dict(payload, body_sha256="c" * 64)
+    runtime.observed.update(job_id="job-1", project_name=f"PP3B {runtime.plan.run_id} sizing submission")
+    with pytest.raises(s.ReplayRefused): runtime._drive_event("event-app-1-2", payload, 100)
+
+
+def test_r14f2_driver_event_count_bound(tmp_path):
+    replay, _, directory = fault_directory(tmp_path)
+    runtime = driver_case()
+    runtime.plan = replay
+    for seq in range(1, 258):
+        (directory / f"event-app-100-{seq}.json").write_bytes(b"{}")
+    with pytest.raises(s.ReplayRefused): runtime.drive(100)
+
+
+def test_r14f2_capture_bootstrap_reads_fresh_committed_digest():
+    from contextlib import contextmanager
+    events = []
+    connection = object()
+    @contextmanager
+    def connect():
+        events.append("new-transaction")
+        yield connection
+    lease = SimpleNamespace(worker_id="worker-one", attempt=1)
+    scope = SimpleNamespace(org_id="seeded-org", project_id="project-one", job_id="job-one")
+    def capture(scope, lease, **kwargs):
+        events.append("capture-committed")
+        return "stored"
+    def get_exchange(scope, lease, *, conn):
+        assert conn is connection and events == ["capture-committed", "new-transaction"]
+        return dict(state="response_stored", sender_worker=lease.worker_id, sender_attempt=1,
+                    response_bytes=b"response", response_sha256=s.digest(b"response"))
+    exchanges = SimpleNamespace(capture_response=capture, get_exchange=get_exchange, db=SimpleNamespace(connection=connect))
+    channel = SimpleNamespace(event=lambda kind, **payload: events.append((kind, payload)) or "event-sizing-worker-1-1",
+                              decision=lambda event, allowed: "continue")
+    s.install_capture_seam(plan(), SimpleNamespace(_exchanges=lambda: exchanges), channel)
+    assert exchanges.capture_response(scope, lease, response_bytes=b"response", response_sha256=s.digest(b"response")) == "stored"
+    assert events[2][0] == "capture" and events[2][1]["response_sha256"] == s.digest(b"response")
+
+
+def test_r14f2_heartbeat_allows_only_owned_service_drop_gap():
+    runtime = driver_case()
+    # Exercise the real heartbeat method, while the driver owns a proved stop.
+    runtime.generation = 2
+    runtime.stopped_for_drop = True
+    runtime.schedule.next_index = 2
+    barrier = runtime._arm(s.SCENARIOS[2], runtime.observed)
+    barrier.consume(barrier.binding)
+    runtime.pending["event-listener-1-1"] = ("held", 2, {})
+    assert s.ReplayRuntime.heartbeat(runtime, 100) is None
+    runtime.pending.clear()
+    with pytest.raises(s.ReplayRefused): s.ReplayRuntime.heartbeat(runtime, 100)
+
+
+def test_r14f2_every_http_response_closes_connection():
+    for method, path, body in (("POST", "/api/run", None), ("POST", "/api/run", b'{"tool":"solar-settings"}'),
+                               ("GET", "/health", b""), ("POST", "/other", b"")):
+        h = submission_case(body)
+        h.scope.update(method=method, path=path)
+        original = [(b"Connection", b"keep-alive"), (b"content-type", b"application/json"), (b"connection", b"upgrade")]
+        h.messages[0]["headers"] = original[:]
+        h.run()
+        assert h.sent[0]["headers"] == [(b"content-type", b"application/json"), (b"connection", b"close")]
+        assert h.messages[0]["headers"] == original and h.sent[1:] == h.messages[1:]
+        assert bool(h.events) is (method == "POST" and path == "/api/run" and body is None)
+
+
+def test_r14f2_listener_disconnected_sender_still_acknowledges_drop(tmp_path, monkeypatch):
+    events, closed = [], []
+    decisions = iter(("hold", "drop"))
+    monkeypatch.setattr(s, "FaultChannel", lambda *args: SimpleNamespace(
+        event=lambda kind, **payload: events.append(kind) or "event-listener-1-1",
+        decision=lambda event, allowed: next(decisions)))
+    def operate(handler, replay):
+        import io
+        raw = json.loads((s.REPO / s.FIXTURE).read_bytes())
+        paths = sys.path[:]
+        try:
+            client = s._load_parser().sizing_module()
+            body = client.wire_bytes(client.SizingRequest.model_validate(raw["request"]))
+        finally:
+            sys.path[:] = paths
+        def shutdown(*args):
+            closed.append("shutdown")
+            raise OSError(57, "Socket is not connected")
+        handler.connection.shutdown = shutdown
+        handler.connection.close = lambda: closed.append("close")
+        handler.path, handler.rfile = "/string-length", io.BytesIO(body)
+        handler.headers["Content-Type"] = "application/json"
+        handler.headers["Content-Length"] = str(len(body))
+        handler.do_POST()
+        assert handler.wfile.getvalue() == b""
+    replay, env = listener_case(tmp_path, monkeypatch, operate)
+    s._listener_main(env)
+    assert closed == ["shutdown", "close"] and events == ["service", "held", "dropped"]
+    assert len((replay.run_root / "project-replay/requests.jsonl").read_bytes().splitlines()) == 1
+
+
+def test_r14f2_submission_buffer_caps_every_message():
+    reads, entered, received, sent, events = [], [], [], [], []
+    async def receive():
+        message = {"type": "http.request", "body": b"", "more_body": True}
+        reads.append(message)
+        return message
+    async def app(scope, receive, send):
+        entered.append(len(reads))
+        for _ in range(1025): received.append(await receive())
+        await send({"type": "http.response.start", "status": 200})
+        await send({"type": "http.response.body", "body": b"ok"})
+    async def send(message): sent.append(message)
+    channel = SimpleNamespace(event=lambda *args, **kwargs: events.append(args))
+    finish_coroutine(s.channel_submission_wrapper(app, channel)(
+        {"type": "http", "method": "POST", "path": "/api/run"}, receive, send))
+    assert entered == [1024] and len(reads) == len(received) == 1025 and events == []
+    assert sent[-1]["body"] == b"ok"
+
+
+def test_r14f2_submission_receive_has_one_deadline(monkeypatch):
+    now, deadlines, received = SimpleNamespace(value=0.0), [], []
+    chunks = iter(({"type": "http.request", "body": b'{"tool":', "more_body": True},
+                   {"type": "http.request", "body": b'"solar-settings"}'}))
+    monkeypatch.setattr(s.time, "monotonic", lambda: now.value)
+    async def receive(): return next(chunks)
+    async def bounded(receive, deadline):
+        deadlines.append(deadline)
+        now.value += 10.0
+        return await receive()
+    monkeypatch.setattr(s, "_receive_before", bounded)
+    async def app(scope, receive, send):
+        received.extend((await receive(), await receive()))
+    channel = SimpleNamespace(event=lambda *args, **kwargs: pytest.fail("non-sizing event"))
+    finish_coroutine(s.channel_submission_wrapper(app, channel)(
+        {"type": "http", "method": "POST", "path": "/api/run"}, receive, None))
+    assert deadlines == [30.0, 30.0] and b"".join(item["body"] for item in received) == b'{"tool":"solar-settings"}'
+
+
+def test_r14f2_submission_receive_timeout_aborts_without_bytes(monkeypatch):
+    async def bounded(receive, deadline): raise TimeoutError()
+    async def app(*args): pytest.fail("timed-out body reached admission")
+    async def send(message): pytest.fail("timed-out body sent response bytes")
+    monkeypatch.setattr(s, "_receive_before", bounded)
+    channel = SimpleNamespace(event=lambda *args, **kwargs: pytest.fail("timed-out body emitted event"))
+    reset = s._ABORT_RESPONSE.set(False)
+    try:
+        with pytest.raises(s._DiscardResponse):
+            finish_coroutine(s.channel_submission_wrapper(app, channel)(
+                {"type": "http", "method": "POST", "path": "/api/run"}, None, send))
+        assert s._ABORT_RESPONSE.get() is True
+    finally:
+        s._ABORT_RESPONSE.reset(reset)
+
+
+def test_r14f2_receive_before_uses_remaining_absolute_budget(monkeypatch):
+    import asyncio
+    now, budgets = SimpleNamespace(value=0.0), []
+    monkeypatch.setattr(s.time, "monotonic", lambda: now.value)
+    async def wait_for(awaitable, *, timeout):
+        budgets.append(timeout)
+        return await awaitable
+    monkeypatch.setattr(asyncio, "wait_for", wait_for)
+    async def receive(): return "chunk"
+    assert finish_coroutine(_real_receive_before(receive, 30.0)) == "chunk"
+    now.value = 29.0
+    assert finish_coroutine(_real_receive_before(receive, 30.0)) == "chunk"
+    now.value = 30.0
+    with pytest.raises(TimeoutError): finish_coroutine(_real_receive_before(receive, 30.0))
+    assert budgets == [30.0, 1.0]
+
+
+def retry_driver_case(tmp_path):
+    replay, _, directory = fault_directory(tmp_path)
+    runtime = driver_case()
+    runtime.plan, runtime.schedule = replay, s.FaultSchedule(replay)
+    runtime.jobs, runtime.posts = ["job-1", "job-2"], 2
+    runtime.schedule.next_index = 1
+    retry = dict(runtime.observed, job_id="job-2", project_id="project-2",
+        project_name=f"PP3B {replay.run_id} sizing submission", exchange_state="published")
+    barrier = runtime._arm(s.SCENARIOS[1], retry)
+    barrier.consume(barrier.binding)
+    runtime.retry_event = "event-app-1-4"
+    runtime.next_job = dict(runtime.observed, job_id="job-3", project_id="project-3",
+        project_name=f"PP3B {replay.run_id} sizing service", exchange_state="prepared")
+    runtime.observations = []
+    def observe(query, deadline):
+        runtime.observations.append(query["job_id"])
+        return dict(retry if query["job_id"] == "job-2" else runtime.next_job)
+    runtime.observe = observe
+    path = directory / "event-app-100-1.json"
+    s.write_fault_message(path, s.fault_message(replay, "submission", 1, job_id="job-3", status_code=202,
+        organization_id=replay.organization_id, project_id="project-3", body_sha256="a" * 64, idempotency_key_sha256="b" * 64))
+    return runtime, retry, path
+
+
+def test_r14f2_driver_settles_published_retry_before_new_admission(tmp_path):
+    runtime, retry, path = retry_driver_case(tmp_path)
+    runtime.drive(100)
+    assert runtime.observations == ["job-2", "job-3"]
+    assert runtime.schedule.next_index == 2 and runtime.retry_event is None and path.stem in runtime.seen
+    assert runtime.facts[s.SCENARIOS[1]] == dict(job_id="job-2", submissions=2, same_submission=True, service_posts=2)
+    assert runtime.jobs == ["job-1", "job-2", "job-3"] and runtime.decisions == [(path.stem, "pass")]
+
+
+def test_r14f2_driver_waits_for_retry_settlement(tmp_path):
+    runtime, retry, path = retry_driver_case(tmp_path)
+    retry["exchange_state"] = "response_stored"
+    runtime.drive(100)
+    assert runtime.jobs == ["job-1", "job-2"] and path.stem not in runtime.seen and runtime.decisions == []
+    retry["exchange_state"] = "published"
+    runtime.drive(100)
+    assert runtime.jobs == ["job-1", "job-2", "job-3"] and path.stem in runtime.seen
+    assert runtime.schedule.next_index == 2 and runtime.decisions == [(path.stem, "pass")]
+
+
+def heartbeat_case():
+    from datetime import datetime, timezone
+    runtime = driver_case()
+    del runtime.heartbeat
+    runtime.p.HEARTBEAT_MAX_AGE_S = 30.0
+    runtime.p.HeartbeatProof = SimpleNamespace
+    runtime.p.CanonicalRequest = lambda purpose, tool, environment, **kwargs: SimpleNamespace(tool=tool, **kwargs)
+    now, instant = SimpleNamespace(value=0.0), datetime(2026, 1, 1, tzinfo=timezone.utc)
+    runtime.effects.clock.monotonic = lambda: now.value
+    runtime.effects.clock.utc_now = lambda: instant
+    descriptor = SimpleNamespace(runtime="python-3.12.14", source_sha256="a" * 64, source_revision="sha256:" + "a" * 64)
+    runtime.descriptor = descriptor
+    runtime.beats, runtime.reads = {}, []
+    workers = [(runtime.worker, runtime.worker_identity, runtime.worker_id, s.TOOL, descriptor)]
+    for label, tool in (("panels", "solar-panels-from-drawing"), ("groups", "solar-panel-groups")):
+        identity = SimpleNamespace(role=label + "-worker", start_id=label)
+        child = SimpleNamespace(identity=identity, poll=lambda: None)
+        worker_id = f"project:{runtime.plan.run_id}:{label}:1"
+        owned = (child, identity, worker_id, tool, descriptor)
+        workers.append(owned)
+        runtime.auxiliary.append(owned)
+    for child, identity, worker_id, tool, descriptor in workers:
+        runtime.beats[worker_id] = SimpleNamespace(worker_id=worker_id, tool_name=tool, runtime=descriptor.runtime,
+            source_revision=descriptor.source_revision, source_sha256=descriptor.source_sha256, observed_at=instant)
+    def read(request):
+        runtime.reads.append(request.worker_id)
+        return runtime.beats[request.worker_id]
+    runtime.effects.canonical_reader = read
+    return runtime, now
+
+
+def test_r14f2_loop_heartbeat_throttles_each_worker_only():
+    runtime, now = heartbeat_case()
+    beat = runtime.loop_heartbeat(100)
+    assert beat is runtime.beats[runtime.worker_id] and len(runtime.reads) == 3
+    runtime.loop_heartbeat(100)
+    now.value = 1.99
+    runtime.loop_heartbeat(100)
+    assert len(runtime.reads) == 3
+    now.value = 2.0
+    runtime.loop_heartbeat(100)
+    assert len(runtime.reads) == 6 and len(set(runtime.reads)) == 3
+    runtime.auxiliary[0][0].identity = SimpleNamespace(role="foreign", start_id="reused")
+    with pytest.raises(s.ReplayRefused): runtime.loop_heartbeat(100)
+
+
+def test_r14f2_heartbeat_revalidates_during_loop_cache():
+    runtime, now = heartbeat_case()
+    runtime.loop_heartbeat(100)
+    runtime.heartbeat(100)
+    runtime.heartbeat(100)
+    assert len(runtime.reads) == 9
+    for worker_id, beat in runtime.beats.items():
+        original = beat.source_sha256
+        beat.source_sha256 = "b" * 64
+        with pytest.raises(s.ReplayRefused): runtime.heartbeat(100)
+        beat.source_sha256 = original
