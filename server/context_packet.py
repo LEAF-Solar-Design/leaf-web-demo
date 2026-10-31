@@ -56,6 +56,40 @@ MAX_PACKET_CHARS = 8000
 MAX_CONTEXT_PACKET_DEPTH = 32
 # One-liner descriptions only — a long docstring must not eat the packet budget.
 DESCRIPTION_CAP = 140
+PROJECT_MATERIAL_CONTEXT_CHARS = 2400
+
+
+def _project_material_context(tenant: Any, session_id: str, turn_id: str,
+                              max_age_s: float) -> Optional[Dict[str, Any]]:
+    import platform_link
+
+    try:
+        section = platform_link.read_turn_project_materials(
+            tenant, session_id, turn_id, max_age_s)
+        if section is None:
+            return None
+        page = section["page"]
+        fields = page["fields"] if page is not None else []
+        # Bound individual text first, then remove tail rows deterministically.
+        text_truncated = any(len(field["value"]) > 240 for field in fields)
+        for field in fields:
+            field["value"] = field["value"][:240]
+        if page is not None:
+            page["omitted_field_count"] = 0
+            page["text_truncated"] = text_truncated
+        materials = section["materials"]
+        while len(_serialize(section)) > PROJECT_MATERIAL_CONTEXT_CHARS:
+            if materials["samples"]:
+                materials["samples"].pop()
+                materials["omitted_count"] += 1
+            elif fields:
+                fields.pop()
+                page["omitted_field_count"] += 1
+            else:
+                return None
+        return section
+    except Exception:  # noqa: BLE001 - advisory, never an empty-project claim
+        return None
 
 
 # --------------------------------------------------------------------------- #
@@ -290,7 +324,11 @@ def _container_depth(value: Any) -> int:
 def build_packet(tenant_id: Any, drawing_id: str,
                  classifier_hint: Optional[Dict[str, Any]] = None, *,
                  entitlements_override: Optional[Dict[str, bool]] = None,
-                 grant_timeout_s: float = 10.0) -> Dict[str, Any]:
+                 grant_timeout_s: float = 10.0,
+                 project_principal: Any = None,
+                 session_id: Optional[str] = None,
+                 turn_id: Optional[str] = None,
+                 turn_max_age_s: float = 300.0) -> Dict[str, Any]:
     """Assemble the §4 ContextPacket for one turn. Pure reads; no writes.
 
     `tenant_id` may be the plain str or the TenantContext (it IS its tenant_id
@@ -315,6 +353,12 @@ def build_packet(tenant_id: Any, drawing_id: str,
         "classifier_hint": classifier_hint,
     }
     packet.update(_drawing_sections(str(tenant_id), drawing_id))
+    if (project_principal is not None and str(project_principal) == str(tenant_id)
+            and session_id and turn_id):
+        section = _project_material_context(
+            project_principal, session_id, turn_id, turn_max_age_s)
+        if section is not None:
+            packet["project_material_context"] = section
 
     if _container_depth(packet) > MAX_CONTEXT_PACKET_DEPTH:
         packet["classifier_hint"] = None
@@ -331,6 +375,9 @@ def build_packet(tenant_id: Any, drawing_id: str,
         keep -= 1
         packet["catalog"] = _capped_catalog(entries, keep)
     raw = _serialize(packet)
+    if len(raw) >= MAX_PACKET_CHARS and "project_material_context" in packet:
+        del packet["project_material_context"]
+        raw = _serialize(packet)
     if len(raw) >= MAX_PACKET_CHARS:
         # ValueError (not assert): the route maps it to BAD_PARAMS instead of a
         # 500, and `python -O` cannot strip it into silently shipping oversized.

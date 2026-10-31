@@ -257,6 +257,68 @@ def require_project_session_access(
     return session
 
 
+def read_turn_project_materials(tenant: Any, session_id: str, turn_id: str,
+                                max_age_s: float) -> Optional[Dict[str, Any]]:
+    """Pure read projection inputs, bound to the verified active turn author.
+
+    No subject argument or back-edge inference: queued callers must carry the
+    app's verified principal, just as immediate turns do.
+    """
+    import deps
+    import session_store
+
+    if (not isinstance(tenant, deps.TenantContext)
+            or not tenant.authority_resolved or tenant.backedge
+            or tenant.verified_demo or not tenant.subject):
+        return None
+
+    def authority():
+        session = session_store.get_session(session_id)
+        if (session is None or not session.get("org_id")
+                or not session.get("project_id")
+                or str(session.get("active_turn_id")) != str(turn_id)
+                or session_store.active_turn_subject(
+                    session_id, turn_id, str(tenant), max_age_s) != tenant.subject):
+            raise ProjectSessionForbidden("project context unavailable")
+        binding = resolve_caller_binding(tenant)
+        if binding is None or require_project_session_access(
+                session, tenant, write=False, binding=binding) is None:
+            raise ProjectSessionForbidden("project context unavailable")
+        return (str(uuid.UUID(str(session["org_id"]))),
+                str(uuid.UUID(str(session["project_id"]))), binding.binding_id)
+
+    scope = authority()
+    _ensure_platform_package()
+    from leaf_platform import project_materials, project_web_page, project_page_proposal
+
+    page = project_web_page.read(*scope)
+    if page is not None:
+        document = project_page_proposal.validate_document(page["document"])
+        if project_page_proposal.document_digest(document) != page["digest"]:
+            raise ValueError("invalid project source")
+        fields = (project_page_proposal._catalog(document)[0]
+                  if document.get("schema") == "leaf.portfolio.v1" else [])
+        page = {"revision": page["revision"], "digest": page["digest"],
+                "fields": [{"id": row["id"], "value": row["value"]} for row in fields]}
+    # A fixed read cap bounds work. A continuation means the observed count is
+    # only a lower bound, even when no samples fit the eventual packet budget.
+    batch = project_materials.list_materials(*scope, limit=200)
+    rows = batch["materials"]
+    allowed = ("material_id", "name", "media_type", "width", "height",
+               "sha256", "preview_sha256")
+    samples = [{key: row[key] for key in allowed
+                if key in row and type(row[key]) in (str, int, type(None))}
+               for row in rows[:5]]
+    result = {"schema": "leaf.project-material-context.v1",
+              "org_id": scope[0], "project_id": scope[1], "page": page,
+              "materials": {"observed_count": len(rows),
+                            "count_complete": batch.get("next_cursor") is None,
+                            "samples": samples, "omitted_count": len(rows) - len(samples)}}
+    if authority() != scope:
+        raise ProjectSessionForbidden("project context unavailable")
+    return result
+
+
 def _db_configured() -> bool:
     """True iff the platform package imports AND a DATABASE_URL resolves (env or
     platform/.env.local). Never raises; a False here is the silent no-op path
