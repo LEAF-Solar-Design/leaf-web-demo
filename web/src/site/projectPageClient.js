@@ -187,6 +187,40 @@ async function readProposal(response, signal) {
   }
 }
 
+export function validateProjectPageProposal(projectId, saved, value) {
+  if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)) proposalInvalid()
+  let document
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024) proposalInvalid()
+    document = validatePortfolioDocument(saved.document)
+  } catch { return proposalInvalid() }
+  const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
+  if (!closed(value, 'source proposed_document proposed_digest edits model usage')
+    || !closed(value.source, 'project_id revision digest') || canonical(value.source) !== canonical(source)
+    || !validDigest(value.proposed_digest) || typeof value.model !== 'string' || !value.model.trim()
+    || value.model.length > 128 || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.model)
+    || !Array.isArray(value.edits) || value.edits.length > 32
+    || !value.usage || typeof value.usage !== 'object' || Array.isArray(value.usage)) proposalInvalid()
+  const ids = new Set()
+  for (const edit of value.edits) {
+    if (!closed(edit, 'id value') || typeof edit.id !== 'string' || !edit.id.trim() || edit.id.length > 128
+      || ids.has(edit.id) || typeof edit.value !== 'string' || Array.from(edit.value).length > 8000) proposalInvalid()
+    ids.add(edit.id)
+  }
+  const usageKeys = ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'cost_tokens']
+  for (const [key, count] of Object.entries(value.usage)) {
+    if (!usageKeys.includes(key) || !Number.isSafeInteger(count) || count < 0) proposalInvalid()
+  }
+  const changes = portfolioTextChanges(document, value.proposed_document)
+  const values = value.edits.map(edit => edit.value)
+  for (const change of changes) {
+    const index = values.indexOf(change.after)
+    if (index < 0) proposalInvalid()
+    values.splice(index, 1)
+  }
+  return value
+}
+
 export async function proposeProjectPage(projectId, saved, instruction, { signal } = {}) {
   const path = pagePath(projectId)
   if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
@@ -195,36 +229,14 @@ export async function proposeProjectPage(projectId, saved, instruction, { signal
   }
   let document
   try { document = validatePortfolioDocument(saved.document) } catch { return proposalInvalid() }
+  const snapshot = { revision: saved.revision, digest: saved.digest, document }
   const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
   return request(`${path}/proposals`, { signal, proposal: true, method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ expected_revision: source.revision, expected_digest: source.digest, instruction }),
   }, async (response, requestSignal) => {
     const value = await readProposal(response, requestSignal)
-    if (!closed(value, 'source proposed_document proposed_digest edits model usage')
-      || !closed(value.source, 'project_id revision digest') || canonical(value.source) !== canonical(source)
-      || !validDigest(value.proposed_digest) || typeof value.model !== 'string' || !value.model.trim()
-      || value.model.length > 128 || /[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.model)
-      || !Array.isArray(value.edits) || value.edits.length > 32
-      || !value.usage || typeof value.usage !== 'object' || Array.isArray(value.usage)) proposalInvalid()
-    const ids = new Set()
-    for (const edit of value.edits) {
-      if (!closed(edit, 'id value') || typeof edit.id !== 'string' || !edit.id.trim() || edit.id.length > 128
-        || ids.has(edit.id) || typeof edit.value !== 'string' || Array.from(edit.value).length > 8000) proposalInvalid()
-      ids.add(edit.id)
-    }
-    const usageKeys = ['input_tokens', 'output_tokens', 'cache_creation_tokens', 'cache_read_tokens', 'cost_tokens']
-    for (const [key, count] of Object.entries(value.usage)) {
-      if (!usageKeys.includes(key) || !Number.isSafeInteger(count) || count < 0) proposalInvalid()
-    }
-    const changes = portfolioTextChanges(document, value.proposed_document)
-    const values = value.edits.map(edit => edit.value)
-    for (const change of changes) {
-      const index = values.indexOf(change.after)
-      if (index < 0) proposalInvalid()
-      values.splice(index, 1)
-    }
-    return value
+    return validateProjectPageProposal(projectId, snapshot, value)
   })
 }
 
