@@ -6,6 +6,7 @@ vi.mock('../../telemetry.js', () => ({ track: vi.fn(), trackErrorShown: vi.fn() 
 import { createCatalogController } from './createCatalogController.js'
 import { createSolarProjectClient } from '../../solar/solarProjectClient.js'
 import { getCapabilities } from '../../api.js'
+import { SecretRefusedError } from '../../lib/secretGuardTransport.js'
 
 const A = { entitled: true, implemented: true, engine_ready: true, input_ready: false, refusal_reasons: ['graph_seed_required'] }
 const I = { schema_version: 1, source_intake_sha256: 'a'.repeat(64), units: { drawing_units: 'ft', wcs_to_ucs: [1,0,0,0,0,1,0,0,0,0,1,0,0,0,0,1], elevation_datum: 'unknown', crs: null } }
@@ -541,6 +542,127 @@ function retireReceipt(run) {
   run.controller.destroy()
   run.client.dispose()
 }
+
+describe('non-executable project prompt routing', () => {
+  const unmatchedTools = [null, undefined, '', ' \t ']
+  const prompt = 'can you help me make a change'
+
+  function promptSetup(tool, scope = 'bound', agent = 'enabled') {
+    const run = receiptSetup()
+    run.controller.setContext({ projectIntents: [], agentDisabled: agent === 'disabled',
+      ...(scope === 'unbound' ? { solarBinding: null, catalogDiscovery: {
+        projectId: projectBinding.project_id, orgId: projectBinding.organization_id,
+      } } : {}) })
+    run.decision = { lane: 'run', tool, params: {}, confidence: 1, alternatives: [] }
+    run.services.routePrompt.mockResolvedValue(run.decision)
+    run.adapters.agentBannerFor = vi.fn(() => ({ kind: 'unreachable' }))
+    if (agent !== 'missing') run.adapters.startAgentTurn = vi.fn(async () => {
+      if (agent === 'unavailable') throw new Error('offline')
+    })
+    return run
+  }
+
+  describe.each(['bound', 'unbound'])('%s Browser project context without executable intents', (scope) => {
+    it.each(unmatchedTools)('sends tool %j to the existing agent exactly once', async (tool) => {
+      const run = promptSetup(tool, scope)
+      try {
+        await run.controller.actions.loadCatalog()
+        expect(await run.controller.actions.dispatch(prompt)).toEqual(run.decision)
+        expect(run.adapters.startAgentTurn).toHaveBeenCalledExactlyOnceWith(prompt, {
+          lane: 'run', tool: tool || null, confidence: 1, rationale: null,
+        }, { allowSecretOnce: false })
+        expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+        expect(run.controller.getState()).toMatchObject({ route: null, routeError: null,
+          agentMode: 'primary', agentBanner: null, routing: false, secretRefusal: null })
+      } finally { retireReceipt(run) }
+    })
+
+    describe.each(['disabled', 'unavailable', 'missing'])('%s agent', (agent) => {
+      it.each(unmatchedTools)('presents tool %j without arming execution', async (tool) => {
+        const run = promptSetup(tool, scope, agent)
+        try {
+          await run.controller.actions.loadCatalog()
+          expect(await run.controller.actions.dispatch(prompt)).toEqual(run.decision)
+          expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+          if (agent === 'disabled') expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+          if (agent === 'unavailable') expect(run.adapters.startAgentTurn).toHaveBeenCalledOnce()
+          expect(run.controller.getState()).toMatchObject({ route: run.decision, routeError: null,
+            agentMode: null, agentBanner: agent === 'disabled' ? null : { kind: 'unreachable' }, routing: false })
+        } finally { retireReceipt(run) }
+      })
+    })
+  })
+
+  it.each(['solar-settings', 'unknown-tool', false, 0, {}, []].map((tool) => [tool]))('keeps admission required for tool %j', async (tool) => {
+    const run = promptSetup(tool)
+    try {
+      await run.controller.actions.loadCatalog()
+      await run.controller.actions.dispatch(prompt)
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(run.controller.getState()).toMatchObject({ route: null, routeError: 'project_request_required' })
+    } finally { retireReceipt(run) }
+  })
+
+  it.each(unmatchedTools)('never arms a direct unmatched decision with tool %j', (tool) => {
+    const run = promptSetup(tool)
+    try {
+      expect(run.controller.actions.commitDecision(run.decision)).toEqual(run.decision)
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.controller.getState()).toMatchObject({ route: run.decision, routeError: null })
+      run.controller.actions.commitDecision({ ...run.decision, slash: true })
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.controller.getState()).toMatchObject({ route: null, routeError: 'project_request_required' })
+    } finally { retireReceipt(run) }
+  })
+
+  it.each(['solar-settings', 'unknown-tool'])('keeps slash selection %s behind admission', async (tool) => {
+    const run = promptSetup(null)
+    try {
+      await run.controller.actions.loadTools()
+      await run.controller.actions.loadCatalog()
+      await run.controller.actions.dispatchSlash(tool)
+      expect(run.services.routePrompt).not.toHaveBeenCalled()
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(run.controller.getState()).toMatchObject({ route: null, routeError: 'project_request_required' })
+    } finally { retireReceipt(run) }
+  })
+
+  it.each(['route', 'agent'])('drops the old result when project scope changes during %s', async (phase) => {
+    const run = promptSetup(null)
+    let settle
+    const deferred = new Promise((resolve) => { settle = resolve })
+    if (phase === 'route') run.services.routePrompt.mockReturnValueOnce(deferred)
+    else run.adapters.startAgentTurn.mockReturnValueOnce(deferred)
+    try {
+      const pending = run.controller.actions.dispatch(prompt)
+      await Promise.resolve()
+      if (phase === 'agent') expect(run.adapters.startAgentTurn).toHaveBeenCalledOnce()
+      switchReceiptScope(run, { ...projectBinding, input_version_id: projectBinding.project_id })
+      settle(run.decision)
+      expect(await pending).toBeUndefined()
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      if (phase === 'route') expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(run.controller.getState()).toMatchObject({ route: null, routeError: null, agentMode: null, routing: false })
+    } finally { retireReceipt(run) }
+  })
+
+  it.each(['route', 'agent'])('preserves transport credential refusal during %s', async (phase) => {
+    const run = promptSetup(null)
+    const error = new SecretRefusedError({ id: 'credential', reason: 'Credentials never go to the model.', masked: '***' })
+    if (phase === 'route') run.services.routePrompt.mockRejectedValueOnce(error)
+    else run.adapters.startAgentTurn.mockRejectedValueOnce(error)
+    try {
+      expect(await run.controller.actions.dispatch(prompt)).toBeUndefined()
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.adapters.agentBannerFor).not.toHaveBeenCalled()
+      if (phase === 'route') expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(run.controller.getState()).toMatchObject({ secretRefusal: error.refusal, route: null,
+        routeError: null, agentMode: null, agentBanner: null, routing: false })
+    } finally { retireReceipt(run) }
+  })
+})
 
 describe('project catalog receipts', () => {
   it('R13A-27 publishes the five-field receipt from the accepted catalog', async () => {
