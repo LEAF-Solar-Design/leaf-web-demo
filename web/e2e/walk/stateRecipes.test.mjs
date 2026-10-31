@@ -3428,6 +3428,65 @@ test('reloadAndReenter reloads once without entry clicks on builds without an en
   assert.deepEqual(events, ['reload'])
 })
 
+test('WL49 real project reload enters the workspace once before Start', async () => {
+  const fake = workspaceEnvironmentFake({ entered: 'true' })
+  const { page, events } = fake
+  const environmentLocator = page.locator
+  let boardVisible = false
+  const org = { org_id: 'walk-org' }
+  const project = { project_id: 'walk-project', org_id: org.org_id, name: 'Walk project' }
+  const board = {
+    get visible() { return boardVisible },
+    getAttribute: async name => { assert.equal(name, 'data-project-state'); return 'project' },
+    getByText: () => ({ countValue: 0 }),
+    getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.equal(options.name, 'Create project from this drawing')
+      return { disabled: false, click: async () => events.push('Create project') }
+    },
+  }
+  page.request = { post: async path => {
+    assert.equal(path, '/api/orgs')
+    return { ok: () => true, json: async () => ({ org }) }
+  } }
+  page.evaluate = async (_callback, orgId) => { assert.equal(orgId, org.org_id); return null }
+  page.reload = async options => {
+    assert.deepEqual(options, { timeout: 60_000 })
+    events.push('reload')
+    fake.setEntered('false')
+  }
+  page.waitForResponse = async () => ({ ok: () => true, json: async () => ({ project }),
+    request: () => ({ headers: () => ({ 'x-org-id': org.org_id }) }) })
+  page.getByRole = (role, options) => {
+    if (role === 'region') { assert.equal(options.name, 'Project workspace'); return board }
+    if (role === 'dialog') return { visible: false }
+    assert.equal(role, 'button')
+    if (options.name === 'Start') return { click: async () => {
+      assert.equal(await environmentLocator('section.workspace-environment').getAttribute('data-entered'), 'true')
+      events.push('Start'); boardVisible = true
+    } }
+    if (options.name === 'Return to drawing') return { isVisible: async () => true,
+      click: async () => { events.push('Return to drawing'); boardVisible = false } }
+    assert.ok(options.name.test('Run tool'))
+    return { countValue: 0 }
+  }
+  page.locator = selector => {
+    if (selector === '.workspace-summary') return { text: project.name }
+    if (selector === '.strip-failed, .strip-running') return { countValue: 0 }
+    return environmentLocator(selector)
+  }
+  page.getByTestId = id => {
+    assert.equal(id, 'cockpit-status')
+    return { locator: selector => { assert.equal(selector, '.cockpit-sel'); return { text: 'no selection' } } }
+  }
+  const assertions = Object.assign(value => censusAssertions(value), { poll: boundedWorkspacePoll().assertions.poll })
+  const runtime = { page, evidence: {}, cleanup: [] }
+  await setupRealProject(runtime, assertions)
+  assert.deepEqual(events, ['reload', 'Continue workspace', 'assert:data-entered=true', 'Start',
+    'Create project', 'Return to drawing'])
+  assert.deepEqual(runtime.evidence.escapeProject, { orgId: org.org_id, projectId: project.project_id, name: project.name })
+})
+
 test('session-details and sign-out oracles require the current Session details dialog', async () => {
   for (const dialogName of ['Session details', 'Session · provenance']) {
     for (const target of ['session-provenance', 'signed-out-session']) {
@@ -5979,7 +6038,7 @@ test('WL19 request evidence is capped at 50 and metadata errors cannot change a 
   assert.equal(JSON.stringify(evidence), before)
 })
 
-test('ready Solar catalog setup requires the browser drawing query and exact enabled tool', async () => {
+test('WL49 ready Solar catalog setup re-enters after the browser drawing query before restoring its tab', async () => {
   for (const [name, familyId, placement, surface, tab] of [
     ['solar-settings', 'stringing', undefined, 'solar', 'Manage'],
     ['solar-string-data', 'stringing', undefined, 'solar', 'Manage'],
@@ -5989,10 +6048,12 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
     ['solar-settings', 'solar-unit', { tab: 'view' }, 'solar', 'View'],
     ['solar-settings', 'solar-unit', { tab: 'view' }, 'cad', 'View'],
   ]) {
-    const events = []
+    const workspace = workspaceEnvironmentFake({ entered: 'true' })
+    const events = workspace.events
     const button = { visible: true, enabled: true }
     const page = {
       locator: (selector) => {
+        if (selector === 'section.workspace-environment') return workspace.page.locator(selector)
         assert.equal(selector, '.app')
         return { first: () => ({ getAttribute: async (name) => {
           assert.equal(name, 'data-surface')
@@ -6012,6 +6073,7 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
       goto: async (url) => {
         assert.equal(url, '/app?drawing=private&surface=solar')
         events.push('private drawing')
+        workspace.setEntered('false')
       },
       request: { get: async (path, options) => {
         assert.equal(options.timeout, 15_000)
@@ -6045,10 +6107,12 @@ test('ready Solar catalog setup requires the browser drawing query and exact ena
       toBeVisible: async () => { events.push('visible'); assert.equal(value.visible, true) },
       toBeEnabled: async () => { events.push('enabled'); assert.equal(value.enabled, true) },
     })
+    assertions.poll = boundedWorkspacePoll().assertions.poll
     const probe = { kind: 'tool', sourceId: name, state: 'ready', assertion: { kind: 'opens', target: 'catalog-run-decision' } }
     const runtime = { page, drawingId: 'private', drawingVersion: 2, evidence: {}, recipeAssertions: assertions }
     await setupStep(probe, runtime, { kind: 'catalog-tool', name })
-    assert.deepEqual(events, [tab, 'browser catalog', 'private drawing', tab, 'exact tool', 'visible', 'enabled'])
+    assert.deepEqual(events, [tab, 'browser catalog', 'private drawing', 'Continue workspace',
+      'assert:data-entered=true', tab, 'exact tool', 'visible', 'enabled'])
     assert.equal(runtime.ribbonTab, tab)
     assert.equal(runtime.evidence.browserCatalog.drawingId, 'private')
     button.enabled = false
@@ -6075,6 +6139,7 @@ test('catalog tools choose their first tab from the active surface without a rea
       const tabs = []
       const page = {
         locator: (selector) => {
+          if (selector === 'section.workspace-environment') assert.fail('without navigation this path must not enter the workspace')
           assert.equal(selector, '.app')
           return { first: () => ({ getAttribute: async (attribute) => {
             assert.equal(attribute, 'data-surface')

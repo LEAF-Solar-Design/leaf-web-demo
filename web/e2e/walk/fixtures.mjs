@@ -2005,6 +2005,7 @@ export async function setupRealProject(runtime, assertions = expect) {
     }, previousOrg)
   })
   await page.reload({ timeout: 60_000 })
+  await enterWorkspaceEnvironment(page, assertions)
   await page.getByRole('button', { name: 'Start', exact: true }).click({ timeout: 15_000 })
   const board = page.getByRole('region', { name: 'Project workspace', exact: true })
   await assertions(board).toBeVisible()
@@ -3825,6 +3826,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         await page.goto(`/app?drawing=${encodeURIComponent(runtime.drawingId)}&surface=solar`)
         const response = await scopedCatalog
         await assertions(response.ok()).toBe(true)
+        await enterWorkspaceEnvironment(page, assertions)
         evidence.browserCatalog = { url: response.url(), drawingId: runtime.drawingId }
         await setupStep(probe, runtime, { kind: 'ribbon-tab', name: tab[0].toUpperCase() + tab.slice(1) })
         const button = control(page, { role: 'button', name: recipe.name, panelName: family.label,
