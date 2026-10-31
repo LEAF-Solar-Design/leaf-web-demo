@@ -1,23 +1,65 @@
 import { writeFileSync } from 'node:fs'
 import { isAbsolute } from 'node:path'
-import { CHECKPOINTS, REQUIRED_TEST_IDS, publicId, validateMetadata } from './projectIdentity.mjs'
+import { CHECKPOINTS, CHECKPOINT_OWNERS, REQUIRED_TEST_IDS, SIZING_SCENARIOS, SIZING_OWNERS, publicId, validateMetadata } from './projectIdentity.mjs'
 
 // The Python adapter reads this same closed wire contract.
 export const BROWSER_REPORT_SCHEMA = 'leaf.project-browser.v1'
 export const MAX_RECEIPT_BYTES = 4 * 1024 * 1024
 export const EVENT_NAME = 'pp3b.checkpoint'
 export const CANONICAL_NAME = 'pp3b.canonical'
+export const SIZING_NAME = 'pp3b.sizing'
 export const CANONICAL_FIELDS = Object.freeze([
   'organization_id', 'project_id', 'drawing_id', 'input_version_id', 'output_version_id',
   'job_id', 'binding_id', 'worker_id', 'checkout_fence', 'before_settings_sha256',
   'settings_sha256', 'reopened_settings_sha256',
 ])
-const owners = Object.freeze(Object.fromEntries(CHECKPOINTS.map((key, index) =>
-  [key, REQUIRED_TEST_IDS[index < 4 ? 0 : index < 7 ? 1 : 2]])))
+const owners = CHECKPOINT_OWNERS
 const statuses = new Set(['passed', 'failed', 'timedOut', 'skipped', 'interrupted'])
 const annotationTypes = new Set(['skip', 'fixme', 'fail', 'slow', 'issue', 'tag'])
 const fixedError = () => ({ message: 'PP3B_TEST_FAILURE', stack: 'PP3B_TEST_FAILURE' })
-const completeIds = ids => ids.length === 3 && REQUIRED_TEST_IDS.every(id => ids.includes(id))
+const completeIds = ids => ids.length === REQUIRED_TEST_IDS.length && REQUIRED_TEST_IDS.every((id, i) => ids[i] === id)
+
+const sizingFields = Object.freeze({
+  'capture-recovery': ['scenario', 'organization_id', 'project_id', 'drawing_id', 'input_version_id', 'job_id',
+    'output_version_id', 'exchange_job_id', 'evidence_sha256', 'panels_in_sequence'],
+  'read-custody': ['scenario', 'organization_id', 'project_id', 'drawing_id', 'source_version_id', 'groups_job_id',
+    'input_version_id', 'frame_count', 'tool', 'request_sha256', 'output_sha256'],
+  'browser-response-discard': ['scenario', 'organization_id', 'project_id', 'drawing_id', 'input_version_id', 'job_id',
+    'output_version_id', 'exchange_job_id', 'evidence_sha256', 'panels_in_sequence', 'submissions', 'same_submission'],
+  'service-response-drop': ['scenario', 'organization_id', 'project_id', 'drawing_id', 'input_version_id', 'job_id',
+    'status', 'reason_code', 'retryable'],
+})
+
+export function sizingRecord(value, scenario, metadata) {
+  const refuse = () => { throw new Error('PP3B_SIZING') }
+  const fields = typeof scenario === 'string' && Object.hasOwn(sizingFields, scenario) ? sizingFields[scenario] : null
+  if (!fields || !value || typeof value !== 'object' || Array.isArray(value) ||
+      Object.keys(value).length !== fields.length || !fields.every(key => Object.hasOwn(value, key)) ||
+      value.scenario !== scenario || value.organization_id !== metadata.organization_id) refuse()
+  const record = Object.fromEntries(fields.map(key => [key, value[key]]))
+  for (const key of fields) {
+    if (key.endsWith('_id') && !publicId(record[key])) refuse()
+    if (key.endsWith('_sha256') && (typeof record[key] !== 'string' || !/^[a-f0-9]{64}$/.test(record[key]))) refuse()
+    if (['frame_count', 'panels_in_sequence'].includes(key) && (!Number.isSafeInteger(record[key]) || record[key] < 1)) refuse()
+  }
+  if (Object.hasOwn(record, 'exchange_job_id') &&
+      (record.exchange_job_id !== record.job_id || record.input_version_id === record.output_version_id)) refuse()
+  if (scenario === 'read-custody' &&
+      (record.tool !== 'solar-string-data' || record.source_version_id === record.input_version_id)) refuse()
+  if (scenario === 'browser-response-discard' && (record.submissions !== 2 || record.same_submission !== true)) refuse()
+  if (scenario === 'service-response-drop' &&
+      (record.status !== 'failed' || record.reason_code !== 'SIZING_OUTCOME_UNKNOWN' || record.retryable !== false)) refuse()
+  return record
+}
+
+export function sizingComplete(records) {
+  if (Object.keys(records).length !== SIZING_SCENARIOS.length || !SIZING_SCENARIOS.every(key => Object.hasOwn(records, key))) return false
+  const recovery = records['capture-recovery'], custody = records['read-custody']
+  const jobs = ['capture-recovery', 'browser-response-discard', 'service-response-drop'].map(key => records[key])
+  return new Set(jobs.map(r => r.project_id)).size === 3 && new Set(jobs.map(r => r.job_id)).size === 3 &&
+    custody.project_id === recovery.project_id && custody.drawing_id === recovery.drawing_id &&
+    custody.source_version_id === recovery.output_version_id
+}
 
 export function canonicalProjection(value, metadata) {
   if (!value || Object.keys(value).length !== CANONICAL_FIELDS.length) throw new Error('PP3B_CANONICAL')
@@ -48,7 +90,7 @@ export default class ProjectProofReporter {
       source_binding: this.metadata.source_binding,
       public_key_thumbprint: this.metadata.public_key_thumbprint,
       exit_code: 1, selected_test_ids: [], started_test_ids: [], completed_test_ids: [],
-      outcomes: [], annotation_types: [], checkpoints: {}, canonical: null,
+      outcomes: [], annotation_types: [], checkpoints: {}, canonical: null, sizing: {},
     }
   }
 
@@ -59,7 +101,7 @@ export default class ProjectProofReporter {
 
   record(list, test) {
     const id = this.id(test)
-    if (list.length >= 3 || list.includes(id)) { this.invalid = true; return id }
+    if (list.length >= REQUIRED_TEST_IDS.length || list.includes(id)) { this.invalid = true; return id }
     list.push(id)
     return id
   }
@@ -86,19 +128,24 @@ export default class ProjectProofReporter {
   onTestEnd(test, result) {
     const id = this.record(this.result.completed_test_ids, test)
     this.annotations(test)
-    if (this.result.outcomes.length < 3) this.result.outcomes.push({ test_id: id,
+    if (this.result.outcomes.length < REQUIRED_TEST_IDS.length) this.result.outcomes.push({ test_id: id,
       status: statuses.has(result.status) ? result.status : 'failed',
       retry: Number.isSafeInteger(result.retry) && result.retry >= 0 ? result.retry : -1 })
     for (const attachment of (result.attachments || []).slice(0, 32)) {
-      if (![EVENT_NAME, CANONICAL_NAME].includes(attachment.name)) continue
+      if (![EVENT_NAME, CANONICAL_NAME, SIZING_NAME].includes(attachment.name)) continue
       try {
         if (attachment.contentType !== 'application/json' || !Buffer.isBuffer(attachment.body) ||
-            attachment.body.length > 4096 || attachment.path) throw new Error('PP3B_EVENT')
+            attachment.body.length > 4096 || attachment.path !== undefined) throw new Error('PP3B_EVENT')
         const event = JSON.parse(attachment.body.toString('utf8'))
         if (attachment.name === EVENT_NAME) {
           if (Object.keys(event).length !== 2 || owners[event.key] !== id || event.value !== true ||
               Object.hasOwn(this.result.checkpoints, event.key)) throw new Error('PP3B_EVENT')
           this.result.checkpoints[event.key] = true
+        } else if (attachment.name === SIZING_NAME) {
+          const scenario = event?.scenario
+          if (!Object.hasOwn(SIZING_OWNERS, scenario) || SIZING_OWNERS[scenario] !== id ||
+              Object.hasOwn(this.result.sizing, scenario)) throw new Error('PP3B_SIZING')
+          this.result.sizing[scenario] = sizingRecord(event, scenario, this.metadata)
         } else {
           if (id !== REQUIRED_TEST_IDS[2] || this.result.canonical) throw new Error('PP3B_EVENT')
           this.result.canonical = canonicalProjection(event, this.metadata)
@@ -134,8 +181,8 @@ export default class ProjectProofReporter {
       completeIds(r.selected_test_ids) ? 'passed' : 'failed' }
     const complete = !this.invalid && fullResult.status === 'passed' &&
       [r.selected_test_ids, r.started_test_ids, r.completed_test_ids].every(completeIds) &&
-      r.outcomes.length === 3 && r.outcomes.every(o => o.status === 'passed' && o.retry === 0) &&
-      r.annotation_types.length === 0 && CHECKPOINTS.every(key => r.checkpoints[key] === true) && !!r.canonical
+      r.outcomes.length === REQUIRED_TEST_IDS.length && r.outcomes.every(o => o.status === 'passed' && o.retry === 0) &&
+      r.annotation_types.length === 0 && CHECKPOINTS.every(key => r.checkpoints[key] === true) && !!r.canonical && sizingComplete(r.sizing)
     r.exit_code = complete ? 0 : 1
     const serialized = JSON.stringify(r) + '\n'
     if (Buffer.byteLength(serialized) > MAX_RECEIPT_BYTES) throw new Error('PP3B_OUTPUT_LIMIT')

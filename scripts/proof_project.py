@@ -44,7 +44,9 @@ REQUIREMENTS = ("server/requirements.txt", "platform/requirements.txt",
 REQUIRED_MODULES = ("fastapi", "uvicorn", "psycopg", "psycopg_pool", "jwt",
                     "cryptography", "httpx", "requests")
 REQUIRED_TEST_IDS = ("project_browser_create_import", "project_browser_bearer_required",
-                     "project_settings_worker_readback")
+                     "project_settings_worker_readback", "project_sizing_recovery_reopen",
+                     "project_sizing_read_custody", "project_sizing_submission_unknown",
+                     "project_sizing_service_unknown")
 ENGINE_OUTPUTS = ("engine.js", "engine_bg.wasm")
 _RUN_ROOT_DIRECTORY_STORES = MappingProxyType({
     "LEAF_STORE_DIR": "drawings", "LEAF_GUEST_STORE_DIR": "guest-drawings",
@@ -1481,14 +1483,21 @@ def prepare_authority(plan: Plan, *, effects: Effects, scope: RunScope) -> Prepa
 
 
 STACK_TIMEOUT_S = 120.0
-BROWSER_TIMEOUT_S = 300.0
+BROWSER_TIMEOUT_S = 840.0
+VERIFICATION_TIMEOUT_S = 300.0
 HEARTBEAT_MAX_AGE_S = 30.0
 STACK_ROLES = ("broker", "worker", "harness", "app", "web")
 APP_DEPENDENCIES = ("broker", "harness", "database", "worker", "durable_stores", "build")
 CHECKPOINTS = ("ui_project_created", "ui_dxf_imported", "bearer_present",
     "actor_header_absent", "bearerless_read_refused", "bearerless_mutation_refused",
     "bearerless_no_mutation", "ui_checkout_acquired", "settings_submitted",
-    "worker_published", "settings_readback", "settings_reopened")
+    "worker_published", "settings_readback", "settings_reopened",
+    "recovery_settings_published", "recovery_panels_imported", "recovery_sizing_submitted",
+    "recovery_sizing_published", "recovery_values_read", "recovery_exact_reopen",
+    "custody_groups_published", "custody_frame_power_checked", "custody_read_passed",
+    "submission_settings_published", "submission_panels_imported", "submission_retried_same_request",
+    "submission_sizing_published", "service_settings_published", "service_panels_imported",
+    "service_sizing_submitted", "service_outcome_unknown_shown", "service_job_terminal", "service_reobserved")
 
 
 @dataclass(frozen=True, repr=False)
@@ -1601,9 +1610,12 @@ class BrowserResult:
     annotation_types: tuple[str, ...]
     checkpoints: Mapping[str, bool]
     canonical: CanonicalEvidence
+    sizing: Mapping[str, Mapping] = field(default_factory=dict)
 
     def __post_init__(self):
         object.__setattr__(self, "checkpoints", MappingProxyType(dict(self.checkpoints)))
+        object.__setattr__(self, "sizing", MappingProxyType({key: MappingProxyType(dict(value))
+                                                            for key, value in self.sizing.items()}))
 
 
 class OwnedBrowser(Protocol):
@@ -1735,7 +1747,7 @@ def _validate_browser(result, request):
     if (request.required_test_ids != ids or result.run_id != request.run_id
             or result.source_binding != request.source_binding
             or result.public_key_thumbprint != request.public_key_thumbprint
-            or any(type(values) is not tuple or len(values) != len(ids) or set(values) != set(ids)
+            or any(type(values) is not tuple or values != ids
                    for values in (result.selected_test_ids, result.started_test_ids, result.completed_test_ids))
             or len(result.outcomes) != len(ids) or {o.test_id for o in result.outcomes} != set(ids)
             or any(type(o) is not TestOutcome or type(o.status) is not str or o.status != "passed"
@@ -1759,6 +1771,11 @@ def _validate_browser(result, request):
             or evidence.before_settings_sha256 == evidence.settings_sha256
             or evidence.settings_sha256 != evidence.reopened_settings_sha256):
         _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+    try:
+        _sizing_module().validate_browser_sizing(dict((key, dict(value)) for key, value in result.sizing.items()),
+                                                request.organization_id)
+    except Exception:
+        _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
     return result
 
 
@@ -1767,7 +1784,8 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
     code, stage = FailureCode.LAUNCH, Stage.STACK
     try:
         plan = prepared.plan
-        if plan is None or plan.reservation is None or plan.required_test_ids != REQUIRED_TEST_IDS:
+        if (plan is None or plan.reservation is None or plan.required_test_ids != REQUIRED_TEST_IDS
+                or effects.replay_factory is None):
             _refuse(FailureCode.LAUNCH, Stage.STACK)
         if effects.browser_runner is None or effects.browser_runner is _browser_unavailable:
             _refuse(FailureCode.BROWSER_UNAVAILABLE, Stage.BROWSER)
@@ -1813,7 +1831,7 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
         code, stage = FailureCode.BROWSER_EXIT, Stage.BROWSER
         browser_deadline = stack_ready + BROWSER_TIMEOUT_S
         # This distinct late mint is never added to the shared stack environment.
-        token = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=360)
+        token = prepared.identity_lease.mint(now=int(effects.clock.utc_now().timestamp()), lifetime_s=900)
         browser_env = _PrivateEnvironment(_essential_environment(plan.host.environment))
         browser_env.update({key: env[key] for key in MANAGED_PUBLIC_UI_SETTINGS})
         browser_env.update({"LEAF_E2E_TOKEN": token.reveal(), "LEAF_E2E_MANAGED": "1",
@@ -1830,7 +1848,8 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
                 _refuse(FailureCode.OWNERSHIP, Stage.STACK)
             final_heartbeat = _heartbeat(request, effects)
             if replay is not None:
-                replay.heartbeat(browser_deadline)
+                replay.drive(browser_deadline)
+                replay.loop_heartbeat(browser_deadline)
             result = browser.poll()
             exit_code = browser.process.poll()
             if exit_code is not None and (type(exit_code) is not int or exit_code != 0):
@@ -1846,21 +1865,33 @@ def run_project_pipeline(prepared: PreparedAuthority, *, effects: Effects, scope
             effects.clock.wait(min(0.1, _remaining(browser_deadline, effects, code, stage)))
         _remaining(browser_deadline, effects, code, stage)
         code, stage = FailureCode.CANONICAL, Stage.VERIFICATION
+        verification_deadline = effects.clock.monotonic() + VERIFICATION_TIMEOUT_S
+        request = replace(request, deadline=verification_deadline)
+        if replay is None or replay.complete() is not True:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
         canonical = effects.canonical_reader(CanonicalRequest("execution", WORKER_TOOL, env,
-            result.canonical, browser_deadline))
+            result.canonical, verification_deadline, sizing_attachment={
+                "browser": {key: dict(value) for key, value in result.sizing.items()}, "driver": replay.facts}))
         if type(canonical) is not CanonicalProof or canonical.evidence != result.canonical:
             _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        custody = effects.canonical_reader(CanonicalRequest("custody", WORKER_TOOL, env,
+            result.canonical, verification_deadline, sizing_attachment={
+                "browser": {key: dict(value) for key, value in result.sizing.items()}, "driver": replay.facts}))
+        if type(canonical.sizing_evidence) is not dict or type(custody) is not dict:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        canonical = replace(canonical, sizing_evidence={**canonical.sizing_evidence, "read-custody": custody})
+        _sizing_module().validate_sizing_evidence(canonical.sizing_evidence, replay.plan.public())
         if (canonical.stored_settings_sha256 != result.canonical.settings_sha256
                 or canonical.reopened_settings_sha256 != result.canonical.reopened_settings_sha256):
             _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
         if replay is not None and canonical.replay_facts != replay.plan.public():
             _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
-        _remaining(browser_deadline, effects, code, stage)
+        _remaining(verification_deadline, effects, code, stage)
         if _owned_stack(request, effects) != ready.owned_process_identities:
             _refuse(FailureCode.OWNERSHIP, Stage.STACK)
         final_heartbeat = _heartbeat(request, effects)
         if replay is not None:
-            replay.heartbeat(browser_deadline)
+            replay.heartbeat(verification_deadline)
         return ExecutionProof(ready, request.worker_id, ready.heartbeat, final_heartbeat,
             result, canonical, stack_ready - start, effects.clock.monotonic() - stack_ready,
             replay_facts=canonical.replay_facts, sizing_evidence=canonical.sizing_evidence)
@@ -2143,7 +2174,10 @@ def _canonical_database_proof(request, *, graph, connection):
         reopened, _ = graph._stored_context(expected, UUID(evidence.output_version_id), conn)
         reopened_hash = _settings_hash(reopened, digest=graph.local.digest)
         if request.sizing_attachment is not None:
-            sizing_evidence = sizing.observe_database_sizing(replay, request.sizing_attachment, graph=graph, conn=conn)
+            if set(request.sizing_attachment) == {"browser", "driver"}:
+                sizing_evidence = sizing.observe_sizing_execution(replay, request.sizing_attachment, graph=graph, conn=conn)
+            else:
+                sizing_evidence = sizing.observe_database_sizing(replay, request.sizing_attachment, graph=graph, conn=conn)
     return CanonicalProof(evidence, stored_hash, reopened_hash,
                           replay.public() if replay is not None else None, sizing_evidence)
 
@@ -2170,17 +2204,24 @@ def _canonical_child_entry():
                     public = None if row is None else {"worker_id": row["worker_id"], "tool_name": row["tool_name"],
                         "runtime": row["runtime"], "source_revision": row["source_revision"],
                         "source_sha256": row["source_sha256"], "observed_at": row["observed_at"].isoformat()}
-            elif request.purpose == "execution":
+            elif request.purpose in {"execution", "custody", "replay-observe"}:
                 db = _Host.database_module(environment)
                 sys.path.insert(0, str(REPO / "server"))
                 try:
                     graph = importlib.import_module("solar_project_graph")
-                    proof = _canonical_database_proof(request, graph=graph, connection=_project_connection)
-                    public = {"stored_settings_sha256": proof.stored_settings_sha256,
-                              "reopened_settings_sha256": proof.reopened_settings_sha256}
-                    if proof.replay_facts is not None:
-                        public["replay_facts"] = dict(proof.replay_facts)
-                        public["sizing_evidence"] = proof.sizing_evidence
+                    if request.purpose == "replay-observe":
+                        with _project_connection(environment, request.deadline) as conn, conn.transaction(force_rollback=True):
+                            public = sizing.observe_replay_job(replay, request.sizing_attachment, conn=conn)
+                    elif request.purpose == "custody":
+                        public = sizing.observe_read_custody(replay, request.sizing_attachment, request.evidence,
+                            graph=graph, connection=_project_connection, environment=environment, deadline=request.deadline)
+                    else:
+                        proof = _canonical_database_proof(request, graph=graph, connection=_project_connection)
+                        public = {"stored_settings_sha256": proof.stored_settings_sha256,
+                                  "reopened_settings_sha256": proof.reopened_settings_sha256}
+                        if proof.replay_facts is not None:
+                            public["replay_facts"] = dict(proof.replay_facts)
+                            public["sizing_evidence"] = proof.sizing_evidence
                 finally:
                     sys.path.remove(str(REPO / "server"))
                     db.reset_pool()
@@ -2197,11 +2238,61 @@ def _canonical_child_entry():
                 db.reset_pool()
 
 
+def _validate_canonical_observation_output(value, request):
+    value = _sizing_module().validate_observation(value)
+    if "job_id" in request.sizing_attachment and value["job_id"] != request.sizing_attachment["job_id"]:
+        _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    return value
+
+
+def _validate_canonical_custody_output(value, request):
+    _sizing_module().validate_custody_record(value, run_id=request.evidence.worker_id.removeprefix("project:"),
+                                          organization_id=request.evidence.organization_id)
+    reported = request.sizing_attachment["browser"]["read-custody"]
+    if any(value[key] != reported[key] for key in ("organization_id", "project_id", "source_version_id", "input_version_id",
+            "groups_job_id", "frame_count", "request_sha256", "output_sha256")):
+        _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    return value
+
+
+def _validate_canonical_execution_output(value, request):
+    sizing = _sizing_module()
+    fields = {"stored_settings_sha256", "reopened_settings_sha256"}
+    if sizing.CONFIG_KEY in request.environment:
+        fields.update(("replay_facts", "sizing_evidence"))
+    if (type(value) is not dict or set(value) != fields
+            or any(not _hash_ok(value[key]) for key in ("stored_settings_sha256", "reopened_settings_sha256"))):
+        _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    if "replay_facts" in value:
+        plan = sizing.read_private_plan(request.environment)
+        if value["replay_facts"] != plan.public():
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    attachment = request.sizing_attachment
+    if type(attachment) is dict and set(attachment) == {"browser", "driver"}:
+        sizing.validate_sizing_execution_evidence(value.get("sizing_evidence"), value["replay_facts"])
+        sizing.validate_execution_binding(value["sizing_evidence"], attachment, request.evidence.organization_id)
+    else:
+        if value.get("sizing_evidence") != attachment:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        if value.get("sizing_evidence") is not None:
+            sizing.validate_sizing_attachment(value["sizing_evidence"], value["replay_facts"])
+    return value
+
+
 def _canonical_execution(request):
     _nonempty_dsn(request.environment)
-    if (request.purpose not in {"execution", "heartbeat"}
-            or (request.purpose == "execution" and type(request.evidence) is not CanonicalEvidence)):
+    if (request.purpose not in {"execution", "heartbeat", "replay-observe", "custody"}
+            or (request.purpose in {"execution", "custody"} and type(request.evidence) is not CanonicalEvidence)
+            or (request.purpose in {"custody", "replay-observe"} and _sizing_module().CONFIG_KEY not in request.environment)):
         _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    if request.purpose == "replay-observe":
+        query = request.sizing_attachment
+        if (type(query) is not dict or not (query == {"query": "send_started"}
+                or set(query) == {"job_id"} and _public_id(query["job_id"]))):
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+    elif request.purpose == "custody":
+        if type(request.sizing_attachment) is not dict or set(request.sizing_attachment) != {"browser", "driver"}:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
     environment = _PrivateEnvironment(request.environment)
     evidence = request.evidence
     # Explicit public fields only; never serialize runtime state or a capability.
@@ -2231,14 +2322,11 @@ def _canonical_execution(request):
                 return None
             heartbeat = HeartbeatProof(**dict(raw, observed_at=datetime.fromisoformat(raw["observed_at"])))
             return heartbeat
-        fields = {"stored_settings_sha256", "reopened_settings_sha256"}
-        if _sizing_module().CONFIG_KEY in environment:
-            fields.update(("replay_facts", "sizing_evidence"))
-        if (type(raw) is not dict or set(raw) != fields
-                or any(not _hash_ok(raw[key]) for key in ("stored_settings_sha256", "reopened_settings_sha256"))):
-            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
-        if raw.get("sizing_evidence") != request.sizing_attachment:
-            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        if request.purpose == "replay-observe":
+            return _validate_canonical_observation_output(raw, request)
+        if request.purpose == "custody":
+            return _validate_canonical_custody_output(raw, request)
+        raw = _validate_canonical_execution_output(raw, request)
         return CanonicalProof(evidence, raw["stored_settings_sha256"], raw["reopened_settings_sha256"],
                               raw.get("replay_facts"), raw.get("sizing_evidence"))
     finally:
@@ -2310,7 +2398,7 @@ def _read_browser_report(path, request):
         raw = json.loads(payload.decode("utf-8"), object_pairs_hook=_browser_pairs)
         _browser_object(raw, ("schema", "run_id", "source_binding", "public_key_thumbprint",
             "exit_code", "selected_test_ids", "started_test_ids", "completed_test_ids",
-            "outcomes", "annotation_types", "checkpoints", "canonical"))
+            "outcomes", "annotation_types", "checkpoints", "canonical", "sizing"))
         if raw["schema"] != BROWSER_REPORT_SCHEMA:
             _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
         source = _browser_object(raw["source_binding"], ("commit", "dirty_tree_sha256",
@@ -2347,7 +2435,7 @@ def _read_browser_report(path, request):
         result = BrowserResult(raw["run_id"], source, raw["public_key_thumbprint"], raw["exit_code"],
             _browser_strings(raw["selected_test_ids"]), _browser_strings(raw["started_test_ids"]),
             _browser_strings(raw["completed_test_ids"]), tuple(outcomes),
-            _browser_strings(raw["annotation_types"]), checkpoints, CanonicalEvidence(**canonical))
+            _browser_strings(raw["annotation_types"]), checkpoints, CanonicalEvidence(**canonical), raw["sizing"])
         return _validate_browser(result, request)
     except ProofRefused:
         raise
@@ -2987,7 +3075,7 @@ class _RuntimeProcess:
 
     def start(self):
         spec = self.spec
-        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child", "project-browser", "sizing-replay", "sizing-worker"}:
+        if spec.role not in {"runtime-version", "runtime-build", "migration-child", "seed-child", "stack-launcher", "canonical-child", "project-browser", "sizing-replay", "sizing-worker", "panels-worker", "groups-worker"}:
             raise RuntimeError("unknown process role")
         with self._lock:
             if self._start_attempted or self._stop_requested:
@@ -3718,6 +3806,10 @@ def _receipt_document(plan, runtime, prepared, execution, cleanup_proof, failure
                 or (execution.sizing_evidence is not None and execution.replay_facts is None)):
             _receipt_refused()
         if execution.replay_facts is not None:
+            try:
+                _sizing_module().validate_sizing_evidence(canonical.sizing_evidence, execution.replay_facts)
+            except Exception:
+                _receipt_refused()
             document["replay"] = {"facts": dict(execution.replay_facts),
                 "sizing_required": execution.sizing_evidence is not None,
                 "sizing_evidence": execution.sizing_evidence,
@@ -3754,14 +3846,13 @@ def _sizing_attachment_hash(value):
 
 def _validate_replay_sizing(replay):
     sizing = _sizing_module()
-    sizing.validate_sizing_attachment(replay["sizing_evidence"], replay["facts"])
+    sizing.validate_sizing_evidence(replay["sizing_evidence"], replay["facts"])
     if replay["canonical_sizing_sha256"] != _sizing_attachment_hash(replay["sizing_evidence"]):
         _receipt_refused()
 
 
 def _validate_receipt_structure(document, *, project=True):
-    # F1 is additive: legacy receipts omit replay. When present its shape is
-    # closed. F2 must require sizing and its seven-test walk at its boundary.
+    # Failure receipts retain partial evidence; success always includes the sizing walk.
     fields = _RECEIPT_FIELDS | ({"replay"} if type(document) is dict and "replay" in document else set())
     _exact(document, fields)
     if (document["schema"] != (SCHEMA if project else MIGRATION_SCHEMA) or document["profile"] != PROFILE
@@ -3815,6 +3906,8 @@ def _validate_receipt_structure(document, *, project=True):
             _validate_replay_sizing(replay)  # IGNORE_SIZING_EVIDENCE
         elif replay["sizing_evidence"] is not None or replay["canonical_sizing_sha256"] is not None:
             _receipt_refused()
+    if project and document["ok"] and ("replay" not in document or document["replay"]["sizing_required"] is not True):
+        _receipt_refused()
     database = document["database"]
     if database is not None:
         _exact(database, ("authority_run_id", "ownership", "transport", "readiness", "migration_manifest",
@@ -3898,9 +3991,9 @@ def _validate_receipt_structure(document, *, project=True):
         _exact(playwright, ("selected_test_ids", "started_test_ids", "completed_test_ids", "outcomes", "annotation_types"))
         for key in ("selected_test_ids", "started_test_ids", "completed_test_ids"):
             ids = playwright[key]
-            if type(ids) is not list or len(ids) != 3 or set(ids) != set(REQUIRED_TEST_IDS):
+            if type(ids) is not list or ids != list(REQUIRED_TEST_IDS):
                 _receipt_refused()
-        if playwright["annotation_types"] != [] or type(playwright["outcomes"]) is not list or len(playwright["outcomes"]) != 3:
+        if playwright["annotation_types"] != [] or type(playwright["outcomes"]) is not list or len(playwright["outcomes"]) != len(REQUIRED_TEST_IDS):
             _receipt_refused()
         ids = []
         for item in playwright["outcomes"]:
@@ -4235,7 +4328,7 @@ def _lifecycle(config, *, effects, migration):
                      else prepare_authority(plan, effects=bound, scope=scope)), 2 * MIGRATION_TIMEOUT_S + 120)
         if not migration:
             execution = _stage_call(scope, Stage.BROWSER,
-                lambda: run_project_pipeline(prepared, effects=bound, scope=scope), STACK_TIMEOUT_S + BROWSER_TIMEOUT_S + 5)
+                lambda: run_project_pipeline(prepared, effects=bound, scope=scope), STACK_TIMEOUT_S + BROWSER_TIMEOUT_S + VERIFICATION_TIMEOUT_S + 5)
     except ProofRefused as error:
         scope.remember(error.failure)
     except (KeyboardInterrupt, SystemExit):
@@ -4481,19 +4574,15 @@ def _child_public(spec, raw):
                 return None
             beat = HeartbeatProof(**dict(value, observed_at=datetime.fromisoformat(value["observed_at"])))
             return _heartbeat_public(beat)
-        fields = {"stored_settings_sha256", "reopened_settings_sha256"}
-        if _sizing_module().CONFIG_KEY in spec.environment:
-            fields.update(("replay_facts", "sizing_evidence"))
-        _exact(value, fields)
-        if not all(_hash_ok(value[key]) for key in ("stored_settings_sha256", "reopened_settings_sha256")):
-            return None
-        if "replay_facts" in value:
-            plan = _sizing_module().read_private_plan(spec.environment)
-            if value["replay_facts"] != plan.public():
-                return None
-            if value["sizing_evidence"] is not None:
-                _sizing_module().validate_sizing_attachment(value["sizing_evidence"], value["replay_facts"])
-        return value
+        validators = {"replay-observe": _validate_canonical_observation_output,
+                      "custody": _validate_canonical_custody_output, "execution": _validate_canonical_execution_output}
+        validate = validators.get(request["purpose"])
+        if validate is None:
+            _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        evidence = None if request.get("evidence") is None else CanonicalEvidence(**request["evidence"])
+        expected = CanonicalRequest(request["purpose"], request.get("tool_name", WORKER_TOOL), spec.environment,
+            evidence, request.get("deadline", spec.deadline), request.get("worker_id"), request.get("sizing_attachment"))
+        return validate(value, expected)
     return _approved_event(raw)
 
 

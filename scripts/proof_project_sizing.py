@@ -8,6 +8,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 import hashlib
+import hmac
 import importlib
 import importlib.util
 import json
@@ -18,6 +19,8 @@ import secrets
 import stat
 import sys
 import threading
+import time
+from contextvars import ContextVar
 from types import MappingProxyType, SimpleNamespace
 
 REPO = Path(__file__).resolve().parent.parent
@@ -25,12 +28,17 @@ MANIFEST = "scripts/fixtures/string_sizer_replay_manifest.json"
 MANIFEST_SHA256 = "2b467b2257225849a05b413af581c92c70e9e7ddc0b893c0d3779c8a479bc53e"
 FIXTURE = "server/tests/fixtures/w1_string_length_recorded_response.json"
 FIXTURE_SHA256 = "6e807695b9b36bbaf9007f3322d3570ea748853c746c33dcefcfdfe07c1c299a"
+CATALOG = "scripts/fixtures/project_replay_module_catalog.json"
+CATALOG_SHA256 = "a4a07e1b0aefc9353c2bbd5e21b774368a4c71bc053696670e997ec9d221c7fc"
+FAULT_DECISION_TIMEOUT_S = 60.0
+REPLACEMENT_READY_S = 30.0
+MAX_FAULT_EVENTS = 256
 TOOL = "solar-size-strings"
 GRANT_REF = "project-replay-fixture"
 CONFIG_KEY = "LEAF_PROJECT_REPLAY_CONFIG"
 CONFIG_HASH_KEY = "LEAF_PROJECT_REPLAY_CONFIG_SHA256"
 SCENARIOS = ("capture-recovery", "browser-response-discard", "service-response-drop")
-PIN_FILES = (MANIFEST, FIXTURE, "scripts/proof_project_sizing.py", "scripts/proof_project.py",
+PIN_FILES = (MANIFEST, FIXTURE, CATALOG, "scripts/proof_project_sizing.py", "scripts/proof_project.py",
              "scripts/proof_string_sizer.py", "scripts/start-leaf.py",
              "server/solar_sizing_client.py", "server/solar_project_jobs.py",
              "server/solar_project_graph.py", "server/solar_project_sizing.py")
@@ -56,6 +64,54 @@ def _hash(value):
 
 def _id(value):
     return type(value) is str and re.fullmatch(r"[A-Za-z0-9:|_-]{1,128}", value) is not None
+
+
+BROWSER_SCENARIOS = ("capture-recovery", "read-custody", "browser-response-discard", "service-response-drop")
+BROWSER_FIELDS = {
+    "capture-recovery": ("scenario", "organization_id", "project_id", "drawing_id", "input_version_id", "job_id",
+                         "output_version_id", "exchange_job_id", "evidence_sha256", "panels_in_sequence"),
+    "read-custody": ("scenario", "organization_id", "project_id", "drawing_id", "source_version_id", "groups_job_id",
+                     "input_version_id", "frame_count", "tool", "request_sha256", "output_sha256"),
+    "browser-response-discard": ("scenario", "organization_id", "project_id", "drawing_id", "input_version_id", "job_id",
+                                 "output_version_id", "exchange_job_id", "evidence_sha256", "panels_in_sequence",
+                                 "submissions", "same_submission"),
+    "service-response-drop": ("scenario", "organization_id", "project_id", "drawing_id", "input_version_id", "job_id",
+                              "status", "reason_code", "retryable"),
+}
+
+
+def validate_browser_record(value, scenario, organization_id):
+    fields = BROWSER_FIELDS.get(scenario)
+    _require(fields is not None and type(value) is dict and set(value) == set(fields))
+    _require(value["scenario"] == scenario and value["organization_id"] == organization_id)
+    for key in fields:
+        if key.endswith("_id"):
+            _require(_id(value[key]))
+        if key.endswith("_sha256"):
+            _require(_hash(value[key]))
+        if key in {"frame_count", "panels_in_sequence"}:
+            _require(type(value[key]) is int and 1 <= value[key] <= 9007199254740991)
+    if "exchange_job_id" in value:
+        _require(value["exchange_job_id"] == value["job_id"]
+                 and value["input_version_id"] != value["output_version_id"])
+    if scenario == "read-custody":
+        _require(value["tool"] == "solar-string-data" and value["input_version_id"] != value["source_version_id"])
+    if scenario == "browser-response-discard":
+        _require(type(value["submissions"]) is int and value["submissions"] == 2 and value["same_submission"] is True)
+    if scenario == "service-response-drop":
+        _require(value["status"] == "failed" and value["reason_code"] == "SIZING_OUTCOME_UNKNOWN" and value["retryable"] is False)
+    return {key: value[key] for key in fields}
+
+
+def validate_browser_sizing(value, organization_id):
+    _require(type(value) is dict and set(value) == set(BROWSER_SCENARIOS))
+    records = {key: validate_browser_record(value[key], key, organization_id) for key in BROWSER_SCENARIOS}
+    jobs = [records[key] for key in SCENARIOS]
+    _require(len({row["project_id"] for row in jobs}) == 3 and len({row["job_id"] for row in jobs}) == 3)
+    source, read = records["capture-recovery"], records["read-custody"]
+    _require(read["project_id"] == source["project_id"] and read["drawing_id"] == source["drawing_id"]
+             and read["source_version_id"] == source["output_version_id"])
+    return records
 
 
 def _endpoint(value):
@@ -154,7 +210,8 @@ def prepare_replay(*, run_id, run_root, root_identity, organization_id, endpoint
     _require(len(pins) == len(PIN_FILES) and {name for name, _ in pins} == set(PIN_FILES))
     for name, pin in pins:
         _require(_hash(pin) and digest(read(repo / name)) == pin)
-    _require(dict(pins)[MANIFEST] == MANIFEST_SHA256 and dict(pins)[FIXTURE] == FIXTURE_SHA256)
+    _require(dict(pins)[MANIFEST] == MANIFEST_SHA256 and dict(pins)[FIXTURE] == FIXTURE_SHA256
+             and dict(pins)[CATALOG] == CATALOG_SHA256)
     fixtures = _fixtures(repo, load_manifest)
     _require(len(fixtures) == 1)
     token = (token_factory or (lambda: secrets.token_urlsafe(32)))()
@@ -177,12 +234,13 @@ def bootstrap_child(plan, role, environment, *, modules=None, read=None, stat_ro
     owned = read_private_plan(environment)
     _require(owned.public() == plan.public() and owned.token == plan.token
              and dict(owned.fixture_map) == dict(plan.fixture_map))
-    _require(role in {"app", "broker", "worker", "sizing-worker", "canonical"})
+    _require(role in {"app", "broker", "worker", "sizing-worker", "panels-worker", "groups-worker", "canonical"})
     _validate_plan(plan, environment, read=read, stat_root=stat_root, load_manifest=load_manifest)
     child = dict(environment)
     child["DATABASE_URL"] = environment["DATABASE_URL"]  # DROP_PROJECT_DSN
     child["LEAF_AUTH_LIVE"] = "1"
-    if modules is None:
+    production = modules is None
+    if production:
         sys.path.insert(0, str(REPO / "server"))
         modules = SimpleNamespace(client=importlib.import_module("solar_sizing_client"),
             graph=importlib.import_module("solar_project_graph"),
@@ -212,6 +270,26 @@ def bootstrap_child(plan, role, environment, *, modules=None, read=None, stat_ro
     modules.client.resolve_grant = resolve
     modules.client.requests = Transport
     modules.graph.SYNTHETIC_SIZING_PROOF_ACCEPTED = True
+    if role == "app":
+        if production:
+            modules.catalog = importlib.import_module("solar_module_catalog")
+        if hasattr(modules, "catalog"):
+            install_app_seams(plan, modules)
+        if production:
+            uvicorn = importlib.import_module("uvicorn")
+            for name in ("h11_impl", "httptools_impl"):
+                try:
+                    implementation = importlib.import_module("uvicorn.protocols.http." + name)
+                except ImportError:
+                    continue
+                patch_uvicorn_abort(implementation.RequestResponseCycle)
+            run = uvicorn.run
+            channel = FaultChannel(plan, "app")
+            def run_app(app, *args, **kwargs):
+                return run(submission_asgi_wrapper(app, channel=channel), *args, **kwargs)
+            uvicorn.run = run_app
+    elif role == "sizing-worker" and production:
+        install_capture_seam(plan, modules.graph, FaultChannel(plan, role))
     return child
 
 
@@ -359,8 +437,11 @@ def capture_response_hook(capture, *, binding_for, committed, pause):
     return wrapped
 
 
-def submission_asgi_wrapper(app, *, barrier, binding_for, admitted):
+def submission_asgi_wrapper(app, *, barrier=None, binding_for=None, admitted=None, channel=None):
     """F2 selects the real sizing submission scope; all admission remains in app."""
+    if channel is not None:
+        _require(barrier is None and binding_for is None and admitted is None)
+        return channel_submission_wrapper(app, channel)
     async def wrapped(scope, receive, send):
         binding = binding_for(scope)
         if binding is None:
@@ -457,6 +538,329 @@ def observe_database_sizing(plan, attachment, *, graph, conn):
     return verify_sizing_run(plan, attachment, observe=observe)
 
 
+OBSERVATION_FIELDS = {"job_id", "organization_id", "project_id", "project_name", "tool", "status", "attempt",
+    "lease_owner", "lease_expires_at", "reason_code", "retryable", "output_version_id", "jobs_in_project",
+    "exchange_state", "sender_worker", "sender_attempt", "published_worker", "published_attempt",
+    "exchange_output_version_id", "classification", "response_sha256", "version_count", "versions_before_job"}
+
+
+def validate_observation(value):
+    _require(type(value) is dict and set(value) == OBSERVATION_FIELDS)
+    _require(all(_id(value[key]) for key in ("job_id", "organization_id", "project_id")))
+    _require(type(value["project_name"]) is str and len(value["project_name"]) <= 256 and value["tool"] == TOOL)
+    _require(type(value["status"]) is str and value["status"] in {"queued", "running", "succeeded", "failed", "cancelled"})
+    for key in ("attempt", "jobs_in_project", "version_count", "versions_before_job"):
+        _require(type(value[key]) is int and 0 <= value[key] <= 1024)
+    for key in ("lease_owner", "output_version_id", "sender_worker", "published_worker", "exchange_output_version_id"):
+        _require(value[key] is None or _id(value[key]))
+    for key in ("sender_attempt", "published_attempt"):
+        _require(value[key] is None or type(value[key]) is int and 1 <= value[key] <= 3)
+    _require(value["classification"] is None or value["classification"] == "synthetic")
+    _require(value["exchange_state"] is None or type(value["exchange_state"]) is str
+             and value["exchange_state"] in {"prepared", "send_started", "response_stored", "published", "refused", "outcome_unknown"})
+    _require(value["response_sha256"] is None or _hash(value["response_sha256"]))
+    _require(value["retryable"] is None or type(value["retryable"]) is bool)
+    _require(value["reason_code"] is None or _id(value["reason_code"]))
+    _require(value["lease_expires_at"] is None or type(value["lease_expires_at"]) is str and len(value["lease_expires_at"]) <= 64)
+    return value
+
+
+def observe_replay_job(plan, query, *, conn):
+    _require(type(query) is dict and (set(query) == {"job_id"} and _id(query["job_id"])
+             or query == {"query": "send_started"}))
+    where = "j.job_id=%s" if "job_id" in query else "e.state='send_started'"
+    parameters = (plan.organization_id, query["job_id"]) if "job_id" in query else (plan.organization_id,)
+    rows = conn.execute("SELECT j.*, p.name AS project_name, e.state AS exchange_state, e.sender_worker, "
+        "e.sender_attempt, e.published_worker, e.published_attempt, e.output_version_id AS exchange_output_version_id, "
+        "e.classification, e.response_sha256, "
+        "(SELECT count(*) FROM jobs k WHERE k.org_id=j.org_id AND k.project_id=j.project_id "
+        "AND k.tool_name='solar-size-strings' AND k.deleted_at IS NULL) AS jobs_in_project, "
+        "(SELECT count(*) FROM drawing_versions v WHERE v.org_id=j.org_id AND v.project_id=j.project_id "
+        "AND v.deleted_at IS NULL) AS version_count, "
+        "(SELECT count(*) FROM drawing_versions v WHERE v.org_id=j.org_id AND v.project_id=j.project_id "
+        "AND v.deleted_at IS NULL AND v.created_at <= j.created_at) AS versions_before_job "
+        "FROM jobs j JOIN projects p ON p.project_id=j.project_id AND p.org_id=j.org_id "
+        "LEFT JOIN project_sizing_exchanges e ON e.job_id=j.job_id AND e.org_id=j.org_id AND e.project_id=j.project_id "
+        "WHERE j.org_id=%s AND j.tool_name='solar-size-strings' AND j.deleted_at IS NULL AND " + where,
+        parameters).fetchall()
+    _require(len(rows) == 1)
+    row = rows[0]
+    error = row.get("error") or {}
+    result = dict(job_id=str(row["job_id"]), organization_id=str(row["org_id"]), project_id=str(row["project_id"]),
+        project_name=row["project_name"], tool=row["tool_name"], status=row["status"], attempt=row["attempt"],
+        lease_owner=row["lease_owner"], lease_expires_at=None if row["lease_expires_at"] is None else row["lease_expires_at"].isoformat(),
+        reason_code=error.get("reason_code"), retryable=error.get("retryable"),
+        output_version_id=None if row["output_version_id"] is None else str(row["output_version_id"]),
+        jobs_in_project=row["jobs_in_project"], exchange_state=row["exchange_state"], sender_worker=row["sender_worker"],
+        sender_attempt=row["sender_attempt"], published_worker=row["published_worker"], published_attempt=row["published_attempt"],
+        exchange_output_version_id=None if row["exchange_output_version_id"] is None else str(row["exchange_output_version_id"]),
+        classification=row["classification"], response_sha256=row["response_sha256"], version_count=row["version_count"],
+        versions_before_job=row["versions_before_job"])
+    return validate_observation(result)
+
+
+def _driver_facts(plan, browser, driver):
+    _require(type(driver) is dict and set(driver) == {*SCENARIOS, "service_posts_final"}
+             and type(driver["service_posts_final"]) is int and driver["service_posts_final"] == 3)
+    prefix = f"project:{plan.run_id}:sizing:"
+    expected = {
+        SCENARIOS[0]: dict(job_id=browser[SCENARIOS[0]]["job_id"], sender_worker_id=prefix + "1", published_worker_id=prefix + "2", service_posts=1),
+        SCENARIOS[1]: dict(job_id=browser[SCENARIOS[1]]["job_id"], submissions=2, same_submission=True, service_posts=2),
+        SCENARIOS[2]: dict(job_id=browser[SCENARIOS[2]]["job_id"], sender_worker_id=prefix + "2", reclaim_worker_id=prefix + "3", service_posts=3),
+    }
+    _require(all(type(driver[key]) is dict and driver[key] == expected[key] for key in SCENARIOS))
+    _require(driver[SCENARIOS[1]]["same_submission"] is True)
+    for index, key in enumerate(SCENARIOS):
+        _require(type(driver[key]["service_posts"]) is int and driver[key]["service_posts"] == index + 1)
+    _require(type(driver[SCENARIOS[1]]["submissions"]) is int)
+    return driver
+
+
+def observe_sizing_execution(plan, attachment, *, graph, conn):
+    from uuid import UUID
+    _require(type(attachment) is dict and set(attachment) == {"browser", "driver"})
+    browser = validate_browser_sizing(attachment["browser"], plan.organization_id)
+    driver = _driver_facts(plan, browser, attachment["driver"])
+    output = {}
+    prefix = f"project:{plan.run_id}:sizing:"
+    for index, scenario in enumerate(SCENARIOS):
+        record = browser[scenario]
+        observed = observe_replay_job(plan, {"job_id": record["job_id"]}, conn=conn)
+        _require(observed["organization_id"] == record["organization_id"] and observed["project_id"] == record["project_id"]
+                 and observed["project_name"] == f"PP3B {plan.run_id} sizing {('recovery', 'submission', 'service')[index]}"
+                 and observed["jobs_in_project"] == 1 and observed["classification"] == "synthetic")
+        job = conn.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL", (record["job_id"],)).fetchone()
+        context = job["execution_context"]
+        _require(str(job["input_version_id"]) == record["input_version_id"]
+                 and str(context["drawing_id"]) == record["drawing_id"] and job["request_tenant_id"] == plan.organization_id)
+        if scenario == SCENARIOS[2]:
+            _require(observed["status"] == record["status"] == "failed"
+                and observed["reason_code"] == record["reason_code"] == "SIZING_OUTCOME_UNKNOWN"
+                and observed["retryable"] is record["retryable"] is False
+                and observed["output_version_id"] is observed["exchange_output_version_id"] is None
+                and observed["exchange_state"] == "outcome_unknown" and observed["sender_worker"] == prefix + "2"
+                and observed["sender_attempt"] == 1 and observed["attempt"] == 2
+                and job["provenance"]["worker_id"] == prefix + "3" and job["lease_owner"] is job["lease_expires_at"] is None
+                and observed["version_count"] == observed["versions_before_job"])
+            output[scenario] = dict(run_id=plan.run_id, organization_id=plan.organization_id, project_id=record["project_id"],
+                job_id=record["job_id"], status="failed", reason_code="SIZING_OUTCOME_UNKNOWN", retryable=False,
+                exchange_state="outcome_unknown", sender_worker_id=prefix + "2", reclaim_worker_id=prefix + "3",
+                job_attempt=2, output_version_id=None, service_posts=3, service_posts_final=driver["service_posts_final"])
+            continue
+        scope, lease = graph._exchange_authority(job)
+        exchange = graph._exchanges().get_exchange(scope, lease, conn=conn)
+        _require(exchange is not None)
+        base = dict(run_id=plan.run_id, organization_id=plan.organization_id, project_id=record["project_id"],
+            job_id=record["job_id"], output_version_id=record["output_version_id"], exchange_job_id=record["exchange_job_id"],
+            classification="synthetic", endpoint_sha256=digest(plan.endpoint.encode()), fixture_sha256=plan.fixture_sha256,
+            evidence_sha256=record["evidence_sha256"], request_sha256=exchange["request_sha256"], response_sha256=exchange["response_sha256"])
+        base = observe_database_sizing(plan, base, graph=graph, conn=conn)
+        binding = dict(organization_id=plan.organization_id, project_id=record["project_id"], drawing_id=record["drawing_id"])
+        stored, version = graph._stored_context(binding, UUID(record["output_version_id"]), conn)
+        value = stored.graph
+        _require(value["settings"]["panels_in_sequence"] == record["panels_in_sequence"] == 27
+                 and value["settings"]["voc_cold"]["passes"] is True and len(value["panels"]) == 4 and not value["frames"]
+                 and value["settings"]["extra"]["string_sizing"]["project_exchange"] == {
+                     "job_id": record["job_id"], "evidence_sha256": record["evidence_sha256"]}
+                 and observed["output_version_id"] == record["output_version_id"]
+                 and version.provenance["parent_version_id"] == record["input_version_id"])
+        graph.require_project_sizing(stored, conn=conn)
+        if scenario == SCENARIOS[0]:
+            _require(observed["attempt"] == 2 and job["provenance"]["worker_id"] == prefix + "2"
+                     and exchange["sender_worker"] == prefix + "1" and exchange["sender_attempt"] == 1
+                     and exchange["published_worker"] == prefix + "2" and exchange["published_attempt"] == 2)
+            base.update(panels_in_sequence=27, job_attempt=2, sender_worker_id=prefix + "1", published_worker_id=prefix + "2", service_posts=1)
+        else:
+            _require(record["submissions"] == 2 and record["same_submission"] is True
+                     and observed["version_count"] == observed["versions_before_job"] + 1)
+            base.update(panels_in_sequence=27, submissions=2, same_submission=True, jobs_in_project=1, service_posts=2)
+        output[scenario] = base
+    return output
+
+
+REFUSALS = {"missing-reference": "SIP_R3_SERVICE_EVIDENCE_REQUIRED", "altered-values": "SIP_R3_PROOF_REJECTED",
+            "foreign-reference": "SIP_R3_PROOF_REJECTED"}
+
+
+def validate_custody_record(record, *, run_id, organization_id):
+    fields = {"run_id", "organization_id", "project_id", "source_version_id", "input_version_id", "groups_job_id",
+        "frame_count", "request_sha256", "output_sha256", "refusals", "control_read_passed", "inventories_unchanged"}
+    _require(type(record) is dict and set(record) == fields and record["run_id"] == run_id
+             and record["organization_id"] == organization_id)
+    _require(all(_id(record[key]) for key in fields if key.endswith("_id")))
+    _require(record["source_version_id"] != record["input_version_id"] and type(record["frame_count"]) is int
+             and 1 <= record["frame_count"] <= 9007199254740991 and _hash(record["request_sha256"])
+             and _hash(record["output_sha256"]) and record["refusals"] == REFUSALS
+             and record["control_read_passed"] is True and record["inventories_unchanged"] is True)
+
+
+def validate_sizing_execution_evidence(value, facts):
+    _require(type(value) is dict and set(value) == set(SCENARIOS))
+    base_fields = {"run_id", "organization_id", "project_id", "job_id", "output_version_id", "exchange_job_id",
+                   "classification", "endpoint_sha256", "fixture_sha256", "evidence_sha256", "request_sha256", "response_sha256"}
+    extras = {
+        SCENARIOS[0]: {"panels_in_sequence", "job_attempt", "sender_worker_id", "published_worker_id", "service_posts"},
+        SCENARIOS[1]: {"panels_in_sequence", "submissions", "same_submission", "jobs_in_project", "service_posts"},
+    }
+    prefix = f"project:{facts['run_id']}:sizing:"
+    for scenario in SCENARIOS[:2]:
+        row = value[scenario]
+        _require(type(row) is dict and set(row) == base_fields | extras[scenario])
+        validate_sizing_attachment({key: row[key] for key in base_fields}, facts)
+        _require(row["classification"] == "synthetic" and type(row["panels_in_sequence"]) is int and row["panels_in_sequence"] == 27
+                 and type(row["service_posts"]) is int and row["service_posts"] == SCENARIOS.index(scenario) + 1)
+    recovery, submission, unknown = (value[key] for key in SCENARIOS)
+    _require(type(recovery["job_attempt"]) is int and recovery["job_attempt"] == 2
+             and recovery["sender_worker_id"] == prefix + "1" and recovery["published_worker_id"] == prefix + "2")
+    _require(type(submission["submissions"]) is int and submission["submissions"] == 2 and submission["same_submission"] is True
+             and type(submission["jobs_in_project"]) is int and submission["jobs_in_project"] == 1)
+    fields = {"run_id", "organization_id", "project_id", "job_id", "status", "reason_code", "retryable", "exchange_state",
+              "sender_worker_id", "reclaim_worker_id", "job_attempt", "output_version_id", "service_posts", "service_posts_final"}
+    _require(type(unknown) is dict and set(unknown) == fields and unknown["run_id"] == facts["run_id"]
+             and unknown["organization_id"] == facts["organization_id"] and _id(unknown["project_id"]) and _id(unknown["job_id"])
+             and unknown["status"] == "failed" and unknown["reason_code"] == "SIZING_OUTCOME_UNKNOWN" and unknown["retryable"] is False
+             and unknown["exchange_state"] == "outcome_unknown" and unknown["output_version_id"] is None
+             and unknown["sender_worker_id"] == prefix + "2" and unknown["reclaim_worker_id"] == prefix + "3")
+    _require(all(type(unknown[key]) is int and unknown[key] == expected for key, expected in (
+        ("job_attempt", 2), ("service_posts", 3), ("service_posts_final", 3))))
+    _require(len({value[key]["project_id"] for key in SCENARIOS}) == 3 and len({value[key]["job_id"] for key in SCENARIOS}) == 3)
+
+
+def validate_sizing_evidence(value, facts):
+    _require(type(value) is dict and set(value) == set(BROWSER_SCENARIOS))
+    validate_sizing_execution_evidence({key: value[key] for key in SCENARIOS}, facts)
+    recovery = value[SCENARIOS[0]]
+    custody = value["read-custody"]
+    validate_custody_record(custody, run_id=facts["run_id"], organization_id=facts["organization_id"])
+    _require(custody["project_id"] == recovery["project_id"] and custody["source_version_id"] == recovery["output_version_id"])
+    _require(custody["groups_job_id"] not in {value[key]["job_id"] for key in SCENARIOS})
+
+
+def validate_execution_binding(value, attachment, organization_id):
+    browser = validate_browser_sizing(attachment["browser"], organization_id)
+    _require(type(value) is dict and set(value) == set(SCENARIOS))
+    for scenario in SCENARIOS:
+        row, reported = value[scenario], browser[scenario]
+        fields = ("organization_id", "project_id", "job_id", "status", "reason_code", "retryable") if scenario == SCENARIOS[2] else (
+            "organization_id", "project_id", "job_id", "output_version_id", "exchange_job_id", "evidence_sha256", "panels_in_sequence")
+        _require(type(row) is dict and all(row.get(key) == reported[key] for key in fields))
+        for key, expected in attachment["driver"][scenario].items():
+            _require(row.get(key) == expected and type(row.get(key)) is type(expected))
+    _require(value[SCENARIOS[2]]["service_posts_final"] == attachment["driver"]["service_posts_final"])
+
+
+def observe_read_custody(plan, attachment, evidence, *, graph, connection, environment, deadline):
+    """Publish only run-owned successors, then exercise the unmodified read boundary."""
+    from copy import deepcopy
+    from uuid import UUID, NAMESPACE_URL, uuid5
+    import deps
+    import solar_project_read as reads
+    from solar_sizing_power import frame_module_power
+    _require(type(attachment) is dict and set(attachment) == {"browser", "driver"})
+    browser = validate_browser_sizing(attachment["browser"], plan.organization_id)
+    _driver_facts(plan, browser, attachment["driver"])
+    record, recovered = browser["read-custody"], browser["capture-recovery"]
+    org, project_id, drawing = map(UUID, (plan.organization_id, record["project_id"], record["drawing_id"]))
+    actor = UUID(evidence.binding_id)
+    tenant = deps.TenantContext(plan.organization_id, org_id=plan.organization_id, tier="hosted_pro",
+                              subject="leaf-proof-project|" + plan.run_id)
+    actual_org, actual_actor = graph.project._access(tenant, project_id, write=True)
+    _require((actual_org, actual_actor) == (org, actor))
+    binding = dict(organization_id=plan.organization_id, project_id=record["project_id"], drawing_id=record["drawing_id"])
+    with connection(environment, deadline, read_only=False) as conn, conn.transaction(force_rollback=True):
+        groups = conn.execute("SELECT * FROM jobs WHERE job_id=%s AND deleted_at IS NULL", (record["groups_job_id"],)).fetchone()
+        _require(groups is not None and groups["status"] == "succeeded" and groups["tool_name"] == "solar-panel-groups"
+            and str(groups["org_id"]) == plan.organization_id and str(groups["project_id"]) == record["project_id"]
+            and str(groups["input_version_id"]) == recovered["output_version_id"]
+            and str(groups["output_version_id"]) == record["input_version_id"]
+            and groups["execution_context"]["drawing_id"] == record["drawing_id"])
+        context, version = graph._stored_context(binding, UUID(record["input_version_id"]), conn)
+        _require(version.provenance["parent_version_id"] == recovered["output_version_id"])
+        commit = groups["result"]["graph_commit"]
+        expected = {key: commit[key] for key in ("schema", "attempt", "tool", "tool_manifest_sha256", "parameters",
+            "parent_intake_sha256", "before_graph_sha256", "graph_project_id", "initialized")}
+        expected.update(**binding, parent_version_id=recovered["output_version_id"], job_id=record["groups_job_id"],
+            actor_binding_id=groups["execution_context"]["actor_binding_id"], checkout_fence=str(groups["execution_context"]["checkout_fence"]))
+        proof = graph.project_graph_job_provenance(UUID(record["groups_job_id"]), commit, expected=expected, conn=conn)
+        _require(proof["output_version_id"] == record["input_version_id"])
+        source, _ = graph._stored_context(binding, UUID(recovered["output_version_id"]), conn)
+        value = context.graph
+        _require(len(value["frames"]) == record["frame_count"] >= 1 and value["settings"] == source.graph["settings"])
+        _require(all(frame["module_power_watts"] == frame_module_power(value, frame["panel_refs"], frame["electrical_zone_ref"])
+                     for frame in value["frames"]))
+        graph.require_project_sizing(context, conn=conn)
+    trusted = reads.solar_tools.trusted_record("solar-string-data")
+    catalog_digest = deps.catalog_tool_digest(trusted)
+    def run(version_id):
+        result = reads.run_project_read(tenant, project_id, drawing, version_id, "solar-string-data", {},
+                                       catalog_digest=catalog_digest, current=False)
+        _require(type(result) is dict and type(result.get("result")) is dict)
+        return result["result"]
+    observed = run(UUID(record["input_version_id"]))
+    _require(all(observed[key] == record[key] for key in ("input_version_id", "tool", "request_sha256", "output_sha256")))
+    backend = graph.project.write_loop.upload_backend_for_tenant(plan.organization_id)
+    _require(Path(backend.root).resolve() == plan.run_root / "drawings")
+    artifact_root = Path(backend.root) / f"tenants/{org}/projects/{project_id}/drawings/{drawing}/solar-artifacts"
+    def inventory():
+        with connection(environment, deadline) as conn, conn.transaction(force_rollback=True):
+            rows = conn.execute("SELECT version_id FROM drawing_versions WHERE org_id=%s AND project_id=%s "
+                "AND drawing_id=%s AND deleted_at IS NULL ORDER BY seq DESC", (org, project_id, drawing)).fetchall()
+            _require(bool(rows))
+        files = list(artifact_root.rglob("*")) if artifact_root.exists() else []
+        _require(not any(path.is_symlink() for path in files))
+        return (str(rows[0]["version_id"]), len(rows), sum(path.is_file() for path in files))
+    before_all = inventory()
+    _require(before_all[0] == record["input_version_id"])
+    store = graph.project.graph_store()
+    with connection(environment, deadline, read_only=False) as conn:
+        lease = store.acquire_checkout(org, project_id, drawing, actor_binding_id=actor,
+            holder="Project proof custody", ttl_s=300, expected_fence=None, conn=conn)
+    try:
+        parent = UUID(record["input_version_id"])
+        for label in ("control", *REFUSALS):
+            intake = deepcopy(context.intake)
+            candidate = intake["solar_design_graph"]
+            if label == "missing-reference":
+                del candidate["settings"]["extra"]["string_sizing"]["project_exchange"]
+            elif label == "altered-values":
+                candidate["frames"][0]["module_power_watts"] += 1.0
+            elif label == "foreign-reference":
+                foreign = browser["browser-response-discard"]
+                candidate["settings"]["extra"]["string_sizing"]["project_exchange"] = {
+                    "job_id": foreign["job_id"], "evidence_sha256": foreign["evidence_sha256"]}
+            intake["solar_design_graph_sha256"] = graph.local.digest(candidate)
+            raw = graph.local.canonical_bytes(intake)
+            pin = digest(raw)
+            key = store.publication_intake_key(org, project_id, drawing, pin)
+            backend.put_if_absent_or_verify(key, raw)
+            request_id = uuid5(NAMESPACE_URL, f"project-proof:{plan.run_id}:custody:{label}")
+            with connection(environment, deadline, read_only=False) as conn:
+                version = store.publish_version(org, project_id, drawing, expected_parent_version_id=parent,
+                    actor_binding_id=actor, expected_fence=lease.fence, request_id=request_id,
+                    intake_sha256=pin, conn=conn, before_new=lambda: graph.project._load_intake(org, key, pin))
+            parent = version.version_id
+            before = inventory()
+            if label == "control":
+                control = run(parent)
+                _require(control["tool"] == "solar-string-data" and control["input_version_id"] == str(parent))
+            else:
+                reason = None
+                try:
+                    run(parent)
+                except Exception as exc:
+                    reason = getattr(exc, "reason_code", None) or getattr(exc, "code", None)
+                _require(reason == REFUSALS[label] and inventory() == before)
+        after_all = inventory()
+        _require(after_all[1] == before_all[1] + 4)
+    finally:
+        with connection(environment, deadline, read_only=False) as conn:
+            store.release_checkout(org, project_id, drawing, actor_binding_id=actor, expected_fence=lease.fence, conn=conn)
+    return dict(run_id=plan.run_id, organization_id=plan.organization_id, project_id=record["project_id"],
+        source_version_id=record["source_version_id"], input_version_id=record["input_version_id"], groups_job_id=record["groups_job_id"],
+        frame_count=record["frame_count"], request_sha256=record["request_sha256"], output_sha256=record["output_sha256"],
+        refusals=dict(REFUSALS), control_read_passed=True, inventories_unchanged=True)
+
+
 def close_replay(owner):
     """Uncertainty retains private material for the guardian; it never means success."""
     stopped = True
@@ -482,6 +886,305 @@ def _write_private(path, value):
         stream.flush()
         os.fsync(stream.fileno())
     return digest(payload)
+
+
+_FAULT_FIELDS = {
+    "capture": {"job_id", "organization_id", "project_id", "worker_id", "attempt", "response_sha256"},
+    "submission": {"job_id", "status_code", "body_sha256", "idempotency_key_sha256", "organization_id", "project_id"},
+    "service": {"request_sha256", "content_length"},
+    "decision": {"event", "action"},
+    "paused": {"event"}, "discarded": {"event"}, "held": {"event"}, "dropped": {"event"}, "failed": {"event"},
+}
+_FAULT_ACTIONS = {"continue", "pause", "pass", "discard", "answer", "hold", "drop"}
+
+
+def _canonical_json(value):
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()
+
+
+def _unique_json(pairs):
+    value = {}
+    for key, item in pairs:
+        _require(key not in value)
+        value[key] = item
+    return value
+
+
+def fault_message(plan, kind, seq, **payload):
+    _require(kind in _FAULT_FIELDS and set(payload) == _FAULT_FIELDS[kind])
+    _require(type(seq) is int and 1 <= seq <= MAX_FAULT_EVENTS * 4)
+    value = dict(v=1, run_id=plan.run_id, kind=kind, seq=seq, **payload)
+    value["mac"] = hmac.new(plan.token.encode(), _canonical_json(value), hashlib.sha256).hexdigest()
+    raw = _canonical_json(value)
+    validate_fault_message(plan, raw)
+    return raw
+
+
+def validate_fault_message(plan, raw):
+    _require(type(raw) is bytes and 0 < len(raw) <= 4096)
+    try:
+        value = json.loads(raw, object_pairs_hook=_unique_json)
+    except (ValueError, UnicodeError, RecursionError):
+        raise ReplayRefused() from None
+    _require(type(value) is dict and type(value.get("kind")) is str and value["kind"] in _FAULT_FIELDS)
+    kind = value["kind"]
+    _require(set(value) == {"v", "run_id", "kind", "seq", "mac"} | _FAULT_FIELDS[kind])
+    _require(type(value["v"]) is int and value["v"] == 1 and value["run_id"] == plan.run_id
+             and type(value["seq"]) is int and 1 <= value["seq"] <= MAX_FAULT_EVENTS * 4 and _hash(value["mac"]))
+    unsigned = {key: item for key, item in value.items() if key != "mac"}
+    _require(hmac.compare_digest(value["mac"], hmac.new(plan.token.encode(), _canonical_json(unsigned), hashlib.sha256).hexdigest()))
+    for key in _FAULT_FIELDS[kind]:
+        item = value[key]
+        if key.endswith("_id"):
+            _require(_id(item))
+        if key.endswith("_sha256"):
+            _require(_hash(item))
+    if kind == "capture":
+        _require(type(value["attempt"]) is int and 1 <= value["attempt"] <= 3)
+    if kind == "submission":
+        _require(type(value["status_code"]) is int and 200 <= value["status_code"] < 300)
+    if kind == "service":
+        _require(type(value["content_length"]) is int and 1 <= value["content_length"] <= 65536
+                 and value["request_sha256"] in plan.fixture_map)
+    if "event" in value:
+        _require(type(value["event"]) is str and re.fullmatch(
+            r"event-(?:app|sizing-worker|listener)-[1-9][0-9]*-[1-9][0-9]*", value["event"]) is not None)
+    if kind == "decision":
+        _require(type(value["action"]) is str and value["action"] in _FAULT_ACTIONS)
+    return value
+
+
+def write_fault_message(path, raw):
+    _require(type(raw) is bytes and len(raw) <= 4096 and path.suffix == ".json")
+    temporary = path.with_suffix(".tmp")
+    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    try:
+        with os.fdopen(descriptor, "wb") as stream:
+            stream.write(raw)
+            stream.flush()
+            os.fsync(stream.fileno())
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def read_fault_message(plan, path):
+    _require(path.parent == plan.run_root / "project-replay/faults" and path.suffix == ".json")
+    info = path.lstat()
+    _require(stat.S_ISREG(info.st_mode) and info.st_size <= 4096
+             and (os.name == "nt" or not info.st_mode & 0o077))
+    with path.open("rb") as stream:
+        return validate_fault_message(plan, stream.read(4097))
+
+
+class FaultChannel:
+    def __init__(self, plan, role, *, clock=time.monotonic, wait=time.sleep, pid=None):
+        _require(role in {"app", "sizing-worker", "listener", "supervisor"})
+        self.plan, self.role, self.clock, self.wait = plan, role, clock, wait
+        self.directory = plan.run_root / "project-replay/faults"
+        self.pid, self.seq, self.decisions = pid or os.getpid(), 0, {}
+        self.lock = threading.RLock()
+
+    def event(self, kind, **payload):
+        with self.lock:
+            self.seq += 1
+            _require(self.seq <= MAX_FAULT_EVENTS)
+            stem = f"event-{self.role}-{self.pid}-{self.seq}"
+            write_fault_message(self.directory / (stem + ".json"), fault_message(self.plan, kind, self.seq, **payload))
+            return stem
+
+    def decide(self, event, action):
+        with self.lock:
+            self.seq += 1
+            write_fault_message(self.directory / ("decision-" + event + ".json"),
+                                fault_message(self.plan, "decision", self.seq, event=event, action=action))
+
+    def decision(self, event, allowed):
+        deadline = self.clock() + FAULT_DECISION_TIMEOUT_S
+        path = self.directory / ("decision-" + event + ".json")
+        while self.clock() < deadline:
+            if path.exists():
+                value = read_fault_message(self.plan, path)
+                _require(value["kind"] == "decision" and value["event"] == event)
+                previous = self.decisions.get(event, 0)
+                if value["seq"] > previous:
+                    _require(value["action"] in allowed)
+                    self.decisions[event] = value["seq"]
+                    return value["action"]
+                _require(value["seq"] == previous)
+            self.wait(0.05)
+        raise ReplayRefused()
+
+
+def capture_handshake(channel, payload, *, exit_process=os._exit):
+    try:
+        event = channel.event("capture", **payload)
+        if channel.decision(event, {"continue", "pause"}) == "continue":
+            return
+        channel.event("paused", event=event)
+        deadline = channel.clock() + 120.0
+        while channel.clock() < deadline:
+            channel.wait(min(0.05, deadline - channel.clock()))
+    except Exception:
+        pass
+    exit_process(70)
+    raise ReplayRefused()
+
+
+_ABORT_RESPONSE = ContextVar("project_proof_abort_response", default=False)
+
+
+class _DiscardResponse(ConnectionAbortedError):
+    pass
+
+
+def patch_uvicorn_abort(cycle):
+    original = cycle.send_500_response
+    async def send_500_response(self):
+        if _ABORT_RESPONSE.get():
+            self.transport.abort()
+            return
+        return await original(self)
+    cycle.send_500_response = send_500_response
+
+
+async def _async_decision(channel, event, allowed):
+    import asyncio
+    return await asyncio.to_thread(channel.decision, event, allowed)
+
+
+async def _receive_before(receive, deadline):
+    import asyncio
+    remaining = deadline - time.monotonic()
+    if remaining <= 0:
+        raise TimeoutError()
+    return await asyncio.wait_for(receive(), timeout=remaining)
+
+
+def channel_submission_wrapper(app, channel, *, decide=_async_decision):
+    async def wrapped(scope, receive, send):
+        if scope.get("type") == "http":
+            # Chromium transparently resends a POST whose REUSED socket closes before any response byte, which
+            # would hide a discarded response from the controller (measured on the mini, 10-31). Close every
+            # proof-host connection after its response so no socket is ever reused.
+            inner_send = send
+
+            async def send(message):
+                if message.get("type") == "http.response.start":
+                    message = dict(message, headers=[*[(k, v) for k, v in message.get("headers", [])
+                                                        if k.lower() != b"connection"], (b"connection", b"close")])
+                return await inner_send(message)
+        if scope.get("type") != "http" or scope.get("method") != "POST" or scope.get("path") != "/api/run":
+            return await app(scope, receive, send)
+        messages, body = [], bytearray()
+        receive_deadline = time.monotonic() + 30.0
+        complete = False
+        try:
+            while len(messages) < 1024:
+                message = await _receive_before(receive, receive_deadline)
+                messages.append(message)
+                if message.get("type") != "http.request":
+                    break
+                body.extend(message.get("body", b""))
+                complete = not message.get("more_body", False)
+                if len(body) > 1048576 or complete:
+                    break
+        except TimeoutError:
+            _ABORT_RESPONSE.set(True)
+            raise _DiscardResponse("project proof request timed out") from None
+        replay_index = 0
+        async def replay_receive():
+            nonlocal replay_index
+            if replay_index < len(messages):
+                message = messages[replay_index]
+                replay_index += 1
+                return message
+            return await receive()
+        try:
+            parsed = json.loads(body) if complete and len(body) <= 1048576 else None
+            sizing = type(parsed) is dict and parsed.get("tool") == TOOL
+        except (ValueError, UnicodeError, RecursionError):
+            sizing = False
+        if not sizing:
+            return await app(scope, replay_receive, send)
+        held = []
+        async def hold(message):
+            held.append(message)
+            _require(sum(len(item.get("body", b"")) for item in held) <= 1048576 and len(held) <= 256)
+        event = None
+        try:
+            await app(scope, replay_receive, hold)
+            start = held[0]
+            if start.get("type") != "http.response.start" or not 200 <= start.get("status", 0) < 300:
+                for message in held:
+                    await send(message)
+                return
+            data = json.loads(b"".join(message.get("body", b"") for message in held[1:]))
+            def header(name):
+                values = [value for key, value in scope.get("headers", []) if key.lower() == name]
+                _require(len(values) == 1)
+                return values[0].decode("ascii")
+            event = channel.event("submission", job_id=data["job_id"], status_code=start["status"],
+                body_sha256=digest(bytes(body)), idempotency_key_sha256=digest(header(b"idempotency-key").encode()),
+                organization_id=header(b"x-org-id"), project_id=header(b"x-project-id"))
+            # The private channel's filesystem wait must not block other ASGI requests.
+            action = await decide(channel, event, {"pass", "discard"})
+            if action == "discard":
+                channel.event("discarded", event=event)
+                _ABORT_RESPONSE.set(True)
+                raise _DiscardResponse("project proof response discarded")
+            for message in held:
+                await send(message)
+        except _DiscardResponse:
+            raise
+        except Exception:
+            if event is not None:
+                channel.event("failed", event=event)
+            _ABORT_RESPONSE.set(True)
+            raise _DiscardResponse("project proof response refused") from None
+    return wrapped
+
+
+def install_app_seams(plan, modules):
+    catalog = modules.catalog
+    catalog.CATALOG_URL = plan.endpoint + "/modules"
+    def resolve(grant_ref, organization_id):
+        if grant_ref != GRANT_REF or organization_id != plan.organization_id:
+            raise modules.grants.CloudError("cloud_tenant_unauthorized", 403)
+        return modules.grants.CloudGrant(plan.organization_id, plan.token)
+    @contextmanager
+    def get(url, **kwargs):
+        _require(url == catalog.CATALOG_URL and kwargs.get("allow_redirects") is False
+                 and kwargs.get("headers", {}).get("Authorization") == "Bearer " + plan.token)
+        with modules.requests.Session() as session:
+            session.trust_env = False
+            with session.get(url, **kwargs) as response:
+                yield response
+    catalog.cloud = SimpleNamespace(resolve_grant=resolve, CloudError=modules.grants.CloudError)
+    catalog.requests = SimpleNamespace(get=get, Timeout=modules.requests.Timeout,
+                                       RequestException=modules.requests.RequestException)
+
+
+def install_capture_seam(plan, graph, channel):
+    exchanges = graph._exchanges()
+    local = threading.local()
+    original = exchanges.capture_response
+    def binding_for(scope, lease):
+        local.scope, local.lease = scope, lease
+        return FaultBinding(plan.run_id, str(scope.org_id), str(scope.project_id), str(scope.job_id))
+    def committed(scope, lease):
+        with exchanges.db.connection() as conn:
+            exchange = exchanges.get_exchange(scope, lease, conn=conn)
+            local.exchange = exchange
+            return (exchange is not None and exchange["state"] == "response_stored"
+                and exchange["sender_worker"] == lease.worker_id and exchange["sender_attempt"] == lease.attempt
+                and digest(exchange["response_bytes"]) == exchange["response_sha256"])
+    def pause(binding, worker_id):
+        capture_handshake(channel, dict(job_id=binding.job_id, organization_id=binding.organization_id,
+            project_id=binding.project_id, worker_id=worker_id, attempt=local.lease.attempt,
+            response_sha256=local.exchange["response_sha256"]))
+    exchanges.capture_response = capture_response_hook(original, binding_for=binding_for, committed=committed, pause=pause)
 
 
 def read_private_plan(environment):
@@ -515,6 +1218,13 @@ class ReplayRuntime:
         self.plan = None
         self.worker = self.worker_identity = self.descriptor = None
         self.generation = 0
+        self.auxiliary = []
+        self.last_heartbeats = {}
+        self.pending, self.seen, self.writer_sequences = {}, set(), {}
+        self.jobs, self.submissions, self.facts = [], {}, {}
+        self.schedule = self.channel = None
+        self.discard_ack = self.retry_event = None
+        self.stopped_for_drop = False
 
     def __repr__(self):
         return "<owned project replay>"
@@ -525,6 +1235,10 @@ class ReplayRuntime:
     def remove_private(self):
         for path in reversed(self.created):
             if path.is_dir():
+                if path.name == "faults":
+                    for child in path.iterdir():
+                        _require(child.is_file() and not child.is_symlink() and child.suffix in {".json", ".tmp"})
+                        child.unlink()
                 path.rmdir()
             else:
                 path.unlink(missing_ok=True)
@@ -551,6 +1265,11 @@ class ReplayRuntime:
         directory = plan.config.run_root / "project-replay"
         p._private_directory(directory)
         self.created.append(directory)
+        faults = directory / "faults"
+        p._private_directory(faults)
+        self.created.append(faults)
+        self.schedule = FaultSchedule(self.plan)
+        self.channel = FaultChannel(self.plan, "supervisor")
         config = directory / "private.json"
         value = {name: getattr(self.plan, name) for name in ("run_id", "organization_id", "endpoint",
                   "root_identity", "source_sha256", "source_files", "token")}
@@ -572,6 +1291,18 @@ class ReplayRuntime:
         self.descriptor = self.effects.canonical_reader(p.CanonicalRequest(tool_name=TOOL))
         _require(self.descriptor.tool == TOOL and _hash(self.descriptor.source_sha256)
                  and self.descriptor.source_revision == "sha256:" + self.descriptor.source_sha256)
+        for role, tool, label in (("panels-worker", "solar-panels-from-drawing", "panels"),
+                                  ("groups-worker", "solar-panel-groups", "groups")):
+            descriptor = self.effects.canonical_reader(p.CanonicalRequest(tool_name=tool))
+            _require(descriptor.tool == tool and _hash(descriptor.source_sha256)
+                     and descriptor.source_revision == "sha256:" + descriptor.source_sha256)
+            worker_id = f"project:{self.plan.run_id}:{label}:1"
+            argv = tuple(_child_argv(role, ("--tool", tool, "--readiness", "--worker-id", worker_id)))
+            child = self.effects.process_launcher(p.ProcessSpec(role, argv, REPO / "server", self.environment, deadline), scope=self.scope)
+            self.resources.append(child)
+            identity = child.identity
+            _require(identity.role == role and identity.start_id)
+            self.auxiliary.append((child, identity, worker_id, tool, descriptor))
         return self.environment
 
     def launcher_argv(self, argv):
@@ -588,21 +1319,46 @@ class ReplayRuntime:
         _require(self.worker_identity.role == "sizing-worker" and self.worker_identity.start_id)
         return self.worker
 
-    def heartbeat(self, deadline):
-        ready_deadline = min(deadline, self.effects.clock.monotonic() + 5.0)
+    def _worker_heartbeat(self, child, identity, worker_id, tool, descriptor, deadline, ready_s, *, loop_only=False):
+        now = self.effects.clock.monotonic()
+        _require(child.identity == identity and child.poll() is None)
+        cached = self.last_heartbeats.get(worker_id)
+        if loop_only and cached is not None and now - cached[0] < 2.0:
+            return cached[1]
+        ready_deadline = min(deadline, now + ready_s)
         while True:
-            _require(self.worker.identity == self.worker_identity and self.worker.poll() is None)
+            _require(child.identity == identity and child.poll() is None)
             _require(self.effects.clock.monotonic() < ready_deadline)
-            beat = self.effects.canonical_reader(self.p.CanonicalRequest("heartbeat", TOOL, self.environment,
-                deadline=ready_deadline, worker_id=self.worker_id))
+            beat = self.effects.canonical_reader(self.p.CanonicalRequest("heartbeat", tool, self.environment,
+                deadline=ready_deadline, worker_id=worker_id))
             if beat is not None:
                 break
-            self.effects.clock.wait(0.05)
-        d = self.descriptor
+            self.effects.clock.wait(min(2.0, max(0, ready_deadline - self.effects.clock.monotonic())))
+        d = descriptor
         _require(type(beat) is self.p.HeartbeatProof and (beat.worker_id, beat.tool_name, beat.runtime,
-            beat.source_revision, beat.source_sha256) == (self.worker_id, TOOL, d.runtime, d.source_revision, d.source_sha256))
+            beat.source_revision, beat.source_sha256) == (worker_id, tool, d.runtime, d.source_revision, d.source_sha256))
         age = (self.effects.clock.utc_now() - beat.observed_at).total_seconds()
         _require(0 <= age <= self.p.HEARTBEAT_MAX_AGE_S)
+        self.last_heartbeats[worker_id] = (self.effects.clock.monotonic(), beat)
+        return beat
+
+    def heartbeat(self, deadline, *, ready_s=5.0):
+        return self._heartbeat(deadline, ready_s=ready_s, loop_only=False)
+
+    def loop_heartbeat(self, deadline):
+        return self._heartbeat(deadline, ready_s=5.0, loop_only=True)
+
+    def _heartbeat(self, deadline, *, ready_s, loop_only):
+        beat = None
+        if self.stopped_for_drop:
+            _require(self.generation == 2 and self.schedule.active is not None
+                     and self.schedule.active.scenario == SCENARIOS[2]
+                     and any(kind == "held" for kind, index, payload in self.pending.values()))
+        else:
+            beat = self._worker_heartbeat(self.worker, self.worker_identity, self.worker_id, TOOL,
+                                          self.descriptor, deadline, ready_s, loop_only=loop_only)
+        for child, identity, worker_id, tool, descriptor in self.auxiliary:
+            self._worker_heartbeat(child, identity, worker_id, tool, descriptor, deadline, 5.0, loop_only=loop_only)
         return beat
 
     def recover(self, barrier, binding, *, committed, captured_identity, deadline):
@@ -614,7 +1370,7 @@ class ReplayRuntime:
         def validate(child, captured):
             if child.identity == captured or self.worker_id == old_id or child is old:
                 return False
-            self.heartbeat(deadline)
+            self.heartbeat(deadline, ready_s=REPLACEMENT_READY_S)
             return True
         # launch_worker uses the supervisor's launcher: scope and guardian own
         # the new process before its first instruction, including bad identity.
@@ -622,6 +1378,198 @@ class ReplayRuntime:
             current_worker=self.worker_identity, stop=lambda identity: old.stop(deadline),
             launch_replacement=lambda: self.launch_worker(deadline),
             register=lambda child: _require(child in self.resources), validate_identity=validate)
+
+    def service_posts(self):
+        path = self.plan.run_root / "project-replay/requests.jsonl"
+        if not path.exists():
+            return 0
+        _require(path.lstat().st_size <= 65536 and not path.is_symlink())
+        lines = path.read_bytes().splitlines()
+        _require(len(lines) <= 3)
+        for line in lines:
+            value = json.loads(line, object_pairs_hook=_unique_json)
+            _require(set(value) == {"request_sha256", "response_sha256", "classification", "endpoint_sha256", "fixture_sha256"})
+            fixture = self.plan.fixture_map.get(value["request_sha256"])
+            _require(fixture is not None and value["response_sha256"] == fixture[2]
+                     and value["classification"] == "synthetic" and value["fixture_sha256"] == self.plan.fixture_sha256
+                     and value["endpoint_sha256"] == digest(self.plan.endpoint.encode()))
+        return len(lines)
+
+    def observe(self, query, deadline):
+        value = self.effects.canonical_reader(self.p.CanonicalRequest("replay-observe", TOOL, self.environment,
+            deadline=deadline, sizing_attachment=query))
+        validate_observation(value)
+        _require(value["organization_id"] == self.plan.organization_id and value["tool"] == TOOL)
+        return value
+
+    def _bound(self, value, index):
+        _require(0 <= index < 3 and value["job_id"] == self.jobs[index])
+        suffix = ("recovery", "submission", "service")[index]
+        _require(value["project_name"] == f"PP3B {self.plan.run_id} sizing {suffix}")
+        return value
+
+    def _arm(self, scenario, observed):
+        return arm_scenario(self.schedule, scenario, run_id=self.plan.run_id,
+            organization_id=observed["organization_id"], project_id=observed["project_id"], job_id=observed["job_id"])
+
+    def _decision(self, stem, action, observed):
+        _require(observed["organization_id"] == self.plan.organization_id)
+        self.channel.decide(stem, action)
+
+    def drive(self, deadline):
+        _require(self.effects.clock.monotonic() < deadline)
+        self._settle_retry(deadline)
+        directory = self.plan.run_root / "project-replay/faults"
+        events = list(directory.glob("event-*.json"))
+        _require(len(events) <= MAX_FAULT_EVENTS)
+        # Per-writer sequence order; app admission must be observed before service/capture.
+        candidates = []
+        for path in events:
+            if path.stem in self.seen:
+                continue
+            match = re.fullmatch(r"event-(app|sizing-worker|listener)-([1-9][0-9]*)-([1-9][0-9]*)", path.stem)
+            _require(match is not None)
+            candidates.append(({"app": 0, "listener": 1, "sizing-worker": 2}[match[1]], int(match[3]), path, match))
+        for _, _, path, match in sorted(candidates, key=lambda item: (item[0], item[1]))[:32]:
+            value = read_fault_message(self.plan, path)
+            _require(value["kind"] != "decision" and value["seq"] == int(match[3]))
+            kind = value["kind"]
+            expected_role = {"capture": "sizing-worker", "paused": "sizing-worker", "submission": "app",
+                             "discarded": "app", "service": "listener", "held": "listener", "dropped": "listener"}.get(kind)
+            _require(expected_role == match[1])
+            writer = match[1] + "-" + match[2]
+            _require(value["seq"] == self.writer_sequences.get(writer, 0) + 1)
+            if self._drive_event(path.stem, value, deadline) is False:
+                continue
+            self.writer_sequences[writer] = value["seq"]
+            self.seen.add(path.stem)
+        self._settle_retry(deadline)
+
+    def _settle_retry(self, deadline):
+        if self.retry_event is not None and self.schedule.active is not None:
+            _require(self.schedule.active.scenario == SCENARIOS[1])
+            observed = self._bound(self.observe({"job_id": self.jobs[1]}, deadline), 1)
+            if observed["exchange_state"] == "published":
+                _require(self.service_posts() == 2)
+                self.facts[SCENARIOS[1]] = dict(job_id=self.jobs[1], submissions=2, same_submission=True, service_posts=2)
+                self.schedule.active.complete()
+                self.retry_event = None
+
+    def _drive_event(self, stem, value, deadline):
+        kind = value["kind"]
+        if kind == "submission":
+            job = value["job_id"]
+            if job not in self.jobs:
+                self._settle_retry(deadline)
+                index = len(self.jobs)
+                # An admitted successor can reach the channel before this loop has observed the previous
+                # publication. Leave it pending until that independently observed settlement completes.
+                if index == 2 and self.schedule.next_index == 1 and self.retry_event is not None:
+                    return False
+                _require(index < 3 and self.schedule.next_index == index and self.schedule.active is None)
+                observed = self.observe({"job_id": job}, deadline)
+                self.jobs.append(job)
+                self._bound(observed, index)
+                _require(value["organization_id"] == observed["organization_id"] and value["project_id"] == observed["project_id"])
+                self.submissions[job] = value
+                if index == 1:
+                    barrier = self._arm(SCENARIOS[1], observed)
+                    barrier.consume(barrier.binding)
+                    self.pending[stem] = (kind, index, value)
+                    self._decision(stem, "discard", observed)
+                else:
+                    self._decision(stem, "pass", observed)
+            else:
+                index = self.jobs.index(job)
+                _require(index == 1 and self.discard_ack is not None and self.retry_event is None
+                         and SCENARIOS[1] not in self.facts)
+                observed = self._bound(self.observe({"job_id": job}, deadline), 1)
+                original = self.submissions[job]
+                _require(all(value[key] == original[key] for key in ("organization_id", "project_id", "body_sha256", "idempotency_key_sha256")))
+                self._decision(stem, "pass", observed)
+                self.retry_event = stem
+        elif kind == "capture":
+            if value["job_id"] not in self.jobs:
+                return False
+            index = self.jobs.index(value["job_id"])
+            observed = self._bound(self.observe({"job_id": value["job_id"]}, deadline), index)
+            _require(observed["exchange_state"] == "response_stored" and observed["sender_worker"] == value["worker_id"]
+                     and observed["sender_attempt"] == value["attempt"] and observed["response_sha256"] == value["response_sha256"]
+                     and value["organization_id"] == observed["organization_id"] and value["project_id"] == observed["project_id"])
+            if index == 0:
+                _require(self.generation == 1 and value["worker_id"] == self.worker_id and value["attempt"] == 1)
+                self._arm(SCENARIOS[0], observed)
+                self.pending[stem] = (kind, index, value)
+                self._decision(stem, "pause", observed)
+            else:
+                _require(index == 1 and self.generation == 2 and value["worker_id"] == self.worker_id)
+                self._decision(stem, "continue", observed)
+        elif kind == "service":
+            if not self.jobs:
+                return False
+            observed = self.observe({"query": "send_started"}, deadline)
+            if observed["job_id"] not in self.jobs:
+                return False
+            index = self.jobs.index(observed["job_id"])
+            self._bound(observed, index)
+            _require(observed["exchange_state"] == "send_started" and observed["sender_worker"] == self.worker_id
+                     and observed["sender_attempt"] == 1 and value["request_sha256"] in self.plan.fixture_map)
+            if index == 2:
+                _require(self.generation == 2)
+                barrier = self._arm(SCENARIOS[2], observed)
+                barrier.consume(barrier.binding)
+                self.pending[stem] = (kind, index, value)
+                self._decision(stem, "hold", observed)
+            else:
+                self._decision(stem, "answer", observed)
+        else:
+            original = value["event"]
+            _require(original in self.pending)
+            primary, index, payload = self.pending[original]
+            observed = self._bound(self.observe({"job_id": self.jobs[index]}, deadline), index)
+            if kind == "paused":
+                _require(primary == "capture" and index == 0 and observed["exchange_state"] == "response_stored"
+                         and observed["sender_worker"] == self.worker_id and observed["sender_attempt"] == 1)
+                old_id = self.worker_id
+                barrier = self.schedule.active
+                self.recover(barrier, barrier.binding, committed=True, captured_identity=self.worker_identity, deadline=deadline)
+                _require(self.generation == 2 and self.service_posts() == 1)
+                self.facts[SCENARIOS[0]] = dict(job_id=self.jobs[0], sender_worker_id=old_id,
+                                              published_worker_id=self.worker_id, service_posts=1)
+                del self.pending[original]
+            elif kind == "discarded":
+                _require(primary == "submission" and index == 1 and self.discard_ack is None)
+                self.discard_ack = original
+                del self.pending[original]
+            elif kind == "held":
+                _require(primary == "service" and index == 2 and observed["exchange_state"] == "send_started"
+                         and observed["sender_worker"] == self.worker_id and self.generation == 2)
+                _require(self.worker.identity == self.worker_identity and self.worker.stop(deadline) is True)
+                self.stopped_for_drop = True
+                self._decision(original, "drop", observed)
+                self.pending[original] = ("held", index, payload)
+            elif kind == "dropped":
+                _require(primary == "held" and index == 2 and self.service_posts() == 3)
+                old, old_identity, old_id = self.worker, self.worker_identity, self.worker_id
+                child = self.launch_worker(deadline)
+                _require(child is not old and child.identity != old_identity and self.worker_id != old_id)
+                self.stopped_for_drop = False
+                self.heartbeat(deadline, ready_s=REPLACEMENT_READY_S)
+                _require(self.generation == 3)
+                self.facts[SCENARIOS[2]] = dict(job_id=self.jobs[2], sender_worker_id=old_id,
+                    reclaim_worker_id=self.worker_id, service_posts=3)
+                self.schedule.active.complete()
+                del self.pending[original]
+            else:
+                raise ReplayRefused()
+        return True
+
+    def complete(self):
+        _require(self.service_posts() == 3)
+        self.facts["service_posts_final"] = 3
+        return (self.schedule.next_index == 3 and self.schedule.active is None and not self.pending
+                and not self.stopped_for_drop and len(self.jobs) == 3 and set(self.facts) == {*SCENARIOS, "service_posts_final"}
+                and all(path.stem in self.seen for path in (self.plan.run_root / "project-replay/faults").glob("event-*.json")))
 
     def close(self):
         return close_replay(self)
@@ -631,6 +1579,25 @@ def _listener_main(environment, *, fault_driver=None, record_request=None):
     """Only POST /string-length exists; there is deliberately no fault-control route."""
     from http.server import BaseHTTPRequestHandler, HTTPServer
     plan = read_private_plan(environment)
+    raw_catalog = (REPO / CATALOG).read_bytes()
+    _require(digest(raw_catalog) == CATALOG_SHA256)
+    catalog = json.loads(raw_catalog)["response"]
+    if fault_driver is None and record_request is None:
+        channel = FaultChannel(plan, "listener")
+        def fault_driver(plan, body, length, record, close):
+            try:
+                event = channel.event("service", request_sha256=digest(body), content_length=length)
+                if channel.decision(event, {"answer", "hold"}) == "answer":
+                    return False
+                channel.event("held", event=event)
+                _require(channel.decision(event, {"drop"}) == "drop")
+                record(digest(body))
+                close()
+                channel.event("dropped", event=event)
+                return True
+            except Exception:
+                close()
+                return True
     count = 0
     def record(request_sha256):
         nonlocal count
@@ -654,6 +1621,30 @@ def _listener_main(environment, *, fault_driver=None, record_request=None):
         def log_message(self, *args):
             pass
 
+        def do_GET(self):
+            from urllib.parse import urlsplit, parse_qs
+            from copy import deepcopy
+            self.close_connection = True
+            parts = urlsplit(self.path)
+            _require(parts.path == "/string-length/modules" and not parts.fragment)
+            _require(self.headers.get_all("Authorization") == ["Bearer " + plan.token])
+            query = parse_qs(parts.query, keep_blank_values=True, strict_parsing=True)
+            _require(set(query) == {"q", "limit"} and all(len(values) == 1 for values in query.values()))
+            q, limit = query["q"][0], query["limit"][0]
+            tokens = re.findall(r"[a-z0-9]+", q.lower())
+            _require(2 <= len(q) <= 64 and 1 <= len(tokens) <= 6 and re.fullmatch(r"[0-9]{1,2}", limit) is not None
+                     and 1 <= int(limit) <= 50)
+            result = deepcopy(catalog)
+            module = result["modules"][0]
+            result["modules"] = [module] if all(token in module["key"].lower() for token in tokens) else []
+            result["truncated"] = False
+            raw = _canonical_json(result)
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(raw)))
+            self.end_headers()
+            self.wfile.write(raw)
+
         def do_POST(self):
             self.close_connection = True
             self.connection.settimeout(5)
@@ -670,7 +1661,10 @@ def _listener_main(environment, *, fault_driver=None, record_request=None):
             fixture = plan.fixture_map.get(digest(body))
             _require(fixture is not None)
             def close():
-                self.connection.shutdown(2)
+                try:
+                    self.connection.shutdown(2)  # The killed sender's peer may already be gone (ENOTCONN).
+                except OSError:
+                    pass
                 self.connection.close()
                 return True
             # A private F2 driver may consume the armed service-drop barrier.
@@ -712,18 +1706,14 @@ def main():
             return run_replay_launcher(plan, launcher, environment)
         _require(mode == "child" and bool(args))
         role, *child_args = args
-        child = bootstrap_child(plan, role, environment)
-        _require(role in {"app", "broker", "worker", "sizing-worker"})
+        _require(role in {"app", "broker", "worker", "sizing-worker", "panels-worker", "groups-worker"})
         if role in {"app", "broker"}:
             _require(not child_args)
             entry = role + ".py"
         else:
-            tool = "solar-settings" if role == "worker" else TOOL
-            prefix = "project:" + plan.run_id + ("" if role == "worker" else ":sizing:")
-            _require(len(child_args) == 5 and child_args[:4] == ["--tool", tool, "--readiness", "--worker-id"])
-            _require(child_args[4] == prefix if role == "worker" else
-                     re.fullmatch(re.escape(prefix) + r"[1-9][0-9]*", child_args[4]) is not None)
+            validate_worker_argv(plan, role, child_args)
             entry = "canonical_worker.py"
+        child = bootstrap_child(plan, role, environment)
         os.environ.clear()
         os.environ.update(child)
         sys.argv = [str(REPO / "server" / entry), *child_args]
@@ -731,6 +1721,18 @@ def main():
         return 0
     except Exception:
         return 1
+
+
+def validate_worker_argv(plan, role, args):
+    roles = {"worker": ("solar-settings", ""), "sizing-worker": (TOOL, ":sizing:"),
+             "panels-worker": ("solar-panels-from-drawing", ":panels:"),
+             "groups-worker": ("solar-panel-groups", ":groups:")}
+    _require(role in roles)
+    tool, suffix = roles[role]
+    _require(len(args) == 5 and list(args[:4]) == ["--tool", tool, "--readiness", "--worker-id"])
+    prefix = "project:" + plan.run_id + suffix
+    _require(args[4] == prefix if role == "worker" else
+             re.fullmatch(re.escape(prefix) + (r"[1-3]" if role == "sizing-worker" else "1"), args[4]) is not None)
 
 
 if __name__ == "__main__":

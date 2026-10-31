@@ -2,9 +2,9 @@
 import { it, expect, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
-import { CHECKPOINTS, REQUIRED_TEST_IDS, createProjectIdentity, disposeIdentity, installIdentity,
+import { CHECKPOINTS, CHECKPOINT_OWNERS, REQUIRED_TEST_IDS, SIZING_SCENARIOS, SIZING_OWNERS, createProjectIdentity, disposeIdentity, installIdentity,
   removeBearer, validateMetadata } from './projectIdentity.mjs'
-import Reporter, { EVENT_NAME, CANONICAL_NAME, MAX_RECEIPT_BYTES, BROWSER_REPORT_SCHEMA } from './projectProofReporter.mjs'
+import Reporter, { EVENT_NAME, CANONICAL_NAME, SIZING_NAME, sizingRecord, MAX_RECEIPT_BYTES, BROWSER_REPORT_SCHEMA } from './projectProofReporter.mjs'
 import { createProjectApiBundle, injectProjectApi, MAX_BUNDLE_BYTES, BUILD_TIMEOUT_MS } from './projectApiBundle.mjs'
 import { environmentDefinitions } from '../../scripts/next-runtime.mjs'
 
@@ -55,6 +55,21 @@ const canonical = () => ({ organization_id: 'org-1', project_id: 'project-1', dr
   worker_id: metadata().worker_id, checkout_fence: 1, before_settings_sha256: '1'.repeat(64),
   settings_sha256: '2'.repeat(64), reopened_settings_sha256: '2'.repeat(64) })
 const attachment = (name, value) => ({ name, contentType: 'application/json', body: Buffer.from(JSON.stringify(value)) })
+function sizing() {
+  const common = { organization_id: 'org-1', project_id: 'recovery-project', drawing_id: 'recovery-drawing' }
+  const recovery = { scenario: 'capture-recovery', ...common, input_version_id: 'panels-1', job_id: 'sizing-1',
+    output_version_id: 'sized-1', exchange_job_id: 'sizing-1', evidence_sha256: 'a'.repeat(64), panels_in_sequence: 27 }
+  return {
+    'capture-recovery': recovery,
+    'read-custody': { scenario: 'read-custody', ...common, source_version_id: 'sized-1', groups_job_id: 'groups-1',
+      input_version_id: 'groups-output', frame_count: 1, tool: 'solar-string-data', request_sha256: 'b'.repeat(64), output_sha256: 'c'.repeat(64) },
+    'browser-response-discard': { ...recovery, scenario: 'browser-response-discard', project_id: 'submission-project',
+      drawing_id: 'submission-drawing', input_version_id: 'panels-2', job_id: 'sizing-2', output_version_id: 'sized-2',
+      exchange_job_id: 'sizing-2', submissions: 2, same_submission: true },
+    'service-response-drop': { scenario: 'service-response-drop', organization_id: 'org-1', project_id: 'service-project',
+      drawing_id: 'service-drawing', input_version_id: 'panels-3', job_id: 'sizing-3', status: 'failed', reason_code: 'SIZING_OUTCOME_UNKNOWN', retryable: false },
+  }
+}
 function fakeReporter() {
   const files = new Map()
   const outputFile = environment().LEAF_PROJECT_PROOF_OUTPUT
@@ -70,9 +85,10 @@ function drive(reporter, change = () => {}) {
   reporter.onBegin({ workers: 1, forbidOnly: true, shard: null, projects: [{ name: 'project', retries: 0 }] }, { allTests: () => tests })
   tests.forEach((test, index) => {
     reporter.onTestBegin(test)
-    const keys = CHECKPOINTS.slice(index === 0 ? 0 : index === 1 ? 4 : 7, index === 0 ? 4 : index === 1 ? 7 : 12)
+    const keys = CHECKPOINTS.filter(key => CHECKPOINT_OWNERS[key] === test.title)
     const result = { status: 'passed', retry: 0, errors: [], attachments: keys.map(key => attachment(EVENT_NAME, { key, value: true })) }
     if (index === 2) result.attachments.push(attachment(CANONICAL_NAME, canonical()))
+    for (const scenario of SIZING_SCENARIOS) if (SIZING_OWNERS[scenario] === test.title) result.attachments.push(attachment(SIZING_NAME, sizing()[scenario]))
     change(test, result, index)
     reporter.onTestEnd(test, result)
   })
@@ -99,10 +115,10 @@ function acceptsBrowserResult(result, request) {
   expect(result.public_key_thumbprint).toBe(request.public_key_thumbprint)
   expect(result.exit_code).toBe(0)
   for (const key of ['selected_test_ids', 'started_test_ids', 'completed_test_ids']) {
-    expect(result[key]).toHaveLength(3)
+    expect(result[key]).toHaveLength(REQUIRED_TEST_IDS.length)
     expect([...result[key]].sort()).toEqual([...request.required_test_ids].sort())
   }
-  expect(result.outcomes).toHaveLength(3)
+  expect(result.outcomes).toHaveLength(REQUIRED_TEST_IDS.length)
   expect(result.outcomes.map(o => o.test_id).sort()).toEqual([...request.required_test_ids].sort())
   for (const outcome of result.outcomes) {
     expect(Object.keys(outcome).sort()).toEqual(fields('TestOutcome').sort())
@@ -381,7 +397,7 @@ it('PP3B-17 injected global is read only after managed-origin navigation and rei
   url = 'http://127.0.0.1:5186/app'
   await expect(injectProjectApi(page, metadata().web_origin, 'bundle')).rejects.toThrow(/^PP3B_API_INJECT$/)
   expect(events).toEqual(['navigate', 'inject', 'read'])
-  expect(spec.match(/window\.__pp3bApi/g)).toHaveLength(4)
+  expect(spec.match(/window\.__pp3bApi/g)).toHaveLength(7)
   expect(spec.match(/\.goto\(/g)).toHaveLength(1)
   expect(spec).toMatch(/async function openProjectUI\(page\) \{\s+await navigateProject\(page\)/)
   expect(spec).toMatch(/test\('project_browser_create_import',[\s\S]*?withIdentity\(browser, async \(\{ page \}\) => \{\s+await navigateProject\(page\)/)
@@ -460,5 +476,130 @@ it('PP3B-22 metadata accepts real repository paths', () => {
   for (const invalid of ['a/../b', 'a//b', 'a\\b', 'a/\u0001b']) {
     input.source_binding.files[0].path = invalid
     expect(() => validateMetadata(input)).toThrow(/^PP3B_METADATA$/)
+  }
+})
+
+it('PP3B-23 all seven tests must complete passed at retry zero without annotations', () => {
+  expect(REQUIRED_TEST_IDS).toHaveLength(7)
+  for (let owner = 3; owner < REQUIRED_TEST_IDS.length; owner += 1) {
+    for (const change of [
+      (test, result) => { result.status = 'skipped' },
+      (test, result) => { result.retry = 1 },
+      test => { test.annotations = [{ type: 'skip' }] },
+      (test, result) => { result.attachments = [] },
+    ]) {
+      const h = fakeReporter()
+      expect(drive(h.reporter, (test, result, i) => { if (i === owner) change(test, result) })).toEqual({ status: 'failed' })
+    }
+    const h = fakeReporter()
+    drive(h.reporter)
+    h.reporter.result.completed_test_ids.splice(owner, 1)
+    h.reporter.write = () => {}
+    expect(h.reporter.onEnd({ status: 'passed' })).toEqual({ status: 'failed' })
+  }
+})
+
+it('PP3B-24 one bounded JSON sizing attachment is accepted only from its owner', () => {
+  const good = fakeReporter()
+  expect(drive(good.reporter)).toEqual({ status: 'passed' })
+  expect(good.json().sizing).toEqual(sizing())
+  for (const scenario of SIZING_SCENARIOS) {
+    for (const mutation of [
+      (result, index) => result.attachments.push(result.attachments[index]),
+      (result, index) => { result.attachments[index].path = '/private/record' },
+      (result, index) => { result.attachments[index].body = Buffer.alloc(4097) },
+      (result, index) => { result.attachments[index].contentType = 'text/plain' },
+      (result, index) => { result.attachments[index] = attachment(SIZING_NAME, { ...sizing()[scenario], extra: true }) },
+      (result, index) => { const value = sizing()[scenario]; delete value.project_id; result.attachments[index] = attachment(SIZING_NAME, value) },
+    ]) {
+      const h = fakeReporter()
+      expect(drive(h.reporter, (test, result) => {
+        if (test.title === SIZING_OWNERS[scenario]) mutation(result, result.attachments.findIndex(a => a.name === SIZING_NAME))
+      })).toEqual({ status: 'failed' })
+    }
+    const wrong = fakeReporter()
+    expect(drive(wrong.reporter, (test, result, index) => {
+      if (index === 0) result.attachments.push(attachment(SIZING_NAME, sizing()[scenario]))
+    })).toEqual({ status: 'failed' })
+  }
+})
+
+it('PP3B-25 sizing records enforce exact public values and organization binding', () => {
+  for (const scenario of SIZING_SCENARIOS) {
+    const record = sizing()[scenario]
+    expect(sizingRecord(record, scenario, metadata())).toEqual(record)
+    expect(sizingRecord(record, scenario, metadata())).not.toBe(record)
+    const mutations = { organization_id: 'foreign', project_id: '../private' }
+    for (const [key, value] of Object.entries(record)) {
+      if (key.endsWith('_sha256')) mutations[key] = 'A'.repeat(64)
+      if (key === 'exchange_job_id') mutations[key] = 'foreign-job'
+      if (key === 'submissions') mutations[key] = 1
+      if (key === 'same_submission') mutations[key] = false
+      if (key === 'status') mutations[key] = 'complete'
+      if (key === 'reason_code') mutations[key] = 'OTHER'
+      if (key === 'retryable') mutations[key] = true
+      if (key === 'tool') mutations[key] = 'solar-cable-export'
+      if (['frame_count', 'panels_in_sequence'].includes(key)) mutations[key] = 0
+    }
+    for (const [key, value] of Object.entries(mutations)) expect(() => sizingRecord({ ...record, [key]: value }, scenario, metadata())).toThrow(/^PP3B_SIZING$/)
+    expect(() => sizingRecord(record, 'unknown', metadata())).toThrow(/^PP3B_SIZING$/)
+  }
+})
+
+it('PP3B-26 sizing records bind custody and distinct projects and jobs', () => {
+  for (const [scenario, key, value] of [
+    ['read-custody', 'source_version_id', 'foreign-output'], ['read-custody', 'drawing_id', 'foreign-drawing'],
+    ['read-custody', 'project_id', 'foreign-project'], ['browser-response-discard', 'project_id', 'recovery-project'],
+    ['service-response-drop', 'job_id', 'sizing-1'],
+  ]) {
+    const h = fakeReporter()
+    expect(drive(h.reporter, (test, result) => {
+      if (test.title === SIZING_OWNERS[scenario]) {
+        const index = result.attachments.findIndex(a => a.name === SIZING_NAME)
+        result.attachments[index] = attachment(SIZING_NAME, { ...sizing()[scenario], [key]: value })
+      }
+    })).toEqual({ status: 'failed' })
+  }
+  for (const scenario of SIZING_SCENARIOS) {
+    const h = fakeReporter()
+    expect(drive(h.reporter, (test, result) => {
+      if (test.title === SIZING_OWNERS[scenario]) result.attachments = result.attachments.filter(a => a.name !== SIZING_NAME)
+    })).toEqual({ status: 'failed' })
+  }
+})
+
+it('PP3B-27 sizing walk uses the real form and serial scenario order', () => {
+  const spec = source('./project-authority.spec.mjs')
+  expect([...spec.matchAll(/^test\('([^']+)'/gm)].map(match => match[1])).toEqual(REQUIRED_TEST_IDS)
+  for (const text of ['sizing recovery', 'sizing submission', 'sizing service', 'pp3b-sizing-panels.dxf',
+    'Panel import', 'Manual sizing', 'Panel groups', 'project-replay-fixture', 'JA_Solar_JAM72D40-595/MB',
+    'Sizer modules', 'Review & run']) expect(spec).toContain(text)
+  expect(spec).toContain("mode: 'serial'")
+  expect(spec).not.toMatch(/page\.route|\broute\(|setExtraHTTPHeaders|addInitScript|waitForTimeout/)
+})
+
+it('PP3B-28 sizing sanitization discards split tokens grants DSNs and capabilities', () => {
+  const canaries = ['TOKEN_SECRET_CANARY', 'postgresql://proof:DSN_SECRET_CANARY@private/db',
+    'GRANT_SECRET_CANARY', 'X-Checkout-Capability: lco1.' + 'e'.repeat(64)]
+  const h = fakeReporter()
+  const results = []
+  for (const value of canaries) {
+    h.reporter.onStdOut(value.slice(0, 7)); h.reporter.onStdOut(value.slice(7))
+    h.reporter.onStdErr(value.slice(0, 7)); h.reporter.onStdErr(value.slice(7))
+  }
+  drive(h.reporter, (test, result, index) => {
+    if (index < 3) return
+    results.push(result)
+    result[Symbol('buffer')] = canaries
+    result.errors = [{ message: canaries.join(' '), stack: canaries.join(' ') }]
+    result.stdout = canaries; result.stderr = canaries
+    result.attachments.push(attachment('raw', { secret: canaries }))
+  })
+  expect(h.json().sizing).toEqual(sizing())
+  for (const value of canaries) expect(h.files.get(h.outputFile)).not.toContain(value)
+  for (const result of results) {
+    expect(Object.getOwnPropertySymbols(result)).toEqual([])
+    expect(result.errors).toEqual([{ message: 'PP3B_TEST_FAILURE', stack: 'PP3B_TEST_FAILURE' }])
+    expect(result.stdout).toEqual([]); expect(result.stderr).toEqual([]); expect(result.attachments).toEqual([])
   }
 })

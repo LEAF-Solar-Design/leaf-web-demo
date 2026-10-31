@@ -1,13 +1,47 @@
 export const REQUIRED_TEST_IDS = Object.freeze([
   'project_browser_create_import', 'project_browser_bearer_required',
   'project_settings_worker_readback',
+  'project_sizing_recovery_reopen', 'project_sizing_read_custody',
+  'project_sizing_submission_unknown', 'project_sizing_service_unknown',
 ])
 export const CHECKPOINTS = Object.freeze([
   'ui_project_created', 'ui_dxf_imported', 'bearer_present', 'actor_header_absent',
   'bearerless_read_refused', 'bearerless_mutation_refused', 'bearerless_no_mutation',
   'ui_checkout_acquired', 'settings_submitted', 'worker_published',
   'settings_readback', 'settings_reopened',
+  'recovery_settings_published', 'recovery_panels_imported', 'recovery_sizing_submitted',
+  'recovery_sizing_published', 'recovery_values_read', 'recovery_exact_reopen',
+  'custody_groups_published', 'custody_frame_power_checked', 'custody_read_passed',
+  'submission_settings_published', 'submission_panels_imported', 'submission_retried_same_request',
+  'submission_sizing_published', 'service_settings_published', 'service_panels_imported',
+  'service_sizing_submitted', 'service_outcome_unknown_shown', 'service_job_terminal', 'service_reobserved',
 ])
+export const CHECKPOINT_OWNERS = Object.freeze({
+  ui_project_created: 'project_browser_create_import', ui_dxf_imported: 'project_browser_create_import',
+  bearer_present: 'project_browser_create_import', actor_header_absent: 'project_browser_create_import',
+  bearerless_read_refused: 'project_browser_bearer_required', bearerless_mutation_refused: 'project_browser_bearer_required',
+  bearerless_no_mutation: 'project_browser_bearer_required',
+  ui_checkout_acquired: 'project_settings_worker_readback', settings_submitted: 'project_settings_worker_readback',
+  worker_published: 'project_settings_worker_readback', settings_readback: 'project_settings_worker_readback',
+  settings_reopened: 'project_settings_worker_readback',
+  recovery_settings_published: 'project_sizing_recovery_reopen', recovery_panels_imported: 'project_sizing_recovery_reopen',
+  recovery_sizing_submitted: 'project_sizing_recovery_reopen', recovery_sizing_published: 'project_sizing_recovery_reopen',
+  recovery_values_read: 'project_sizing_recovery_reopen', recovery_exact_reopen: 'project_sizing_recovery_reopen',
+  custody_groups_published: 'project_sizing_read_custody', custody_frame_power_checked: 'project_sizing_read_custody',
+  custody_read_passed: 'project_sizing_read_custody',
+  submission_settings_published: 'project_sizing_submission_unknown', submission_panels_imported: 'project_sizing_submission_unknown',
+  submission_retried_same_request: 'project_sizing_submission_unknown', submission_sizing_published: 'project_sizing_submission_unknown',
+  service_settings_published: 'project_sizing_service_unknown', service_panels_imported: 'project_sizing_service_unknown',
+  service_sizing_submitted: 'project_sizing_service_unknown', service_outcome_unknown_shown: 'project_sizing_service_unknown',
+  service_job_terminal: 'project_sizing_service_unknown', service_reobserved: 'project_sizing_service_unknown',
+})
+export const SIZING_SCENARIOS = Object.freeze([
+  'capture-recovery', 'read-custody', 'browser-response-discard', 'service-response-drop',
+])
+export const SIZING_OWNERS = Object.freeze({
+  'capture-recovery': 'project_sizing_recovery_reopen', 'read-custody': 'project_sizing_read_custody',
+  'browser-response-discard': 'project_sizing_submission_unknown', 'service-response-drop': 'project_sizing_service_unknown',
+})
 const HEX = /^[a-f0-9]{64}$/
 export const publicId = value => typeof value === 'string' && /^[A-Za-z0-9:|_-]{1,128}$/.test(value)
 const requireValue = condition => { if (!condition) throw new Error('PP3B_METADATA') }

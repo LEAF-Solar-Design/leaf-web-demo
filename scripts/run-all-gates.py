@@ -2606,10 +2606,10 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 89),
         # Records A/A2/B/C/D/E/A1/C1/A1c/A1e and PP-3B: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 + 1 A1c + 2 A1e + 21 browser + 6 A1b rows + 3 source rows + 3 native selection rows + 3 run-root store rows + 1 heartbeat runtime row + 1 reservation rollback row + 4 teardown and receipt rows + 18 R14-F1 replay custody rows.
         Suite("scripts-proof-project", "scripts test_proof_project.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 335),
+              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 361),
         # R14-F1: 29 injected-effect replay custody rows.
         Suite("scripts-proof-project-sizing", "scripts test_proof_project_sizing.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project_sizing.py"), 29),
+              SCRIPTS_DIR, _py_pytest("test_proof_project_sizing.py"), 60),
         # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
         # contract v2 shape (neutral names, handle-value membership order, refused
         # non-handle member ids), and the adapter's input scan got its own bounds sized for
@@ -3479,7 +3479,7 @@ def build_suites() -> List[Suite]:
         # PP-3B: explicit discovery; the script itself requires all 21 rows to pass.
         Suite("web-project-proof-contract", "web managed project proof contract", "script", WEB,
               ["node", "--input-type=module", "-e",
-               "import { startVitest } from 'vitest/node'; const ctx = await startVitest('test', ['e2e/project/projectProof.test.mjs'], { config: false, run: true, environment: 'node', include: ['e2e/project/projectProof.test.mjs'], exclude: ['node_modules/**'], reporters: ['verbose'] }); if (!ctx) process.exitCode = 1; else { const rows = ctx.state.getFiles().flatMap(file => file.tasks); if (rows.length !== 22 || rows.some(row => row.type !== 'test' || row.result?.state !== 'pass')) process.exitCode = 1; await ctx.close(); }"], None),
+               "import { startVitest } from 'vitest/node'; const ctx = await startVitest('test', ['e2e/project/projectProof.test.mjs'], { config: false, run: true, environment: 'node', include: ['e2e/project/projectProof.test.mjs'], exclude: ['node_modules/**'], reporters: ['verbose'] }); if (!ctx) process.exitCode = 1; else { const rows = ctx.state.getFiles().flatMap(file => file.tasks); if (rows.length !== 28 || rows.some(row => row.type !== 'test' || row.result?.state !== 'pass')) process.exitCode = 1; await ctx.close(); }"], None),
         Suite("web-walk-unit", "Studio walk unit tests", "script", WEB,
               [_npm(), "run", "check:walk-unit"], None),
         Suite("web-elk-rank", "web node --test scripts/elk_rank.test.mjs", "script", WEB,
