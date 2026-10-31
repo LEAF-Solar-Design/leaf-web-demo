@@ -6115,6 +6115,75 @@ def test_r14f2_canonical_execution_child_response_binding(monkeypatch):
     with pytest.raises(p._sizing_module().ReplayRefused): p._canonical_execution(request)
 
 
+def test_r14f2d_empty_heartbeat_result_reads_as_not_yet(monkeypatch):
+    stops = []
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(
+        start=lambda: None, poll=lambda: 0, stop=lambda deadline: stops.append(deadline) or True))
+    monkeypatch.setattr(p, "_path_safe", lambda path: True)
+    monkeypatch.setattr(Path, "is_file", lambda path: True)
+    monkeypatch.setattr(Path, "open", lambda *args, **kwargs: io.BytesIO(b""))
+    monkeypatch.setattr(Path, "unlink", lambda *args, **kwargs: None)
+    request = p.CanonicalRequest("heartbeat", environment={"DATABASE_URL": "fakedb",
+        "LEAF_STORE_DIR": str(ROOT / "drawings")}, deadline=10, worker_id="project:run-test:sizing:2")
+    assert p._canonical_execution(request) is None
+    assert stops == [10]
+
+
+def test_r14f2d_empty_result_still_refuses_other_purposes(monkeypatch):
+    reads = []
+    open_file = Path.open
+    def empty_result(path):
+        reads.append(path.name)
+        return json.loads(b"")
+    monkeypatch.setattr(p.time, "monotonic", lambda: 1.0)
+    monkeypatch.setattr(p, "_RuntimeProcess", lambda spec: SimpleNamespace(
+        start=lambda: None, poll=lambda: 0, stop=lambda deadline: True))
+    monkeypatch.setattr(p._Host, "read_child_result", staticmethod(empty_result))
+    monkeypatch.setattr(p, "_path_safe", lambda path: True)
+    monkeypatch.setattr(Path, "is_file", lambda path: True)
+    monkeypatch.setattr(Path, "open", lambda path, *args, **kwargs: io.BytesIO(b"")
+        if path.name.endswith("-readback.json") else open_file(path, *args, **kwargs))
+    monkeypatch.setattr(Path, "unlink", lambda *args, **kwargs: None)
+    for purpose in ("execution", "replay-observe"):
+        c = execution_case()
+        def canonical(request):
+            attachment = {"query": "send_started"} if purpose == "replay-observe" else request.sizing_attachment
+            return p._canonical_execution(replace(request, purpose=purpose, sizing_attachment=attachment))
+        c.effects = replace(c.effects, canonical_reader=canonical)
+        with pytest.raises(p.ProofRefused) as error:
+            execute(c)
+        assert error.value.failure.fixed_code == p.FailureCode.CANONICAL
+        assert error.value.failure.stage == p.Stage.VERIFICATION
+        assert reads[-1] == purpose + "-readback.json"
+
+
+def test_r14f2d_replacement_poll_survives_a_not_yet_beat():
+    c = execution_case()
+    sizing = p._sizing_module()
+    runtime = sizing.ReplayRuntime(c.prepared, c.effects, c.scope, p)
+    runtime.worker_identity = p.ProcessIdentity("sizing-worker", 901, "start901", 50)
+    runtime.worker = SimpleNamespace(identity=runtime.worker_identity, poll=lambda: None)
+    runtime.worker_id = "project:run-test:sizing:2"
+    runtime.environment = {"DATABASE_URL": "fakedb"}
+    runtime.descriptor = replace(c.descriptor, tool="solar-size-strings")
+    beat = replace(c.heartbeat, worker_id=runtime.worker_id, tool_name="solar-size-strings")
+    pending, requests = iter((None, beat)), []
+    def canonical(request):
+        requests.append(request)
+        return next(pending)
+    runtime.effects = replace(c.effects, canonical_reader=canonical)
+    start = c.effects.clock.monotonic()
+    assert runtime.heartbeat(10, ready_s=5.0) == beat
+    assert c.effects.clock.monotonic() == start + 2.0
+    assert len(requests) == 2
+    assert all(request.purpose == "heartbeat" and request.worker_id == runtime.worker_id
+               and request.deadline == min(10, start + 5.0) for request in requests)
+    runtime.effects = replace(c.effects, canonical_reader=lambda request: replace(beat, worker_id="foreign"))
+    with pytest.raises(sizing.ReplayRefused):
+        runtime.heartbeat(10, ready_s=5.0)
+
+
 def test_r14f2_receipt_requires_sizing_and_all_scenarios():
     c = successful_receipt()
     assert c.document["replay"]["sizing_required"] is True

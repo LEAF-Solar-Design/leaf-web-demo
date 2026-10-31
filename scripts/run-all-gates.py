@@ -2606,7 +2606,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_proof_project_pg.py"), 89),
         # Records A/A2/B/C/D/E/A1/C1/A1c/A1e and PP-3B: measured 32 boundary/runtime + 34 authority + 22 execution + 134 lifetime + 45 receipt + 5 C1 + 1 A1c + 2 A1e + 21 browser + 6 A1b rows + 3 source rows + 3 native selection rows + 3 run-root store rows + 1 heartbeat runtime row + 1 reservation rollback row + 4 teardown and receipt rows + 18 R14-F1 replay custody rows.
         Suite("scripts-proof-project", "scripts test_proof_project.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 373),
+              SCRIPTS_DIR, _py_pytest("test_proof_project.py"), 376),
         # R14-F1: 29 injected-effect replay custody rows.
         Suite("scripts-proof-project-sizing", "scripts test_proof_project_sizing.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_sizing.py"), 62),

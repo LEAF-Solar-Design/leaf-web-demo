@@ -68,7 +68,7 @@ def test_pp3a_gate_registration():
     assert suite.cwd == SCRIPTS
     assert suite.argv == runner._py_pytest("test_proof_project.py")
     assert suite.label == "scripts test_proof_project.py"
-    assert suite.kind == "pytest" and suite.expected == 373
+    assert suite.kind == "pytest" and suite.expected == 376
     assert not suite.db_gated and not suite.uses_database and not suite.opt_in_env
     assert suite.allowed_skip_reasons == suite.database_skip_reasons == ()
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
@@ -4987,4 +4987,4 @@ def test_r14f1_gate_registration():
     assert mandatory.index(suite.id) == mandatory.index("scripts-proof-project") + 1
     ids = [item.id for item in catalog]
     assert ids.index(suite.id) == ids.index("scripts-proof-project") + 1
-    assert next(item for item in catalog if item.id == "scripts-proof-project").expected == 373
+    assert next(item for item in catalog if item.id == "scripts-proof-project").expected == 376
