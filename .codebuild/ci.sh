@@ -104,6 +104,48 @@ event = {"provider": "github", "repo": "LEAF-Solar-Design/leaf-web-demo",
          "head_sha": e.get("CODEBUILD_RESOLVED_SOURCE_VERSION", ""),
          "head_ref": e.get("CODEBUILD_WEBHOOK_HEAD_REF", ""),
          "target_ref": e.get("CODEBUILD_WEBHOOK_BASE_REF", "")}
+try:
+    head, trusted = e["HEAD_SHA"], e["TRUSTED_SHA"]
+    relay_head = re.fullmatch(r"refs/pull/([1-9][0-9]*)/head", event["head_ref"])
+    relay_base = event["target_ref"]
+    operation = e.get("FORGE_CI_OPERATION", "")
+    if (initiator == "states/leaf-forge-ci-relay" and
+            event["event"] in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") and
+            re.fullmatch(r"[0-9A-Fa-f]{40}", head) and re.fullmatch(r"[0-9A-Fa-f]{40}", trusted) and
+            relay_head and re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", relay_base) and
+            ".." not in relay_base and re.fullmatch(r"[A-Za-z0-9._-]+", operation)):
+        manifest_sha256 = None
+        manifest_status = "unreadable"
+        try:
+            manifest_bytes = Path(e.get("LEAF_RELAY_MANIFEST", "/tmp/manifest.json")).read_bytes()
+            manifest_sha256 = hashlib.sha256(manifest_bytes).hexdigest()
+            manifest = json.loads(manifest_bytes)
+            checks = (
+                ("schema", "leaf.forge-ci-relay.snapshot.v1"),
+                ("repository", "LEAF-Solar-Design/leaf-web-demo"),
+                ("head_sha", head), ("base_sha", trusted), ("base_ref", relay_base),
+                ("operation", operation),
+            )
+            manifest_status = "verified"
+            for field, expected in checks:
+                if not isinstance(manifest, dict) or manifest.get(field) != expected:
+                    manifest_status = "mismatch:" + field
+                    break
+            if manifest_status == "verified" and (
+                    not isinstance(manifest.get("bundle_sha256"), str) or
+                    not re.fullmatch(r"[0-9A-Fa-f]{64}", manifest["bundle_sha256"])):
+                manifest_status = "mismatch:bundle_sha256"
+        except FileNotFoundError:
+            manifest_status = "missing"
+        except (OSError, ValueError, UnicodeError):
+            pass
+        event.update(provider="forge", initiator="forge-ci-relay", source_version="",
+                     head_sha=head, target_sha=trusted, pr_number=int(relay_head[1]),
+                     provider_bound=manifest_status == "verified", relay_manifest=manifest_status,
+                     evidence_ref={"build": e.get("CODEBUILD_BUILD_ARN") or e.get("CODEBUILD_BUILD_ID", ""),
+                                   "manifest_sha256": manifest_sha256, "operation": operation})
+except Exception:
+    pass
 # No queue/filter/revocation claim is manufactured from webhook presence.
 # Absent enforcement-producer evidence is a full-execution decision in S1.
 (directory / "event.json").write_bytes(canonical(event) + b"\n")
@@ -111,6 +153,9 @@ LEAF_SELECTION_INPUTS
         then
           pr_number="${CODEBUILD_SOURCE_VERSION:-}"
           pr_number="${pr_number#pr/}"
+          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
+            pr_number="${BASH_REMATCH[1]}"
+          fi
           if python -I -B "$selection_dir/select_tests.py" decide \
             --repo "$CODEBUILD_SRC_DIR" --trusted-sha "$TRUSTED_SHA" --head-sha "$HEAD_SHA" \
             --map "$selection_dir/test-selection-map.json" --out-dir "$selection_dir" \
@@ -225,6 +270,7 @@ import datetime
 import json
 import os
 from pathlib import Path
+import re
 import subprocess
 import sys
 
@@ -258,6 +304,8 @@ ref = e.get("CODEBUILD_WEBHOOK_HEAD_REF", "")
 raw = e.get("CODEBUILD_WEBHOOK_EVENT", "")
 event = ("merge_group" if "gh-readonly-queue/" in ref else
          "pr" if source.startswith("pr/") and raw.startswith("PULL_REQUEST_") else
+         "pr" if e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" and
+         raw.startswith("PULL_REQUEST_") and re.fullmatch(r"refs/pull/[1-9][0-9]*/head", ref) else
          "main" if ref == "refs/heads/main" and raw == "PUSH" else
          "manual" if not raw and e.get("CODEBUILD_INITIATOR") else "unknown")
 ids = decision.get("selected_test_ids")

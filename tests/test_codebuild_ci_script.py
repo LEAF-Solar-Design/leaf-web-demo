@@ -1,11 +1,14 @@
 """Pin the leaf-web-demo native CodeBuild CI rail without parsing YAML."""
 
+import hashlib
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
+import tempfile
 import unittest
 from unittest.mock import mock_open, patch
 
@@ -17,6 +20,61 @@ BASH = shutil.which("bash")
 
 
 class TestCodebuildCiScript(unittest.TestCase):
+    def test_forge_relay_event_manifest(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block = script.split("<<'LEAF_SELECTION_INPUTS'\n", 1)[1].split(
+            "\nLEAF_SELECTION_INPUTS", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            manifest_path = root / "manifest.json"
+            env = {"CODEBUILD_INITIATOR": "states/leaf-forge-ci-relay",
+                   "CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED",
+                   "CODEBUILD_WEBHOOK_HEAD_REF": "refs/pull/7/head",
+                   "CODEBUILD_WEBHOOK_BASE_REF": "refs/heads/main",
+                   "FORGE_CI_OPERATION": "ci-fixture", "HEAD_SHA": "a" * 40,
+                   "TRUSTED_SHA": "b" * 40, "CODEBUILD_BUILD_ID": "fixture-build",
+                   "LEAF_RELAY_MANIFEST": str(manifest_path)}
+            manifest = {"schema": "leaf.forge-ci-relay.snapshot.v1",
+                        "repository": "LEAF-Solar-Design/leaf-web-demo",
+                        "head_sha": env["HEAD_SHA"], "base_sha": env["TRUSTED_SHA"],
+                        "base_ref": env["CODEBUILD_WEBHOOK_BASE_REF"],
+                        "operation": env["FORGE_CI_OPERATION"], "bundle_sha256": "c" * 64}
+            for status, head in (("verified", "a" * 40), ("mismatch:head_sha", "d" * 40)):
+                with self.subTest(status=status):
+                    manifest["head_sha"] = head
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                    (root / "catalog.json").write_text(json.dumps({
+                        "schema": "leaf.ci.catalog.v1", "suites": [{"id": "sample"}],
+                        "catalog_sha256": "e" * 64}), encoding="utf-8")
+                    with patch.dict(os.environ, env, clear=True), \
+                         patch.object(sys, "argv", ["inputs", str(root), "f" * 40]):
+                        exec(compile(block, "selection-inputs", "exec"), {})
+                    event = json.loads((root / "event.json").read_text(encoding="utf-8"))
+                    self.assertEqual(event["provider"], "forge")
+                    self.assertEqual(event["pr_number"], 7)
+                    self.assertEqual(event["source_version"], "")
+                    self.assertEqual(event["head_sha"], env["HEAD_SHA"])
+                    self.assertEqual(event["target_sha"], env["TRUSTED_SHA"])
+                    self.assertEqual(event["relay_manifest"], status)
+                    self.assertIs(event["provider_bound"], status == "verified")
+                    self.assertEqual(event["evidence_ref"]["manifest_sha256"],
+                                     hashlib.sha256(manifest_path.read_bytes()).hexdigest())
+
+    def test_relay_receipt_event_classifier(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block = script.split("<<'LEAF_SELECTION_RECEIPTS'\n", 1)[1].split(
+            "\nLEAF_SELECTION_RECEIPTS", 1)[0]
+        classifier = block[block.index('source = e.get("CODEBUILD_SOURCE_VERSION"'):block.index('\nids =')]
+        for raw, ref, expected in (("PULL_REQUEST_UPDATED", "refs/pull/7/head", "pr"),
+                                   ("PUSH", "refs/heads/main", "main"),
+                                   ("PULL_REQUEST_UPDATED", "refs/pull/0/head", "unknown")):
+            with self.subTest(raw=raw, ref=ref):
+                namespace = {"e": {"CODEBUILD_INITIATOR": "states/leaf-forge-ci-relay",
+                                    "CODEBUILD_WEBHOOK_EVENT": raw,
+                                    "CODEBUILD_WEBHOOK_HEAD_REF": ref}, "re": re}
+                exec(compile(classifier, "receipt-classifier", "exec"), namespace)
+                self.assertEqual(namespace["event"], expected)
+
     def test_workflow_commands(self):
         """Pin CodeBuild's deliberate --with-deps deviation from the workflow."""
         script = CI_PATH.read_text(encoding="utf-8")
