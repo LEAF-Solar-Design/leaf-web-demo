@@ -459,6 +459,9 @@ def test_verified_decision_rechecks_project_session(
     tenant = deps.TenantContext(project["org"], subject=project["subject"],
                                 authority_resolved=True)
     decision_identity.binding.platform_tenant_id = project["org"]
+    monkeypatch.setattr(
+        overlay_router.platform_link, "resolve_caller_binding",
+        lambda *_: pytest.fail("forbidden project must be rejected before actor lookup"))
     if failure == "revoked_role":
         project["membership"]["role"] = "revoked"
     else:
