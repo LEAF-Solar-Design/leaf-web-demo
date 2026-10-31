@@ -3558,11 +3558,22 @@ function realProjectFake({ chooser = false, resetAfterCreation = false, missingB
   const boardFailure = new Error('Project workspace board never appeared')
   const org = { org_id: 'walk-org' }
   const project = { project_id: 'walk-project', org_id: org.org_id, name: 'Walk project' }
-  const board = {
+  const stateChecks = []
+  const boardLocator = (includeHidden = false) => ({
     get visible() { return boardVisible },
     isVisible: async () => boardVisible,
-    getAttribute: async name => { assert.equal(name, 'data-project-state'); return 'project' },
-    getByText: () => ({ countValue: 0 }),
+    count: async () => boardVisible || includeHidden ? 1 : 0,
+    getAttribute: async name => {
+      assert.ok(boardVisible || includeHidden, 'Project workspace board does not resolve while hidden')
+      assert.equal(name, 'data-project-state')
+      stateChecks.push({ name, includeHidden })
+      return 'project'
+    },
+    getByText: (name, options) => {
+      assert.deepEqual(options, { exact: true })
+      stateChecks.push({ name, includeHidden })
+      return { countValue: 0 }
+    },
     getByRole: (role, options) => {
       assert.equal(role, 'button')
       assert.equal(options.name, 'Create project from this drawing')
@@ -3576,7 +3587,9 @@ function realProjectFake({ chooser = false, resetAfterCreation = false, missingB
         }
       } }
     },
-  }
+  })
+  const board = boardLocator()
+  const hiddenBoard = boardLocator(true)
   page.request = { post: async path => {
     assert.equal(path, '/api/orgs')
     return { ok: () => true, json: async () => ({ org }) }
@@ -3590,7 +3603,11 @@ function realProjectFake({ chooser = false, resetAfterCreation = false, missingB
   page.waitForResponse = async () => ({ ok: () => true, json: async () => ({ project }),
     request: () => ({ headers: () => ({ 'x-org-id': org.org_id }) }) })
   page.getByRole = (role, options) => {
-    if (role === 'region') { assert.equal(options.name, 'Project workspace'); return board }
+    if (role === 'region') {
+      assert.equal(options.name, 'Project workspace')
+      assert.equal(options.exact, true)
+      return options.includeHidden === true ? hiddenBoard : board
+    }
     if (role === 'dialog') return { visible: false }
     assert.equal(role, 'button')
     if (options.name === 'Start') return { click: async () => {
@@ -3632,7 +3649,7 @@ function realProjectFake({ chooser = false, resetAfterCreation = false, missingB
     },
   }), { poll: polling.poll })
   const runtime = { page, evidence: {}, cleanup: [] }
-  return { runtime, assertions, events, polls, project, org, boardFailure }
+  return { runtime, assertions, events, polls, project, org, boardFailure, stateChecks }
 }
 
 test('WL49 real project reload enters the workspace once before Start', async () => {
@@ -3666,6 +3683,29 @@ test('WL51 U3 scope reset re-enters once before the tail, while entered environm
       ? ['Continue workspace', 'assert:data-entered=true'] : ['Return to drawing']), 'tail assertions'])
     assert.equal(fake.polls.filter(poll => poll.timeout === 20_000).length, resetAfterCreation ? 2 : 1)
   }
+})
+
+test('WL51b U1 post-creation state checks resolve the hidden board after the studio scope reset', async () => {
+  for (const resetAfterCreation of [true, 'hidden chooser']) {
+    const fake = realProjectFake({ chooser: true, resetAfterCreation })
+    await setupRealProject(fake.runtime, fake.assertions)
+    assert.deepEqual(fake.stateChecks, [
+      { name: 'data-project-state', includeHidden: true },
+      { name: 'Versions live with a workspace project', includeHidden: true },
+      { name: 'Runs appear here with a project open', includeHidden: true },
+    ])
+    const { page } = fake.runtime
+    assert.equal(await page.getByRole('region', { name: 'Project workspace', exact: true }).count(), 0)
+    assert.equal(await page.getByRole('region', { name: 'Project workspace', exact: true, includeHidden: true }).count(), 1)
+  }
+})
+
+test('WL51b U2 a plain board locator cannot check project state after the studio scope reset', async () => {
+  const fake = realProjectFake({ chooser: true, resetAfterCreation: true })
+  await setupRealProject(fake.runtime, fake.assertions)
+  const board = fake.runtime.page.getByRole('region', { name: 'Project workspace', exact: true })
+  await assert.rejects(fake.assertions(board).toHaveAttribute('data-project-state', 'project'),
+    /Project workspace board does not resolve while hidden/)
 })
 
 test('WL51 U4 missing board after the chooser fails with its cause and no further clicks', async () => {

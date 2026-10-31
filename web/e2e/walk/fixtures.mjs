@@ -2062,9 +2062,10 @@ export async function setupRealProject(runtime, assertions = expect) {
   assertions(name).toBeTruthy()
   evidence.escapeProject = { orgId: org.org_id, projectId: project.project_id, name }
   await assertions(page.locator('.workspace-summary')).toContainText(name)
-  await assertions(board).toHaveAttribute('data-project-state', 'project')
-  await assertions(board.getByText('Versions live with a workspace project', { exact: true })).toHaveCount(0)
-  await assertions(board.getByText('Runs appear here with a project open', { exact: true })).toHaveCount(0)
+  const projectStateBoard = page.getByRole('region', { name: 'Project workspace', exact: true, includeHidden: true })
+  await assertions(projectStateBoard).toHaveAttribute('data-project-state', 'project')
+  await assertions(projectStateBoard.getByText('Versions live with a workspace project', { exact: true })).toHaveCount(0)
+  await assertions(projectStateBoard.getByText('Runs appear here with a project open', { exact: true })).toHaveCount(0)
   const environment = page.locator('section.workspace-environment')
   try {
     if (await openProject.isVisible()
