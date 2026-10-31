@@ -311,10 +311,175 @@ def canonical_allocator():
     return module
 
 
+def reconciliation_transport_bounded(argv, *, input, timeout):
+    # Bound storage as well as reads; no stderr or raw transport errors escape.
+    import tempfile
+    with tempfile.TemporaryFile() as output:
+        child = subprocess.Popen(argv, stdin=subprocess.PIPE, stdout=output,
+                                 stderr=subprocess.DEVNULL)
+        try:
+            child.stdin.write(input)
+            child.stdin.close()
+            until = time.monotonic() + timeout
+            while child.poll() is None:
+                require(os.fstat(output.fileno()).st_size <= 16384, 'response-bounds')
+                require(time.monotonic() < until, 'mac-transport-failed')
+                time.sleep(.02)
+            output.seek(0)
+            raw = output.read(16385)
+            require(len(raw) <= 16384, 'response-bounds')
+            return subprocess.CompletedProcess(argv, child.returncode, raw)
+        finally:
+            if child.poll() is None:
+                child.kill()
+                child.wait(timeout=5)
+
+
+RECONCILIATION_READ = r'''
+import hashlib, json, math, re, sys, uuid
+from pathlib import Path
+def pairs(items):
+    out={}
+    for key,value in items:
+        assert key not in out
+        out[key]=value
+    return out
+def load(raw):
+    return json.loads(raw,object_pairs_hook=pairs,parse_constant=lambda _:bad())
+def bad():
+    raise ValueError()
+def canonical(value):
+    return json.dumps(value,sort_keys=True,separators=(',',':'),allow_nan=False).encode()
+def read(path,limit):
+    assert not path.is_symlink() and path.is_file()
+    with path.open('rb') as stream: raw=stream.read(limit+1)
+    assert len(raw)<=limit
+    return raw
+def strings(value):
+    if isinstance(value,str): yield value
+    elif isinstance(value,dict):
+        for key,item in value.items():
+            yield key
+            yield from strings(item)
+    elif isinstance(value,list):
+        for item in value: yield from strings(item)
+def main():
+    p=load(sys.stdin.buffer.read(1025))
+    assert set(p)=={'job_id','attempt'}
+    jid,attempt=p['job_id'],p['attempt']
+    assert type(jid) is str and str(uuid.UUID(jid))==jid
+    assert type(attempt) is int and 1<=attempt<=2147483647
+    prefix='preview-'+jid+'-'+str(attempt)+'-'
+    root=Path.home()/'.mini-alloc'
+    assert root.is_dir() and not root.is_symlink()
+    before=load(read(root/'state.json',8*1024*1024))
+    assert type(before) is dict
+    paths=[root/('history.jsonl'+suffix) for suffix in ('.5','.4','.3','.2','.1','')]
+    assert all(not p.is_symlink() for p in paths)
+    # Rotation may retain fewer than five files, but a hole cannot certify a
+    # complete window: it could hide conflicting evidence for this ticket.
+    present=[p.exists() for p in reversed(paths)]
+    assert present[0] and present==sorted(present,reverse=True)
+    signatures=[(p.stat().st_ino,p.stat().st_size,p.stat().st_mtime_ns) if p.exists() else None for p in paths]
+    events=[]; total=0
+    for path in paths:
+        if not path.exists():
+            assert path.name!='history.jsonl'
+            continue
+        raw=read(path,11*1024*1024); total+=len(raw)
+        assert total<=66*1024*1024 and (not raw or raw.endswith(b'\n'))
+        for line in raw.splitlines():
+            row=load(line)
+            assert type(row) is dict
+            events.append(row)
+    assert signatures==[(p.stat().st_ino,p.stat().st_size,p.stat().st_mtime_ns) if p.exists() else None for p in paths]
+    after=load(read(root/'state.json',8*1024*1024))
+    assert type(after) is dict
+    associated=[]; markers=set()
+    for row in events:
+        matching=[v for v in strings(row) if v.startswith(prefix)]
+        if row.get('event') in ('submit','grant') and matching:
+            assert all(re.fullmatch(re.escape(prefix)+r'[0-9a-f]{32}',v) for v in matching)
+            ticket=row.get('ticket')
+            assert type(ticket) is str and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',ticket)
+            associated.append(ticket)
+            markers.update(matching)
+    tickets=set(associated)
+    assert len(tickets)==1 and len(markers)==1
+    ticket=tickets.pop()
+    # A full ticket must not also describe another preview execution. Joining
+    # only its terminal events would otherwise hide a conflicting association.
+    for row in events:
+        matching=[v for v in strings(row) if v.startswith(prefix)]
+        if matching:
+            assert row.get('ticket')==ticket and all(v in markers for v in matching)
+        if row.get('ticket')!=ticket: continue
+        names=[v for v in strings(row) if v.startswith('preview-')]
+        assert all(v in markers for v in names)
+    def active_matches(state):
+        # The allocator retains terminal rows for free_retention_s. They are
+        # evidence of release, not active admission, only after confirmed death.
+        assert type(state.get('jobs')) is dict
+        count=sum(v==ticket or v.startswith(prefix)
+                  for v in strings({k:v for k,v in state.items() if k!='jobs'}))
+        for key,row in state['jobs'].items():
+            if not (key==ticket or any(v==ticket or v.startswith(prefix) for v in strings(row))):
+                continue
+            assert type(row) is dict
+            if (key==ticket and row.get('ticket',key)==ticket
+                    and row.get('state')=='free' and row.get('confirmed_dead') is True):
+                continue
+            count+=1
+        return count
+    counts=[active_matches(state) for state in (before,after)]
+    assert counts==[0,0]
+    times={}
+    ordered=[]
+    for row in events:
+        if row.get('ticket')!=ticket: continue
+        event=row.get('event')
+        if event not in ('grant','release','confirm_dead','free'): continue
+        keys=[key for key in ('ts','at','time') if key in row]
+        assert len(keys)==1
+        stamp=row[keys[0]]
+        assert type(stamp) in (int,float) and math.isfinite(stamp)
+        assert event not in times
+        times[event]=stamp; ordered.append(event)
+    assert ordered==['grant','release','confirm_dead','free']
+    assert times['grant']<=times['release']<=times['confirm_dead']<=times['free']
+    value=dict(job_id=jid,attempt=attempt,prefix=prefix,ticket=ticket,event_times=times,
+               active_match_counts=counts,history_complete=True)
+    value['witness_sha256']=hashlib.sha256(canonical(value)).hexdigest()
+    sys.stdout.buffer.write(canonical(value))
+try: main()
+except OSError: sys.exit(75)
+except BaseException: sys.exit(1)
+'''
+
+
 class MacAdapter:
-    def __init__(self, allocator=None):
+    def __init__(self, allocator=None, *, reconciliation_transport=None):
         self.allocator = allocator
+        self.reconciliation_transport = reconciliation_transport or reconciliation_transport_bounded
         self.report = {'cleanup_complete': False, 'allocator_release_confirmed': False}
+
+    def read_reconciliation_allocator(self, job_id, attempt):
+        from native_preview_reconciliation import allocator_witness
+        canonical_uuid(job_id)
+        require(type(attempt) is int and 1 <= attempt <= 2147483647)
+        allocator = self.allocator or canonical_allocator()
+        argv = allocator.ssh_argv([], host='mac-mini')
+        require(type(argv) is list and len(argv) >= 3 and argv[-2] == 'mac-mini')
+        argv = argv[:-1] + ['/usr/bin/python3 -c ' + shlex.quote(RECONCILIATION_READ)]
+        try:
+            result = self.reconciliation_transport(argv, input=json.dumps(
+                {'job_id': job_id, 'attempt': attempt}).encode(), timeout=30)
+        except BaseException:
+            raise WorkerError('mac-transport-failed') from None
+        require(result.returncode not in (75, 255), 'mac-transport-failed')
+        require(result.returncode == 0 and type(result.stdout) is bytes
+                and len(result.stdout) <= 16384)
+        return allocator_witness(parse(result.stdout), job_id, attempt)
 
     def __call__(self, archive, job, guard):
         guard.stage('mac-bootstrap')
@@ -336,6 +501,7 @@ class MacAdapter:
                 result = release(*args, **kwargs)
                 released = getattr(result, 'returncode', None) == 0
                 self.report['allocator_release_confirmed'] = released
+                guard.record({'event': 'release', 'allocator_release_confirmed': released})
                 return result
             held.release = record_release
             guard.held = held
@@ -357,6 +523,8 @@ class MacAdapter:
                 return parse(result.stdout)
 
             try:
+                guard.record({'event': 'allocator', 'ticket': held.ticket,
+                              'marker_sha256': hashlib.sha256(name.encode()).hexdigest()})
                 bootstrap = call(BOOTSTRAP, p)
                 require(set(bootstrap) == {'remote_clock'} and type(bootstrap['remote_clock']) in (int, float)
                         and math.isfinite(bootstrap['remote_clock']), 'invalid-remote-clock')
@@ -369,6 +537,7 @@ class MacAdapter:
                     guard.refresh = refresh
                     guard.stage('mac-permit-refresh')
                     guard.beat()
+                guard.record({'event': 'producer', 'producer_may_have_started': True})
                 guard.stage('mac-producer')
                 payload = {**p, 'archive': base64.b64encode(archive).decode(),
                            'sha256': job['descriptor']['archive_sha256'], 'byte_size': len(archive),
@@ -393,6 +562,7 @@ class MacAdapter:
                     cleanup = False
                 self.report['cleanup_complete'] = cleanup
                 held.outcome = 'ok' if cleanup and facts else 'infra'
+                guard.record({'event': 'cleanup', 'cleanup_complete': cleanup})
         guard.held = None
         require(cleanup and released and facts is not None and image is not None, 'cleanup-release-unconfirmed')
         guard.check()

@@ -4,7 +4,7 @@ No standalone activation is available in this slice. A trusted owner must supply
 a context-manager session factory and install its lifecycle separately. This
 module neither provisions credentials nor installs a scheduler. The lock only
 excludes local consumers; the server lease remains the job authority. Uncertain
-cycles require owner-supported reconciliation, which is deliberately absent here.
+cycles require exact local and authenticated reconciliation evidence.
 """
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ from pathlib import Path
 import tempfile
 
 import native_preview_worker as worker
+import native_preview_reconciliation as recovery
 
 MAX_WAIT_SECONDS = 3600.0
 
@@ -54,7 +55,8 @@ def _lock(stream):
 
 def _checkpoint(path, digest, phase):
     """Replace and sync before claiming; never store session or job payloads."""
-    payload = worker.encode({'scope_sha256': digest, 'phase': phase})
+    payload = worker.encode(phase if type(phase) is dict else
+                            {'scope_sha256': digest, 'phase': phase})
     fd, name = tempfile.mkstemp(prefix='.checkpoint-', dir=path.parent)
     try:
         with os.fdopen(fd, 'wb') as stream:
@@ -95,23 +97,33 @@ def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
     entered = False
     armed = False
     accepted = None
+    output = None
     try:
         with session_factory(scope.copy()) as (http, native):
             entered = True
             if stop_event.is_set():
                 return 'stopped'
-            _checkpoint(checkpoint, digest, 'reconciliation-required')
-            armed = True
             output = Path(tempfile.mkdtemp(prefix='cycle-', dir=directory))
+            journal = recovery.Journal(output, digest, directory)
+            dirty = {'schema': recovery.CHECKPOINT_SCHEMA, 'scope_sha256': digest,
+                     'phase': 'reconciliation-required', 'cycle': output.name}
+            _checkpoint(checkpoint, digest, dirty)
+            armed = True
             if stop_event.is_set():
                 accepted = 'stopped'
             else:
-                accepted = _accepted(worker.run_once(scope.copy(), http, native, output))
+                accepted = _accepted(worker.run_once(scope.copy(), http, native, output,
+                                                     journal=journal))
+                if journal.failed:
+                    accepted = None
         # A context manager may suppress an exception. That is not evidence of
         # completion: accepted remains unset, and the marker remains durable.
         if armed:
             if accepted is None:
                 return 'reconciliation-required'
+            recovery.need(recovery.read(checkpoint) == worker.encode(dirty))
+            recovery.need(recovery.cycle_path(directory, output.name) == output)
+            recovery.need(recovery.read(journal.path) == worker.encode(journal.value))
             _checkpoint(checkpoint, digest, 'clean')
             return accepted
         return 'retry'
@@ -119,11 +131,38 @@ def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
         if entered:
             # Includes context cleanup failures even before a claim could start.
             try:
-                _checkpoint(checkpoint, digest, 'reconciliation-required')
+                if not armed:
+                    # Never manufacture a legacy checkpoint on a new journal
+                    # failure: a stale explicit legacy candidate cannot apply.
+                    _checkpoint(checkpoint, digest, {'schema': recovery.CHECKPOINT_SCHEMA,
+                                'scope_sha256': digest, 'phase': 'reconciliation-required',
+                                'cycle': output.name if output is not None else 'cycle-unavailable'})
             except BaseException:
                 pass
             return 'reconciliation-required'
         return 'retry' if isinstance(error, Exception) else 'stopped'
+
+
+def _recover(scope, session_factory, directory, checkpoint, digest, stop_event, error_seconds):
+    try:
+        proof = recovery.LocalProof(directory, checkpoint, digest)
+    except BaseException:
+        return 'reconciliation-required'
+    while not stop_event.is_set():
+        try:
+            proof.recheck(scope)
+            backend, allocator = proof.collect(scope, session_factory)
+            if stop_event.is_set():
+                return 'stopped'
+            proof.commit(scope, backend, allocator, _checkpoint)
+            return 'recovered'
+        except recovery.Unavailable:
+            if proof.legacy:
+                return 'reconciliation-required'
+            stop_event.wait(error_seconds)
+        except BaseException:
+            return 'reconciliation-required'
+    return 'stopped'
 
 
 def serve(scope, session_factory, output_root, stop_event, *, poll_seconds=5.0,
@@ -156,12 +195,20 @@ def serve(scope, session_factory, output_root, stop_event, *, poll_seconds=5.0,
             checkpoint = directory / 'consumer.json'
             if checkpoint.exists():
                 clean = {'scope_sha256': digest, 'phase': 'clean'}
-                if worker.parse(checkpoint.read_bytes()) != clean:
-                    return result('reconciliation-required')
+                if worker.parse(recovery.read(checkpoint)) != clean:
+                    outcome = _recover(scope, session_factory, directory, checkpoint,
+                                       digest, stop_event, error_seconds)
+                    if outcome != 'recovered':
+                        return result(outcome)
             while not stop_event.is_set():
                 outcome = _cycle(scope, session_factory, directory, checkpoint, digest, stop_event)
+                if outcome == 'reconciliation-required':
+                    outcome = _recover(scope, session_factory, directory, checkpoint,
+                                       digest, stop_event, error_seconds)
                 if outcome in ('reconciliation-required', 'stopped'):
                     return result(outcome)
+                if outcome == 'recovered':
+                    continue
                 if outcome == 'complete':
                     completed += 1
                 elif outcome == 'empty':

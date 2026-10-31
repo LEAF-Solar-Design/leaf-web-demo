@@ -82,6 +82,44 @@ def safe_error(error, code):
     assert error.__context__ is None
 
 
+def test_status_uses_fixed_project_read_and_disposes_token():
+    opener = Opener()
+    job_id = '44444444-4444-4444-8444-444444444444'
+    with factory(opener)(SCOPE) as (http, _):
+        assert http.status(job_id) == b'{"job":null}'
+        request = opener.platform[-1]
+        assert request.method == 'GET' and request.data is None
+        assert request.full_url == (worker.ORIGIN + '/api/projects/' +
+                                    SCOPE['project_id'] + '/native-previews/' + job_id)
+        assert '/worker/' not in request.full_url
+        for invalid in ('../' + job_id, job_id.upper(), '', None):
+            # This fixture UUID has only numeric hex; use a letter-bearing UUID
+            # separately to exercise uppercase refusal.
+            if invalid == job_id:
+                continue
+            count = len(opener.platform)
+            with pytest.raises(session.SessionError):
+                http.status(invalid)
+            assert len(opener.platform) == count
+        with pytest.raises(session.SessionError):
+            http.status('AAAAAAAA-AAAA-4AAA-8AAA-AAAAAAAAAAAA')
+        for invalid in (True, 0, 16385):
+            with pytest.raises(session.SessionError):
+                http.status(job_id, invalid)
+    with pytest.raises(session.SessionError):
+        http.status(job_id)
+
+
+def test_status_does_not_retry_platform_failure():
+    opener = Opener()
+    opener.platform_error = RuntimeError(SECRET)
+    with factory(opener)(SCOPE) as (http, _):
+        with pytest.raises(session.SessionError) as caught:
+            http.status('44444444-4444-4444-8444-444444444444')
+        safe_error(caught.value, 'platform-unavailable')
+    assert len(opener.platform) == 1 and len(opener.auth) == 1
+
+
 @pytest.mark.parametrize('audience', sorted(session.AUDIENCES))
 def test_exact_token_contract_and_fixed_platform(audience):
     response = Response()
