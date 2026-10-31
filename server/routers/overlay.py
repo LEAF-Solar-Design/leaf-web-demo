@@ -203,7 +203,23 @@ def decide_overlay(body: DecideBody,
                    x_actor: Optional[str] = Header(default=None, alias="X-Actor"),
                    tenant=Depends(deps.require_tenant)) -> Any:
     """Apply or refuse a pending preview. The operator's single tap."""
-    actor = (x_actor or "").strip()
+    if (isinstance(tenant, deps.TenantContext)
+            and tenant.authority_resolved and tenant.subject
+            and not tenant.backedge and not tenant.verified_demo):
+        # Resolve again at the mutation boundary: a binding may have been
+        # revoked since authentication. Never fall back to a supplied label.
+        try:
+            binding = platform_link.resolve_caller_binding(tenant)
+        except platform_link.ProjectSessionForbidden:
+            return _fail("actor_forbidden", "current identity cannot decide", 403)
+        except Exception:  # noqa: BLE001 - identity store unavailable
+            return _fail("actor_unavailable", "current identity is unavailable", 503)
+        if (binding is None
+                or str(binding.platform_tenant_id) != str(tenant)):
+            return _fail("actor_forbidden", "current identity cannot decide", 403)
+        actor = str(binding.binding_id)
+    else:
+        actor = x_actor.strip() if isinstance(x_actor, str) else ""
     if not actor:
         # Every runtime mutation must be attributable. The decision path
         # refuses a blank actor too; failing here gives the caller a usable

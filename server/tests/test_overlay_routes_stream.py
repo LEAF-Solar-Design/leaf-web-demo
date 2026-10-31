@@ -333,6 +333,189 @@ def test_a_blank_actor_never_reaches_the_store(store, session):
     assert store.decided is None
 
 
+@pytest.fixture()
+def decision_identity(monkeypatch):
+    """Exercise the canonical caller resolver, replacing only its store IO."""
+    import uuid
+    from types import SimpleNamespace
+    import deps
+
+    state = SimpleNamespace(
+        binding=SimpleNamespace(platform_tenant_id=TENANT, binding_id=uuid.uuid4()),
+        lookups=[], error=None,
+    )
+
+    def resolve(authority, subject):
+        state.lookups.append((authority, subject))
+        if state.error is not None:
+            raise state.error
+        return state.binding
+
+    binding_store = SimpleNamespace(resolve_active_identity_binding=resolve)
+    monkeypatch.setattr(overlay_router.platform_link, "_load_platform",
+                        lambda: (binding_store, None, None))
+    state.tenant = deps.TenantContext(
+        TENANT, subject="auth0|overlay-reviewer", authority_resolved=True)
+    return state
+
+
+@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize("actor", [None, "spoofed@browser"])
+def test_verified_decision_records_canonical_binding(store, session, decision_identity,
+                                                    approve, actor):
+    identity = decision_identity
+    kwargs = {} if actor is None else {"x_actor": actor}
+    out = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=approve,
+                   decision_key="verified-key", document_version=3),
+        tenant=identity.tenant, **kwargs)
+    assert out["state"] == ("approved" if approve else "denied")
+    assert identity.lookups == [("auth0", identity.tenant.subject)]
+    assert store.decided == ("approve" if approve else "deny", {
+        "proposal_id": "p-1", "tenant_id": TENANT,
+        "actor": str(identity.binding.binding_id), "decision_key": "verified-key",
+        "expected_version": 3,
+    })
+
+
+@pytest.mark.parametrize("failure", ["revoked", "foreign", "outage"])
+def test_verified_decision_never_falls_back_to_supplied_actor(
+        store, session, decision_identity, failure):
+    identity = decision_identity
+    if failure == "revoked":
+        identity.binding = None
+    elif failure == "foreign":
+        identity.binding.platform_tenant_id = "foreign-tenant"
+    else:
+        identity.error = RuntimeError("private binding outage")
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=False,
+                   decision_key="verified-key", document_version=3),
+        x_actor="fallback@browser", tenant=identity.tenant)
+    assert res.status_code == (503 if failure == "outage" else 403)
+    assert store.decided is None
+    assert store.proposed == []
+    assert _events(session) == []
+    assert b"private binding outage" not in res.body
+
+
+@pytest.mark.parametrize("approve", [False, True])
+@pytest.mark.parametrize("code", ["version_conflict", "decision_key_reused"])
+def test_verified_decision_preserves_store_witness_refusals(
+        store, session, decision_identity, monkeypatch, approve, code):
+    class WitnessRefused(Exception):
+        status_code = 409
+
+    def refuse(**kwargs):
+        assert kwargs["expected_version"] == 3
+        assert kwargs["decision_key"] == "verified-key"
+        error = WitnessRefused()
+        error.code = code
+        raise error
+
+    monkeypatch.setattr(store, "approve" if approve else "deny", refuse)
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=approve,
+                   decision_key="verified-key", document_version=3),
+        tenant=decision_identity.tenant)
+    assert res.status_code == 409
+    assert code.encode() in res.body
+    assert store.decided is None
+    assert _events(session) == []
+
+
+@pytest.mark.parametrize("kind", ["plain", "unresolved", "subjectless", "backedge", "demo"])
+def test_unverified_decision_does_not_gain_an_actor(store, session, monkeypatch, kind):
+    import deps
+
+    contexts = {
+        "plain": TENANT,
+        "unresolved": deps.TenantContext(TENANT, subject="auth0|unverified"),
+        "subjectless": deps.TenantContext(TENANT, authority_resolved=True),
+        "backedge": deps.TenantContext(TENANT, subject="auth0|backedge",
+                                     authority_resolved=True, backedge=True),
+        "demo": deps.TenantContext(TENANT, subject="demo|subject",
+                                 authority_resolved=True, verified_demo=True),
+    }
+    monkeypatch.setattr(
+        overlay_router.platform_link, "resolve_caller_binding",
+        lambda *_: pytest.fail("this caller has no normal verified authority"))
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=False,
+                   decision_key="verified-key", document_version=3),
+        tenant=contexts[kind])
+    assert res.status_code == 400
+    assert b"actor_required" in res.body
+    assert store.decided is None
+    assert _events(session) == []
+
+
+@pytest.mark.parametrize("failure", ["revoked_role", "foreign_session"])
+def test_verified_decision_rechecks_project_session(
+        project_overlay, decision_identity, monkeypatch, failure):
+    import deps
+
+    project = project_overlay
+    tenant = deps.TenantContext(project["org"], subject=project["subject"],
+                                authority_resolved=True)
+    decision_identity.binding.platform_tenant_id = project["org"]
+    if failure == "revoked_role":
+        project["membership"]["role"] = "revoked"
+    else:
+        foreign = session_store.get_or_create_session(
+            "foreign-org", f"dwg-{os.urandom(4).hex()}")["session_id"]
+        project["store"].session_id = foreign
+    res = overlay_router.decide_overlay(
+        DecideBody(proposal_id="p-1", approve=False,
+                   decision_key="verified-key", document_version=3), tenant=tenant)
+    assert res.status_code == (403 if failure == "revoked_role" else 404)
+    assert project["store"].decided is None
+    assert project["store"].proposed == []
+    assert _events(project["session"]) == []
+    if failure == "foreign_session":
+        assert _events(foreign) == []
+
+
+@pytest.mark.parametrize("actor", [None, "spoofed@browser"])
+def test_http_authenticated_denial_without_browser_actor(
+        store, session, decision_identity, monkeypatch, actor):
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import auth
+    import deps
+    import tenancy
+
+    identity = decision_identity
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+
+    def verify(authorization):
+        assert authorization == "Bearer verified-fixture"
+        ns = auth.claim_ns()
+        return {"sub": identity.tenant.subject, ns + "tenant_id": TENANT,
+                ns + "org_id": TENANT, ns + "tier": "pro"}
+
+    monkeypatch.setattr(auth, "verify_platform_token", verify)
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                        lambda subject: (TENANT, "pro"))
+    monkeypatch.setattr(tenancy, "get_store", lambda: SimpleNamespace(
+        resolve_workspace=lambda _: None))
+    app = FastAPI()
+    app.include_router(overlay_router.router)
+    headers = {"Authorization": "Bearer verified-fixture"}
+    if actor is not None:
+        headers["X-Actor"] = actor
+    with TestClient(app) as client:
+        response = client.post("/api/overlay/decisions", headers=headers, json={
+            "proposal_id": "p-1", "approve": False,
+            "decision_key": "verified-key", "document_version": 3,
+        })
+    assert response.status_code == 200, response.text
+    assert response.json()["state"] == "denied"
+    assert store.decided[1]["actor"] == str(identity.binding.binding_id)
+    assert identity.lookups == [("auth0", identity.tenant.subject)]
+
+
 # --------------------------------------------------------------------------- #
 # Revoke
 # --------------------------------------------------------------------------- #
