@@ -2316,6 +2316,11 @@ def _canonical_execution(request):
             time.sleep(min(0.05, remaining))
         if process.poll() != 0 or time.monotonic() >= request.deadline:
             _refuse(FailureCode.CANONICAL, Stage.VERIFICATION)
+        if request.purpose == "heartbeat" and _path_safe(output) and output.is_file():
+            with output.open("rb") as stream:
+                # An empty heartbeat result means no approved beat yet; readiness polling retries.
+                if not stream.read(1):
+                    return None
         raw = _Host.read_child_result(output)
         if request.purpose == "heartbeat":
             if raw is None:
