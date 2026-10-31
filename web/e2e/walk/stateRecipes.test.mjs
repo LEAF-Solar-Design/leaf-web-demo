@@ -168,8 +168,10 @@ function projectSidebarFake({ initial = 'none', pane = false, surface = 'browser
     clearContent: () => { contentVisible = false }, restoreContent: () => { contentVisible = true } }
 }
 
-function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears = true, loaded = true } = {}) {
+function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears = true, loaded = true,
+  scopeReset = false, chooserVisible = true } = {}) {
   let state = initial
+  let sidebarVisible = true
   let projectName = ''
   const events = []
   const visible = (read, extra = {}) => ({
@@ -184,11 +186,15 @@ function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears
       action()
     },
   })
+  const selectProject = () => {
+    state = boardAppears ? 'board' : 'stalled'
+    if (scopeReset) sidebarVisible = false
+  }
   const projectList = options => {
     const matching = options?.name === undefined ? names : names.filter(name => name === options.name)
     const first = () => ({
       ...button(matching[0], () => state === 'bound' && loaded && matching.length > 0,
-        () => { state = boardAppears ? 'board' : 'stalled' }),
+        selectProject),
       innerText: async () => matching[0],
     })
     return { first, count: async () => state === 'bound' && loaded ? matching.length : 0 }
@@ -217,7 +223,8 @@ function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears
       assert.equal(options.name, kind === 'unbound' ? 'Create workspace' : 'Create project')
       return button(options.name, () => state === kind, () => {
         if (kind === 'bound') assert.equal(projectName, 'WL46 walk project')
-        state = kind === 'unbound' ? 'bound' : boardAppears ? 'board' : 'stalled'
+        if (kind === 'unbound') state = 'bound'
+        else selectProject()
       })
     },
     getByText: (text, options) => {
@@ -226,11 +233,25 @@ function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears
       return visible(() => state === 'bound' && loaded && names.length === 0)
     },
   })
-  const sidebar = { getByRole: (role, options) => {
+  const page = { getByRole: (role, options) => {
+    assert.equal(options.exact, true)
+    if (role === 'button') {
+      assert.equal(options.name, 'Open project or material')
+      return button(options.name, () => !sidebarVisible && chooserVisible, () => { sidebarVisible = true })
+    }
+    assert.equal(role, 'navigation')
+    assert.equal(options.name, 'Workspace controls')
+    return { getByRole: (role, options) => {
+      assert.equal(role, 'button')
+      assert.deepEqual(options, { name: 'Project', exact: true })
+      return button(options.name, () => !sidebarVisible, () => { sidebarVisible = true })
+    } }
+  } }
+  const sidebar = { isVisible: async () => sidebarVisible, page: () => page, getByRole: (role, options) => {
     assert.equal(options.exact, true)
     if (role === 'button') {
       assert.equal(options.name, 'Open tools')
-      return button(options.name, () => state === 'board', () => assert.fail('setup must not activate Open tools'))
+      return button(options.name, () => sidebarVisible && state === 'board', () => assert.fail('setup must not activate Open tools'))
     }
     assert.equal(role, 'region')
     assert.ok(['Create your workspace', 'Workspace projects'].includes(options.name))
@@ -238,6 +259,10 @@ function browserToolsJourneyFake({ initial = 'unbound', names = [], boardAppears
   } }
   const assertions = locator => ({ toBeVisible: async () => {
     assert.equal(await locator.isVisible(), true, 'expected browser journey control to be visible')
+  } })
+  assertions.poll = (read, options) => ({ toBe: async expected => {
+    assert.deepEqual(options, { timeout: 15_000 })
+    assert.equal(await read(), expected)
   } })
   return { sidebar, assertions, events }
 }
@@ -247,6 +272,33 @@ test('WL46 unbound browser journey creates workspace then project once and reach
   await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
   assert.deepEqual(fake.events, ['Create workspace', 'fill:WL46 walk project', 'Create project'])
   assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+})
+
+test('WL48 unbound journey reopens Project once through the chooser after the scope reset', async () => {
+  const fake = browserToolsJourneyFake({ scopeReset: true })
+  await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+  assert.deepEqual(fake.events, ['Create workspace', 'fill:WL46 walk project', 'Create project', 'Open project or material'])
+  assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+})
+
+test('WL48 listed project reopens through Workspace controls only when the sidebar closes', async () => {
+  for (const scopeReset of [true, false]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names: ['Existing walk project'],
+      scopeReset, chooserVisible: false })
+    await prepareBrowserToolsProject(fake.sidebar, fake.assertions)
+    assert.deepEqual(fake.events, scopeReset ? ['Existing walk project', 'Project'] : ['Existing walk project'])
+    assert.equal(await fake.sidebar.getByRole('button', { name: 'Open tools', exact: true }).isVisible(), true)
+  }
+})
+
+test('WL48 missing Open tools after reopening fails without any further clicks', async () => {
+  for (const chooserVisible of [true, false]) {
+    const fake = browserToolsJourneyFake({ initial: 'bound', names: ['Existing walk project'],
+      scopeReset: true, chooserVisible, boardAppears: false })
+    await assert.rejects(prepareBrowserToolsProject(fake.sidebar, fake.assertions),
+      /Open tools setup: browser workspace journey did not reach the Open tools board/)
+    assert.deepEqual(fake.events, ['Existing walk project', chooserVisible ? 'Open project or material' : 'Project'])
+  }
 })
 
 test('WL46 bound browser journey opens the first listed project or creates only when empty', async () => {

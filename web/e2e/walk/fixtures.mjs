@@ -47,6 +47,25 @@ export async function revealStudioRail(page) {
   return true
 }
 
+export async function assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions = expect) {
+  if (targetRecipe.normalizedName) {
+    const snapshot = await locator.ariaSnapshot()
+    const match = snapshot.split('\n')[0].match(/^- button "((?:\\.|[^"\\])*)"/)
+    assertions(match, 'count control must expose its accessible name').toBeTruthy()
+    const liveName = JSON.parse('"' + match[1] + '"')
+    assertions(normalizedControlKey({ scope: 'document', role: 'button', name: liveName })).toBe(
+      normalizedControlKey({ scope: 'document', role: 'button', name: targetRecipe.normalizedName }))
+    evidence.controlIdentity = { rawName: liveName, normalizedName: targetRecipe.normalizedName }
+  } else if (probe.featureId === 'control:job-monitor-expand'
+    && targetRecipe !== probe.locator && probe.locator.normalizedName) {
+    evidence.controlIdentity = { launcher: { role: 'button', name: 'Studio' },
+      inventoryName: probe.locator.normalizedName, inventoryRendered: false }
+    await assertions(page.getByRole('button', {
+      name: /^Expand the job monitor \([0-9]+ live\)$/, includeHidden: true,
+    })).toHaveCount(0)
+  }
+}
+
 export async function prepareBrowserToolsProject(sidebar, assertions = expect) {
   const openTools = sidebar.getByRole('button', { name: 'Open tools', exact: true })
   try {
@@ -70,6 +89,17 @@ export async function prepareBrowserToolsProject(sidebar, assertions = expect) {
     } else {
       await projects.getByRole('textbox', { name: 'Project name', exact: true }).fill('WL46 walk project')
       await projects.getByRole('button', { name: 'Create project', exact: true }).click()
+    }
+    await assertions.poll(async () => await openTools.isVisible() || !await sidebar.isVisible(),
+      { timeout: 15_000 }).toBe(true)
+    if (!await sidebar.isVisible()) {
+      const page = sidebar.page()
+      const chooser = page.getByRole('button', { name: 'Open project or material', exact: true })
+      const reopen = await chooser.isVisible() ? chooser
+        : page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+          .getByRole('button', { name: 'Project', exact: true })
+      await assertions(reopen).toBeVisible()
+      await reopen.click()
     }
     await assertions(openTools).toBeVisible()
   } catch (error) {
@@ -4845,14 +4875,8 @@ export async function runProbe(probe, runtime) {
     await expect(locator).toBeVisible()
     if (probe.kind === 'control') {
       await expect(locator).toHaveCount(1)
-      if (probe.locator.normalizedName) {
-        const snapshot = await locator.ariaSnapshot()
-        const match = snapshot.split('\n')[0].match(/^- button "((?:\\.|[^"\\])*)"/)
-        expect(match, 'count control must expose its accessible name').toBeTruthy()
-        const liveName = JSON.parse('"' + match[1] + '"')
-        expect(normalizedControlKey({ scope: 'document', role: 'button', name: liveName })).toBe(
-          normalizedControlKey({ scope: 'document', role: 'button', name: probe.locator.normalizedName }))
-        evidence.controlIdentity = { rawName: liveName, normalizedName: probe.locator.normalizedName }
+      if (typeof assertCountControlIdentity === 'function') {
+        await assertCountControlIdentity(page, probe, targetRecipe, locator, evidence)
       }
     }
     const before = await captureBefore(probe, runtime)
