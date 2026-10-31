@@ -726,6 +726,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                integration_capture=None) -> str:
     if queued_id is not None or journal_claimed:
         integration_capture = None
+    project_principal = tenant_id
     entity_scope = deepcopy(entity_scope)
     # In live auth this is a deps.TenantContext, a str subclass carrying the
     # verified claim. Snapshot the claim before normalizing to the frozen
@@ -966,6 +967,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
             entitlements_override=entitlements.entitlements_for(
                 entitlement_tier, entitlement_roles, entitlement_elevated),
             grant_timeout_s=CONTEXT_PACKET_GRANT_TIMEOUT_S,
+            project_principal=project_principal, session_id=session_id,
+            turn_id=turn_id, turn_max_age_s=max_s,
         )
     except Exception as exc:  # noqa: BLE001 - advisory grounding must not fail a turn
         print(f"[leaf-agent] context packet omitted: {type(exc).__name__}", file=sys.stderr)
@@ -1284,6 +1287,7 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     Ownership was checked by the router; the session vanishing between that
     check and the append here surfaces as TurnRejected(404).
     """
+    project_principal = tenant_id
     tier = getattr(tenant_id, "tier", None)
     subject = getattr(tenant_id, "subject", None)
     # The entitlement tier is snapshotted too, so the KICKER can re-run the
@@ -1339,7 +1343,7 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
     queued_id = str(uuid.uuid4())
     payload = {
         "queued_id": queued_id,
-        "tenant_id": tenant_id,
+        "tenant_id": project_principal,
         "tier": tier,
         "subject": subject,
         "entitlement_tier": entitlement_tier,
