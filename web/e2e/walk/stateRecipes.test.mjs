@@ -3549,21 +3549,32 @@ test('reloadAndReenter reloads once without entry clicks on builds without an en
   assert.deepEqual(events, ['reload'])
 })
 
-test('WL49 real project reload enters the workspace once before Start', async () => {
+function realProjectFake({ chooser = false, resetAfterCreation = false, missingBoard = false,
+  missingStart = false, failedReentry = false } = {}) {
   const fake = workspaceEnvironmentFake({ entered: 'true' })
   const { page, events } = fake
   const environmentLocator = page.locator
-  let boardVisible = false
+  let boardVisible = false, chooserVisible = false
+  const boardFailure = new Error('Project workspace board never appeared')
   const org = { org_id: 'walk-org' }
   const project = { project_id: 'walk-project', org_id: org.org_id, name: 'Walk project' }
   const board = {
     get visible() { return boardVisible },
+    isVisible: async () => boardVisible,
     getAttribute: async name => { assert.equal(name, 'data-project-state'); return 'project' },
     getByText: () => ({ countValue: 0 }),
     getByRole: (role, options) => {
       assert.equal(role, 'button')
       assert.equal(options.name, 'Create project from this drawing')
-      return { disabled: false, click: async () => events.push('Create project') }
+      return { disabled: false, click: async () => {
+        events.push('Create project')
+        if (resetAfterCreation) {
+          fake.setEntered('false')
+          boardVisible = false
+          chooserVisible = resetAfterCreation !== 'hidden chooser'
+          if (failedReentry) fake.setPresent(false)
+        }
+      } }
     },
   }
   page.request = { post: async path => {
@@ -3584,9 +3595,19 @@ test('WL49 real project reload enters the workspace once before Start', async ()
     assert.equal(role, 'button')
     if (options.name === 'Start') return { click: async () => {
       assert.equal(await environmentLocator('section.workspace-environment').getAttribute('data-entered'), 'true')
-      events.push('Start'); boardVisible = true
+      events.push('Start'); boardVisible = !chooser && !missingStart; chooserVisible = chooser && !missingStart
+      if (chooserVisible) fake.setEntered('false')
     } }
-    if (options.name === 'Return to drawing') return { isVisible: async () => true,
+    if (options.name === 'Open project or material') return {
+      isVisible: async () => chooserVisible
+        && await fake.environment.getAttribute('data-entered') !== 'true',
+      click: async options => {
+        assert.deepEqual(options, { timeout: 15_000 })
+        events.push('Open project or material'); chooserVisible = false
+        fake.setEntered('true'); boardVisible = !missingBoard
+      },
+    }
+    if (options.name === 'Return to drawing') return { isVisible: async () => boardVisible,
       click: async () => { events.push('Return to drawing'); boardVisible = false } }
     assert.ok(options.name.test('Run tool'))
     return { countValue: 0 }
@@ -3597,15 +3618,81 @@ test('WL49 real project reload enters the workspace once before Start', async ()
     return environmentLocator(selector)
   }
   page.getByTestId = id => {
+    events.push('tail assertions')
     assert.equal(id, 'cockpit-status')
     return { locator: selector => { assert.equal(selector, '.cockpit-sel'); return { text: 'no selection' } } }
   }
-  const assertions = Object.assign(value => censusAssertions(value), { poll: boundedWorkspacePoll().assertions.poll })
+  const { polls, assertions: polling } = boundedWorkspacePoll()
+  const assertions = Object.assign(value => ({ ...censusAssertions(value),
+    toBeVisible: async options => {
+      if (value === board) {
+        assert.deepEqual(options, { timeout: 15_000 })
+        if (!boardVisible) throw boardFailure
+      } else await censusAssertions(value).toBeVisible()
+    },
+  }), { poll: polling.poll })
   const runtime = { page, evidence: {}, cleanup: [] }
+  return { runtime, assertions, events, polls, project, org, boardFailure }
+}
+
+test('WL49 real project reload enters the workspace once before Start', async () => {
+  const { runtime, assertions, events, org, project } = realProjectFake()
   await setupRealProject(runtime, assertions)
   assert.deepEqual(events, ['reload', 'Continue workspace', 'assert:data-entered=true', 'Start',
-    'Create project', 'Return to drawing'])
+    'Create project', 'Return to drawing', 'tail assertions'])
   assert.deepEqual(runtime.evidence.escapeProject, { orgId: org.org_id, projectId: project.project_id, name: project.name })
+})
+
+test('WL51 U1 studio Start follows the chooser into Project exactly once before creation', async () => {
+  const fake = realProjectFake({ chooser: true })
+  await setupRealProject(fake.runtime, fake.assertions)
+  assert.deepEqual(fake.events.slice(3), ['Start', 'Open project or material', 'Create project',
+    'Return to drawing', 'tail assertions'])
+  assert.deepEqual(fake.polls.map(poll => poll.timeout), [20_000, 15_000])
+})
+
+test('WL51 U2 legacy Start reaches the board without a chooser click', async () => {
+  const fake = realProjectFake()
+  await setupRealProject(fake.runtime, fake.assertions)
+  assert.deepEqual(fake.events.slice(3), ['Start', 'Create project', 'Return to drawing', 'tail assertions'])
+})
+
+test('WL51 U3 scope reset re-enters once before the tail, while entered environments skip entry', async () => {
+  for (const resetAfterCreation of [true, 'hidden chooser', false]) {
+    const fake = realProjectFake({ chooser: true, resetAfterCreation })
+    await setupRealProject(fake.runtime, fake.assertions)
+    const afterCreation = fake.events.slice(fake.events.indexOf('Create project') + 1)
+    assert.deepEqual(afterCreation, [...(resetAfterCreation
+      ? ['Continue workspace', 'assert:data-entered=true'] : ['Return to drawing']), 'tail assertions'])
+    assert.equal(fake.polls.filter(poll => poll.timeout === 20_000).length, resetAfterCreation ? 2 : 1)
+  }
+})
+
+test('WL51 U4 missing board after the chooser fails with its cause and no further clicks', async () => {
+  const fake = realProjectFake({ chooser: true, missingBoard: true })
+  await assert.rejects(setupRealProject(fake.runtime, fake.assertions), error => {
+    assert.equal(error.message, 'open-real-project: Start did not reach the Project workspace board')
+    assert.equal(error.cause, fake.boardFailure)
+    return true
+  })
+  assert.deepEqual(fake.events.slice(3), ['Start', 'Open project or material'])
+  assert.deepEqual(fake.runtime.evidence, {})
+})
+
+test('WL51 missing Start destination and failed scope re-entry name their steps and retain causes', async () => {
+  for (const missingStart of [true, false]) {
+    const fake = realProjectFake(missingStart ? { missingStart: true }
+      : { chooser: true, resetAfterCreation: true, failedReentry: true })
+    await assert.rejects(setupRealProject(fake.runtime, fake.assertions), error => {
+      assert.equal(error.message, missingStart
+        ? 'open-real-project: Start did not reach the Project workspace board'
+        : 'open-real-project: workspace did not re-enter after project creation')
+      assert.ok(error.cause instanceof Error)
+      return true
+    })
+    assert.equal(fake.events.includes('Return to drawing'), false)
+    assert.equal(fake.events.includes('tail assertions'), false)
+  }
 })
 
 test('session-details and sign-out oracles require the current Session details dialog', async () => {
@@ -5628,6 +5715,7 @@ test('project Escape observes UI creation and rejects refused or cross-org recei
   for (const authLive of [false, true]) for (const fault of [null, 'refused', 'wrong-org']) {
     const events = []
     const board = { visible: true, attributes: { 'data-project-state': 'project' },
+      isVisible: async () => board.visible,
       getByRole: (role, options) => {
         assert.equal(role, 'button')
         assert.deepEqual(options, { name: 'Create project from this drawing', exact: true })
@@ -5665,16 +5753,19 @@ test('project Escape observes UI creation and rejects refused or cross-org recei
       getByRole: (role, options) => {
         if (role === 'region') return board
         if (role === 'dialog') return { visible: false }
+        if (options.name === 'Open project or material') return { isVisible: async () => false }
         if (options.name instanceof RegExp) return { countValue: 0 }
         return { isVisible: async () => true, click: async () => {
           events.push(options.name)
           if (options.name === 'Return to drawing') board.visible = false
         } }
       },
-      locator: (selector) => selector === '.workspace-summary' ? { text: project.name } : { countValue: 0 },
+      locator: (selector) => selector === '.workspace-summary' ? { text: project.name }
+        : selector === 'section.workspace-environment' ? { count: async () => 0 } : { countValue: 0 },
       getByTestId: () => ({ locator: () => ({ text: 'no selection' }) }),
     } }
     const assertions = (value) => ({ ...faultAssertions(value), toHaveText: async (expected) => assert.equal(value.text, expected) })
+    assertions.poll = faultAssertions.poll
     const probe = resolveProbe(buildFeatureMap().entries.find((entry) => entry.id === 'action:bar-escape'), 'project-open')
     const open = () => setupStep(probe, runtime, probe.setup.steps.at(-1), assertions)
     if (fault) {
