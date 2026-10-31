@@ -119,6 +119,16 @@ class _Session:
             self._token = self._scope = self._resolver = self._audience = None
             self._opener = self._clock = None
 
+    def status(self, job_id: str, limit: int = 16384) -> bytes:
+        http = self._http()
+        try:
+            return http.status(job_id, limit)
+        except BaseException:
+            pass
+        finally:
+            http._token = None
+        raise SessionError('platform-unavailable')
+
 
 def make_session_factory(credential_resolver, audience, *, opener_factory=None,
                          native_factory=None, clock=time.monotonic):

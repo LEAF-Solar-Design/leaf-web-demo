@@ -19,6 +19,7 @@ import pytest
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import native_preview_worker as worker
 import native_preview_mac as mac
+import native_preview_reconciliation as reconciliation
 
 ORG = '11111111-1111-4111-8111-111111111111'
 PROJECT = '22222222-2222-4222-8222-222222222222'
@@ -111,6 +112,49 @@ def test_empty_has_no_native_effects(source, tmp_path):
     http.job = None
     assert worker.run_once(SCOPE, http, lambda *a: pytest.fail('native called'), tmp_path)['result'] == 'empty'
     assert len(http.calls) == 1
+
+
+def test_claim_journal_failure_prevents_source_and_native(source, tmp_path):
+    http = Transport(source)
+    def broken(event):
+        assert event['event'] == 'claim' and 'lease_owner' not in event
+        raise OSError('synthetic-secret')
+    result = worker.run_once(SCOPE, http, lambda *args: pytest.fail('native'), tmp_path, journal=broken)
+    assert result['result'] == 'failed'
+    assert [path for _, path, _, _ in http.calls] == ['claim']
+
+
+def test_journal_failure_remains_a_producer_barrier(source):
+    def broken(event):
+        raise OSError('synthetic-secret')
+    guard = worker.Authority(Transport(source), source[1], journal=broken)
+    guard.beat()
+    with pytest.raises(worker.WorkerError, match='journal-failed'):
+        guard.record(dict(event='producer', producer_may_have_started=True))
+    # Even an adapter that catches the callback error cannot clear this barrier
+    # by restoring cancellation state or obtaining another acknowledgment.
+    guard.cancelled.clear()
+    with pytest.raises(worker.WorkerError, match='journal-failed'):
+        guard.check()
+
+
+@pytest.mark.parametrize('same_job', [True, False])
+def test_reconciliation_receipt_blocks_only_old_job(source, tmp_path, same_job):
+    cycle = tmp_path / 'cycle-next'
+    cycle.mkdir()
+    old = JOB if same_job else ACTOR
+    reconciliation.receipt_path(tmp_path, old).write_bytes(b'{}')
+    journal = reconciliation.Journal(cycle, 'a' * 64, tmp_path)
+    http = Transport(source)
+    calls = []
+    def native(*args):
+        calls.append(True)
+        return facts(), png()
+    result = worker.run_once(SCOPE, http, native, cycle, journal=journal)
+    assert bool(calls) is (not same_job)
+    assert result['result'] == ('failed' if same_job else 'complete')
+    if same_job:
+        assert [path for _, path, _, _ in http.calls] == ['claim']
 
 
 @pytest.mark.parametrize('key,value', [('lease_owner', 'BAD'), ('attempt', True), ('attempt', 0),
@@ -235,6 +279,30 @@ def test_http_limits_redirect_and_redaction():
         http.request('POST', 'claim', {})
     assert str(caught.value) == 'http-unavailable'
     assert worker.NoRedirect().redirect_request(None, None, None, None, None, None) is None
+
+
+@pytest.mark.parametrize('bad', ['redirect', 'oversize', 'unavailable'])
+def test_status_bounds_and_redirect_refusal(bad):
+    calls = []
+    url = worker.ORIGIN + '/api/projects/' + PROJECT + '/native-previews/' + JOB
+    class Response:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *args): pass
+        def geturl(self): return url if bad != 'redirect' else worker.ORIGIN + '/wrong'
+        def read(self, size):
+            assert size == 5
+            return b'x' * size
+    class Opener:
+        def open(self, request, timeout):
+            calls.append(request)
+            assert request.full_url == url and request.method == 'GET' and timeout == 10
+            if bad == 'unavailable':
+                raise OSError('synthetic-secret')
+            return Response()
+    with pytest.raises(worker.WorkerError) as caught:
+        worker.Http(SCOPE, 'synthetic', opener=Opener()).status(JOB, 4)
+    assert len(calls) == 1 and 'synthetic-secret' not in str(caught.value)
 
 
 def test_lost_heartbeat_sticky_and_no_success(source, tmp_path):
@@ -441,7 +509,7 @@ class Allocator:
                     result.pop('cleanup_complete')
                     result.pop('allocator_release_confirmed')
                     result['screenshot_base64'] = base64.b64encode(png()).decode()
-                elif len(owner.calls) == 1: result = {'remote_clock': time.monotonic()}
+                elif 'remote_clock' in command: result = {'remote_clock': time.monotonic()}
                 else: result = {'cleanup_complete': owner.cleanup}
                 return subprocess.CompletedProcess([], 0, json.dumps(result), '')
         self.held = Held()
@@ -460,6 +528,147 @@ def test_mac_adapter_actual_facts_transfer_cleanup_release(source):
     assert 'expiry' in allocator.calls[1]
     assert base64.b64decode(allocator.calls[2]['archive']) == source[0]
     assert guard.refresh is None
+
+
+@pytest.mark.parametrize('failed_event', ['allocator', 'producer', 'cleanup', 'release'])
+def test_mac_journal_error_still_cleans_and_releases(source, failed_event):
+    allocator = Allocator()
+    events = []
+    def record(event):
+        events.append(event)
+        if event['event'] == failed_event:
+            raise OSError('synthetic-secret')
+    guard = worker.Authority(Transport(source), source[1], journal=record)
+    guard.beat()
+    adapter = mac.MacAdapter(allocator)
+    with pytest.raises(worker.WorkerError, match='journal-failed'):
+        adapter(source[0], source[1], guard)
+    assert adapter.report == dict(cleanup_complete=True, allocator_release_confirmed=True)
+    assert guard.refresh is None and guard.journal_failed
+    if failed_event in ('allocator', 'producer'):
+        assert not any('driver' in payload for payload in allocator.calls)
+    assert all(set(event) in ({'event', 'ticket', 'marker_sha256'},
+                             {'event', 'producer_may_have_started'},
+                             {'event', 'cleanup_complete'},
+                             {'event', 'allocator_release_confirmed'}) for event in events)
+
+
+def allocator_history_fixture(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    namespace = {}
+    # Define the actual shipped program without invoking its CLI exception rail.
+    tree = ast.parse(mac.RECONCILIATION_READ)
+    tree.body.pop()
+    exec(compile(tree, '<allocator-read>', 'exec'), namespace)
+    monkeypatch.setattr(Path, 'home', classmethod(lambda cls: tmp_path))
+    root = tmp_path / '.mini-alloc'
+    root.mkdir()
+    (root / 'state.json').write_text('{"jobs":{}}')
+    name = 'preview-' + JOB + '-1-' + 'e' * 32
+    rows = [dict(event='submit', ticket='full-ticket', job=name, at=1),
+            dict(event='grant', ticket='full-ticket', job=name, at=2),
+            dict(event='release', ticket='full-ticket', at=3),
+            dict(event='confirm_dead', ticket='full-ticket', at=4),
+            dict(event='free', ticket='full-ticket', at=5)]
+    unrelated = dict(event='submit', ticket='unrelated-ticket', job='unrelated-secret', at=0)
+    rows.insert(0, unrelated)
+    (root / 'history.jsonl').write_bytes(b''.join(worker.encode(row) + b'\n' for row in rows))
+    output = io.BytesIO()
+    namespace['sys'] = SimpleNamespace(stdin=SimpleNamespace(buffer=io.BytesIO(
+        worker.encode(dict(job_id=JOB, attempt=1)))), stdout=SimpleNamespace(buffer=output))
+    return namespace, root, rows, output
+
+
+def test_canonical_allocator_history_projection(tmp_path, monkeypatch):
+    namespace, root, rows, output = allocator_history_fixture(tmp_path, monkeypatch)
+    namespace['main']()
+    raw = output.getvalue()
+    witness = reconciliation.allocator_witness(worker.parse(raw), JOB, 1)
+    assert witness['ticket'] == 'full-ticket'
+    assert b'unrelated' not in raw and b'e' * 32 not in raw
+    assert witness['active_match_counts'] == [0, 0]
+
+
+@pytest.mark.parametrize('bad', ['ambiguous', 'missing', 'active', 'active-after', 'order',
+                                 'no-death', 'no-free', 'malformed', 'truncated', 'oversize',
+                                 'ticket-reused', 'unassociated-ticket', 'rotation-gap'])
+def test_canonical_allocator_history_fail_closed(tmp_path, monkeypatch, bad):
+    namespace, root, rows, output = allocator_history_fixture(tmp_path, monkeypatch)
+    history = root / 'history.jsonl'
+    if bad == 'ambiguous':
+        rows.append(dict(event='submit', ticket='second-ticket', job=rows[1]['job'], at=1))
+    elif bad == 'ticket-reused':
+        rows.append(dict(event='submit', ticket='full-ticket',
+                         job='preview-' + ACTOR + '-1-' + 'f' * 32, at=6))
+    elif bad == 'unassociated-ticket':
+        rows.append(dict(event='release', ticket='second-ticket', job=rows[1]['job'], at=6))
+    elif bad == 'rotation-gap':
+        (root / 'history.jsonl.2').write_bytes(b'')
+    elif bad == 'missing':
+        rows = rows[:1]
+    elif bad in ('active', 'active-after'):
+        state = worker.encode(dict(jobs={'full-ticket': dict(job=rows[1]['job'])}))
+        if bad == 'active':
+            (root / 'state.json').write_bytes(state)
+        else:
+            original = namespace['read']
+            def read(path, limit):
+                raw = original(path, limit)
+                if path.name == 'history.jsonl':
+                    (root / 'state.json').write_bytes(state)
+                return raw
+            namespace['read'] = read
+    elif bad == 'order':
+        rows[-2]['at'] = 0
+    elif bad == 'no-death':
+        rows.pop(-2)
+    elif bad == 'no-free':
+        rows.pop()
+    elif bad == 'oversize':
+        (root / 'history.jsonl.1').write_bytes(b' ' * (11 * 1024 * 1024 + 1))
+    history.write_bytes(b''.join(worker.encode(row) + b'\n' for row in rows))
+    if bad == 'malformed':
+        history.write_bytes(history.read_bytes() + b'{bad}\n')
+    if bad == 'truncated':
+        history.write_bytes(history.read_bytes().rstrip(b'\n'))
+    with pytest.raises((AssertionError, ValueError)):
+        namespace['main']()
+    assert not output.getvalue()
+
+
+def test_reconciliation_transport_preserves_installed_ssh_prefix(tmp_path, monkeypatch):
+    namespace, _, _, output = allocator_history_fixture(tmp_path, monkeypatch)
+    namespace['main']()
+    prefix = ['ssh', '-o', 'BatchMode=yes', '-o', 'ConnectTimeout=8', 'mac-mini']
+    class Installed:
+        @staticmethod
+        def ssh_argv(args, host):
+            assert args == [] and host == 'mac-mini'
+            return prefix + ['fixed-allocator-command']
+        Client = staticmethod(lambda *args, **kwargs: pytest.fail('no client or lease'))
+    def transport(argv, *, input, timeout):
+        assert argv[:-1] == prefix and timeout == 30
+        assert argv[-1].startswith('/usr/bin/python3 -c ')
+        assert worker.parse(input) == dict(job_id=JOB, attempt=1)
+        return subprocess.CompletedProcess(argv, 0, output.getvalue())
+    adapter = mac.MacAdapter(Installed, reconciliation_transport=transport)
+    assert adapter.read_reconciliation_allocator(JOB, 1)['ticket'] == 'full-ticket'
+    with pytest.raises(worker.WorkerError):
+        adapter.read_reconciliation_allocator('../' + JOB, 1)
+    with pytest.raises(worker.WorkerError):
+        adapter.read_reconciliation_allocator(JOB, True)
+
+
+@pytest.mark.parametrize('raw,code', [(b'not-json', 0), (b'x' * 16385, 0), (b'{}', 1), (b'{}', 255)])
+def test_reconciliation_transport_malformed_or_oversize_output_refuses(raw, code):
+    class Installed:
+        @staticmethod
+        def ssh_argv(args, host):
+            return ['ssh', '-o', 'BatchMode=yes', host, 'allocator-command']
+    def transport(argv, **kwargs):
+        return subprocess.CompletedProcess(argv, code, raw)
+    with pytest.raises(worker.WorkerError):
+        mac.MacAdapter(Installed, reconciliation_transport=transport).read_reconciliation_allocator(JOB, 1)
 
 
 @pytest.mark.parametrize('granted,allowed', [

@@ -37,6 +37,7 @@ ERROR_CODES = frozenset({
     'completion-unknown', 'windows-worker-required', 'invalid-granted-simulator',
     'invalid-ticket', 'mac-transport-failed', 'invalid-remote-clock',
     'screenshot-bounds', 'cleanup-release-unconfirmed',
+    'journal-failed',
 })
 AUTHORITY_FAILURES = frozenset({'none', 'heartbeat-request', 'heartbeat-contract',
                               'permit-refresh', 'deadline', 'ack-expired',
@@ -182,6 +183,24 @@ class Http:
         self._token = token
         self.opener = opener or urllib.request.build_opener(NoRedirect())
 
+    def status(self, job_id: str, limit: int = 16384) -> bytes:
+        canonical_uuid(job_id)
+        require(type(limit) is int and 0 < limit <= 16384, 'response-bounds')
+        url = self.prefix.removesuffix('worker/') + job_id
+        request = urllib.request.Request(url, method='GET', headers={
+            'Authorization': 'Bearer ' + self._token, 'Content-Type': 'application/json',
+            'User-Agent': USER_AGENT})
+        try:
+            with self.opener.open(request, timeout=10) as response:
+                require(response.status == 200 and response.geturl() == url, 'http-denied')
+                raw = response.read(limit + 1)
+                require(type(raw) is bytes and len(raw) <= limit, 'response-bounds')
+                return raw
+        except WorkerError:
+            raise
+        except Exception:
+            raise WorkerError('http-unavailable') from None
+
     def request(self, method, suffix, body=None, limit=16384):
         data = None if body is None else encode(body)
         require(data is None or len(data) <= MAX_BODY, 'request-bounds')
@@ -203,7 +222,7 @@ class Http:
 
 class Authority:
     """Sticky cancellation, fixed deadline, fresh acknowledgments only."""
-    def __init__(self, http, job, *, clock=time.time, monotonic=time.monotonic):
+    def __init__(self, http, job, *, clock=time.time, monotonic=time.monotonic, journal=None):
         self.http, self.job, self.clock, self.monotonic = http, job, clock, monotonic
         self.deadline = job['deadline']
         self.end = monotonic() + self.deadline - clock()
@@ -216,6 +235,17 @@ class Authority:
         self.thread = None
         self.authority_failure = 'none'
         self.execution_stage = 'source'
+        self.journal = journal
+        self.journal_failed = False
+
+    def record(self, event):
+        if self.journal is not None:
+            try:
+                self.journal(event)
+            except BaseException:
+                self.journal_failed = True
+                self.fail('unexpected')
+                raise WorkerError('journal-failed') from None
 
     def fail(self, cause):
         with self.lock:
@@ -233,6 +263,7 @@ class Authority:
         return {k: self.job[k] for k in ('lease_owner', 'attempt')}
 
     def check(self):
+        require(not self.journal_failed, 'journal-failed')
         cause = None
         if self.cancelled.is_set():
             cause = 'unexpected'
@@ -327,15 +358,19 @@ def make_receipt(job, scope, facts, image):
             'target': 'ios-simulator', **facts}
 
 
-def run_once(scope, http, native, output, *, clock=time.time):
+def run_once(scope, http, native, output, *, clock=time.time, journal=None):
     scope = binding(scope)
     job = validate_claim(parse(http.request('POST', 'claim', {})), scope, clock())
     if job is None:
         return {'stage': 'empty', 'result': 'empty'}
-    guard = Authority(http, job, clock=clock)
+    guard = Authority(http, job, clock=clock, journal=journal)
     settling = False
     failure_settlement = 'not-attempted-authority-lost'
     try:
+        guard.record({'event': 'claim', 'job_id': job['job_id'], 'attempt': job['attempt'],
+                      'source': {k: job['descriptor'][k] for k in
+                                 ('revision', 'document_sha256', 'archive_sha256')},
+                      'deadline': job['deadline']})
         guard.start()
         raw = http.request('GET', job['job_id'] + '/source?' + urllib.parse.urlencode(guard.identity),
                            limit=producer().MAX_ARCHIVE_BYTES)
