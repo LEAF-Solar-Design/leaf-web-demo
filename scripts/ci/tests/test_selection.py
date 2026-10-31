@@ -519,14 +519,92 @@ class SelectionContracts(unittest.TestCase):
                 revised = plugin.validate_collection_or_choose_full(changed, baseline, self.catalog)
                 self.assertFalse(revised["apply_filter"])
 
-    def test_catalog_change(self):
+    def test_catalog_metadata_change_is_not_suite_drift(self):
         self.change()
         for field, value in (("cwd", "elsewhere"), ("command", ["false"]),
                              ("floor", 9), ("skip_rule", "skip-everything")):
             changed = copy.deepcopy(self.catalog)
             changed["suites"][0][field] = value
             (self.inputs / "catalog.json").write_text(json.dumps(changed))
-            self.assert_full(self.choose(), "catalog_change")
+            decision = self.choose()
+            self.assertEqual(decision["execution_mode"], "selected")
+            self.assertNotEqual(decision["catalog_sha256"], decision["map_catalog_sha256"])
+            self.assertEqual(decision["catalog_drift"],
+                             {"new": [], "changed": [], "removed": [], "ratio": 0.0})
+
+    def test_catalog_drift_within_bound_is_not_catalog_change(self):
+        del self.mapping["suites"]["idle"]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertIn("idle", decision["proposed_suite_ids"])
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": ["idle"], "changed": [], "removed": [], "ratio": 0.2})
+        self.assertEqual(decision["known_read_paths"]["idle"], [])
+
+    def test_catalog_drift_above_bound_falls_back(self):
+        for sid in ("b", "idle"):
+            del self.mapping["suites"][sid]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assert_full(decision, "catalog_change")
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": ["b", "idle"], "changed": [], "removed": [], "ratio": 0.4})
+        self.mapping["max_catalog_drift_ratio"] = 0.5
+        self.rebase_fixture()
+        self.change(text="good\n\n\n")
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertTrue({"b", "idle"} <= set(decision["proposed_suite_ids"]))
+
+    def test_changed_test_ids_force_the_suite_required(self):
+        row = self.mapping["suites"]["idle"]
+        row["test_ids"] = ["tests/test_idle.py::test_old"]
+        row["read_paths"] = ["missing/stale.py"]
+        row["generated_rules"] = [None]
+        row["shared_state_dependencies"] = ["missing"]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertIn("idle", decision["proposed_suite_ids"])
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": [], "changed": ["idle"], "removed": [], "ratio": 0.2})
+        self.assertEqual(decision["known_read_paths"]["idle"], [])
+
+    def test_removed_suites_are_reported_not_fatal(self):
+        self.mapping["suites"]["retired"] = {"read_paths": ["missing/stale.py"]}
+        self.mapping["mandatory_suite_ids"] = ["retired", "missing-mandatory"]
+        self.mapping["always_select_suite_ids"] = ["retired", "missing-always"]
+        self.mapping["suites"]["b"]["shared_state_dependencies"] = ["retired"]
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": [], "changed": [], "removed": ["retired"], "ratio": 0.0})
+        self.assertEqual(decision["mandatory_suite_ids"], [])
+        self.assertTrue(set(decision["proposed_suite_ids"]) <= set(decision["catalog_suite_ids"]))
+
+    def test_invalid_max_catalog_drift_ratio(self):
+        for value in (True, "0.2", -0.1, 1.5):
+            with self.subTest(value=value):
+                self.mapping["max_catalog_drift_ratio"] = value
+                self.rebase_fixture()
+                self.change(text="good\n" + repr(value) + "\n")
+                self.assert_full(self.choose(), "invalid_policy")
+
+    def test_rowless_map_still_falls_back(self):
+        self.mapping["suites"] = {}
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assert_full(decision, "catalog_change")
+        self.assertEqual(decision["catalog_drift"],
+                         {"new": sorted(row["id"] for row in self.catalog["suites"]), "changed": [],
+                          "removed": [], "ratio": 1.0})
 
     def test_hostile_policy(self):
         self.change(selector.MAP_PATH, '{"suites":{}}\n')
