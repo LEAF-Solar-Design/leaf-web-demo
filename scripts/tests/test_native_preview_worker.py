@@ -564,13 +564,14 @@ def allocator_history_fixture(tmp_path, monkeypatch):
     root = tmp_path / '.mini-alloc'
     root.mkdir()
     (root / 'state.json').write_text('{"jobs":{}}')
-    name = 'preview-' + JOB + '-1-' + 'e' * 32
-    rows = [dict(event='submit', ticket='full-ticket', job=name, at=1),
-            dict(event='grant', ticket='full-ticket', job=name, at=2),
-            dict(event='release', ticket='full-ticket', at=3),
-            dict(event='confirm_dead', ticket='full-ticket', at=4),
-            dict(event='free', ticket='full-ticket', at=5)]
-    unrelated = dict(event='submit', ticket='unrelated-ticket', job='unrelated-secret', at=0)
+    name = 'preview-' + JOB + '-1-<redacted>'
+    rows = [dict(event='submit', ticket='full-ticket', job=name, ts=1, redactions=1),
+            dict(event='grant', ticket='full-ticket', job=name, ts=2, redactions=1),
+            dict(event='legacy_seen', marker=name, ts=2.5, redactions=1),
+            dict(event='release', ticket='full-ticket', ts=3, redactions=0),
+            dict(event='confirm_dead', ticket='full-ticket', ts=4, redactions=0),
+            dict(event='free', ticket='full-ticket', ts=5, at=5, redactions=0)]
+    unrelated = dict(event='submit', ticket='unrelated-ticket', job='unrelated-secret', ts=0, redactions=0)
     rows.insert(0, unrelated)
     (root / 'history.jsonl').write_bytes(b''.join(worker.encode(row) + b'\n' for row in rows))
     output = io.BytesIO()
@@ -580,8 +581,13 @@ def allocator_history_fixture(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize('retained_free', [False, True])
-def test_canonical_allocator_history_projection(tmp_path, monkeypatch, retained_free):
+@pytest.mark.parametrize('redacted', [False, True])
+def test_canonical_allocator_history_projection(tmp_path, monkeypatch, retained_free, redacted):
     namespace, root, rows, output = allocator_history_fixture(tmp_path, monkeypatch)
+    if not redacted:
+        rows = [{k: v.replace('<redacted>', 'e' * 32) if isinstance(v, str) else v
+                 for k, v in row.items()} for row in rows]
+        (root / 'history.jsonl').write_bytes(b''.join(worker.encode(row) + b'\n' for row in rows))
     if retained_free:
         (root / 'state.json').write_bytes(worker.encode(dict(jobs={
             'full-ticket': dict(ticket='full-ticket', job=rows[1]['job'],
@@ -597,17 +603,24 @@ def test_canonical_allocator_history_projection(tmp_path, monkeypatch, retained_
 @pytest.mark.parametrize('bad', ['ambiguous', 'missing', 'active', 'active-after', 'order',
                                  'no-death', 'no-free', 'malformed', 'truncated', 'oversize',
                                  'ticket-reused', 'unassociated-ticket', 'rotation-gap',
-                                 'free-without-death', 'foreign-free-ticket'])
+                                 'free-without-death', 'foreign-free-ticket',
+                                 'malformed-suffix', 'legacy-extra-key', 'free-clock-conflict'])
 def test_canonical_allocator_history_fail_closed(tmp_path, monkeypatch, bad):
     namespace, root, rows, output = allocator_history_fixture(tmp_path, monkeypatch)
     history = root / 'history.jsonl'
     if bad == 'ambiguous':
-        rows.append(dict(event='submit', ticket='second-ticket', job=rows[1]['job'], at=1))
+        rows.append(dict(event='submit', ticket='second-ticket', job=rows[1]['job'], ts=1))
     elif bad == 'ticket-reused':
         rows.append(dict(event='submit', ticket='full-ticket',
-                         job='preview-' + ACTOR + '-1-' + 'f' * 32, at=6))
+                         job='preview-' + ACTOR + '-1-<redacted>', ts=6))
     elif bad == 'unassociated-ticket':
-        rows.append(dict(event='release', ticket='second-ticket', job=rows[1]['job'], at=6))
+        rows.append(dict(event='release', ticket='second-ticket', job=rows[1]['job'], ts=6))
+    elif bad == 'malformed-suffix':
+        rows[1]['job'] = rows[1]['job'].replace('<redacted>', 'unknown')
+    elif bad == 'legacy-extra-key':
+        next(row for row in rows if row['event'] == 'legacy_seen')['ticket'] = 'second-ticket'
+    elif bad == 'free-clock-conflict':
+        rows[-1]['at'] = 9
     elif bad == 'rotation-gap':
         (root / 'history.jsonl.2').write_bytes(b'')
     elif bad == 'missing':
@@ -630,7 +643,7 @@ def test_canonical_allocator_history_fail_closed(tmp_path, monkeypatch, bad):
                 return raw
             namespace['read'] = read
     elif bad == 'order':
-        rows[-2]['at'] = 0
+        rows[-2]['ts'] = 0
     elif bad == 'no-death':
         rows.pop(-2)
     elif bad == 'no-free':
