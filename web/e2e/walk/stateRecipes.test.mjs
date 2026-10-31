@@ -17,6 +17,127 @@ import { solarChainSteps } from './probes.mjs'
 import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.mjs'
 import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { prepareStudioJobMonitor, assertStudioJobMonitor } from './fixtures.mjs'
+import { collectPromptRunDiagnostic } from './fixtures.mjs'
+
+function promptRunDiagnosticFake({ resolverVisible = false } = {}) {
+  const state = { barValue: '/w1k-no-such-tool', runDisabled: false, resolverVisible,
+    toolCommandsVisible: true, statusText: `  ${'status '.repeat(40)}  `,
+    alerts: ['  First alert  ', `  ${'a'.repeat(140)}  `, ' Third alert ', 'Fourth alert'] }
+  const resolver = {
+    isVisible: async () => state.resolverVisible,
+    getByText: (text, options) => {
+      assert.ok(text.includes('/w1k-no-such-tool'))
+      assert.equal(options.exact, true)
+      return { resolverCopy: true }
+    },
+  }
+  const page = {
+    getByRole: (role, options) => {
+      assert.equal(options.exact, true)
+      if (role === 'combobox') {
+        assert.equal(options.name, 'Command bar')
+        return { inputValue: async () => state.barValue }
+      }
+      if (role === 'button') {
+        assert.equal(options.name, 'Run')
+        return { isDisabled: async () => state.runDisabled }
+      }
+      assert.equal(role, 'listbox')
+      if (options.name === 'Route resolver') return resolver
+      assert.equal(options.name, 'Tool commands')
+      return { isVisible: async () => state.toolCommandsVisible }
+    },
+    locator: selector => {
+      if (selector === '.bar-dock .cockpit-engine-status:visible') return {
+        first: () => ({ textContent: async () => state.statusText }),
+      }
+      assert.equal(selector, '[role="alert"]:visible')
+      return { evaluateAll: async read => read(state.alerts.map(textContent => ({ textContent }))) }
+    },
+  }
+  return { page, state, resolver }
+}
+
+test('WL50 U1 prompt-run diagnostic collects bounded text and copies at most ten request paths', async () => {
+  const fake = promptRunDiagnosticFake()
+  const requests = Array.from({ length: 12 }, (_, index) => `https://leaf.test/api/decision/${index}?secret=value#fragment`)
+  const diagnostic = await collectPromptRunDiagnostic(fake.page, { localDecisionRequests: requests })
+  assert.deepEqual(diagnostic, {
+    barValue: '/w1k-no-such-tool', runDisabled: false, resolverVisible: false, toolCommandsVisible: true,
+    localDecisionRequests: Array.from({ length: 10 }, (_, index) => `/api/decision/${index}`),
+    statusText: fake.state.statusText.trim().slice(0, 160),
+    alerts: ['First alert', 'a'.repeat(120), 'Third alert'],
+  })
+  assert.notEqual(diagnostic.localDecisionRequests, requests)
+  assert.equal(requests.length, 12)
+  assert.ok(requests[0].includes('?secret='))
+  fake.state.statusText = null
+  assert.equal((await collectPromptRunDiagnostic(fake.page, {})).statusText, null)
+})
+
+test('WL50 U2 prompt-run diagnostic tolerates throwing and indefinitely hanging reads', async () => {
+  const empty = { barValue: null, runDisabled: null, resolverVisible: null, toolCommandsVisible: null,
+    localDecisionRequests: [], statusText: null, alerts: [] }
+  for (const hang of [false, true]) {
+    const read = () => {
+      if (hang) return new Promise(() => {})
+      throw new Error('diagnostic read failed')
+    }
+    const node = { inputValue: read, isDisabled: read, isVisible: read, textContent: read, evaluateAll: read }
+    node.first = () => node
+    const page = { getByRole: () => node, locator: () => node }
+    const runtime = { get localDecisionRequests() { throw new Error('request read failed') } }
+    const started = Date.now()
+    assert.deepEqual(await collectPromptRunDiagnostic(page, runtime), empty)
+    assert.ok(Date.now() - started < 3000, 'reads must share the two-second bound')
+  }
+  assert.deepEqual(await collectPromptRunDiagnostic(null, null), empty)
+})
+
+test('WL50 U3 unknown-tool oracle retains snapshots and the original visibility error', async () => {
+  for (const visible of [false, true]) {
+    const fake = promptRunDiagnosticFake({ resolverVisible: visible })
+    const runtime = { page: fake.page, evidence: {}, localDecisionRequests: [] }
+    const originalError = new Error('Route resolver never appeared')
+    const events = []
+    const assertions = value => ({
+      toBeVisible: async () => {
+        if (value === fake.resolver) {
+          events.push('resolver visible')
+          assert.ok(runtime.evidence.promptRunDiagnostic.atOracleEntry)
+          if (!visible) {
+            fake.state.barValue = 'value at failure'
+            throw originalError
+          }
+        } else {
+          assert.equal(value.resolverCopy, true)
+          events.push('resolver copy visible')
+        }
+      },
+      toEqual: expected => {
+        assert.equal(value, runtime.localDecisionRequests)
+        assert.deepEqual(value, expected)
+        events.push('no decision requests')
+      },
+    })
+    const probe = { kind: 'control', featureId: 'control:prompt-run', state: 'ready',
+      assertion: { target: 'unknown-tool-resolver' } }
+    const check = () => assertEffect(probe, runtime, null, {}, assertions)
+    if (visible) await check()
+    else await assert.rejects(check, error => error === originalError)
+    const diagnostic = runtime.evidence.promptRunDiagnostic
+    assert.equal(diagnostic.atOracleEntry.barValue, '/w1k-no-such-tool')
+    assert.equal(diagnostic.atOracleEntry.resolverVisible, visible)
+    if (visible) {
+      assert.deepEqual(Object.keys(diagnostic), ['atOracleEntry'])
+      assert.deepEqual(events, ['resolver visible', 'resolver copy visible', 'no decision requests'])
+    } else {
+      assert.equal(diagnostic.atFailure.barValue, 'value at failure')
+      assert.equal(diagnostic.atFailure.resolverVisible, false)
+      assert.deepEqual(events, ['resolver visible'])
+    }
+  }
+})
 
 function monitorStudioFake({ present = true, open = false, content = true, heading = true, collapse = '', spine = false } = {}) {
   const clicks = []

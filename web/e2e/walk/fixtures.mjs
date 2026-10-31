@@ -31,6 +31,33 @@ import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readCont
 
 export { expect }
 
+export async function collectPromptRunDiagnostic(page, runtime) {
+  const read = async (operation, fallback = null) => {
+    let timer
+    try {
+      return await Promise.race([
+        Promise.resolve().then(operation),
+        new Promise(resolve => { timer = setTimeout(() => resolve(fallback), 2000) }),
+      ])
+    } catch { return fallback }
+    finally { clearTimeout(timer) }
+  }
+  const [barValue, runDisabled, resolverVisible, toolCommandsVisible, localDecisionRequests, statusText, alerts] = await Promise.all([
+    read(() => page.getByRole('combobox', { name: 'Command bar', exact: true }).inputValue({ timeout: 2000 })),
+    read(() => page.getByRole('button', { name: 'Run', exact: true }).isDisabled({ timeout: 2000 })),
+    read(() => page.getByRole('listbox', { name: 'Route resolver', exact: true }).isVisible({ timeout: 2000 })),
+    read(() => page.getByRole('listbox', { name: 'Tool commands', exact: true }).isVisible({ timeout: 2000 })),
+    read(() => (runtime?.localDecisionRequests || []).slice(0, 10).map(url => new URL(url, 'http://diagnostic.invalid').pathname), []),
+    read(async () => {
+      const text = await page.locator('.bar-dock .cockpit-engine-status:visible').first().textContent({ timeout: 2000 })
+      return text == null ? null : text.trim().slice(0, 160)
+    }),
+    read(() => page.locator('[role="alert"]:visible').evaluateAll(nodes =>
+      nodes.slice(0, 3).map(node => (node.textContent || '').trim().slice(0, 120))), []),
+  ])
+  return { barValue, runDisabled, resolverVisible, toolCommandsVisible, localDecisionRequests, statusText, alerts }
+}
+
 export const STUDIO_RAIL_FEATURES = Object.freeze(new Set([
   'control:linked-services', 'control:job-monitor-expand', 'control:notification-collapse', 'control:objects',
 ]))
@@ -4261,8 +4288,18 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     return
   }
   if (target === 'unknown-tool-resolver') {
+    if (typeof collectPromptRunDiagnostic === 'function') {
+      runtime.evidence.promptRunDiagnostic = { atOracleEntry: await collectPromptRunDiagnostic(page, runtime) }
+    }
     const resolver = page.getByRole('listbox', { name: 'Route resolver', exact: true })
-    await expect(resolver).toBeVisible()
+    try {
+      await expect(resolver).toBeVisible()
+    } catch (error) {
+      if (typeof collectPromptRunDiagnostic === 'function') {
+        runtime.evidence.promptRunDiagnostic.atFailure = await collectPromptRunDiagnostic(page, runtime)
+      }
+      throw error
+    }
     await expect(resolver.getByText('“/w1k-no-such-tool” isn’t a tool in this catalog. Pick an alternative:', { exact: true })).toBeVisible()
     expect(runtime.localDecisionRequests).toEqual([])
     return
