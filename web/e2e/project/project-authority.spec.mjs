@@ -302,7 +302,7 @@ test('project_settings_worker_readback', async ({ browser }, info) => {
   })
 })
 
-const sizingFixture = fileURLToPath(new URL('../fixtures/pp3b-sizing-panels.dxf', import.meta.url))
+const sizingFixture = fileURLToPath(new URL('./pp3b-sizing-panels.dxf', import.meta.url))
 const sizingNames = {
   recovery: `PP3B ${metadata.run_id} sizing recovery`,
   submission: `PP3B ${metadata.run_id} sizing submission`,
