@@ -33,6 +33,8 @@ vi.mock("../src/ports/impl/gitWorker.js", () => ({
 }));
 vi.mock("../src/ports/impl/oauthGrantProvider.js", () => ({
   createTenantGrantStore: () => ({}),
+  resolveGrantsDir: () => "C:/tmp/leaf-grants",
+  resolveGrantStoreBackend: () => "file",
   OAuthGrantProviderImpl: class {
     getGrant = startup.getGrant;
     acquireGrant = startup.acquireGrant;

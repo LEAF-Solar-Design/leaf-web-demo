@@ -71,7 +71,8 @@ import {
   createSessionStore,
   type SessionStoreHandle,
 } from "../src/ports/impl/sessionStoreFactory.js";
-import { createTenantGrantStore, OAuthGrantProviderImpl } from "../src/ports/impl/oauthGrantProvider.js";
+import { createTenantGrantStore, OAuthGrantProviderImpl, resolveGrantsDir, resolveGrantStoreBackend } from "../src/ports/impl/oauthGrantProvider.js";
+import { grantKeyProviderFromEnv } from "../src/security/grantEnvelope/fromEnv.js";
 import { upstreamSinkFromEnv } from "../src/ports/impl/httpUpstreamSink.js";
 import { startGitWorker, stopGitWorker } from "../src/ports/impl/gitWorker.js";
 import { PgTenantRepoLeaseCoordinator, TenantRepoProviderImpl } from "../src/ports/impl/tenantRepoProvider.js";
@@ -208,7 +209,12 @@ function buildPorts(standardServicesResolver: StandardServicesResolver | undefin
   // F18 seam: the backend is selected by $LEAF_GRANT_STORE (default `file` →
   // FileTenantGrantStore under $LEAF_GRANTS_DIR). An explicit `vault` request with no
   // vault wired must fail LOUDLY at boot — never silently persist tokens to disk.
-  const grantStore = createTenantGrantStore();
+  const grantsDir = resolveGrantsDir();
+  // Build the provider first so a bad LEAF_GRANT_STORE fails with the value-free error.
+  const grantKeyProvider = grantKeyProviderFromEnv(process.env);
+  const grantBackend = resolveGrantStoreBackend();
+  const grantStore = createTenantGrantStore({ dir: grantsDir, keyProvider: grantKeyProvider });
+  log(`grant_store_backend=${grantBackend}`);
   // The tenant Claude grant stays on this trusted host. Generated source crosses
   // the structured submit boundary as data, and only the broker may execute it
   // inside the E2B tool sandbox.
