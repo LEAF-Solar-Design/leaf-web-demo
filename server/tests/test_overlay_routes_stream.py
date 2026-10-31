@@ -40,11 +40,13 @@ class FakeStore:
 
     def __init__(self):
         self.decided = None
+        self.proposed = []
 
     def document(self, tenant_id):
         return {"tenant_id": tenant_id, "version": 3, "tokens": {}}
 
     def create_proposal(self, **kw):
+        self.proposed.append(kw)
         return {**kw, "state": "pending", "revision": 0,
                 "lease_expires_at": "2026-08-05T00:00:00Z"}
 
@@ -111,6 +113,178 @@ def test_an_unknown_session_is_refused_BEFORE_any_write(store):
                     session_id="sess-does-not-exist"),
         tenant=TENANT)
     assert res.status_code == 404
+
+
+@pytest.fixture()
+def project_overlay(monkeypatch):
+    """Real active-turn lookup and session guard, with a fresh membership seam."""
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import deps
+
+    org_id = "11111111-1111-4111-8111-111111111111"
+    project_id = "22222222-2222-4222-8222-222222222222"
+    monkeypatch.setenv("LEAF_SESSIONS_STORE", "legacy")
+    session_id = session_store.get_or_create_session(
+        org_id, f"dwg-{os.urandom(4).hex()}")["session_id"]
+    turn_id = "overlay-active-turn"
+    subject = "auth0|project-editor"
+    assert session_store.try_begin_turn(
+        session_id, turn_id, 300, tier="pro", subject=subject)
+    original_get = session_store.get_session
+
+    def get_session(target):
+        row = original_get(target)
+        if row is not None and target == session_id:
+            return {**row, "org_id": org_id, "project_id": project_id}
+        return row
+
+    monkeypatch.setattr(session_store, "get_session", get_session)
+    monkeypatch.setattr(
+        deps, "resolve_active_platform_tenant_authority",
+        lambda actor: (org_id, "pro") if actor == subject else ("foreign", "pro"),
+    )
+    membership = {"role": "editor", "checks": []}
+
+    def require_project_access(tenant, target_project, *, write):
+        # This is the existing guard's fresh-membership boundary, not a role
+        # asserted by the transport or saved on the active turn.
+        assert tenant.subject == subject
+        assert str(tenant) == org_id
+        assert target_project == project_id
+        assert write is True
+        membership["checks"].append(membership["role"])
+        if membership["role"] not in {"owner", "editor"}:
+            raise overlay_router.platform_link.ProjectSessionForbidden("write refused")
+        return org_id
+
+    monkeypatch.setattr(overlay_router.platform_link, "require_project_access",
+                        require_project_access)
+    store = FakeStore()
+    store.session_id = session_id
+    monkeypatch.setattr(overlay_router, "_store", lambda: store)
+    context = deps.TenantContext(org_id, org_id=org_id, backedge=True)
+    app = FastAPI()
+    app.include_router(overlay_router.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: context
+    client = TestClient(app)
+    yield {
+        "client": client, "app": app, "store": store,
+        "session": session_id, "turn": turn_id, "org": org_id,
+        "subject": subject, "membership": membership,
+        "headers": {"X-Authority-Session-Id": session_id,
+                    "X-Authority-Turn-Id": turn_id},
+    }
+    session_store.end_turn(session_id, turn_id)
+
+
+def _project_preview(project, *, headers=None, target=None):
+    return project["client"].post(
+        "/api/overlay/proposals",
+        json={"session_id": target or project["session"],
+              "tokens": {"color.border": "#123456"}, "request_text": "private preview"},
+        headers=project["headers"] if headers is None else headers,
+    )
+
+
+@pytest.mark.parametrize("role", ["owner", "editor"])
+def test_dispatch_overlay_uses_active_author_and_fresh_project_write_role(project_overlay, role):
+    project = project_overlay
+    project["membership"]["role"] = role
+    response = _project_preview(project)
+    assert response.status_code == 200, response.text
+    assert project["membership"]["checks"] == [role]
+    assert len(project["store"].proposed) == 1
+    assert project["store"].proposed[0]["session_id"] == project["session"]
+    assert project["store"].proposed[0]["tenant_id"] == project["org"]
+    assert [e["type"] for e in _events(project["session"])] == ["overlay_proposed"]
+
+
+@pytest.mark.parametrize("failure", [
+    "missing", "session_only", "turn_only", "mismatch", "superseded",
+    "completed", "stale", "foreign_turn", "foreign_binding", "binding_outage",
+    "unknown_target", "foreign_target",
+])
+def test_invalid_dispatch_overlay_authority_never_mutates(project_overlay, monkeypatch, failure):
+    import deps
+    import turn_runner
+
+    project = project_overlay
+    headers = dict(project["headers"])
+    target = project["session"]
+    foreign = session_store.get_or_create_session(
+        "foreign-org", f"dwg-{os.urandom(4).hex()}")["session_id"]
+    if failure == "missing":
+        headers = {}
+    elif failure == "session_only":
+        headers.pop("X-Authority-Turn-Id")
+    elif failure == "turn_only":
+        headers.pop("X-Authority-Session-Id")
+    elif failure == "mismatch":
+        other = session_store.get_or_create_session(
+            project["org"], f"dwg-{os.urandom(4).hex()}")["session_id"]
+        assert session_store.try_begin_turn(other, "other-turn", 300, subject=project["subject"])
+        headers = {"X-Authority-Session-Id": other, "X-Authority-Turn-Id": "other-turn"}
+    elif failure == "superseded":
+        headers["X-Authority-Turn-Id"] = "previous-turn"
+    elif failure == "completed":
+        session_store.end_turn(target, project["turn"])
+    elif failure == "stale":
+        monkeypatch.setattr(turn_runner, "turn_max_s", lambda: -1)
+    elif failure == "foreign_turn":
+        assert session_store.try_begin_turn(foreign, "foreign-turn", 300, subject=project["subject"])
+        target = foreign
+        headers["X-Authority-Session-Id"] = foreign
+        headers["X-Authority-Turn-Id"] = "foreign-turn"
+    elif failure == "foreign_binding":
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority",
+                            lambda subject: ("foreign-org", "pro"))
+    elif failure == "binding_outage":
+        def unavailable(subject):
+            raise RuntimeError("binding unavailable")
+        monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", unavailable)
+    elif failure in {"unknown_target", "foreign_target"}:
+        target = "sess-does-not-exist" if failure == "unknown_target" else foreign
+        headers["X-Authority-Session-Id"] = target
+
+    response = _project_preview(project, headers=headers, target=target)
+    assert response.status_code == 404, response.text
+    assert "session_not_found" in response.text
+    assert project["store"].proposed == []
+    assert project["membership"]["checks"] == []
+    assert _events(project["session"]) == []
+    assert _events(foreign) == []
+
+
+@pytest.mark.parametrize("role", ["revoked", "read_only", "reviewer"])
+def test_dispatch_overlay_does_not_restore_project_write_access(project_overlay, role):
+    project = project_overlay
+    project["membership"]["role"] = role
+    response = _project_preview(project)
+    assert response.status_code == 403, response.text
+    assert project["membership"]["checks"] == [role]
+    assert project["store"].proposed == []
+    assert _events(project["session"]) == []
+
+
+@pytest.mark.parametrize("subject", [None, "auth0|project-editor"])
+def test_direct_overlay_does_not_borrow_turn_authority(project_overlay, monkeypatch, subject):
+    import deps
+
+    project = project_overlay
+    context = deps.TenantContext(project["org"], org_id=project["org"], subject=subject)
+    project["app"].dependency_overrides[deps.require_tenant] = lambda: context
+    session_store.end_turn(project["session"], project["turn"])
+    monkeypatch.setattr(deps, "stage_author_identity",
+                        lambda *args: pytest.fail("a direct caller must not borrow an actor"))
+    if subject is None:
+        def forbidden(*args, **kwargs):
+            raise overlay_router.platform_link.ProjectSessionForbidden("no verified subject")
+        monkeypatch.setattr(overlay_router.platform_link, "require_project_access", forbidden)
+    response = _project_preview(project, headers={} if subject else project["headers"])
+    assert response.status_code == (200 if subject else 403), response.text
+    assert len(project["store"].proposed) == (1 if subject else 0)
+    assert len(_events(project["session"])) == (1 if subject else 0)
 
 
 # --------------------------------------------------------------------------- #
