@@ -547,6 +547,74 @@ class SelectionContracts(unittest.TestCase):
         self.assert_full(self.choose(), "policy_path_changed")
         self.assertFalse(sentinel.exists())
 
+    def forge_evidence(self):
+        event = self.evidence()
+        event.update(provider="forge", initiator="forge-ci-relay", source_version="",
+                     head_ref="refs/pull/" + str(self.pr) + "/head", relay_manifest="verified",
+                     evidence_ref={"build": "fixture-build", "manifest_sha256": "a" * 64,
+                                   "operation": "ci-fixture"})
+        return event
+
+    def test_forge_relay_event_validates(self):
+        event = self.forge_evidence()
+        slug, number, bucket = selector.validate_event(event, event["head_sha"], "fixture/repo", self.pr)
+        self.assertEqual((slug, number), ("fixture/repo", self.pr))
+        self.assertEqual(bucket, selector.validate_event(self.evidence(), event["head_sha"], None, None)[2])
+
+    def test_forge_event_refusals(self):
+        cases = [({"provider_bound": False}, "unverified_event"),
+                 ({"initiator": "GitHub-Hook"}, "unverified_event"),
+                 ({"evidence_ref": {"build": "fixture-build", "operation": "ci-fixture"}}, "unverified_event"),
+                 ({"source_version": "pr/7"}, "contradictory_event"),
+                 ({"head_ref": "refs/heads/feature"}, "contradictory_event"),
+                 ({"target_sha": "bad"}, "contradictory_event"),
+                 ({"provider": "unknown"}, "unverified_event"),
+                 ({"build_id": 42}, "unverified_event"),
+                 ({"evidence_ref": {"build": "fixture-build", "operation": "ci-fixture",
+                                    "manifest_sha256": "z" * 64}}, "unverified_event")]
+        for changes, reason in cases:
+            with self.subTest(changes=changes):
+                event = dict(self.forge_evidence(), **changes)
+                with self.assertRaisesRegex(selector.InvalidInput, "^" + reason + "$"):
+                    selector.validate_event(event, event["head_sha"], None, None)
+
+    def test_shadow_tolerates_unverified_merge_gate(self):
+        for phase in ("shadow", "active"):
+            self.mapping["phase"] = phase
+            self.rebase_fixture()
+            self.change(text="good\n" + phase + "\n")
+            event = self.evidence()
+            event.pop("merge_gate")
+            decision = self.choose(event)
+            self.assertIs(decision["merge_gate_verified"], False)
+            if phase == "shadow":
+                self.assertNotIn("merge_gate_unverified", decision["reasons"])
+                self.assertEqual(decision["merge_base_sha"], self.trusted)
+            else:
+                self.assert_full(decision, "merge_gate_unverified")
+
+    def test_shadow_revocation_evidence(self):
+        self.mapping["phase"] = "shadow"
+        self.rebase_fixture()
+        self.change()
+        event = self.evidence()
+        event["merge_gate"].pop("revoked_map_shas")
+        decision = self.choose(event)
+        self.assertIs(decision["merge_gate_verified"], False)
+        self.assertNotIn("revocation_unknown", decision["reasons"])
+        event["merge_gate"]["provider_bound"] = False
+        event["merge_gate"]["revoked_map_shas"] = [event["merge_gate"]["map_sha"]]
+        self.assert_full(self.choose(event), "map_revoked")
+
+    def test_forge_target_uses_origin(self):
+        self.change()
+        event = self.forge_evidence()
+        self.assert_full(self.choose(event), "target_mismatch")
+        self.git("update-ref", "refs/remotes/origin/main", self.trusted)
+        decision = self.choose(event)
+        self.assertEqual(decision["merge_base_sha"], self.trusted)
+        self.assertNotIn("target_mismatch", decision["reasons"])
+
     def test_non_pr_event(self):
         self.change()
         for event_name in ("PUSH", "MANUAL", "MERGE_GROUP", "FORGE", "unknown"):

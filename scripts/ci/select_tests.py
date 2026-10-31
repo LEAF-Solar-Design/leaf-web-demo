@@ -263,9 +263,24 @@ def validate_event(event, head, repo_slug, pr_number):
     if event.get("event") not in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED",
                                   "PULL_REQUEST_REOPENED"):
         raise InvalidInput("non_pr_event")
-    if (event.get("provider") != "github" or event.get("initiator") != "GitHub-Hook" or
-            event.get("provider_bound") is not True or not event.get("build_id") or
-            not event.get("evidence_ref")):
+    provider = event.get("provider")
+    if provider == "github":
+        if (event.get("initiator") != "GitHub-Hook" or
+                event.get("provider_bound") is not True or not event.get("build_id") or
+                not event.get("evidence_ref")):
+            raise InvalidInput("unverified_event")
+    elif provider == "forge":
+        evidence = event.get("evidence_ref")
+        if (event.get("initiator") != "forge-ci-relay" or
+                event.get("provider_bound") is not True or
+                not isinstance(event.get("build_id"), str) or not event["build_id"] or
+                not isinstance(evidence, dict) or
+                not isinstance(evidence.get("manifest_sha256"), str) or
+                not re.fullmatch(r"[0-9A-Fa-f]{64}", evidence["manifest_sha256"]) or
+                any(not isinstance(evidence.get(k), str) or not evidence[k]
+                    for k in ("build", "operation"))):
+            raise InvalidInput("unverified_event")
+    else:
         raise InvalidInput("unverified_event")
     number = event.get("pr_number")
     if type(number) is not int or number <= 0:
@@ -275,10 +290,15 @@ def validate_event(event, head, repo_slug, pr_number):
         raise InvalidInput("invalid_pr_identity")
     if ((repo_slug is not None and repo_slug != slug) or
             (pr_number is not None and int(pr_number) != number) or
-            event.get("source_version") != "pr/" + str(number) or
+            event.get("source_version") != ("" if provider == "forge" else "pr/" + str(number)) or
             event.get("head_sha") != head):
         raise InvalidInput("contradictory_event")
-    for key in ("head_ref", "target_ref"):
+    if provider == "forge" and (
+            event.get("head_ref") != "refs/pull/" + str(number) + "/head" or
+            not isinstance(event.get("target_sha"), str) or
+            not re.fullmatch(r"[0-9A-Fa-f]{40}", event["target_sha"])):
+        raise InvalidInput("contradictory_event")
+    for key in (("target_ref",) if provider == "forge" else ("head_ref", "target_ref")):
         ref = event.get(key)
         if (not isinstance(ref, str) or not ref.startswith("refs/heads/") or
                 not ref[len("refs/heads/"):] or any(c in ref for c in " ~^:?*[\\") or
@@ -361,17 +381,33 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         if catalog["kind"] == "pytest" and ("PR_BASE_SHA" in environ or "BASE_SHA" in environ):
             raise InvalidInput("base_override_env")
         gate = event.get("merge_gate", {})
-        if (not isinstance(gate, dict) or gate.get("provider_bound") is not True or
+        gate_verified = not (not isinstance(gate, dict) or gate.get("provider_bound") is not True or
                 gate.get("kind") != "github-merge-queue" or
                 any(gate.get(k) is not True for k in ("queue_protected", "webhook_filter", "full_status")) or
                 not gate.get("evidence_ref") or gate.get("head_sha") != head_sha or
-                gate.get("repo") != slug or gate.get("map_sha") != decision["map_sha"]):
+                gate.get("repo") != slug or gate.get("map_sha") != decision["map_sha"])
+        decision["merge_gate_verified"] = gate_verified
+        if not gate_verified and policy.get("phase") != "shadow":
             raise InvalidInput("merge_gate_unverified")
-        revoked = gate.get("revoked_map_shas")
-        strings(revoked, "revocation_unknown")
-        if decision["map_sha"] in revoked:
+        revoked = gate.get("revoked_map_shas") if isinstance(gate, dict) else None
+        if gate_verified:
+            try:
+                strings(revoked, "revocation_unknown")
+            except InvalidInput:
+                decision["merge_gate_verified"] = False
+                if policy.get("phase") != "shadow":
+                    raise
+        if isinstance(revoked, list) and decision["map_sha"] in revoked:
             raise InvalidInput("map_revoked")
-        target = git.resolve(event["target_ref"] + "^{commit}")
+        target_ref = event["target_ref"]
+        if event.get("provider") == "forge":
+            target_ref = "refs/remotes/origin/" + target_ref[len("refs/heads/"):]
+        try:
+            target = git.resolve(target_ref + "^{commit}")
+        except InvalidInput:
+            if event.get("provider") == "forge":
+                raise InvalidInput("target_mismatch")
+            raise
         if event.get("target_sha") != target:
             raise InvalidInput("target_mismatch")
         bases = git.run("merge-base", "--all", target, head_sha).decode("ascii").splitlines()
