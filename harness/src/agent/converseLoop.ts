@@ -1374,6 +1374,7 @@ export class ConverseLoop {
               ctx.authoritySessionId ?? "",
               tokens,
               String(args.request_text ?? ""),
+              { sessionId: ctx.authoritySessionId, turnId: ctx.authorityTurnId },
             ),
           ),
         );

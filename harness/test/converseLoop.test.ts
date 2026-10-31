@@ -436,6 +436,38 @@ describe("ConverseLoop — seq + replay", () => {
 });
 
 describe("ConverseLoop — read auto-dispatch", () => {
+  it("proposes an overlay for the app session using the current app turn authority", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    // This test isolates transport after the app gate permits the preview.
+    vi.spyOn(gate, "check").mockResolvedValue({ decision: "allow" });
+    const store = new FakeSessionStore();
+    const results: SpineToolResult[] = [];
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        results.push(await input.tools.execute("propose_overlay", {
+          tokens: { "color.border": "#123456" }, request_text: "preview",
+          session_id: "caller-selected-session", subject: "caller-selected-subject", role: "owner",
+        }));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "overlay-sdk-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const turn = await loop.handleMessage({
+      sessionId: session.session_id, tenantId: session.tenant_id,
+      text: "Preview a border change", contextPacket: PACKET,
+      authoritySessionId: "app-session-1", authorityTurnId: "app-turn-1",
+    });
+    await turn.done;
+    expect(results[0]?.isError).toBeUndefined();
+    expect(appRun.proposeOverlayCalls).toEqual([{
+      tenantId: "demo-tenant", sessionId: "app-session-1",
+      tokens: { "color.border": "#123456" }, requestText: "preview",
+      authority: { sessionId: "app-session-1", turnId: "app-turn-1" },
+    }]);
+  });
+
   it("denies the SDK Skill tool through the live loop permission bridge", async () => {
     const appRun = new FakeAppRunClient();
     const gate = new FakeGateClient();

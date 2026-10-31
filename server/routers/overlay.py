@@ -112,8 +112,31 @@ class DecideBody(BaseModel):
 
 
 @router.post("/api/overlay/proposals")
-def propose_overlay(body: ProposeBody, tenant=Depends(deps.require_tenant)) -> Any:
+def propose_overlay(
+    body: ProposeBody,
+    tenant=Depends(deps.require_tenant),
+    authority_session_id: Optional[str] = Header(default=None, alias="X-Authority-Session-Id"),
+    authority_turn_id: Optional[str] = Header(default=None, alias="X-Authority-Turn-Id"),
+) -> Any:
     """Open a pending preview for one session."""
+    if isinstance(tenant, deps.TenantContext) and tenant.backedge:
+        authority_session_id = (
+            authority_session_id if isinstance(authority_session_id, str) else None
+        )
+        authority_turn_id = (
+            authority_turn_id if isinstance(authority_turn_id, str) else None
+        )
+        actor = None
+        if authority_session_id == body.session_id and authority_turn_id:
+            actor = deps.stage_author_identity(
+                tenant, authority_session_id, authority_turn_id,
+            )
+        if actor is None:
+            # Invalid authority must reveal no more about the target session
+            # than a missing or foreign session, and must precede all writes.
+            return _fail("session_not_found",
+                         f"no such session {body.session_id!r}", 404)
+        tenant = actor
     # Validate the session BEFORE any write. append_event raises KeyError for
     # an unknown session, and by the time publish() runs the proposal row is
     # already committed — the caller would get an error for a proposal that

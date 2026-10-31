@@ -558,11 +558,19 @@ export class HttpAppRunClient implements AppRunClient {
     sessionId: string,
     tokens: Record<string, string>,
     requestText: string,
+    authority?: { sessionId?: string; turnId?: string },
   ): Promise<Record<string, unknown>> {
     return this.request(tenantId, "POST", "/api/overlay/proposals", {
       session_id: sessionId,
       tokens,
       request_text: requestText,
+    }, {
+      ...(authority?.sessionId
+        ? { "x-authority-session-id": authority.sessionId }
+        : {}),
+      ...(authority?.turnId
+        ? { "x-authority-turn-id": authority.turnId }
+        : {}),
     });
   }
 

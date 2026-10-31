@@ -87,6 +87,39 @@ describe("HttpAppRunClient authoring identity", () => {
   });
 });
 
+describe("HttpAppRunClient overlay identity", () => {
+  it.each([true, false])("preserves the target and sends only optional turn authority (%s)", async (withAuthority) => {
+    let headers: Headers | undefined;
+    let body: unknown;
+    const client = new HttpAppRunClient({
+      baseUrl: "https://app.invalid",
+      dispatchSecret: "test-secret",
+      fetchImpl: async (_input, init) => {
+        headers = new Headers(init?.headers ?? {});
+        body = JSON.parse(String(init?.body));
+        return new Response(JSON.stringify({ proposal_id: "p-1" }), {
+          status: 200,
+          headers: { "content-type": "application/json" },
+        });
+      },
+    });
+    await client.proposeOverlay(
+      "tenant-a", "target-session", { "color.border": "#123456" }, "preview",
+      withAuthority ? { sessionId: "app-session", turnId: "app-turn" } : undefined,
+    );
+    expect(body).toEqual({
+      session_id: "target-session", tokens: { "color.border": "#123456" }, request_text: "preview",
+    });
+    expect(headers?.get("x-authority-session-id")).toBe(withAuthority ? "app-session" : null);
+    expect(headers?.get("x-authority-turn-id")).toBe(withAuthority ? "app-turn" : null);
+    expect(headers?.get("x-tenant-id")).toBe("tenant-a");
+    expect(headers?.get("x-dispatch-secret")).toBe("test-secret");
+    for (const name of ["x-author-subject", "x-subject", "x-role", "x-tier", "x-project-id"]) {
+      expect(headers?.has(name)).toBe(false);
+    }
+  });
+});
+
 describe("HttpAppRunClient run identity", () => {
   it("sends only the app-owned authority tuple as run headers", async () => {
     let headers = new Headers();

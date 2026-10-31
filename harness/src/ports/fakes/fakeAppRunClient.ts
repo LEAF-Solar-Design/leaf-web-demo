@@ -159,6 +159,7 @@ export class FakeAppRunClient implements AppRunClient {
     sessionId: string;
     tokens: Record<string, string>;
     requestText: string;
+    authority?: { sessionId?: string; turnId?: string };
   }> = [];
 
   async proposeOverlay(
@@ -166,8 +167,9 @@ export class FakeAppRunClient implements AppRunClient {
     sessionId: string,
     tokens: Record<string, string>,
     requestText: string,
+    authority?: { sessionId?: string; turnId?: string },
   ): Promise<Record<string, unknown>> {
-    this.proposeOverlayCalls.push({ tenantId, sessionId, tokens, requestText });
+    this.proposeOverlayCalls.push({ tenantId, sessionId, tokens, requestText, authority });
     return {
       proposal_id: "fake-overlay-proposal",
       tokens,

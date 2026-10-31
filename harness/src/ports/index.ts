@@ -5,9 +5,21 @@
 export * from "../vendor/mushy-author/ports/index.js";
 
 import type {
+  AppRunClient as VendoredAppRunClient,
   TenantMutationFence,
   TenantRepoProvider as VendoredTenantRepoProvider,
 } from "../vendor/mushy-author/ports/index.js";
+
+/** Host-only overlay authority handoff; the app resolves the active turn's actor. */
+export interface AppRunClient extends VendoredAppRunClient {
+  proposeOverlay(
+    tenantId: string,
+    sessionId: string,
+    tokens: Record<string, string>,
+    requestText: string,
+    authority?: { sessionId?: string; turnId?: string },
+  ): Promise<Record<string, unknown>>;
+}
 
 /** Server-resolved authority for one project repository. No path is caller-selectable. */
 export interface ProjectRepositoryAuthority {
