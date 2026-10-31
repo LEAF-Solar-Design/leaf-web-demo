@@ -49,12 +49,19 @@ def r14f2_browser_records(organization_id="fakeorg"):
     }
 
 
+def r14f2_fixture_digests():
+    sizing = p._sizing_module()
+    fixture = json.loads((sizing.REPO / sizing.MANIFEST).read_bytes())["fixtures"][0]
+    return fixture["request_wire_sha256"], fixture["response_wire_sha256"]
+
+
 def r14f2_evidence(c):
     facts, sizing = r14f1_facts(c), p._sizing_module()
+    request_sha256, response_sha256 = r14f2_fixture_digests()
     prefix = "project:" + c.config.run_id + ":sizing:"
     base = {key: facts[key] for key in ("run_id", "organization_id", "classification", "endpoint_sha256", "fixture_sha256")}
     recovery = dict(base, project_id="recovery-project", job_id="sizing-1", output_version_id="sized-1", exchange_job_id="sizing-1",
-        evidence_sha256=HASH, request_sha256=HASH, response_sha256=OTHER_HASH, panels_in_sequence=27, job_attempt=2,
+        evidence_sha256=HASH, request_sha256=request_sha256, response_sha256=response_sha256, panels_in_sequence=27, job_attempt=2,
         sender_worker_id=prefix + "1", published_worker_id=prefix + "2", service_posts=1)
     submission = {key: value for key, value in recovery.items() if key not in {"job_attempt", "sender_worker_id", "published_worker_id"}}
     submission.update(project_id="submission-project", job_id="sizing-2", exchange_job_id="sizing-2", output_version_id="sized-2",
@@ -5603,11 +5610,12 @@ def r14f1_facts(c):
 
 
 def r14f1_attachment(facts):
+    request_sha256, response_sha256 = r14f2_fixture_digests()
     return {**{key: facts[key] for key in ("run_id", "organization_id", "classification",
             "endpoint_sha256", "fixture_sha256")},
         "project_id": "sizing-project", "job_id": "sizing-job", "exchange_job_id": "sizing-job",
         "output_version_id": "sizing-output", "evidence_sha256": HASH,
-        "request_sha256": HASH, "response_sha256": OTHER_HASH}
+        "request_sha256": request_sha256, "response_sha256": response_sha256}
 
 
 def r14f1_runtime(c):
@@ -5977,6 +5985,21 @@ def test_r14f2_report_reader_requires_sizing(tmp_path, monkeypatch):
     browser_refused(lambda: p._read_browser_report(c.report, c.request))
 
 
+@pytest.mark.parametrize("scenario", ("capture-recovery", "read-custody", "browser-response-discard", "service-response-drop"))
+@pytest.mark.parametrize("repeated", (False, True))
+def test_r14f2_report_reader_refuses_pair_array_records(tmp_path, monkeypatch, scenario, repeated):
+    c = browser_case(tmp_path, monkeypatch)
+    c.launch()
+    c.write()
+    assert p._read_browser_report(c.report, c.request).sizing[scenario]
+    pairs = list(c.raw["sizing"][scenario].items())
+    if repeated:
+        pairs.insert(0, ("organization_id", "foreign"))
+    c.raw["sizing"][scenario] = pairs
+    c.write()
+    browser_refused(lambda: p._read_browser_report(c.report, c.request))
+
+
 def test_r14f2_report_reader_refuses_cross_record_substitution(tmp_path, monkeypatch):
     c = browser_case(tmp_path, monkeypatch)
     c.launch()
@@ -6102,6 +6125,18 @@ def test_r14f2_receipt_requires_sizing_and_all_scenarios():
         assert not verify_document(c, corrupt).ok
     corrupt = clone_document(c.document)
     del corrupt["replay"]
+    assert not verify_document(c, corrupt).ok
+
+
+@pytest.mark.parametrize("scenario", ("capture-recovery", "browser-response-discard"))
+@pytest.mark.parametrize("field", ("request_sha256", "response_sha256"))
+def test_r14f2_receipt_requires_pinned_fixture_digests(scenario, field):
+    c = successful_receipt()
+    corrupt = clone_document(c.document)
+    row = corrupt["replay"]["sizing_evidence"][scenario]
+    assert row[field] != "0" * 64
+    row[field] = "0" * 64
+    corrupt["replay"]["canonical_sizing_sha256"] = p._sizing_attachment_hash(corrupt["replay"]["sizing_evidence"])
     assert not verify_document(c, corrupt).ok
 
 

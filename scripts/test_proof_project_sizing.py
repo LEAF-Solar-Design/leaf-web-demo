@@ -482,6 +482,17 @@ def test_r14f1_independent_sizing_evidence():
             s.verify_sizing_run(replay, value, observe=lambda *ids: evidence)
 
 
+@pytest.mark.parametrize("field", ("request_sha256", "response_sha256"))
+def test_r14f2_receipt_attachment_requires_pinned_fixture_digests(field):
+    replay = plan()
+    evidence = attachment(replay)
+    s.validate_sizing_attachment(evidence, replay.public())
+    assert evidence[field] != "0" * 64
+    evidence[field] = "0" * 64
+    with pytest.raises(s.ReplayRefused):
+        s.validate_sizing_attachment(evidence, replay.public())
+
+
 def test_r14f1_cleanup_uncertainty():
     events = []
     owner = SimpleNamespace(resources=[SimpleNamespace(stop=lambda deadline: events.append("stop") or False)],

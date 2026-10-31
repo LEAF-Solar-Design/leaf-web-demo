@@ -489,7 +489,7 @@ def validate_public_replay(value, *, run_id, organization_id, source_sha256):
 
 
 def validate_sizing_attachment(attachment, facts):
-    """Receipt-side shape; database verification precedes serialization."""
+    """Receipt-side shape and pinned replay digests; database verification precedes serialization."""
     fields = {"run_id", "organization_id", "project_id", "job_id", "output_version_id",
               "exchange_job_id", "classification", "endpoint_sha256", "fixture_sha256",
               "evidence_sha256", "request_sha256", "response_sha256"}
@@ -499,6 +499,11 @@ def validate_sizing_attachment(attachment, facts):
     _require(all(_id(attachment[key]) for key in ("project_id", "job_id", "output_version_id", "exchange_job_id")))
     _require(attachment["job_id"] == attachment["exchange_job_id"])
     _require(all(_hash(attachment[key]) for key in ("evidence_sha256", "request_sha256", "response_sha256")))
+    manifest = (REPO / MANIFEST).read_bytes()
+    _require(digest(manifest) == MANIFEST_SHA256)
+    fixtures = {row["request_wire_sha256"]: row["response_wire_sha256"] for row in json.loads(manifest)["fixtures"]}
+    _require(attachment["request_sha256"] in fixtures
+             and attachment["response_sha256"] == fixtures[attachment["request_sha256"]])
 
 
 def observe_database_sizing(plan, attachment, *, graph, conn):

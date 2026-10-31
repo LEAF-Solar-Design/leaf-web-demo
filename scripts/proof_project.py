@@ -2432,6 +2432,7 @@ def _read_browser_report(path, request):
         if (type(raw["run_id"]) is not str or type(raw["public_key_thumbprint"]) is not str
                 or type(raw["exit_code"]) is not int or raw["exit_code"] != 0):
             _refuse(FailureCode.BROWSER_EVIDENCE, Stage.BROWSER)
+        _sizing_module().validate_browser_sizing(raw["sizing"], request.organization_id)
         result = BrowserResult(raw["run_id"], source, raw["public_key_thumbprint"], raw["exit_code"],
             _browser_strings(raw["selected_test_ids"]), _browser_strings(raw["started_test_ids"]),
             _browser_strings(raw["completed_test_ids"]), tuple(outcomes),
