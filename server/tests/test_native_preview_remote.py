@@ -4,6 +4,7 @@ evidence, never a simulator run. Durable cases use the existing PostgreSQL spine
 import asyncio
 import base64
 import binascii
+import copy
 from concurrent.futures import ThreadPoolExecutor
 import hashlib
 import json
@@ -171,6 +172,149 @@ def test_png_and_duplicate_json_are_rejected():
     with pytest.raises(remote.ProtocolError): remote.parse(b'{"attempt":1,"attempt":2}')
 
 
+@pytest.fixture
+def expired_remote_record(protocol, monkeypatch):
+    c = protocol
+    context = native.validate_context({'schema': native.REMOTE_SCHEMA,
+        'tenant_id': c.org, 'org_id': c.org, 'project_id': c.project,
+        'actor_id': c.actor, 'source': c.prepare(), 'dispatch_kind': 'remote-worker',
+        'worker_binding': c.binding, 'budget_s': 17})
+    jid = str(uuid.uuid4())
+    rec = {'job_id': jid, 'native_preview': context, 'status': 'failed',
+        'progress': 'error', 'attempt': 2,
+        'provenance': {'attempt': 2, 'execution_path': 'native-worker'},
+        'started_at': 100, 'finished_at': 117, 'lease': None, 'result': None,
+        'error': {'message': 'private raw error'},
+        **{key: context[key] for key in ('tenant_id', 'org_id', 'project_id')}}
+    monkeypatch.setattr(jobs, 'job_store_mode', lambda: 'postgres')
+    monkeypatch.setattr(jobs, 'get_job', lambda _: rec)
+    return c, jid, rec
+
+
+def test_failed_disposition_is_closed_source_bound_and_read_only(expired_remote_record, monkeypatch):
+    c, jid, rec = expired_remote_record
+    rec.update({'terminal_fingerprint': 'private fingerprint', 'payload': {'secret': 'raw'},
+                'url': 'https://private.invalid', 'path': '/private', 'environment': {'TOKEN': 'secret'}})
+    before = copy.deepcopy(rec)
+    monkeypatch.setenv('JOB_MAX_S', '3600')
+    monkeypatch.setattr(remote, 'time', SimpleNamespace(time=lambda: pytest.fail('caller time')))
+    public = remote.status(c.org, c.project, c.reader, jid)
+    projection = public['failure_disposition']
+    expected = {'schema': 'leaf.native-preview.failed-disposition.v1',
+        'job_id': jid, 'attempt': 2, 'org_id': c.org, 'project_id': c.project,
+        'status': 'failed', 'reason': 'execution_budget_expired',
+        'source': {key: rec['native_preview']['source'][key] for key in
+                   ('revision', 'document_sha256', 'archive_sha256')},
+        'started_at': 100, 'finished_at': 117, 'lease_cleared': True}
+    expected['disposition_sha256'] = hashlib.sha256(remote.canonical(expected)).hexdigest()
+    assert projection == expected
+    assert public == {'job_id': jid, 'status': 'failed', **expected['source'],
+                      'failure_disposition': expected}
+    assert remote.status(c.org, c.project, c.reader, jid) == public
+    rec['error'] = {'message': 'different private error'}
+    rec['terminal_fingerprint'] = 'different private fingerprint'
+    assert remote.status(c.org, c.project, c.reader, jid) == public
+    rec['error'], rec['terminal_fingerprint'] = before['error'], before['terminal_fingerprint']
+    assert rec == before
+    projection['source']['revision'] += 1
+    assert rec == before
+
+
+@pytest.mark.parametrize('field', ['job_id', 'org_id', 'project_id', 'attempt',
+    'revision', 'document_sha256', 'archive_sha256', 'started_at', 'finished_at'])
+def test_failed_disposition_digest_covers_identity_source_attempt_and_times(expired_remote_record, field):
+    _, jid, rec = expired_remote_record
+    context = rec['native_preview']
+    original = remote._failure_disposition(rec, context, jid)
+    if field == 'job_id': jid = str(uuid.uuid4())
+    elif field in ('org_id', 'project_id'): context[field] = str(uuid.uuid4())
+    elif field == 'attempt':
+        rec['attempt'] += 1
+        rec['provenance']['attempt'] += 1
+    elif field in ('revision', 'document_sha256', 'archive_sha256'):
+        context['source'][field] = (context['source'][field] + 1 if field == 'revision'
+                                    else '0' * 64)
+    elif field == 'started_at': rec[field] -= 1
+    else: rec[field] += 1
+    changed = remote._failure_disposition(rec, context, jid)
+    assert changed['disposition_sha256'] != original['disposition_sha256']
+    digest = changed.pop('disposition_sha256')
+    assert digest == hashlib.sha256(remote.canonical(changed)).hexdigest()
+
+
+@pytest.mark.parametrize('field,value', [
+    ('status', 'queued'), ('status', 'running'), ('status', 'submitted'), ('status', 'cancelled'),
+    ('progress', 'closed'), ('progress', 'cancelled'), ('progress', None),
+    ('attempt', 0), ('attempt', -1), ('attempt', True), ('attempt', 2.0), ('attempt', '2'),
+    ('provenance', None), ('provenance', []),
+    ('provenance', {'attempt': 1, 'execution_path': 'native-worker'}),
+    ('provenance', {'attempt': 2.0, 'execution_path': 'native-worker'}),
+    ('provenance', {'attempt': 2, 'execution_path': 'local'}),
+    ('provenance', {'attempt': 2, 'execution_path': 'native-worker', 'extra': True}),
+    ('result', {}), ('result', {'ok': True}), ('error', None),
+    ('lease', {}), ('lease', {'owner': 'private', 'expires_at': 10000}),
+    ('started_at', None), ('started_at', True), ('started_at', '100'),
+    ('started_at', float('nan')), ('started_at', float('inf')),
+    ('started_at', -float('inf')), ('started_at', 10 ** 1000),
+    ('finished_at', None), ('finished_at', False), ('finished_at', '117'),
+    ('finished_at', float('nan')), ('finished_at', float('inf')),
+    ('finished_at', -float('inf')), ('finished_at', 10 ** 1000),
+    ('finished_at', 116.999), ('finished_at', 99),
+])
+def test_ambiguous_failed_disposition_is_omitted_without_mutation(expired_remote_record, field, value):
+    c, jid, rec = expired_remote_record
+    rec[field] = value
+    before = repr(rec)
+    public = remote.status(c.org, c.project, c.reader, jid)
+    assert 'failure_disposition' not in public
+    assert public['status'] == ('cancelled' if rec['progress'] == 'closed' else
+                              'queued' if rec['status'] == 'submitted' else rec['status'])
+    assert repr(rec) == before
+
+
+@pytest.mark.parametrize('field', ['progress', 'lease', 'error', 'attempt', 'provenance', 'started_at', 'finished_at'])
+def test_missing_failed_disposition_evidence_is_omitted(expired_remote_record, field):
+    c, jid, rec = expired_remote_record
+    del rec[field]
+    before = copy.deepcopy(rec)
+    assert 'failure_disposition' not in remote.status(c.org, c.project, c.reader, jid)
+    assert rec == before
+
+
+def test_failed_disposition_allows_absent_result_and_finite_float_times(expired_remote_record):
+    c, jid, rec = expired_remote_record
+    del rec['result']
+    rec.update(started_at=100.5, finished_at=117.5)
+    assert remote.status(c.org, c.project, c.reader, jid)['failure_disposition']['finished_at'] == 117.5
+
+
+@pytest.mark.parametrize('field', ['tenant_id', 'org_id', 'project_id'])
+def test_failed_disposition_preserves_foreign_scope_protection(expired_remote_record, field):
+    c, jid, rec = expired_remote_record
+    rec[field] = str(uuid.uuid4())
+    before = copy.deepcopy(rec)
+    with pytest.raises(remote.ProtocolError) as exc:
+        remote.status(c.org, c.project, c.reader, jid)
+    assert exc.value.status == 404
+    assert rec == before
+
+
+@pytest.mark.parametrize('during_read', [False, True])
+def test_failed_disposition_preserves_authorization_recheck(expired_remote_record, monkeypatch, during_read):
+    c, jid, rec = expired_remote_record
+    before = copy.deepcopy(rec)
+    if during_read:
+        def get_job(_):
+            c.revoked.add(c.reader)
+            return rec
+        monkeypatch.setattr(jobs, 'get_job', get_job)
+    else:
+        c.revoked.add(c.reader)
+    with pytest.raises(remote.lifecycle.LifecycleForbidden):
+        remote.status(c.org, c.project, c.reader, jid)
+    assert rec == before
+
+
 @pytest.mark.parametrize('outcome', ['applied', 'not_owner', 'missing'])
 def test_remote_redispatch_uses_expiry_authority_without_local_work(protocol, monkeypatch, outcome):
     c = protocol
@@ -278,6 +422,7 @@ def test_real_postgres_http_round_trip_and_readback(protocol, postgres_authority
     assert rec['provenance'] == {'attempt': 1, 'execution_path': 'native-worker'}
     response = c.client.get(c.url + f'/{jid}', headers=c.headers(c.reader))
     assert response.status_code == 200 and response.json()['status'] == 'complete'
+    assert 'failure_disposition' not in response.json()
     assert not {'native_preview', 'worker_binding', 'lease_owner', 'error', 'execution'} & set(response.json())
     response = c.client.get(c.url + f'/{jid}/screenshot', headers=c.headers(c.reader))
     assert response.status_code == 200 and response.content == png_bytes()
@@ -530,6 +675,19 @@ def test_real_postgres_reaper_settles_expired_remote_and_mirror_once(linked_remo
     assert platform['status'] == authority['status'] == 'failed'
     assert authority['terminal_fingerprint'] == jobs._terminal_fingerprint(
         'failed', None, rec['error'], rec['provenance'])
+    response = c.client.get(c.url + f'/{jid}', headers=c.headers(c.reader))
+    assert response.status_code == 200, response.text
+    disposition = response.json()['failure_disposition']
+    digest = disposition.pop('disposition_sha256')
+    assert digest == hashlib.sha256(remote.canonical(disposition)).hexdigest()
+    assert disposition == {'schema': 'leaf.native-preview.failed-disposition.v1',
+        'job_id': jid, 'attempt': ident['attempt'], 'org_id': c.org, 'project_id': c.project,
+        'status': 'failed', 'reason': 'execution_budget_expired',
+        'source': {key: rec['native_preview']['source'][key] for key in
+                   ('revision', 'document_sha256', 'archive_sha256')},
+        'started_at': rec['started_at'], 'finished_at': rec['finished_at'], 'lease_cleared': True}
+    assert remote.status(c.org, c.project, c.reader, jid)['failure_disposition']['disposition_sha256'] == digest
+    assert expiry_rows(db, jid, mirror) == (authority, platform)
     assert not jobs._redispatch_record(jid)
     jobs._reap_orphans_once()
     assert expiry_rows(db, jid, mirror) == (authority, platform)

@@ -391,6 +391,39 @@ def complete(org, project, actor, jid, body):
     return {'job_id': jid, 'status': 'failed' if failure else 'complete'}
 
 
+def _failure_disposition(rec, context, jid):
+    """Project settled expiry evidence only, never private terminal authority."""
+    attempt = rec.get('attempt')
+    provenance = rec.get('provenance')
+    if (rec.get('status') != 'failed' or rec.get('progress') != 'error'
+            or type(attempt) is not int or attempt < 1
+            or type(provenance) is not dict
+            or type(provenance.get('attempt')) is not int
+            or provenance != {'attempt': attempt, 'execution_path': 'native-worker'}
+            or rec.get('result') is not None or rec.get('error') is None
+            or 'lease' not in rec or rec['lease'] is not None):
+        return None
+    start, finish = rec.get('started_at'), rec.get('finished_at')
+    if type(start) not in (int, float) or type(finish) not in (int, float):
+        return None
+    try:
+        if (not math.isfinite(start) or not math.isfinite(finish)
+                or finish < start + context['budget_s']):
+            return None
+    except OverflowError:
+        return None
+    projection = {
+        'schema': 'leaf.native-preview.failed-disposition.v1',
+        'job_id': jid, 'attempt': attempt, 'org_id': context['org_id'],
+        'project_id': context['project_id'], 'status': 'failed',
+        'reason': 'execution_budget_expired',
+        'source': {key: context['source'][key] for key in
+                   ('revision', 'document_sha256', 'archive_sha256')},
+        'started_at': start, 'finished_at': finish, 'lease_cleared': True}
+    projection['disposition_sha256'] = hashlib.sha256(canonical(projection)).hexdigest()
+    return projection
+
+
 def status(org, project, actor, jid):
     org, project, actor = authorize(org, project, actor, write=False)
     rec, context = record(org, project, jid)
@@ -406,6 +439,9 @@ def status(org, project, actor, jid):
         read_evidence(context, jid, result)
         public['receipt'] = copy.deepcopy(result['receipt'])
         public['evidence_basis'] = 'authenticated-worker-report'
+    disposition = _failure_disposition(rec, context, jid)
+    if disposition is not None:
+        public['failure_disposition'] = disposition
     authorize(org, project, actor, write=False)
     return public
 
