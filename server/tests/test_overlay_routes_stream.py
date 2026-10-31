@@ -490,7 +490,7 @@ def test_http_authenticated_denial_without_browser_actor(
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
 
     def verify(authorization):
-        assert authorization == "Bearer verified-fixture"
+        assert authorization == "Bearer test"
         ns = auth.claim_ns()
         return {"sub": identity.tenant.subject, ns + "tenant_id": TENANT,
                 ns + "org_id": TENANT, ns + "tier": "pro"}
@@ -502,7 +502,7 @@ def test_http_authenticated_denial_without_browser_actor(
         resolve_workspace=lambda _: None))
     app = FastAPI()
     app.include_router(overlay_router.router)
-    headers = {"Authorization": "Bearer verified-fixture"}
+    headers = {"Authorization": "Bearer test"}
     if actor is not None:
         headers["X-Actor"] = actor
     with TestClient(app) as client:
