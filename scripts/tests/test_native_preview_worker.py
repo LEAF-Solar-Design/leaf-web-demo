@@ -579,8 +579,13 @@ def allocator_history_fixture(tmp_path, monkeypatch):
     return namespace, root, rows, output
 
 
-def test_canonical_allocator_history_projection(tmp_path, monkeypatch):
+@pytest.mark.parametrize('retained_free', [False, True])
+def test_canonical_allocator_history_projection(tmp_path, monkeypatch, retained_free):
     namespace, root, rows, output = allocator_history_fixture(tmp_path, monkeypatch)
+    if retained_free:
+        (root / 'state.json').write_bytes(worker.encode(dict(jobs={
+            'full-ticket': dict(ticket='full-ticket', job=rows[1]['job'],
+                                state='free', confirmed_dead=True)})))
     namespace['main']()
     raw = output.getvalue()
     witness = reconciliation.allocator_witness(worker.parse(raw), JOB, 1)
@@ -591,7 +596,8 @@ def test_canonical_allocator_history_projection(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize('bad', ['ambiguous', 'missing', 'active', 'active-after', 'order',
                                  'no-death', 'no-free', 'malformed', 'truncated', 'oversize',
-                                 'ticket-reused', 'unassociated-ticket', 'rotation-gap'])
+                                 'ticket-reused', 'unassociated-ticket', 'rotation-gap',
+                                 'free-without-death', 'foreign-free-ticket'])
 def test_canonical_allocator_history_fail_closed(tmp_path, monkeypatch, bad):
     namespace, root, rows, output = allocator_history_fixture(tmp_path, monkeypatch)
     history = root / 'history.jsonl'
@@ -606,6 +612,11 @@ def test_canonical_allocator_history_fail_closed(tmp_path, monkeypatch, bad):
         (root / 'history.jsonl.2').write_bytes(b'')
     elif bad == 'missing':
         rows = rows[:1]
+    elif bad in ('free-without-death', 'foreign-free-ticket'):
+        key = 'wrong-ticket' if bad == 'foreign-free-ticket' else 'full-ticket'
+        (root / 'state.json').write_bytes(worker.encode(dict(jobs={key: dict(
+            ticket=key, job=rows[1]['job'], state='free',
+            confirmed_dead=bad != 'free-without-death')})))
     elif bad in ('active', 'active-after'):
         state = worker.encode(dict(jobs={'full-ticket': dict(job=rows[1]['job'])}))
         if bad == 'active':

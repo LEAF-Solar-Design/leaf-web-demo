@@ -416,7 +416,22 @@ def main():
         if row.get('ticket')!=ticket: continue
         names=[v for v in strings(row) if v.startswith('preview-')]
         assert all(v in markers for v in names)
-    counts=[sum(v==ticket or v.startswith(prefix) for v in strings(state)) for state in (before,after)]
+    def active_matches(state):
+        # The allocator retains terminal rows for free_retention_s. They are
+        # evidence of release, not active admission, only after confirmed death.
+        assert type(state.get('jobs')) is dict
+        count=sum(v==ticket or v.startswith(prefix)
+                  for v in strings({k:v for k,v in state.items() if k!='jobs'}))
+        for key,row in state['jobs'].items():
+            if not (key==ticket or any(v==ticket or v.startswith(prefix) for v in strings(row))):
+                continue
+            assert type(row) is dict
+            if (key==ticket and row.get('ticket',key)==ticket
+                    and row.get('state')=='free' and row.get('confirmed_dead') is True):
+                continue
+            count+=1
+        return count
+    counts=[active_matches(state) for state in (before,after)]
     assert counts==[0,0]
     times={}
     ordered=[]
