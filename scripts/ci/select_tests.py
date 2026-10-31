@@ -374,7 +374,23 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         entries, fingerprint = catalog_info(catalog)
         decision.update(catalog_sha256=fingerprint, catalog_suite_ids=sorted(entries),
                         executed_suite_ids=sorted(entries), catalog_kind=catalog.get("kind"))
-        if mapping.get("catalog_sha256") != fingerprint:
+        suites = mapping.get("suites")
+        if not isinstance(suites, dict) or any(not isinstance(row, dict) for row in suites.values()):
+            raise InvalidInput("invalid_map")
+        new = set(entries) - set(suites)
+        removed = set(suites) - set(entries)
+        changed = {sid for sid in set(entries) & set(suites)
+                   if suites[sid].get("test_ids") is not None and
+                   sorted(strings(suites[sid]["test_ids"])) != sorted(entries[sid]["test_ids"])}
+        ratio = round((len(new) + len(changed)) / len(entries), 6)
+        decision["map_catalog_sha256"] = mapping.get("catalog_sha256")
+        decision["catalog_drift"] = {"new": sorted(new), "changed": sorted(changed),
+                                     "removed": sorted(removed), "ratio": ratio}
+        max_ratio = policy.get("max_catalog_drift_ratio", 0.25)
+        if (isinstance(max_ratio, bool) or not isinstance(max_ratio, (int, float)) or
+                not 0 <= max_ratio <= 1):
+            raise InvalidInput("invalid_policy")
+        if ratio > max_ratio:
             raise InvalidInput("catalog_change")
         if catalog.get("kind") not in ("pytest", "web"):
             raise InvalidInput("invalid_catalog")
@@ -424,11 +440,11 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         if not paths:
             raise InvalidInput("empty_diff")
         for path in paths:
-            old, new = base_tree.get(path), head_tree.get(path)
-            if not old and not new:
+            old_entry, new_entry = base_tree.get(path), head_tree.get(path)
+            if not old_entry and not new_entry:
                 raise InvalidInput("unreadable_changed_path")
             if any(entry and (entry[0] not in ("100644", "100755") or entry[1] != "blob")
-                   for entry in (old, new)):
+                   for entry in (old_entry, new_entry)):
                 raise InvalidInput("submodule_or_symlink")
         rules = strings(policy.get("force_full_rules", []), "invalid_policy")
         if any(protected_path(path, rules) for path in paths):
@@ -445,20 +461,22 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                 raise InvalidInput("catalog_runner_change")
         if catalog["kind"] == "web" and not runner:
             raise InvalidInput("catalog_runner_unbound")
-        suites = mapping.get("suites")
-        if not isinstance(suites, dict) or set(suites) - set(entries):
-            raise InvalidInput("invalid_map")
         mandatory = set(strings(mapping.get("mandatory_suite_ids")))
         mandatory.update(strings(policy.get("mandatory_suite_ids")))
         required = mandatory | set(strings(mapping.get("always_select_suite_ids", [])))
-        if not mandatory or not required <= set(entries):
+        if not mandatory:
             raise InvalidInput("missing_mandatory_id")
+        mandatory.intersection_update(entries)
+        required.intersection_update(entries)
         decision["mandatory_suite_ids"] = sorted(mandatory)
         decision["known_read_paths"] = {}
         edges = {}
         shared = {}
         for sid, entry in entries.items():
             row = suites.get(sid, {})
+            if sid in new or sid in changed:
+                required.add(sid)
+                row = {}
             if not isinstance(row, dict):
                 raise InvalidInput("invalid_map")
             if (not _eligible_suite(row) or entry.get("trace_kind") != "python" or
@@ -488,7 +506,7 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                     raise InvalidInput("ambiguous_read_path")
                 edges.setdefault(path, set()).add(sid)
             decision["known_read_paths"][sid] = sorted(reads)
-            shared[sid] = set(strings(row.get("shared_state_dependencies", [])))
+            shared[sid] = set(strings(row.get("shared_state_dependencies", []))) - removed
             if not shared[sid] <= set(entries):
                 raise InvalidInput("shared_closure_incomplete")
         for path in paths:
