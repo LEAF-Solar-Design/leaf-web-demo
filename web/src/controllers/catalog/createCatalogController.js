@@ -328,8 +328,12 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     track('route.outcome', { outcome, ...(route.tool ? { tool: route.tool } : {}) })
   }
 
+  const isUnmatchedDecision = (decision) => decision?.lane === 'run' && !decision.slash &&
+    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()))
+
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
-    const reason = decision?.lane === 'run' && solarRefusal(decision.tool, projectScope() ? decision.params ?? {} : decision.params)
+    const unmatched = isUnmatchedDecision(decision)
+    const reason = decision?.lane === 'run' && !unmatched && solarRefusal(decision.tool, projectScope() ? decision.params ?? {} : decision.params)
     if (reason) {
       adapters.dismissDecision?.()
       publish({ route: null, routeError: reason })
@@ -339,7 +343,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       (typeof decision.tool !== 'string' || !decision.tool.trim())
     const count = refused ? (requestText === lastRefusedText ? refusedCount + 1 : 1) : 0
     const nextDecision = count >= 2 ? { ...decision, repeat: count } : decision
-    const committed = adapters.commitDecision ? adapters.commitDecision(nextDecision) : nextDecision
+    const committed = !unmatched && adapters.commitDecision ? adapters.commitDecision(nextDecision) : nextDecision
     if (committed !== undefined) {
       lastRefusedText = refused ? requestText : null
       refusedCount = count
@@ -598,12 +602,13 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const routed = await services.routePrompt(current.mock, text, state.tools, { allowSecretOnce })
       if (!requestIsCurrent()) return undefined
       const decision = solveRunDecision(routed)
-      if (decision.lane === 'run' && solarRefusal(decision.tool, decision.params)) {
+      const unmatched = isUnmatchedDecision(decision)
+      if (decision.lane === 'run' && !unmatched && solarRefusal(decision.tool, decision.params)) {
         return commitDecision(decision, { requestText: text })
       }
       const confidence = Number(decision.confidence) || 0
       const chipOnly = current.agentDisabled ||
-        (decision.lane === 'run' && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
+        (decision.lane === 'run' && !unmatched && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
 
       if (chipOnly) {
         commitDecision(decision, { requestText: text })
@@ -617,7 +622,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         }
         publish({ agentBanner: null })
         if (!requestIsCurrent()) return undefined
-        if (decision.lane === 'run' && !!decision.tool &&
+        if (decision.lane === 'run' && !unmatched && !!decision.tool &&
             (confidence >= thresholds.RACE_MIN || decision.routedLane === 'solve')) {
           commitDecision(decision, { requestText: text })
           try {
