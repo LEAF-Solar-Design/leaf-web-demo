@@ -2035,7 +2035,15 @@ export async function setupRealProject(runtime, assertions = expect) {
   await enterWorkspaceEnvironment(page, assertions)
   await page.getByRole('button', { name: 'Start', exact: true }).click({ timeout: 15_000 })
   const board = page.getByRole('region', { name: 'Project workspace', exact: true })
-  await assertions(board).toBeVisible()
+  const openProject = page.getByRole('button', { name: 'Open project or material', exact: true })
+  try {
+    await assertions.poll(async () => await board.isVisible() || await openProject.isVisible(),
+      { timeout: 15_000 }).toBe(true)
+    if (await openProject.isVisible()) await openProject.click({ timeout: 15_000 })
+    await assertions(board).toBeVisible({ timeout: 15_000 })
+  } catch (cause) {
+    throw new Error('open-real-project: Start did not reach the Project workspace board', { cause })
+  }
   // WorkspaceProjectSlot supplies the drawing's name; the controller creates
   // and opens the project directly, without a name field or native dialog.
   const create = board.getByRole('button', { name: 'Create project from this drawing', exact: true })
@@ -2054,9 +2062,20 @@ export async function setupRealProject(runtime, assertions = expect) {
   assertions(name).toBeTruthy()
   evidence.escapeProject = { orgId: org.org_id, projectId: project.project_id, name }
   await assertions(page.locator('.workspace-summary')).toContainText(name)
-  await assertions(board).toHaveAttribute('data-project-state', 'project')
-  await assertions(board.getByText('Versions live with a workspace project', { exact: true })).toHaveCount(0)
-  await assertions(board.getByText('Runs appear here with a project open', { exact: true })).toHaveCount(0)
+  const projectStateBoard = page.getByRole('region', { name: 'Project workspace', exact: true, includeHidden: true })
+  await assertions(projectStateBoard).toHaveAttribute('data-project-state', 'project')
+  await assertions(projectStateBoard.getByText('Versions live with a workspace project', { exact: true })).toHaveCount(0)
+  await assertions(projectStateBoard.getByText('Runs appear here with a project open', { exact: true })).toHaveCount(0)
+  const environment = page.locator('section.workspace-environment')
+  try {
+    if (await openProject.isVisible()
+      || await environment.count() && await readLocatorAttribute(environment, 'data-entered') !== 'true') {
+      await enterWorkspaceEnvironment(page, assertions)
+      await assertions(environment).toHaveAttribute('data-entered', 'true', { timeout: 15_000 })
+    }
+  } catch (cause) {
+    throw new Error('open-real-project: workspace did not re-enter after project creation', { cause })
+  }
   const back = page.getByRole('button', { name: 'Return to drawing', exact: true })
   if (await back.isVisible()) await back.click({ timeout: 15_000 })
   await assertions(board).toBeHidden()
