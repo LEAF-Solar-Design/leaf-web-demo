@@ -1,11 +1,11 @@
 import { execFile, spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
-import { readFile, readdir, stat } from 'node:fs/promises'
+import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { shippedViteFlags, productionBundleCacheKey } from './buildFlags.mjs'
+import { shippedViteFlags, productionBundleCacheKey, PRODUCTION_BUNDLE_INPUTS, productionBundleMarker } from './buildFlags.mjs'
 import { ensureEngineArtifacts } from './engineArtifacts.mjs'
 
 const web = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -49,9 +49,7 @@ export async function prepareProductionBundle() {
     }
     const cacheKey = productionBundleCacheKey(flags, engine_unavailable_reason)
     const vendorWorker = join(repo, 'vendor', 'acad' + 'rust-worker')
-    const sourceMtime = Math.max(...await Promise.all([
-      'src', 'public', 'vite-plugins', 'vite.config.js', 'index.html', 'package.json', 'package-lock.json',
-    ].map((path) => newest(join(web, path)))), ...await Promise.all([
+    const sourceMtime = Math.max(...await Promise.all(PRODUCTION_BUNDLE_INPUTS.map((path) => newest(join(web, path)))), ...await Promise.all([
       newest(join(vendorWorker, 'worker-browser.mjs')), newest(join(vendorWorker, 'pkg-web')),
       newest(join(repo, 'scripts', 'stage_cad_engine.mjs')),
     ]))
@@ -60,7 +58,10 @@ export async function prepareProductionBundle() {
     try { cached = JSON.parse(await readFile(marker, 'utf8')) } catch (error) {
       if (error.code !== 'ENOENT' && !(error instanceof SyntaxError)) throw error
     }
-    if (cached?.sourceMtime === sourceMtime && cached?.cacheKey === cacheKey && cached?.apiBase === '' && cached?.mock === false && cached?.authLive === false && await exists(join(dist, 'index.html')) && (flags.VITE_CAD_EDIT !== '1' || (await exists(join(dist, 'engine', 'engine.js')) && await exists(join(dist, 'engine', 'engine_bg.wasm'))))) return dist
+    if (cached?.sourceMtime === sourceMtime && cached?.cacheKey === cacheKey && cached?.apiBase === '' && cached?.mock === false && cached?.authLive === false && await exists(join(dist, 'index.html')) && (flags.VITE_CAD_EDIT !== '1' || (await exists(join(dist, 'engine', 'engine.js')) && await exists(join(dist, 'engine', 'engine_bg.wasm'))))) {
+      await writeFile(marker, JSON.stringify(productionBundleMarker({ ...cached, provenance: 'reused', at: new Date().toISOString() })) + '\n')
+      return dist
+    }
     if (!await exists(join(web, 'node_modules'))) throw new Error('Production bundle needs web/node_modules; install the web prerequisites first')
     // npm's Windows shim needs cmd.exe; no user-controlled command is interpolated.
     const command = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm'
@@ -91,8 +92,7 @@ export async function prepareProductionBundle() {
       await promisify(execFile)(process.execPath, [join(repo, 'scripts', 'stage_cad_engine.mjs')], { cwd: repo, timeout: 60000, windowsHide: true })
       if (!await exists(join(dist, 'engine', 'engine.js')) || !await exists(join(dist, 'engine', 'engine_bg.wasm'))) throw new Error('Production build did not stage the CAD engine')
     }
-    const { writeFile } = await import('node:fs/promises')
-    await writeFile(marker, JSON.stringify({ sourceMtime, apiBase: '', mock: false, authLive: false, flags, engine_unavailable_reason, cacheKey }) + '\n')
+    await writeFile(marker, JSON.stringify(productionBundleMarker({ sourceMtime, cacheKey, flags, engine_unavailable_reason, provenance: 'built', at: new Date().toISOString() })) + '\n')
     return dist
   })()
   try { return await building } finally { building = undefined }
