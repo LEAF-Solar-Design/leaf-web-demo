@@ -134,7 +134,6 @@ def _page_proposal_tenant(request: Request):
             return deps.backedge_tenant(headers["x-tenant-id"])
         return deps.require_tenant(
             request, x_tenant_id=headers.get("x-tenant-id"),
-            authorization=headers.get("authorization"),
             x_dispatch_secret=headers.get("x-dispatch-secret"),
             x_guest_session=headers.get("x-guest-session"),
             x_demo_session=headers.get("x-demo-session"),
