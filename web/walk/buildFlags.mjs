@@ -15,3 +15,16 @@ export function shippedViteFlags(dockerfileText) {
 export function productionBundleCacheKey(flags, engineUnavailableReason = null) {
   return JSON.stringify({ flags: Object.fromEntries(Object.entries(flags).sort(([a], [b]) => a.localeCompare(b))), engine_unavailable_reason: engineUnavailableReason })
 }
+
+// Reuse accepts a prior marker's builtAt; legacy markers have no known build time.
+export function productionBundleMarker({ sourceMtime, cacheKey, flags, engine_unavailable_reason, provenance, at, builtAt = null }) {
+  return {
+    sourceMtime, apiBase: '', mock: false, authLive: false, flags, engine_unavailable_reason, cacheKey,
+    provenance, builtAt: provenance === 'built' ? at : builtAt, lastUsedAt: at,
+  }
+}
+
+export const PRODUCTION_BUNDLE_INPUTS = Object.freeze([
+  'src', 'public', 'vite-plugins', 'vite.config.js', 'index.html', 'package.json', 'package-lock.json',
+  'next.config.mjs', 'webpack', 'scripts',
+])
