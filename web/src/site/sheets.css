@@ -532,3 +532,6 @@
   --font-display: 'Inter Tight', 'Inter', system-ui, sans-serif;
   --font-mono: ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
 }
+
+/* DP-A25: accessible hint ink; the #3f3f46 declaration above is a recorded keep */
+.sheets-root .sheet-index-row .hint{color:var(--leaf-ink-muted)}
