@@ -5071,7 +5071,7 @@ import { faultRouteOnce, drawingRequest, setupVersionFault, finishVersionFault,
   setupHistoryFault, assertHistoryRecovery, setupRealProject } from './fixtures.mjs'
 import { CENSUS_DISCLOSURES, censusDisclosureState, setupCensusDisclosure, setupCensusScript,
   setupCensusDownloadOnly, activateCensusFileChooser, captureCensusEffect, assertCensusEffect,
-  observeDxfImportState } from './fixtures.mjs'
+  observeDxfImportState, collectCadEditBundleProbe } from './fixtures.mjs'
 
 const censusAssertions = (value) => ({
   toBe: (expected) => assert.equal(value, expected),
@@ -5557,12 +5557,165 @@ test('C2 and C3 disclosures click into each initial state, reject a wrong effect
       await assert.rejects(assertCensusEffect(probe, runtime, button, {}, censusAssertions), assert.AssertionError)
       await button.click({ timeout: 15_000 })
       // Import's input visibility follows the real pane posture.
-      page.getByLabel = () => ({ visible: open })
+      page.getByLabel = () => ({ visible: open, count: async () => 1 })
       await assertCensusEffect(probe, runtime, button, {}, censusAssertions)
       for (const cleanup of runtime.cleanup.reverse()) await cleanup()
       assert.equal(open, false)
       assert.equal(runtime.evidence.censusDisclosure.cleaned, true)
       if (target === 'ribbon-overflow-expanded') assert.equal(events.at(-1), 1440)
+    }
+  }
+})
+
+test('WL58 U1 DXF collapse requires a mounted control before accepting hidden', async () => {
+  for (const present of [true, false]) {
+    const page = {
+      locator: () => ({ getAttribute: async () => null }),
+      getByLabel: () => ({ visible: false, count: async () => Number(present) }),
+    }
+    const assertions = (value, message) => ({ ...censusAssertions(value),
+      toBeGreaterThan: expected => assert.ok(value > expected, message) })
+    assertions.poll = censusAssertions.poll
+    const run = assertCensusEffect({ assertion: { target: 'dxf-import-expanded', value: false } },
+      { page }, { getAttribute: async () => 'false' }, {}, assertions)
+    if (present) await run
+    else await assert.rejects(run, /DXF control must exist before it can be collapsed/)
+  }
+})
+
+function cadBundleFake({ marker = true, fail = false, cap = false, computed = false, oversized = false } = {}) {
+  const requests = [], disposed = []
+  const bodies = {
+    '/.leaf-walk-build.json': JSON.stringify({ flags: { VITE_CAD_EDIT: '1', secret: 'PRIVATE_ENV' } }),
+    '/': '<script type="module" src="/assets/main.js?signature=PRIVATE_URL"></script><link rel="modulepreload" href="/assets/preload.js">',
+    '/assets/preload.js': 'export const preload = true',
+    '/assets/main.js': cap ? Array.from({ length: 41 }, (_, i) => `import("./chunk${i}.js")`).join(';')
+      : computed ? 'import(variable)' : 'import{preload}from"./preload.js";import("./chunk.js")',
+    '/assets/chunk.js': marker ? '/* PRIVATE_BODY cad-edit-workbench */' : '/* PRIVATE_BODY no surface */',
+  }
+  const page = {
+    url: () => 'https://walk.example/workspace?secret=PRIVATE_URL',
+    locator: selector => ({ count: async () => selector === '#cockpit-import-pane' ? 1 : 0 }),
+    request: { get: async (href, options) => {
+      assert.ok(options.timeout > 0 && options.timeout <= 10_000)
+      assert.equal(options.maxRedirects, 0)
+      const url = new URL(href)
+      requests.push(url.pathname)
+      if (fail && url.pathname === '/assets/chunk.js') throw new Error('PRIVATE_FETCH_ERROR')
+      const body = Buffer.from(bodies[url.pathname] || 'export const chunk = true')
+      return { ok: () => true, status: () => 200,
+        headers: () => ({ 'content-length': String(oversized && url.pathname === '/assets/main.js' ? 31 * 1024 * 1024 : body.length) }),
+        body: async () => body, dispose: async () => { disposed.push(url.pathname) } }
+    } },
+  }
+  const runtime = { evidence: { consoleErrors: [{ text: 'CadEdit PRIVATE_CONSOLE' }, { text: 'other' }],
+    pageErrors: [{ message: 'EngineSession PRIVATE_PAGE_ERROR' }] }, testInfo: { workerIndex: 3 } }
+  return { page, runtime, requests, disposed }
+}
+
+function assertCadBundleWhitelist(probe) {
+  const keys = (value, expected) => assert.deepEqual(Object.keys(value).sort(), expected.sort())
+  keys(probe, ['manifestFlag', 'dom', 'servedJs', 'consoleErrorCount', 'binding'])
+  keys(probe.dom, ['workbench', 'objectsPanel', 'importPane'])
+  keys(probe.binding, ['worker', 'pageUrlPathSha256'])
+  keys(probe.servedJs, ['indexSha256', 'assets', 'markerFound', 'coverage'])
+  for (const value of Object.values(probe.dom)) assert.ok(value === null || Number.isInteger(value))
+  assert.ok(probe.consoleErrorCount === null || Number.isInteger(probe.consoleErrorCount))
+  for (const asset of probe.servedJs.assets) {
+    keys(asset, ['pathSha256', 'status', 'bytes', 'sha256'])
+    assert.match(asset.pathSha256, /^[a-f0-9]{64}$/)
+    if (asset.sha256 !== null) assert.match(asset.sha256, /^[a-f0-9]{64}$/)
+    for (const key of ['status', 'bytes']) assert.ok(asset[key] === null || Number.isInteger(asset[key]))
+  }
+  assert.doesNotMatch(JSON.stringify(probe), /PRIVATE_|walk\.example|assets\/|cad-edit-workbench|EngineSession/)
+}
+
+test('WL58 U2 bundle correlation follows one level of static and dynamic imports and whitelists output', async () => {
+  for (const marker of [true, false]) {
+    const fake = cadBundleFake({ marker })
+    const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+    assert.equal(probe.manifestFlag, '1')
+    assert.deepEqual(probe.dom, { workbench: 0, objectsPanel: 0, importPane: 1 })
+    assert.equal(probe.consoleErrorCount, 2)
+    assert.equal(probe.binding.worker, 3)
+    assert.match(probe.binding.pageUrlPathSha256, /^[a-f0-9]{64}$/)
+    assert.match(probe.servedJs.indexSha256, /^[a-f0-9]{64}$/)
+    assert.equal(probe.servedJs.markerFound, marker)
+    assert.equal(probe.servedJs.coverage, 'complete')
+    assert.equal(probe.servedJs.assets.length, 3)
+    assert.deepEqual(fake.requests, fake.disposed)
+    assertCadBundleWhitelist(probe)
+  }
+})
+
+test('WL58 U2 failed fetches, computed imports, byte budgets and asset caps leave negative coverage UNKNOWN', async () => {
+  for (const options of [{ fail: true }, { cap: true }, { computed: true }, { oversized: true }]) {
+    const fake = cadBundleFake(options)
+    const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+    assert.equal(probe.servedJs.coverage, 'partial')
+    assert.equal(probe.servedJs.markerFound, 'UNKNOWN')
+    assert.ok(probe.servedJs.assets.length <= 40)
+    if (options.cap) assert.equal(probe.servedJs.assets.length, 40)
+    assertCadBundleWhitelist(probe)
+  }
+  const probe = await collectCadEditBundleProbe({}, {})
+  assert.equal(probe.manifestFlag, null)
+  assert.deepEqual(probe.dom, { workbench: null, objectsPanel: null, importPane: null })
+  assert.equal(probe.servedJs.markerFound, 'UNKNOWN')
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL58 U3 Objects records missing-summary evidence before preserving its original visibility failure', async () => {
+  for (const present of [true, false]) {
+    const fake = cadBundleFake()
+    const originalError = new Error('original Objects visibility failure')
+    const button = { visible: present, count: async () => Number(present) }
+    const page = { ...fake.page }
+    const assertions = value => ({ ...censusAssertions(value), toBeVisible: async () => {
+      if (!value.visible) {
+        assert.ok(runtime.evidence.cadEditBundleProbe)
+        throw originalError
+      }
+    } })
+    assertions.poll = censusAssertions.poll
+    page.locator = selector => selector === 'details.drawing-objects-panel > summary' ? button
+      : selector === 'details.drawing-objects-panel' ? { evaluate: async () => false, count: async () => Number(present) }
+        : fake.page.locator(selector)
+    const runtime = { ...fake.runtime, page, cleanup: [] }
+    const run = setupCensusDisclosure(runtime, { target: 'drawing-objects-expanded', expanded: false,
+      control: { css: 'details.drawing-objects-panel > summary', name: 'Objects' } }, assertions)
+    if (present) {
+      await run
+      assert.equal(runtime.evidence.cadEditBundleProbe, undefined)
+    } else {
+      await assert.rejects(run, error => error === originalError)
+      assertCadBundleWhitelist(runtime.evidence.cadEditBundleProbe)
+    }
+  }
+})
+
+test('WL58 U3 both DXF expansion controls record absent-input evidence before the original failure', async () => {
+  for (const featureId of ['control:open-dxf', 'control:open-dxf-browser']) {
+    for (const present of [true, false]) {
+      const fake = dxfImportFixture({ featureId, present })
+      const bundle = cadBundleFake()
+      fake.page.url = bundle.page.url
+      fake.page.request = bundle.page.request
+      const locator = fake.page.locator
+      fake.page.locator = selector => selector === '#cockpit-import-pane' ? locator(selector) : bundle.page.locator(selector)
+      const assertions = value => ({ ...fake.assertions(value), toBeVisible: async () => {
+        if (!present) assert.ok(fake.runtime.evidence.cadEditBundleProbe)
+        await fake.assertions(value).toBeVisible()
+      } })
+      assertions.poll = censusAssertions.poll
+      const run = assertCensusEffect(fake.probe, fake.runtime, fake.button, {}, assertions)
+      if (present) {
+        await run
+        assert.equal(fake.runtime.evidence.cadEditBundleProbe, undefined)
+      } else {
+        await assert.rejects(run, error => error === fake.originalError)
+        assertCadBundleWhitelist(fake.runtime.evidence.cadEditBundleProbe)
+      }
     }
   }
 })
