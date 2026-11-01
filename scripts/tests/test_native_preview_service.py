@@ -6,6 +6,7 @@ import multiprocessing
 from pathlib import Path
 import sys
 import threading
+import time
 
 import pytest
 
@@ -87,6 +88,8 @@ def stub(monkeypatch, replies, paths=None):
         assert output.is_dir()
         if paths is not None:
             paths.append(output)
+        journal(dict(event='claim', job_id=COMPLETE['job_id'], attempt=1, deadline=1000,
+                     source=dict(revision=3, document_sha256='d' * 64, archive_sha256='a' * 64)))
         reply = next(replies)
         if isinstance(reply, BaseException):
             raise reply
@@ -315,7 +318,7 @@ def _interrupt_claim(root, ready, release):
     service.serve(SCOPE, factory, root, threading.Event())
 
 
-def test_process_interruption_requires_reconciliation_on_restart(tmp_path):
+def test_process_interruption_recovers_without_backend_settlement_on_restart(tmp_path):
     ctx = multiprocessing.get_context('spawn')
     ready, release = ctx.Event(), ctx.Event()
     child = ctx.Process(target=_interrupt_claim, args=(tmp_path, ready, release))
@@ -330,8 +333,12 @@ def test_process_interruption_requires_reconciliation_on_restart(tmp_path):
     assert not child.is_alive()
     with (directory(tmp_path) / 'consumer.lock').open('a+b') as lock:
         assert service._lock(lock)
-    assert service.serve(SCOPE, forbidden, tmp_path, Stop()) == dict(
-        state='reconciliation-required', completed=0)
+    stop = Stop()
+    assert service.serve(SCOPE, forbidden, tmp_path, stop) == dict(state='stopped', completed=0)
+    assert stop.waits == [30.0] and phase(tmp_path) == 'clean'
+    receipts = list(directory(tmp_path).glob('reconciliation-cycle-*.json'))
+    assert len(receipts) == 1
+    assert json.loads(receipts[0].read_bytes())['backend_settlement'] == 'unconfirmed'
 
 
 @pytest.mark.parametrize('value', [0, -1, True, '5', float('inf'), float('nan'), 3601])
@@ -560,6 +567,37 @@ def test_evidence_drift_and_session_close_prevent_commit(tmp_path, which):
         assert marker(tmp_path).read_bytes() == original
 
 
+def test_immutable_receipt_replay_fsyncs_writable_descriptor_without_changing_bytes(tmp_path, monkeypatch):
+    r = service.recovery
+    receipt = tmp_path / 'receipt.json'
+    raw = b'{"immutable":true}'
+    r.immutable(receipt, raw)
+    original_stat = receipt.stat()
+    opened = []
+    synced = []
+    open_path, fsync = Path.open, r.os.fsync
+
+    def observe_open(path, mode='r', *args, **kwargs):
+        stream = open_path(path, mode, *args, **kwargs)
+        if path == receipt and mode == 'r+b':
+            opened.append(stream)
+        return stream
+
+    def require_writable(fd):
+        for stream in opened:
+            if not stream.closed and stream.fileno() == fd:
+                assert stream.writable()
+                synced.append(fd)
+        return fsync(fd)
+
+    monkeypatch.setattr(Path, 'open', observe_open)
+    monkeypatch.setattr(r.os, 'fsync', require_writable)
+    r.immutable(receipt, raw)
+    assert len(opened) == len(synced) == 1
+    assert receipt.read_bytes() == raw
+    assert receipt.stat().st_mtime_ns == original_stat.st_mtime_ns
+
+
 def test_receipt_crash_idempotence_and_conflict(tmp_path):
     claim, status, witness, _ = recovery_fixture(tmp_path)
     r = service.recovery
@@ -567,11 +605,11 @@ def test_receipt_crash_idempotence_and_conflict(tmp_path):
     backend = r.disposition(service.worker.encode(status), SCOPE, claim)
     def crash(*args):
         raise OSError('synthetic-crash')
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match='synthetic-crash'):
         proof.commit(SCOPE, backend, witness, crash)
     receipt = r.receipt_path(directory(tmp_path), claim['job_id'])
     original = receipt.read_bytes()
-    with pytest.raises(OSError):
+    with pytest.raises(OSError, match='synthetic-crash'):
         proof.commit(SCOPE, backend, witness, crash)
     assert receipt.read_bytes() == original and phase(tmp_path) == 'reconciliation-required'
     receipt.write_bytes(b'{}')
@@ -666,3 +704,239 @@ def test_producer_journal_event_cannot_be_reset(tmp_path):
     with pytest.raises(service.worker.WorkerError, match='journal-failed'):
         journal(dict(event='producer', producer_may_have_started=False))
     assert journal.path.read_bytes() == before
+
+
+def pre_execution_fixture(root):
+    r = service.recovery
+    base = directory(root)
+    base.mkdir()
+    cycle = base / 'cycle-pre-execution'
+    cycle.mkdir()
+    journal = r.Journal(cycle, base.name, base)
+    checkpoint = dict(schema=r.CHECKPOINT_SCHEMA, scope_sha256=base.name,
+                      phase='reconciliation-required', cycle=cycle.name)
+    marker(root).write_bytes(service.worker.encode(checkpoint))
+    return journal.path, base / ('reconciliation-' + cycle.name + '.json')
+
+
+def test_pre_execution_receipt_preserves_evidence_then_backoff_before_fresh_claim(tmp_path):
+    journal, receipt = pre_execution_fixture(tmp_path)
+    old_checkpoint, old_journal = marker(tmp_path).read_bytes(), journal.read_bytes()
+    stop = Stop(after=2)
+    calls = []
+    class Http:
+        def request(self, method, suffix, body):
+            assert stop.waits == [11.0]
+            assert (method, suffix, body) == ('POST', 'claim', {})
+            calls.append(suffix)
+            value = json.loads(receipt.read_bytes())
+            assert value['outcome'] == 'claim-unconfirmed-pre-execution'
+            assert value['backend_settlement'] == 'unconfirmed'
+            assert value['original_checkpoint'] == old_checkpoint.decode()
+            assert value['checkpoint_sha256'] == service.recovery.sha(old_checkpoint)
+            assert value['journal_sha256'] == service.recovery.sha(old_journal)
+            assert value['original_runtime_commit'] == json.loads(old_journal)['runtime_commit']
+            assert not {'job_id', 'attempt', 'allocator_release_confirmed', 'source'} & value.keys()
+            return b'{"job":null}'
+    @contextmanager
+    def factory(scope):
+        assert stop.waits == [11.0]
+        assert phase(tmp_path) == 'clean'
+        yield Http(), forbidden
+    assert service.serve(SCOPE, factory, tmp_path, stop, error_seconds=11) == dict(
+        state='stopped', completed=0)
+    assert calls == ['claim'] and stop.waits == [11.0, 5.0]
+    assert journal.read_bytes() == old_journal
+
+
+def test_lost_claim_responses_use_distinct_cycles_and_normal_backoff(tmp_path):
+    calls = []
+    class Http:
+        def request(self, method, suffix, body):
+            assert (method, suffix, body) == ('POST', 'claim', {})
+            calls.append(True)
+            raise OSError(SECRET)
+    @contextmanager
+    def factory(scope):
+        yield Http(), forbidden
+    stop = Stop(after=3)
+    assert service.serve(SCOPE, factory, tmp_path, stop, error_seconds=13) == dict(
+        state='stopped', completed=0)
+    assert calls == [True] * 3 and stop.waits == [13.0] * 3
+    receipts = list(directory(tmp_path).glob('reconciliation-cycle-*.json'))
+    assert len(receipts) == 3 and phase(tmp_path) == 'clean'
+    assert len({json.loads(path.read_bytes())['cycle'] for path in receipts}) == 3
+
+
+@pytest.mark.parametrize('mutation', ['scope', 'cycle', 'runtime', 'schema', 'extra-key',
+                                      'event', 'validated', 'extra-file', 'symlink',
+                                      'checkpoint-schema', 'checkpoint-scope',
+                                      'checkpoint-cycle', 'checkpoint-symlink', 'cycle-symlink'])
+def test_pre_execution_mismatch_stays_held_without_session(tmp_path, mutation):
+    journal, receipt = pre_execution_fixture(tmp_path)
+    value = json.loads(journal.read_bytes())
+    if mutation == 'scope':
+        value['scope_sha256'] = '0' * 64
+    elif mutation == 'cycle':
+        value['cycle'] = 'cycle-other'
+    elif mutation == 'runtime':
+        value['runtime_commit'] = '0' * 40
+    elif mutation == 'schema':
+        value['schema'] += '-unknown'
+    elif mutation == 'extra-key':
+        value['extra'] = True
+    elif mutation == 'event':
+        value['events'] = [dict(event='cleanup', cleanup_complete=True)]
+    elif mutation == 'validated':
+        value['claim_state'] = 'validated'
+    elif mutation == 'extra-file':
+        (journal.parent / 'unexpected').write_bytes(b'')
+    journal.write_bytes(service.worker.encode(value))
+    if mutation == 'symlink':
+        target = directory(tmp_path) / 'journal-target.json'
+        journal.rename(target)
+        journal.symlink_to(target)
+    elif mutation.startswith('checkpoint-') and mutation != 'checkpoint-symlink':
+        checkpoint = json.loads(marker(tmp_path).read_bytes())
+        field, replacement = {'checkpoint-schema': ('schema', 'unknown'),
+                              'checkpoint-scope': ('scope_sha256', '0' * 64),
+                              'checkpoint-cycle': ('cycle', '../cycle-pre-execution')}[mutation]
+        checkpoint[field] = replacement
+        marker(tmp_path).write_bytes(service.worker.encode(checkpoint))
+    elif mutation == 'checkpoint-symlink':
+        target = directory(tmp_path) / 'checkpoint-target.json'
+        marker(tmp_path).rename(target)
+        marker(tmp_path).symlink_to(target)
+    elif mutation == 'cycle-symlink':
+        target = directory(tmp_path) / 'cycle-target'
+        journal.parent.rename(target)
+        journal.parent.symlink_to(target, target_is_directory=True)
+    old = marker(tmp_path).read_bytes()
+    assert service.serve(SCOPE, forbidden, tmp_path, Stop())['state'] == 'reconciliation-required'
+    assert marker(tmp_path).read_bytes() == old and not receipt.exists()
+
+
+@pytest.mark.parametrize('which', ['checkpoint', 'journal', 'extra-file', 'cycle', 'same-bytes-new-inode'])
+def test_pre_execution_rechecks_exact_evidence_before_receipt(tmp_path, which):
+    journal, receipt = pre_execution_fixture(tmp_path)
+    r = service.recovery
+    proof = r.PreExecutionProof(directory(tmp_path), marker(tmp_path), directory(tmp_path).name)
+    if which in ('checkpoint', 'journal'):
+        path = marker(tmp_path) if which == 'checkpoint' else journal
+        path.write_bytes(path.read_bytes() + b' ')
+    elif which == 'extra-file':
+        (journal.parent / 'unexpected').write_bytes(b'')
+    elif which == 'same-bytes-new-inode':
+        replacement = journal.parent / 'replacement.json'
+        replacement.write_bytes(journal.read_bytes())
+        replacement.replace(journal)
+    else:
+        journal.parent.rename(journal.parent.with_name('cycle-moved'))
+        journal.parent.mkdir()
+        journal.write_bytes(proof.files[journal])
+    with pytest.raises(service.worker.WorkerError):
+        proof.commit(SCOPE, service._checkpoint)
+    assert not receipt.exists() and phase(tmp_path) == 'reconciliation-required'
+
+
+def test_pre_execution_receipt_crash_idempotence_and_conflict(tmp_path):
+    journal, receipt = pre_execution_fixture(tmp_path)
+    old = journal.read_bytes()
+    r = service.recovery
+    def crash(*args):
+        raise OSError('synthetic-crash')
+    for _ in range(2):
+        proof = r.PreExecutionProof(directory(tmp_path), marker(tmp_path), directory(tmp_path).name)
+        with pytest.raises(OSError, match='synthetic-crash'):
+            proof.commit(SCOPE, crash)
+        if _ == 0:
+            original = receipt.read_bytes()
+        assert receipt.read_bytes() == original
+    receipt.write_bytes(b'{}')
+    assert service.serve(SCOPE, forbidden, tmp_path, Stop())['state'] == 'reconciliation-required'
+    assert phase(tmp_path) == 'reconciliation-required'
+    receipt.write_bytes(original)
+    stop = Stop()
+    assert service.serve(SCOPE, forbidden, tmp_path, stop)['state'] == 'stopped'
+    assert stop.waits == [30.0] and phase(tmp_path) == 'clean'
+    assert journal.read_bytes() == old and receipt.read_bytes() == original
+
+
+def test_pre_execution_source_binding_uses_actual_git_history():
+    r = service.recovery
+    revision = 'ea6666829719f014dd955f5d61db14f24836177d'
+    try:
+        r.runtime_commit(revision)
+    except service.worker.WorkerError:
+        pytest.skip('reviewed historical object unavailable in managed snapshot')
+    r.pre_execution_source(revision)
+    producer = r.runtime_source(revision, 'scripts/native_preview_worker.py')
+    journal = r.runtime_source(revision, 'scripts/native_preview_reconciliation.py')
+    assert r.sha(producer) == r.PRE_EXECUTION_WORKER_SHA256
+    assert r.journal_ast_sha(journal) == r.PRE_EXECUTION_JOURNAL_AST_SHA256
+    current = r.read(Path(r.__file__), 262144)
+    assert r.journal_ast_sha(current) == r.PRE_EXECUTION_CORRECTED_JOURNAL_AST_SHA256
+
+
+def test_pre_execution_receipt_records_the_actual_corrected_source(tmp_path, monkeypatch):
+    _, receipt = pre_execution_fixture(tmp_path)
+    r = service.recovery
+    load = r.runtime_source
+    corrected = Path(r.__file__).read_bytes()
+    def original(revision, path):
+        return corrected if path.endswith('native_preview_reconciliation.py') else load(revision, path)
+    monkeypatch.setattr(r, 'runtime_source', original)
+    proof = r.PreExecutionProof(directory(tmp_path), marker(tmp_path), directory(tmp_path).name)
+    proof.commit(SCOPE, service._checkpoint)
+    assert json.loads(receipt.read_bytes())['journal_ast_sha256'] == r.PRE_EXECUTION_CORRECTED_JOURNAL_AST_SHA256
+
+
+@pytest.mark.parametrize('which', ['original-worker', 'original-journal', 'current-worker', 'current-journal'])
+def test_pre_execution_altered_source_refuses(tmp_path, monkeypatch, which):
+    _, receipt = pre_execution_fixture(tmp_path)
+    r = service.recovery
+    load, read = r.runtime_source, r.read
+    def altered(raw, path):
+        if which.endswith('worker') and path.endswith('native_preview_worker.py'):
+            return raw.replace(b'guard.start()', b'guard.beat()')
+        if which.endswith('journal') and path.endswith('native_preview_reconciliation.py'):
+            return raw.replace(b'self.failed = True', b'self.failed = False')
+        return raw
+    def original(revision, path):
+        return altered(load(revision, path), path)
+    def current(path, limit=r.MAX_LOCAL):
+        raw = read(path, limit)
+        return altered(raw, str(path))
+    if which.startswith('original'):
+        monkeypatch.setattr(r, 'runtime_source', original)
+    else:
+        monkeypatch.setattr(r, 'read', current)
+    assert service.serve(SCOPE, forbidden, tmp_path, Stop())['state'] == 'reconciliation-required'
+    assert not receipt.exists() and phase(tmp_path) == 'reconciliation-required'
+
+
+def test_claim_journal_write_failure_cannot_reach_heartbeat_source_or_native(tmp_path, monkeypatch):
+    r = service.recovery
+    base = directory(tmp_path)
+    base.mkdir()
+    cycle = base / 'cycle-write-failure'
+    cycle.mkdir()
+    journal = r.Journal(cycle, base.name, base)
+    old = journal.path.read_bytes()
+    calls = []
+    descriptor = dict(schema='leaf.project-preview-source.v1', target='ios-simulator',
+                      org_id=SCOPE['org_id'], project_id=SCOPE['project_id'], revision=1,
+                      document_sha256='d' * 64, archive_sha256='a' * 64, byte_size=1)
+    job = dict(job_id=COMPLETE['job_id'], lease_owner=SCOPE['actor_id'], attempt=1,
+               descriptor=descriptor, deadline=time.time() + 300)
+    class Http:
+        def request(self, method, suffix, body):
+            calls.append(suffix)
+            assert suffix == 'claim'
+            return service.worker.encode(dict(job=job))
+    def denied(*args):
+        raise OSError(SECRET)
+    monkeypatch.setattr(r.os, 'replace', denied)
+    result = service.worker.run_once(SCOPE, Http(), forbidden, cycle, journal=journal)
+    assert result['result'] == 'failed' and calls == ['claim']
+    assert journal.failed and journal.path.read_bytes() == old

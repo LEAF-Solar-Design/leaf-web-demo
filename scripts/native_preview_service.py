@@ -145,6 +145,18 @@ def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
 
 def _recover(scope, session_factory, directory, checkpoint, digest, stop_event, error_seconds):
     try:
+        proof = recovery.PreExecutionProof(directory, checkpoint, digest)
+    except BaseException:
+        pass
+    else:
+        try:
+            if stop_event.is_set():
+                return 'stopped'
+            proof.commit(scope, _checkpoint)
+            return 'pre-execution-recovered'
+        except BaseException:
+            return 'reconciliation-required'
+    try:
         proof = recovery.LocalProof(directory, checkpoint, digest)
     except BaseException:
         return 'reconciliation-required'
@@ -198,7 +210,9 @@ def serve(scope, session_factory, output_root, stop_event, *, poll_seconds=5.0,
                 if worker.parse(recovery.read(checkpoint)) != clean:
                     outcome = _recover(scope, session_factory, directory, checkpoint,
                                        digest, stop_event, error_seconds)
-                    if outcome != 'recovered':
+                    if outcome == 'pre-execution-recovered':
+                        stop_event.wait(error_seconds)
+                    elif outcome != 'recovered':
                         return result(outcome)
             while not stop_event.is_set():
                 outcome = _cycle(scope, session_factory, directory, checkpoint, digest, stop_event)
@@ -208,6 +222,9 @@ def serve(scope, session_factory, output_root, stop_event, *, poll_seconds=5.0,
                 if outcome in ('reconciliation-required', 'stopped'):
                     return result(outcome)
                 if outcome == 'recovered':
+                    continue
+                if outcome == 'pre-execution-recovered':
+                    stop_event.wait(error_seconds)
                     continue
                 if outcome == 'complete':
                     completed += 1
