@@ -53,6 +53,7 @@ const collectSample = (fake, options = {}) => collectMobileTouchMeasurements({ .
 const collect = async (fake, options = {}) => (await collectSample(fake, options))?.measurements || null
 
 const element = (tag, attributes = {}, textContent = '') => ({ tagName: tag.toUpperCase(), textContent,
+  id: attributes.id || '', classList: attributes.class?.trim().split(/\s+/).filter(Boolean) || [],
   getAttribute: name => attributes[name] ?? null })
 
 test('rounded corners report the parent and target radii separately from the unchanged measurement', async () => {
@@ -65,7 +66,7 @@ test('rounded corners report the parent and target radii separately from the unc
     target: { role: 'button', name: 'Open drawing', box: rect }, control: { reachable: true, clipped: true, rect } }))
   assert.deepEqual(diagnostic, {
     corners: ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map(position => ({ position,
-      hit: { tag: 'div', role: '', name: '' }, insideTarget: false, offscreen: false })),
+      hit: { tag: 'div', id: '', classes: [], role: '', name: '' }, parentPath: [], insideTarget: false, offscreen: false })),
     borderRadiusPx: { topLeft: 8, topRight: 9, bottomLeft: 10, bottomRight: 11 },
   })
   assert.equal(mobileResult(measurements).status, 'finding')
@@ -75,9 +76,44 @@ test('an overlapping sibling records its tag, explicit role and trimmed bounded 
   const sibling = element('aside', { role: 'region', 'aria-label': `  ${'Overlap'.repeat(12)}  ` })
   const { diagnostic } = await collectSample(phone({ hit: (x, y, target) => x === 52 && y === 22 ? sibling : target }))
   assert.deepEqual(diagnostic.corners[1], { position: 'top-right',
-    hit: { tag: 'aside', role: 'region', name: 'Overlap'.repeat(12).slice(0, 60) }, insideTarget: false, offscreen: false })
+    hit: { tag: 'aside', id: '', classes: [], role: 'region', name: 'Overlap'.repeat(12).slice(0, 60) },
+    parentPath: [], insideTarget: false, offscreen: false })
   assert.deepEqual(diagnostic.corners.filter(corner => corner.insideTarget).map(corner => corner.position),
     ['top-left', 'bottom-left', 'bottom-right'])
+})
+
+test('an overlapping sibling records its id, first three classes and nearest three ancestors', async () => {
+  const sibling = element('div', { id: 'overlap', class: 'first second third dropped' })
+  const ancestors = [element('section', { id: 'nearest', class: 'panel active overlay dropped' }),
+    element('main', { id: 'middle', class: 'workspace' }), element('div', { id: 'farthest' }), element('body')]
+  sibling.parentElement = ancestors[0]
+  ancestors.forEach((ancestor, index) => { ancestor.parentElement = ancestors[index + 1] })
+  const { diagnostic } = await collectSample(phone({ hit: (x, y, target) => x === 52 && y === 62 ? sibling : target }))
+  assert.deepEqual(diagnostic.corners[3].hit, { tag: 'div', id: 'overlap',
+    classes: ['first', 'second', 'third'], role: '', name: '' })
+  assert.deepEqual(diagnostic.corners[3].parentPath, [
+    { tag: 'section', id: 'nearest', classes: ['panel', 'active', 'overlay'] },
+    { tag: 'main', id: 'middle', classes: ['workspace'] },
+    { tag: 'div', id: 'farthest', classes: [] },
+  ])
+})
+
+test('corner identities default to empty values, bound long values and stop the parent path at body', async () => {
+  const body = element('body')
+  body.parentElement = element('html', { id: 'excluded' })
+  for (const attributes of [{}, { id: 'i'.repeat(70), class: `${'c'.repeat(50)} second third dropped` }]) {
+    const sibling = element('div', attributes)
+    const parent = element('section', attributes)
+    sibling.parentElement = parent
+    parent.parentElement = body
+    const { diagnostic } = await collectSample(phone({ hit: (x, y, target) => x === 12 && y === 22 ? sibling : target }))
+    const identity = { id: attributes.id ? 'i'.repeat(60) : '',
+      classes: attributes.class ? ['c'.repeat(40), 'second', 'third'] : [] }
+    assert.deepEqual(diagnostic.corners[0].hit, { tag: 'div', ...identity, role: '', name: '' })
+    assert.deepEqual(diagnostic.corners[0].parentPath, [
+      { tag: 'section', ...identity }, { tag: 'body', id: '', classes: [] },
+    ])
+  }
 })
 
 test('corner names resolve labelledby before aria-label and native button text', async () => {
@@ -95,8 +131,8 @@ test('corner names resolve labelledby before aria-label and native button text',
 test('offscreen and empty corner hits are distinguished', async () => {
   const { diagnostic } = await collectSample(phone({ box: { x: -10, y: 20, width: 44, height: 44 },
     hit: (x, y, target) => x === 32 && y === 22 ? null : target }))
-  assert.deepEqual(diagnostic.corners[0], { position: 'top-left', hit: null, insideTarget: false, offscreen: true })
-  assert.deepEqual(diagnostic.corners[1], { position: 'top-right', hit: null, insideTarget: false, offscreen: false })
+  assert.deepEqual(diagnostic.corners[0], { position: 'top-left', hit: null, parentPath: [], insideTarget: false, offscreen: true })
+  assert.deepEqual(diagnostic.corners[1], { position: 'top-right', hit: null, parentPath: [], insideTarget: false, offscreen: false })
 })
 
 test('unclipped targets skip diagnostic reads and failed diagnostic reads preserve measurements', async () => {
@@ -108,6 +144,16 @@ test('unclipped targets skip diagnostic reads and failed diagnostic reads preser
   assert.deepEqual(failed.measurements, successful.measurements)
   assert.equal(Object.hasOwn(failed, 'diagnostic'), false)
   assert.equal(mobileResult(failed.measurements).status, 'finding')
+})
+
+test('a throwing element identity read leaves the measurement intact', async () => {
+  const sibling = element('div')
+  const hit = (x, y, target) => x === 12 && y === 22 ? sibling : target
+  const successful = await collectSample(phone({ hit }))
+  Object.defineProperty(sibling, 'classList', { get() { throw new Error('classes unavailable') } })
+  const failed = await collectSample(phone({ hit }))
+  assert.deepEqual(failed.measurements, successful.measurements)
+  assert.equal(Object.hasOwn(failed, 'diagnostic'), false)
 })
 
 test('activation emits only the selected sample diagnostic and keeps it outside persona measurements', async () => {
