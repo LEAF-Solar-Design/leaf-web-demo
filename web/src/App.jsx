@@ -2472,6 +2472,8 @@ export default function App() {
     const catalogTool = refreshedTool || tools.find((candidate) => candidate.name === decision.tool)
     if (!catalogTool) {
       runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
+      // A defined adapter result publishes the unresolved route for RoutePanel.
+      if (decision.slash === true) return decision
       setRunErr('This tool is no longer in your catalog. Choose another tool to run.')
       return
     }
@@ -3506,7 +3508,7 @@ export default function App() {
         ? { elapsed_ms: interruptSnapshotRef.current.elapsedMs } : {}),
     })
     interruptRun()
-    const tool = selectedTool?.label || 'the run'
+    const tool = selectedTool?.label || selectedTool?.name || 'the run'
     showToast(result != null
       ? { text: `Stopped waiting for the drawing to refresh after ${tool}.` }
       : { text: mock
@@ -3514,7 +3516,7 @@ export default function App() {
         : currentJob?.job_id
           ? `Stopped following ${tool}. It keeps running; find it in Jobs.`
           : `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.` })
-  }, [interruptRun, selectedTool?.label, currentJob?.job_id, result, mock, showToast])
+  }, [interruptRun, selectedTool?.label, selectedTool?.name, currentJob?.job_id, result, mock, showToast])
 
   // R ladder (item D): every displayed R keycap must be live, and only the
   // HIGHEST-PRIORITY visible error responds — one keypress, one retry, never
