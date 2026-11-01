@@ -58,12 +58,19 @@ def test_shipped_catalog_loads_with_v1_shape():
         "request_confirmation", "read_platform_state", "run_read_tool",
         "run_write_tool", "submit_live_solve", "undo_drawing_version",
         "author_tool", "request_publication", "register_tool", "customize_platform",
-        "propose_overlay", "finish_project", "read_integration_data", "save_integration_element",
+        "propose_overlay", "propose_project_page", "finish_project", "read_integration_data", "save_integration_element",
     }
     assert pol.rate_limits == {"low": 120, "medium": 60, "high": 10}
     assert pol.approval_ttl_s == 300
 
     assert pol.actions["finish_project"].policy == "auto"
+
+    proposal = pol.actions["propose_project_page"]
+    assert (proposal.rung, proposal.required_capability, proposal.policy) == (2, "converse", "auto")
+    assert proposal.enabled is True and proposal.tenant_tightenable is True
+    assert proposal.dispatch == {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/proposals"]}
+    assert proposal.args_schema["required"] == ["instruction", "expected_revision", "expected_digest"]
+    assert proposal.args_schema["additionalProperties"] is False
 
     save = pol.actions["save_integration_element"]
     assert (save.rung, save.required_capability, save.policy) == (3, "converse", "auto")
