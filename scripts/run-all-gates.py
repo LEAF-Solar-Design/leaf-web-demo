@@ -3967,8 +3967,13 @@ def process_capture_enabled() -> bool:
                 Path(output).is_dir() and os.access(output, os.W_OK))
 
 
+# Suites that run strace themselves: ptrace cannot nest, so wrapping them makes every case fail
+# with tracer_nonzero_exit (capture build ab0b70fc, 2026-11-01). They stay unmapped and always run.
+PROCESS_CAPTURE_EXEMPT = frozenset({"ci-trace-smoke-linux"})
+
+
 def process_capture_eligible(suite: Suite) -> bool:
-    return suite.kind == "pytest"
+    return suite.kind == "pytest" and suite.id not in PROCESS_CAPTURE_EXEMPT
 
 
 def scrub_process_capture_env(env: dict) -> dict:
