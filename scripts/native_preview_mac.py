@@ -111,6 +111,11 @@ REMOTE_COMMON = r'''
 import base64, fcntl, hashlib, io, json, math, os, pathlib, plistlib, re, shutil
 import signal, subprocess, sys, tempfile, threading, time, zipfile
 from pathlib import Path
+def permit_clock():
+    # Python 3.9 on macOS gives time.monotonic() a process-local origin.
+    # Every permit reader and writer must use the shared kernel clock.
+    return time.clock_gettime(time.CLOCK_MONOTONIC)
+
 def checked(argv, timeout=30, cwd=None):
     capture = (argv[0].endswith('leaf-storage') or
                (argv[:2]==['/usr/bin/xcrun','simctl'] and argv[2] in ('list','listapps')))
@@ -144,7 +149,7 @@ def roots(p):
     return source,derived,internal
 def permitted(source):
     expiry=float((source/'permit').read_text())
-    assert math.isfinite(expiry) and time.monotonic() < expiry
+    assert math.isfinite(expiry) and permit_clock() < expiry
 '''
 
 BOOTSTRAP = r'''
@@ -152,7 +157,7 @@ p=json.load(sys.stdin)
 source,derived,internal=roots(p)
 source.mkdir(mode=0o700,exist_ok=False)
 (source/'owner').write_text(p['name'])
-print(json.dumps({'remote_clock':time.monotonic()}))
+print(json.dumps({'remote_clock':permit_clock()}))
 '''
 
 REFRESH = r'''
@@ -161,7 +166,7 @@ source,derived,internal=roots(p)
 assert source.is_dir() and not source.is_symlink()
 expiry=p['expiry']
 assert type(expiry) in (int,float) and math.isfinite(expiry)
-assert time.monotonic() < expiry <= time.monotonic()+10
+assert permit_clock() < expiry <= permit_clock()+10
 temporary=source/'permit.new'
 temporary.write_text(str(expiry))
 os.chmod(temporary,0o600)
@@ -251,7 +256,8 @@ with (source/'supervisor.lock').open('a') as lock:
     driver=p.pop('driver')
     (source/'started').write_text('yes')
     result=supervise(['/usr/bin/python3','-c',driver],source/'permit',
-                     input_bytes=json.dumps(p).encode(),extinct_file=source/'extinct')
+                     input_bytes=json.dumps(p).encode(),clock=permit_clock,
+                     extinct_file=source/'extinct')
     sys.stdout.buffer.write(result)
 '''
 
