@@ -1,4 +1,4 @@
-import { test, expect, runProbe } from './fixtures.mjs'
+import { test, expect, runProbe, withCensusStudioRail } from './fixtures.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
 import { requireControlCensusBatch, resolveProbe } from './probes.mjs'
 import { censusControls } from './controlCensus.mjs'
@@ -39,8 +39,10 @@ if (process.env.LEAF_WALK_PROOF === '1') {
       await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
       await expect(page.getByRole('tablist', { name: 'Ribbon', exact: true })).toBeVisible()
       await expect(page.getByRole('button', { name: 'Claude accounts not linked', exact: true })).toHaveAttribute('aria-expanded', 'false')
-      await expect(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
-      const census = await censusControls(page, buildFeatureMap(), { state: 'ready', viewport: 'desktop' })
+      const census = await withCensusStudioRail(page, async () => {
+        await expect(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
+        return censusControls(page, buildFeatureMap(), { state: 'ready', viewport: 'desktop' })
+      })
       walkEvidence.censuses = [census]
       expect(census.total).toBeGreaterThan(0)
       expect(requireControlCensusBatch(census, { state: 'ready', viewport: 'desktop' })).toBe(true)

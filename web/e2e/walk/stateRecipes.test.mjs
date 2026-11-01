@@ -18,6 +18,173 @@ import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.m
 import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { prepareStudioJobMonitor, assertStudioJobMonitor } from './fixtures.mjs'
 import { collectPromptRunDiagnostic } from './fixtures.mjs'
+import { withCensusStudioRail } from './fixtures.mjs'
+
+const wl53Assertions = value => ({
+  toBe: expected => assert.equal(value, expected),
+  toBeGreaterThanOrEqual: expected => assert.ok(value >= expected),
+  toBeLessThanOrEqual: expected => assert.ok(value <= expected),
+  toBeVisible: async () => assert.equal(await value.isVisible(), true),
+  toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+})
+wl53Assertions.poll = read => ({ toBe: async expected => assert.equal(await read(), expected) })
+
+test('WL53 U1 census reveals closed Studio once, preserves open or absent Studio, and restores on failure', async () => {
+  for (const visible of [true, false]) for (const expanded of ['false', 'true']) for (const fail of [false, true]) {
+    const fake = studioRailFake({ visible, expanded })
+    const linked = { getAttribute: async name => {
+      assert.equal(name, 'aria-expanded')
+      assert.equal(fake.expanded(), visible ? 'true' : expanded)
+      fake.events.push('Linked services assertion')
+      return 'false'
+    } }
+    const operation = () => withCensusStudioRail(fake.page, async () => {
+      await wl53Assertions(linked).toHaveAttribute('aria-expanded', 'false')
+      fake.events.push('census')
+      if (fail) throw new Error('census failed')
+      return 'inventory'
+    }, wl53Assertions)
+    if (fail) await assert.rejects(operation(), /census failed/)
+    else assert.equal(await operation(), 'inventory')
+    assert.equal(fake.expanded(), expanded)
+    assert.deepEqual(fake.events, visible && expanded === 'false'
+      ? ['Studio click', 'Linked services assertion', 'census', 'Studio click']
+      : ['Linked services assertion', 'census'])
+  }
+})
+
+test('WL53 U2 browser checks the asset before opening Project and closes it after the board check', async () => {
+  for (const fault of [null, 'asset', 'content', 'board']) for (const rendered of [false, true]) {
+    const fake = workspaceEnvironmentFake({ status: 'available', statusLabel: 'Ready' })
+    const events = [], visible = read => ({ isVisible: async () => read() })
+    let projectOpen = false
+    const project = { ...visible(() => true), click: async () => {
+      events.push('open Project'); projectOpen = true
+    } }
+    const close = { ...visible(() => projectOpen), click: async () => {
+      events.push('close Project'); projectOpen = false
+    } }
+    const asset = { ...visible(() => fault !== 'asset'),
+      getByRole: (role, options) => {
+        assert.equal(role, 'heading'); assert.equal(options.name, 'No app to show yet')
+        const empty = visible(() => !rendered && fault !== 'content')
+        empty.or = other => ({ first: () => visible(async () => await empty.isVisible() || await other.isVisible()) })
+        return empty
+      },
+      locator: selector => {
+        assert.equal(selector, 'iframe, .project-page, .portfolio')
+        return visible(() => rendered && fault !== 'content')
+      },
+    }
+    const getByRole = fake.page.getByRole
+    fake.page.getByRole = (role, options) => {
+      if (role === 'region' && options.name === 'Browser asset') return asset
+      if (role === 'region' && options.name === 'Project workspace') return visible(() => {
+        events.push('board check'); return projectOpen && fault !== 'board'
+      })
+      if (role === 'button' && options.name === 'Close Project') return close
+      const result = getByRole(role, options)
+      if (role !== 'navigation') return result
+      return { ...result, getByRole: (childRole, childOptions) => childOptions.name === 'Project'
+        ? project : result.getByRole(childRole, childOptions) }
+    }
+    const probe = { kind: 'surface', sourceId: 'browser', state: 'ready', locator: { role: 'tab', name: 'browser' }, assertion: {
+      target: 'surface:browser', state: 'available', label: 'Ready', ground: 'board',
+    } }
+    const resolved = await resolveSurfaceControl(fake.page, probe)
+    await resolved.activate()
+    const assertions = value => ({ ...workspaceOracleAssertions(value), toBeVisible: async () => {
+      if (value === asset) {
+        assert.ok(fake.events.includes('Select profile:browser'))
+        events.push('asset check')
+      }
+      assert.equal(await value.isVisible(), true)
+    } })
+    const check = () => assertEffect(probe, { page: fake.page }, resolved.locator, {}, assertions)
+    if (fault) await assert.rejects(check(), assert.AssertionError)
+    else await check()
+    assert.equal(projectOpen, false)
+    assert.deepEqual(events, fault === 'asset' || fault === 'content' ? ['asset check']
+      : ['asset check', 'open Project', 'board check', 'close Project'])
+  }
+})
+
+test('WL53 U3 missing Lab option records an unmet precondition and present Lab selects normally', async () => {
+  for (const enabled of [false, true]) {
+    const fake = workspaceEnvironmentFake(), evidence = {}
+    const offered = enabled ? ['browser', 'lab'] : ['browser', 'cad']
+    fake.profileControl.locator = selector => {
+      assert.equal(selector, 'option')
+      return { evaluateAll: async read => read(offered.map(value => ({ value }))) }
+    }
+    const resolved = await resolveSurfaceControl(fake.page, {
+      kind: 'surface', sourceId: 'lab', locator: { role: 'tab', name: 'lab' },
+    }, evidence)
+    if (enabled) {
+      await resolved.activate()
+      assert.deepEqual(fake.events, ['Select profile:lab'])
+      assert.deepEqual(evidence, {})
+    } else {
+      await assert.rejects(resolved.activate(), error => {
+        assert.equal(error.constructor, Error)
+        assert.equal(error.message, 'surface precondition: lab is not an enabled workspace profile on this target')
+        return true
+      })
+      assert.deepEqual(evidence, { surfacePrecondition: { surface: 'lab', reason: 'profile not enabled on this target',
+        offered, source: 'web/src/site/productSurfaces.js:716' } })
+      assert.deepEqual(fake.events, [])
+    }
+  }
+})
+
+test('WL53 U4 overview accepts changed clipped marker size but rejects zoom, no pan and escaped bounds', async () => {
+  const before = { viewport: { x: 10, y: 10, width: 20, height: 20 } }
+  const overviewPan = { map: { x: 0, y: 0, width: 100, height: 80 }, scale: '1:500' }
+  for (const fault of [null, 'scale', 'movement', 'left', 'top', 'right', 'bottom']) {
+    const after = { x: 30, y: 25, width: 21.9, height: 22 }
+    if (fault === 'movement') Object.assign(after, { x: 10, y: 10 })
+    if (fault === 'left') after.x = -1
+    if (fault === 'top') after.y = -1
+    if (fault === 'right') after.x = 90
+    if (fault === 'bottom') after.y = 70
+    const visible = { _apiName: 'Locator', isVisible: async () => true,
+      _expect: async expression => {
+        assert.equal(expression, 'to.be.visible')
+        return { matches: true, log: [] }
+      } }
+    const marker = { ...visible, evaluate: async read => read({
+      getAttribute: key => String(after[key]), hasAttribute: key => key in after,
+    }) }
+    const locator = { locator: selector => {
+      assert.equal(selector, '[data-overview-viewport]'); return marker
+    } }
+    const page = {
+      locator: selector => {
+        if (selector === 'section.workspace-environment') return {
+          count: async () => 1, getAttribute: async name => {
+            assert.equal(name, 'data-entered'); return 'true'
+          },
+        }
+        assert.equal(selector, '.cockpit-scale b')
+        return { innerText: async () => fault === 'scale' ? '1:250' : '1:500' }
+      },
+      getByRole: (role, options) => {
+        if (role === 'button' && options.name === 'Expand drawing overview') return { isVisible: async () => false }
+        if (role === 'button' && options.name === 'Drawing overview') return locator
+        if (role === 'combobox') { assert.equal(options.name, 'Command bar'); return visible }
+        assert.equal(role, 'region'); assert.equal(options.name, 'Drawing')
+        return { locator: selector => { assert.equal(selector, 'canvas:visible'); return visible } }
+      },
+    }
+    const runtime = { page, overviewPan, evidence: { overviewPan: {} } }
+    const check = () => assertEffect({ assertion: { target: 'viewer-overview-pan' } }, runtime, locator, before, wl53Assertions)
+    if (fault) await assert.rejects(check(), assert.AssertionError)
+    else {
+      await check()
+      assert.deepEqual(runtime.evidence.overviewPan.after, after)
+    }
+  }
+})
 
 function promptRunDiagnosticFake({ resolverVisible = false } = {}) {
   const state = { barValue: '/w1k-no-such-tool', runDisabled: false, resolverVisible,
@@ -2631,6 +2798,10 @@ function workspaceEnvironmentFake({ present = true, entered = 'false', resume = 
   const profileControl = {
     count: async () => 1, isVisible: async () => controlsPresent && profileVisible,
     inputValue: async () => profile,
+    locator: selector => {
+      assert.equal(selector, 'option')
+      return { evaluateAll: async read => read(['browser', 'lab', 'ops', 'cad', 'solar'].map(value => ({ value }))) }
+    },
     selectOption: async option => {
       if (typeof option === 'string') {
         events.push(`Select profile:${option}`)
