@@ -425,6 +425,50 @@ async function realSelectionBatch(n) {
 }
 
 describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
+  it('BSP2 writes and reopens a panel layer batch without changing geometry, then undoes the original bytes', { timeout: 90_000 }, async () => {
+    const rectangle = (handle, layer, x, y, w, h) => [
+      '0', 'LWPOLYLINE', '5', handle, '8', layer, '62', '3', '370', '25', '90', '4', '70', '1',
+      '10', x, '20', y, '10', x + w, '20', y, '10', x + w, '20', y + h, '10', x, '20', y + h,
+    ]
+    const bytes = new TextEncoder().encode([
+      '0', 'SECTION', '2', 'ENTITIES',
+      ...rectangle('10', 'Panels', 10, 10, 3.3, 6.5),
+      ...rectangle('11', 'Panels', 15, 10, 3.3, 6.5),
+      ...rectangle('12', 'Roof', 0, 0, 40, 30),
+      ...rectangle('13', 'Obstructions', 25, 10, 5, 5),
+      '0', 'ENDSEC', '0', 'EOF', '',
+    ].join('\n'))
+    const worker = realWorkerTransport()
+    const { result } = renderHook(() => useEngineSession({ createWorker: () => worker }))
+    await act(async () => { result.current.actions.openBytes(bytes, 'rooftop-layers.dxf', { committed: true }) })
+    const before = JSON.parse(JSON.stringify(Array.from(result.current.entities)))
+    expect(before.map((entity) => entity.id)).toEqual(['16', '17', '18', '19'])
+    const ids = ['16', '17']
+    act(() => { result.current.actions.selectReplace(ids) })
+    await act(async () => { result.current.actions.applyEdit('setLayer', { layer: 'PanelsReviewed' }) })
+    expect(result.current.errorKind).toBeNull()
+    const expected = before.map((entity) => ids.includes(entity.id) ? { ...entity, layer: 'PanelsReviewed' } : entity)
+    expect(Array.from(result.current.entities)).toEqual(expected)
+    expect(result.current.selectedIds).toEqual(ids)
+    expect(result.current.undoDepth).toBe(1)
+    expect(worker.writes.filter((entry) => entry.op === 'batch')).toEqual([{ type: 'applyEdit', op: 'batch', count: 1 }])
+    expect(diffPlan(before, result.current.entities)).toEqual({
+      mutations: { set_layer: [{ handle: '10', layer: 'PanelsReviewed' }, { handle: '11', layer: 'PanelsReviewed' }] },
+      count: 2, reason: null,
+    })
+    const savedBytes = result.current.savedBytes
+    expect(savedBytes.byteLength).toBeGreaterThan(0)
+    const reopenedWorker = realWorkerTransport()
+    const reopened = renderHook(() => useEngineSession({ createWorker: () => reopenedWorker }))
+    await act(async () => { reopened.result.current.actions.openBytes(savedBytes, 'saved-rooftop.dxf', { committed: true }) })
+    expect(Array.from(reopened.result.current.entities)).toEqual(expected)
+    expect(reopened.result.current.undoDepth).toBe(0)
+    await act(async () => { expect(result.current.actions.undo()).toBe(true) })
+    expect(Array.from(worker.posted.at(-1).bytes)).toEqual(Array.from(bytes))
+    expect(Array.from(result.current.entities)).toEqual(before)
+    expect(result.current.undoDepth).toBe(0)
+    expect(Array.from(reopened.result.current.entities)).toEqual(expected)
+  })
   it('CCP02 real five-step batch', { timeout: 90_000 }, async () => {
     await realSelectionBatch(5)
   })
