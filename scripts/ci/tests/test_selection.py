@@ -316,7 +316,7 @@ class SelectionContracts(unittest.TestCase):
                                "repo": "fixture/repo", "revoked_map_shas": [],
                                "map_sha": self.git("rev-parse", self.trusted + ":" + selector.MAP_PATH)}}
 
-    def choose(self, event=None, env=None, expected_rc=0):
+    def choose(self, event=None, env=None, expected_rc=0, capture_epoch_manifest=None):
         event = self.evidence() if event is None else event
         event_path = self.inputs / "event.json"
         event_path.write_text(json.dumps(event), encoding="utf-8")
@@ -325,6 +325,8 @@ class SelectionContracts(unittest.TestCase):
                    "--head-sha", self.git("rev-parse", "HEAD"),
                    "--map", str(self.inputs / "map.json"), "--catalog", str(self.inputs / "catalog.json"),
                    "--event-evidence", str(event_path), "--out-dir", str(self.out)]
+        if capture_epoch_manifest is not None:
+            command.extend(["--capture-epoch-manifest", str(capture_epoch_manifest)])
         result = subprocess.run(command, capture_output=True, env=env or self.env, timeout=30)
         self.assertEqual(result.returncode, expected_rc, result.stderr.decode(errors="replace"))
         return json.loads((self.out / "decision.json").read_text(encoding="utf-8"))
@@ -358,6 +360,146 @@ class SelectionContracts(unittest.TestCase):
         self.catalog["runner_path"] = "scripts/run-all-gates.py"
         self.catalog["runner_blob_sha"] = self.git("rev-parse", self.trusted + ":scripts/run-all-gates.py")
         self.rebase_fixture()
+
+    def compact_fixture(self):
+        """Encode real suite rows with shared reads, missing reads and interned edges."""
+        rows = self.mapping["suites"]
+        paths = set()
+        for row in rows.values():
+            paths.update(row["read_paths"])
+            paths.update(row.get("negative_lookup_paths", []))
+            for directory in row.get("directory_reads", []):
+                paths.add(directory["path"])
+                paths.update(directory["members"])
+        paths = sorted(paths)
+        index = {path: i for i, path in enumerate(paths)}
+        shared = {paths[0]}
+        self.mapping.update(schema="leaf.ci.test-selection-map.v2", paths=paths,
+                            format={"paths": "interned", "session": "intersection"},
+                            session={"read_idx": [index[paths[0]]], "negative_idx": [],
+                                     "directory_reads": [], "directory_members": []})
+        for row in rows.values():
+            reads = set(row.pop("read_paths"))
+            row["read_extra_idx"] = sorted(index[p] for p in reads - shared)
+            row["read_missing_idx"] = sorted(index[p] for p in shared - reads)
+            row["negative_extra_idx"] = sorted(index[p] for p in row.pop("negative_lookup_paths", []))
+            row["directory_extra"] = [
+                {"path_idx": index[d["path"]], "member_idx": sorted(index[p] for p in d["members"])}
+                for d in sorted(row.pop("directory_reads", []), key=lambda d: d["path"])]
+
+    def process_fixture(self):
+        self.mapping.update(trace_kind=selector.PROCESS_TRACE_KIND,
+                            phase="shadow", selection_enabled=False)
+        entry = next(row for row in self.catalog["suites"] if row["id"] == "native")
+        entry.update(trace_kind=selector.PROCESS_TRACE_KIND, python_only=False)
+        self.mapping["suites"]["native"]["mappable"] = True
+        manifest = {"schema": "leaf.ci.capture-epoch.v1", "external_root_digests": {},
+                    "external_root_table": {}, "reporting_helper_sha256s": {}}
+        self.mapping["capture_epoch"] = selector.normalized_epoch(manifest)
+        self.mapping["external_root_digests"] = {}
+        path = self.inputs / "epoch.json"
+        path.write_text(json.dumps(manifest), encoding="utf-8")
+        return path
+
+    def test_compact_session_edges_expand_and_validate(self):
+        compact = {
+            "schema": "leaf.ci.test-selection-map.v2",
+            "format": {"paths": "interned", "session": "intersection"},
+            "paths": [".", "data", "data/a", "data/b", "missing"],
+            "session": {"read_idx": [2], "negative_idx": [4],
+                        "collection_idx": [3], "directory_reads": [0, 1],
+                        "directory_members": [[1], [2]]},
+            "suites": {"sample": {"read_extra_idx": [3], "read_missing_idx": [2],
+                                   "negative_extra_idx": [], "directory_missing_idx": [0],
+                                   "directory_extra": [{"path_idx": 1, "member_idx": [3],
+                                                        "member_missing_idx": [2]}]}}}
+        expanded = selector.expand_map(compact)
+        row = expanded["suites"]["sample"]
+        self.assertEqual(row["read_paths"], ["data/b"])
+        self.assertEqual(row["negative_lookup_paths"], ["missing"])
+        self.assertEqual(row["directory_reads"], [{"path": "data", "members": ["data/b"]}])
+        self.assertEqual(expanded["session"]["collection_paths"], ["data/b"])
+        self.assertEqual(row["directory_trie"], selector.directory_trie(["data/b"]))
+        for field, value in (("read_extra_idx", [True]), ("read_extra_idx", [99]),
+                             ("read_extra_idx", [2]), ("read_missing_idx", [3]),
+                             ("negative_extra_idx", [4]), ("directory_missing_idx", [3])):
+            with self.subTest(field=field, value=value):
+                malformed = copy.deepcopy(compact)
+                malformed["suites"]["sample"][field] = value
+                with self.assertRaisesRegex(selector.InvalidInput, "invalid_map"):
+                    selector.expand_map(malformed)
+        self.assertEqual(compact["suites"]["sample"]["read_extra_idx"], [3])
+
+    def test_v2_matches_v1_decision(self):
+        self.change()
+        original = self.choose()
+        self.compact_fixture()
+        self.rebase_fixture()
+        self.change(text="good\n\n\n")
+        compact = self.choose()
+        for field in ("selection_mode", "proposed_suite_ids", "expanded_suite_ids", "known_read_paths"):
+            self.assertEqual(compact[field], original[field])
+
+    def test_process_entry_missed_edge_is_excluded(self):
+        epoch = self.process_fixture()
+        self.compact_fixture()
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose(capture_epoch_manifest=epoch)
+        self.assertEqual(decision["selection_mode"], "shadow")
+        self.assertEqual(decision["proposed_suite_ids"], ["a", "mandatory"])
+
+    def test_process_entry_matching_edge_is_required(self):
+        epoch = self.process_fixture()
+        self.rebase_fixture()
+        self.change("native/input.json", '"changed"\n')
+        decision = self.choose(capture_epoch_manifest=epoch)
+        self.assertEqual(decision["selection_mode"], "shadow")
+        self.assertEqual(decision["proposed_suite_ids"], ["mandatory", "native"])
+
+    def test_process_epoch_fails_closed(self):
+        epoch = self.process_fixture()
+        self.rebase_fixture()
+        self.change()
+        for manifest, reason in ((None, "epoch_unavailable"),
+                                 (self.inputs / "missing.json", "epoch_unavailable"),
+                                 (epoch, "epoch_mismatch")):
+            if manifest == epoch:
+                epoch.write_text(json.dumps({"schema": "leaf.ci.capture-epoch.v1",
+                                             "external_root_digests": {"changed": "digest"}}),
+                                 encoding="utf-8")
+            decision = self.choose(capture_epoch_manifest=manifest)
+            self.assert_full(decision, reason)
+            self.assertEqual(decision["executed_suite_ids"], sorted(self.mapping["suites"]))
+
+    def test_process_entry_floors(self):
+        epoch = self.process_fixture()
+        entry = next(row for row in self.catalog["suites"] if row["id"] == "native")
+        for classification, contracts in (("mandatory", False), ("mapped", True)):
+            entry.update(classification=classification, contract_assertions=contracts)
+            self.rebase_fixture()
+            self.change(text="good\n" + "\n" * (1 if contracts else 2))
+            decision = self.choose(capture_epoch_manifest=epoch)
+            self.assertEqual(decision["selection_mode"], "shadow")
+            self.assertIn("native", decision["proposed_suite_ids"])
+            self.assertIn("mandatory", decision["proposed_suite_ids"])
+
+    def test_process_negative_listing_and_prefix_edges(self):
+        epoch = self.process_fixture()
+        row = self.mapping["suites"]["native"]
+        row["negative_lookup_paths"] = ["new/missing.json"]
+        row["directory_reads"] = [{"path": "listed", "members": []}]
+        row["generated_rules"] = [{"output": "native/input.json", "inputs": ["src/"],
+                                   "evidence_ref": "fixture-policy"}]
+        self.compact_fixture()
+        self.rebase_fixture()
+        for path in ("new/missing.json", "listed/new.json", "src/new.json"):
+            with self.subTest(path=path):
+                self.change(path, '{}\n')
+                decision = self.choose(capture_epoch_manifest=epoch)
+                self.assertEqual(decision["selection_mode"], "shadow")
+                self.assertIn("native", decision["proposed_suite_ids"])
+                self.assertFalse(decision["apply_filter"])
 
     def test_mixed_mapped(self):
         self.put("src/a.py", "good\n\n")
