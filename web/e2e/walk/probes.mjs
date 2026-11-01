@@ -155,10 +155,19 @@ export function controlName(context) {
   return new RegExp('^' + context.name.split('{n}').map(escapePattern).join(count) + '$')
 }
 
-export function requireControlCensusBatch(census, { state = 'ready', viewport = 'desktop' } = {}) {
+// App.jsx ~4774/4776 keeps Studio's Job monitor expanded without Collapse, per the WL47 ruling.
+const STUDIO_SHELL_ABSENT_BY_DESIGN = Object.freeze(new Set(['control:job-monitor-expand']))
+
+export function requireControlCensusBatch(census, { state = 'ready', viewport = 'desktop', studioShell = false } = {}) {
   for (const expected of CONTROL_CENSUS_BATCH) {
     if (!expected.states.includes(state) || !expected.viewports.includes(viewport)) continue
     const matches = census.resolved.filter((row) => normalizedControlKey(row) === normalizedControlKey(expected))
+    if (studioShell && STUDIO_SHELL_ABSENT_BY_DESIGN.has(expected.feature_id)) {
+      if (matches.length !== 0) {
+        throw new Error('control-census: control expected absent on the studio shell: ' + expected.feature_id)
+      }
+      continue
+    }
     if (matches.length !== 1 || matches[0].feature_id !== expected.feature_id) {
       throw new Error('control-census: required batch control missing or misresolved: ' + expected.feature_id)
     }

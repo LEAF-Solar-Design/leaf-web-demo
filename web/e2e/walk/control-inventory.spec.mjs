@@ -41,8 +41,11 @@ test.describe('rendered control census', () => {
       }
       if (state === 'ready') expect(census.resolved.some((row) => row.feature_id === 'action:fit'
         && row.scope === 'toolbar:"View"'), 'viewer Fit must resolve to its registry action').toBe(true)
-      expect(requireControlCensusBatch(census, { state, viewport: 'desktop' })).toBe(true)
-      const applicableBatch = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+      const studioShell = await page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+        .getByRole('button', { name: 'Studio', exact: true }).count() > 0
+      expect(requireControlCensusBatch(census, { state, viewport: 'desktop', studioShell })).toBe(true)
+      const applicableBatch = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state)
+        && (!studioShell || row.feature_id !== 'control:job-monitor-expand'))
       expect(census.resolved.filter((row) => applicableBatch.some((expected) => expected.feature_id === row.feature_id)))
         .toHaveLength(applicableBatch.length)
       const path = process.env.LEAF_WALK_CENSUS_RECORD

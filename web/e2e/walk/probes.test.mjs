@@ -1503,6 +1503,48 @@ test('presence obligations reject duplicate resolved observations even with the 
   assert.throws(() => requireControlCensusBatch({ resolved: [...resolved, resolved.at(-1)] }), /missing or misresolved/)
 })
 
+test('Studio census requires the spine Job monitor Expand control to be absent', () => {
+  for (const state of ['ready', 'failed-load']) {
+    const batch = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+    const expand = batch.find((row) => row.feature_id === 'control:job-monitor-expand')
+    const resolved = batch.filter((row) => row !== expand)
+    assert.equal(requireControlCensusBatch({ resolved }, { state, studioShell: true }), true)
+    for (const rows of [[expand], [expand, expand], [{ ...expand, feature_id: 'wrong-id' }]]) {
+      assert.throws(() => requireControlCensusBatch({ resolved: [...resolved, ...rows] }, { state, studioShell: true }),
+        /control-census: control expected absent on the studio shell: control:job-monitor-expand/)
+    }
+  }
+})
+
+test('non-Studio census still requires exactly one spine Job monitor Expand control', () => {
+  for (const state of ['ready', 'failed-load']) {
+    const resolved = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state))
+    const expand = resolved.find((row) => row.feature_id === 'control:job-monitor-expand')
+    assert.equal(requireControlCensusBatch({ resolved }, { state, studioShell: false }), true)
+    assert.throws(() => requireControlCensusBatch({ resolved: resolved.filter((row) => row !== expand) },
+      { state, studioShell: false }), /control-census: required batch control missing or misresolved: control:job-monitor-expand/)
+    assert.throws(() => requireControlCensusBatch({ resolved: [...resolved, expand] },
+      { state, studioShell: false }), /control-census: required batch control missing or misresolved: control:job-monitor-expand/)
+  }
+})
+
+test('Studio shell does not change other census batch presence and identity obligations', () => {
+  for (const state of ['ready', 'failed-load']) {
+    for (const studioShell of [false, true]) {
+      const resolved = CONTROL_CENSUS_BATCH.filter((row) => row.states.includes(state)
+        && (!studioShell || row.feature_id !== 'control:job-monitor-expand'))
+      assert.equal(requireControlCensusBatch({ resolved }, { state, studioShell }), true)
+      for (const expected of resolved.filter((row) => row.feature_id !== 'control:job-monitor-expand')) {
+        const without = resolved.filter((row) => row !== expected)
+        for (const rows of [without, [...resolved, expected], [...without, { ...expected, feature_id: 'wrong-id' }]]) {
+          assert.throws(() => requireControlCensusBatch({ resolved: rows }, { state, studioShell }),
+            { message: 'control-census: required batch control missing or misresolved: ' + expected.feature_id })
+        }
+      }
+    }
+  }
+})
+
 test('camera navigation precedes URL navigation and collapse never invokes the reopening helper', () => {
   const source = readFileSync(new URL('./fixtures.mjs', import.meta.url), 'utf8')
   const oracle = source.slice(source.indexOf('async function assertEffect'))
