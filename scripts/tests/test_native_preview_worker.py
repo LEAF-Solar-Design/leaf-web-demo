@@ -430,6 +430,54 @@ def test_remote_supervisor_requires_initial_permit(tmp_path):
         mac.supervise(['never-start'], tmp_path / 'missing', popen=lambda *a, **k: pytest.fail('spawned'))
 
 
+def remote_clock_process(tmp_path, program, payload, *, kernel, local_origin):
+    """Model macOS Python 3.9 processes sharing only CLOCK_MONOTONIC."""
+    script = mac.REMOTE_COMMON + '\n' + f'''
+import types
+time=types.SimpleNamespace(CLOCK_MONOTONIC=1,
+    clock_gettime=lambda clock: {kernel!r}, monotonic=lambda: {local_origin!r})
+source=Path({str(tmp_path)!r})/'source'
+roots=lambda p: (source, source/'derived', source/'internal')
+sys.stdin=io.StringIO({json.dumps(payload)!r})
+def supervise(argv, permit, **kw):
+    assert kw['clock'] is permit_clock
+    assert kw['clock']()=={kernel!r}
+    assert float(permit.read_text())>kw['clock']()
+    return b'{{}}'
+''' + program
+    return subprocess.run([sys.executable, '-c', script], capture_output=True, text=True)
+
+
+def test_remote_permit_uses_shared_clock_across_processes(tmp_path):
+    bootstrap = remote_clock_process(tmp_path, mac.BOOTSTRAP, {'name': 'owned'},
+                                     kernel=10000.0, local_origin=.22)
+    assert bootstrap.returncode == 0, bootstrap.stderr
+    assert json.loads(bootstrap.stdout)['remote_clock'] == 10000.0
+    refresh = remote_clock_process(tmp_path, mac.REFRESH, {'expiry': 10008.0},
+                                   kernel=10001.0, local_origin=.01)
+    assert refresh.returncode == 0, refresh.stderr
+    driver = remote_clock_process(tmp_path, 'permitted(source)', {},
+                                  kernel=10002.0, local_origin=.03)
+    assert driver.returncode == 0, driver.stderr
+    supervisor = remote_clock_process(tmp_path, mac.SUPERVISOR_END, {'driver': 'fixed'},
+                                      kernel=10003.0, local_origin=.02)
+    assert supervisor.returncode == 0, supervisor.stderr
+    expired_driver = remote_clock_process(tmp_path, 'permitted(source)', {},
+                                          kernel=10009.0, local_origin=.01)
+    assert expired_driver.returncode != 0
+
+
+@pytest.mark.parametrize('expiry', [10000.0, 10011.0, float('inf'), float('nan')])
+def test_remote_shared_clock_refuses_invalid_refresh(tmp_path, expiry):
+    source = tmp_path / 'source'
+    source.mkdir()
+    (source / 'permit').write_text('previous')
+    refresh = remote_clock_process(tmp_path, mac.REFRESH, {'expiry': expiry},
+                                   kernel=10000.0, local_origin=.01)
+    assert refresh.returncode != 0
+    assert (source / 'permit').read_text() == 'previous'
+
+
 def test_duplicate_zip_entries_rejected(source):
     output = io.BytesIO(source[0])
     with zipfile.ZipFile(output, 'a') as archive, pytest.warns(UserWarning):
