@@ -16,13 +16,22 @@ export function hasIcon(id) {
   return !!id && HAVE.has(id)
 }
 
-export default function CockpitIcon({ id = '', fallback = '', size = 'small' }) {
+export default function CockpitIcon({ id = '', fallback = '', size = 'small', decorative = true, label }) {
+  if (import.meta.env?.DEV && !decorative && (typeof label !== 'string' || !label.trim())) {
+    throw new Error('CockpitIcon requires a non-empty label when decorative is false')
+  }
+  const pixels = size === 'large' ? 39 : ['row', 'quick', 'strip'].includes(size) ? 16 : 18
+  const accessibility = {
+    'aria-hidden': decorative ? 'true' : undefined,
+    role: decorative ? undefined : 'img',
+    'aria-label': decorative ? undefined : label,
+  }
   if (hasIcon(id)) {
     return (
-      <svg className="ci" data-size={size} aria-hidden="true" focusable="false">
+      <svg className="ci" data-size={size} width={pixels} height={pixels} {...accessibility} focusable="false">
         <use href={`${SPRITE_URL}#i8-${id}`} />
       </svg>
     )
   }
-  return <span className="ci ci-glyph" data-size={size} aria-hidden="true">{familyMonogram(fallback || id)}</span>
+  return <span className="ci ci-glyph" data-size={size} {...accessibility}>{familyMonogram(fallback || id)}</span>
 }
