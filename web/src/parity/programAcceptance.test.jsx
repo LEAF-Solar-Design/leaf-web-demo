@@ -16,8 +16,15 @@ import CodeTab from '../lab/code/CodeTab.jsx'
 import { manifests } from '../lab/canvas/registry.js'
 import { keyboardTable } from '../lib/actionRegistry.js'
 import { SINGLE_KEY_SHORTCUTS_KEY } from '../lib/singleKeyPreference.js'
+import GroundSkeleton from '../components/GroundSkeleton.jsx'
+import CatalogStatus from '../site/CatalogStatus.jsx'
+import NavRail from '../site/NavRail.jsx'
+import PromptBox from '../components/PromptBox.jsx'
+import DetailsDrawer from '../components/DetailsDrawer.jsx'
+import { TOAST_MS } from '../components/Toast.jsx'
+import SheetsSet from '../site/sheets/sheetsContent.jsx'
 
-vi.mock('../lib/actionRegistry.js', () => ({ keyboardTable: vi.fn() }))
+vi.mock('../lib/actionRegistry.js', async importOriginal => ({ ...await importOriginal(), keyboardTable: vi.fn() }))
 vi.mock('../site/router.js', () => ({ navigate: vi.fn() }))
 
 // Vitest runs from web/; jsdom import.meta.url is not a file URL.
@@ -159,6 +166,126 @@ function dashHits(node, file, hits) {
 }
 
 const assertions = {
+  'W2-01 grounds delay the named status skeleton and avoid reload and null fallbacks': () => {
+    vi.useFakeTimers()
+    const { container } = render(<GroundSkeleton label="Lab" />)
+    expect(container.innerHTML).toBe('')
+    act(() => vi.advanceTimersByTime(199))
+    expect(container.innerHTML).toBe('')
+    act(() => vi.advanceTimersByTime(1))
+    expect(screen.getByRole('status').textContent).toBe('Loading Lab')
+    expect(read('site/SurfaceGrounds.jsx')).not.toContain('location.reload')
+    expect(read('site/SiteRoot.jsx')).not.toContain('fallback={null}')
+  },
+  'W2-02 CatalogStatus renders five states with exact copy and roles': () => {
+    const onRetry = vi.fn()
+    const onClear = vi.fn()
+    const { container, rerender } = render(<CatalogStatus state="ready" />)
+    expect(container.innerHTML).toBe('')
+    rerender(<CatalogStatus state="loading" />)
+    expect(screen.getAllByRole('status')).toHaveLength(1)
+    expect(screen.getByRole('status').textContent).toBe('Loading tools')
+    expect(screen.getByRole('status').getAttribute('aria-live')).toBe('polite')
+    expect(screen.queryByRole('alert')).toBeNull()
+    for (const [state, query, text] of [
+      ['empty', undefined, 'No tools yet. Add a tool to get started.'],
+      ['no-match', 'panel', 'No tools match "panel".'],
+      ['no-match', '', 'No tools for this surface yet.'],
+    ]) {
+      rerender(<CatalogStatus state={state} query={query} onClear={onClear} />)
+      expect(container.querySelector('p').textContent).toBe(text)
+      expect(screen.queryByRole('status')).toBeNull()
+      expect(screen.queryByRole('alert')).toBeNull()
+      if (query) fireEvent.click(screen.getByRole('button', { name: 'Clear filter' }))
+      else expect(screen.queryByRole('button')).toBeNull()
+    }
+    expect(onClear).toHaveBeenCalledTimes(1)
+    rerender(<CatalogStatus state="failed" onRetry={onRetry} />)
+    expect(screen.getAllByRole('alert')).toHaveLength(1)
+    expect(screen.getByRole('alert').querySelector('p').textContent)
+      .toBe('The tool list did not load. Your saved tools are still available below.')
+    expect(screen.queryByRole('status')).toBeNull()
+    fireEvent.click(within(screen.getByRole('alert')).getByRole('button', { name: 'Retry' }))
+    expect(onRetry).toHaveBeenCalledTimes(1)
+  },
+  'W2-02 NavRail catalog titles use full words for tools and fallback lists': () => {
+    const props = { activeSurface: 'browser', authorContent: null, catalogFamilyCount: 1,
+      railFamilies: [{ family_id: 'measurement', label: 'Measurement', capabilities: [{ name: 'count_panels' }] }],
+      catalogSource: 'flat-fallback', capCount: 7 }
+    const { container, rerender } = render(<NavRail {...props} />)
+    for (const studio of [null, {}]) {
+      rerender(<NavRail {...props} studio={studio} />)
+      const title = container.querySelector('.fam-title')
+      expect(title).not.toBeNull()
+      expect(title.textContent).toContain(`${studio ? 1 : 7} tools · tool list`)
+      expect(title.textContent).not.toMatch(/\b(caps|flat)\b/i)
+    }
+  },
+  'W2-03 prompt results use instant selected rails and one combobox': () => {
+    const css = read('components/promptParity.css')
+    expect(css).toContain('border-left:2px solid transparent')
+    expect(css).toMatch(/\.pb-result\[aria-selected="true"\][^{]*\{border-left-color:var\(--leaf-accent\);background:var\(--leaf-accent-tint\)\}/)
+    const rowRules = css.match(/[^{}]*\.pb-result[^{}]*\{[^{}]*\}/g)
+    expect(rowRules?.length).toBeGreaterThan(0)
+    for (const rule of rowRules) expect(rule).not.toMatch(/transition(?:-[\w-]+)?\s*:/)
+    render(<PromptBox value="" onChange={() => {}} onDispatch={() => {}} mcpDiscoveryEnabled={false} />)
+    expect(screen.getAllByRole('combobox')).toHaveLength(1)
+  },
+  'W2-04 DetailsDrawer uses modal large and nonmodal medium phone detents': () => {
+    const prototype = HTMLDialogElement.prototype
+    const descriptors = new Map(['show', 'showModal', 'close'].map(name =>
+      [name, Object.getOwnPropertyDescriptor(prototype, name)]))
+    const show = vi.fn(function () { this.setAttribute('open', '') })
+    const showModal = vi.fn(function () { this.setAttribute('open', '') })
+    const close = vi.fn(function () { this.removeAttribute('open') })
+    for (const [name, value] of Object.entries({ show, showModal, close })) {
+      Object.defineProperty(prototype, name, { configurable: true, writable: true, value })
+    }
+    vi.stubGlobal('matchMedia', vi.fn(() => ({ matches: true,
+      addEventListener: vi.fn(), removeEventListener: vi.fn() })))
+    let view
+    try {
+      view = render(<DetailsDrawer data={{ title: 'Acceptance details', rows: ['Provenance'] }} onClose={() => {}} />)
+      const dialog = screen.getByRole('dialog', { name: 'Acceptance details' })
+      expect(dialog.getAttribute('data-detent')).toBe('medium')
+      expect(show).toHaveBeenCalledTimes(1)
+      expect(showModal).not.toHaveBeenCalled()
+      fireEvent.click(screen.getByRole('button', { name: 'Expand details' }))
+      expect(dialog.getAttribute('data-detent')).toBe('large')
+      expect(dialog.getAttribute('aria-modal')).toBe('true')
+      expect(showModal).toHaveBeenCalledTimes(1)
+      fireEvent.click(screen.getByRole('button', { name: 'Condense details' }))
+      expect(dialog.getAttribute('data-detent')).toBe('medium')
+      expect(dialog.getAttribute('aria-modal')).toBeNull()
+      expect(show).toHaveBeenCalledTimes(2)
+      expect(showModal).toHaveBeenCalledTimes(1)
+    } finally {
+      view?.unmount()
+      for (const [name, descriptor] of descriptors) {
+        if (descriptor) Object.defineProperty(prototype, name, descriptor)
+        else delete prototype[name]
+      }
+    }
+  },
+  'W2-05 toast durations preserve C3 A info and action timing': () => {
+    expect(TOAST_MS).toEqual({ info: 5000, action: 8000 })
+  },
+  'W2-06 Sheets omit numeric commercial claims and link every CTA note to pricing': () => {
+    // Same scan as site/sheets/sheetsParity.test.jsx, F-COMM A.
+    const commercialClaim = /\$\d|per DAU|per daily active user|\d+-day (free )?trial/gi
+    expect([...read('site/sheets/sheetsContent.jsx').matchAll(commercialClaim)]).toEqual([])
+    const { container } = render(<SheetsSet />)
+    expect(container.textContent).not.toMatch(commercialClaim)
+    const notes = [...container.querySelectorAll('.sheet-cta-note')]
+    expect(notes.map(note => note.closest('section.sheet').id).sort())
+      .toEqual(['a-101', 'a-102', 'e-401', 'g-000', 'l-000', 's-501'])
+    for (const note of notes) {
+      const links = within(note).getAllByRole('link')
+      expect(links).toHaveLength(1)
+      expect(links[0].textContent).toBe('View current pricing')
+      expect(links[0].getAttribute('href')).toBe('/pricing')
+    }
+  },
   'tokens retain 129 root declarations and Stage and Paper control lines': () => {
     const rootSource = standard.match(/:root\s*\{([^}]*)\}/)?.[1]
     expect(rootSource).toBeDefined()
@@ -437,6 +564,7 @@ afterAll(() => {
   expect(executed).toHaveLength(verified.length)
   expect(completed).toHaveLength(verified.length)
   expect([...executed].sort()).toEqual(verified.map(row => row.assertion).sort())
+  expect([...completed].sort()).toEqual(verified.map(row => row.assertion).sort())
   for (const row of coverage.filter(row => row.status === 'deferred')) {
     console.info(`DEFERRED ${row.rule} ${row.slice} gate=${row.fork}: ${row.assertion}`)
   }

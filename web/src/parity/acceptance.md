@@ -2,8 +2,8 @@
 
 `coverage.json` is the registration manifest for `programAcceptance.test.jsx`.
 Each verified row registers exactly one test, named by `assertion`; deferred
-rows register no tests and are printed with their gate. The initial matrix has
-35 rows: 25 verified and ten deferred. Suite hooks check all DP-A1 through
+rows register no tests and are printed with their gate. The matrix has
+35 rows: 32 verified and three deferred. Suite hooks check all DP-A1 through
 DP-A25 identifiers, unique `(rule, slice, assertion)` triples, row shape,
 contract rule-to-slice citations from amendment 2, implemented verified
 assertions, and the actual started and completed counts.
@@ -35,18 +35,18 @@ The coverage scopes are:
 | DP-A9 | Decorative CockpitIcon accessibility |
 | DP-A10 | Ghost button background |
 | DP-A11 | SchemaForm descriptions and decorative unit suffix |
-| DP-A12 | Deferred until shell navigation production assertions are available (F-SHELL) |
+| DP-A12 | Studio navigation tracked in the shell parity ledger (shell-ledger), leaf_website `docs/design-parity-shell-handoff.md`, DP-W3-04 |
 | DP-A13 | Computed Stage panel color roles |
 | DP-A14 | ResultPanel header scopes and numeric cell classification |
-| DP-A15 | DP-W2-03 deferred (F-SHELL+C2) |
-| DP-A16 | ShortcutSheet groups; DP-W2-04 deferred (F-SHELL) |
-| DP-A17 | DP-W2-05 deferred (C3) |
-| DP-A18 | DP-W2-01 and DP-W2-02 deferred (F-SHELL) |
+| DP-A15 | DP-W2-03 instant selected-result rail recipe and single PromptBox combobox (C2 A) |
+| DP-A16 | ShortcutSheet groups; DP-W2-04 modal large and nonmodal medium DetailsDrawer phone detents |
+| DP-A17 | DP-W2-05 toast durations: info 5000 ms, action 8000 ms (C3 A) |
+| DP-A18 | DP-W2-01 delayed named ground skeleton and reload/null-fallback source guards; DP-W2-02 five CatalogStatus states, copy and roles |
 | DP-A19 | Button focus outline and independent single-key preference |
 | DP-A20 | CodeTab clipboard resolution and code typography recipe |
 | DP-A21 | DP-W3-02 deferred (website-only) for marketing rhythm |
 | DP-A22 | DP-W3-02 deferred (website-only) for imagery parity |
-| DP-A23 | Branding and dash scans; DP-W2-02 deferred (F-SHELL); DP-W2-06 deferred (F-COMM) |
+| DP-A23 | Branding and dash scans; DP-W2-02 full-word NavRail titles; DP-W2-06 commercial-claim scan and pricing links at every sheet CTA note (F-COMM A) |
 | DP-A24 | Computed fine/coarse hit target, touch control and text tokens |
 | DP-A25 | EscCap button semantics and Sheets hint contrast token |
 
@@ -72,23 +72,39 @@ they are never inputs to that helper. Token theme assertions use computed
 custom properties directly. The Sheets hint fixture uses the production
 SheetFrame and Sheets stylesheet, following the W1 contrast test's setup.
 
-## Promoting deferred rows
+## Promoted and deferred rows
 
-Only the root promotes rows after the corresponding merge and gate decision.
-The initial gates are:
+DP-W4-05 promotes seven rows from the merged DP-W2-01 through DP-W2-06
+slices after the operator selected every fork A in
+`design-parity-forks-20261101/receipts/operator-forks-all-a-20261101.json`.
+GroundSkeleton is empty through 199 ms and announces `Loading Lab` at 200 ms;
+source guards exclude `location.reload` in SurfaceGrounds and null fallbacks
+in SiteRoot. These source guards do not establish successful Retry recovery.
+CatalogStatus mounts ready, loading, empty, no-match and failed states,
+including both no-match messages and the Clear filter and Retry callbacks.
+NavRail titles are rendered in console and Studio modes with fallback data.
+PromptBox mounts one combobox and its CSS is checked for the transparent
+rail, selected accent/tint and absence of result transitions. DetailsDrawer
+uses prototype dialog polyfills and a phone media query to check `show`,
+`showModal` and the return to `show` across medium/large/medium detents.
+The toast row reads the exported production duration object. The Sheets row
+uses the commercial-claim scan from its component suite against source and
+rendered text, and checks the exact six CTA-note sheet locations and their
+`/pricing` links.
 
-| Slice | Gate |
-| --- | --- |
-| DP-W2-01 | F-SHELL |
-| DP-W2-02 | F-SHELL |
-| DP-W2-03 | F-SHELL+C2 |
-| DP-W2-04 | F-SHELL |
-| DP-W2-05 | C3 |
-| DP-W2-06 | F-COMM |
+Only these rows remain deferred:
+
+| Rule | Slice | Gate | Evidence location |
+| --- | --- | --- | --- |
+| DP-A12 | DP-W3-01 | shell-ledger | leaf_website `docs/design-parity-shell-handoff.md`, DP-W3-04 |
+| DP-A21 | DP-W3-02 | website-only | Website marketing rhythm matrix |
+| DP-A22 | DP-W3-02 | website-only | Website imagery parity matrix |
 
 DP-W2-02 has separate DP-A18 and DP-A23 rows. DP-W2-06 has a DP-A23
 commercial-copy row under amendment 3, since amendment 2 names no different
-rule for it. Its F-COMM gate remains deferred.
+rule for it. Both W2-02 rows and the W2-06 row now have production assertions
+and `fork: null`. The schema guard retains the original W2 fork-gate array
+for any deferred W2-01 through W2-06 row; none currently remain deferred.
 
 DP-W2-11 and DP-W2-12 are website slices and have no Studio rows under
 amendment 3. DP-A21 and DP-A22 instead have DP-W3-02 rows deferred with
