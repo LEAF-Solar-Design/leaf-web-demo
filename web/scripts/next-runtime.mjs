@@ -20,6 +20,19 @@ export const PUBLIC_ENV_KEYS = Object.freeze([
   'VITE_TELEMETRY_DISABLED', 'VITE_TENANT_ID', 'VITE_WORLD_SPACE_BOARD',
 ])
 
+export const FOLDED_FEATURE_FLAGS = Object.freeze([
+  'VITE_CAD_EDIT', 'VITE_LIFECYCLE_UI', 'VITE_SOLAR_SETTINGS_FORM', 'VITE_SOLAR_FLOW_RAIL',
+])
+
+export function productionFeatureFlags(env = process.env) {
+  return Object.fromEntries(FOLDED_FEATURE_FLAGS.map(key => [key, env[key] === '1']))
+}
+
+// Webpack keys the flag pre-loader by rule ident, so the cache version must carry the folded flags.
+export function flagAwareCacheVersion(version, flags) {
+  return [version, 'leaf-flags:' + JSON.stringify(flags)].filter(part => typeof part === 'string' && part.length > 0).join('|')
+}
+
 export function publicEnvironment(env, development) {
   return {
     ...Object.fromEntries(PUBLIC_ENV_KEYS.filter((key) => env[key] !== undefined).map((key) => [key, String(env[key])])),

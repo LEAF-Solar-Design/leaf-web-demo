@@ -1,7 +1,7 @@
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { engineVersion, findEnginePkgDir } from './vite-plugins/engineVersion.js'
-import { elementRefEnabled, environmentDefinitions, sourceIdentity } from './scripts/next-runtime.mjs'
+import { elementRefEnabled, environmentDefinitions, flagAwareCacheVersion, productionFeatureFlags, sourceIdentity } from './scripts/next-runtime.mjs'
 
 const webRoot = path.dirname(fileURLToPath(import.meta.url))
 
@@ -18,6 +18,10 @@ export default function nextConfig(phase) {
     images: { unoptimized: true },
     poweredByHeader: false,
     webpack(config, { dev, webpack }) {
+      const featureFlags = !dev ? productionFeatureFlags(process.env) : undefined
+      if (!dev && config.cache !== null && typeof config.cache === 'object') {
+        config.cache.version = flagAwareCacheVersion(config.cache.version, featureFlags)
+      }
       // Vendored contracts and UI sit outside web/. Resolve their dependencies
       // from this app while preserving Next's React aliases and one runtime.
       config.resolve.modules = [path.join(webRoot, 'node_modules'), ...(config.resolve.modules || ['node_modules'])]
@@ -30,9 +34,7 @@ export default function nextConfig(phase) {
         test: /\.jsx?$/, include: path.join(webRoot, 'src'), enforce: 'pre',
         use: [{ loader: path.join(webRoot, 'webpack/elementSourceLoader.cjs'), options: {
           root: webRoot, source: dev, ref: elementRefEnabled(),
-          ...(!dev ? { featureFlags: Object.fromEntries([
-            'VITE_CAD_EDIT', 'VITE_LIFECYCLE_UI', 'VITE_SOLAR_SETTINGS_FORM', 'VITE_SOLAR_FLOW_RAIL',
-          ].map(key => [key, process.env[key] === '1'])) } : {}),
+          ...(!dev ? { featureFlags } : {}),
         } }],
       }, {
         test: /worker-browser\.mjs$/, include: path.resolve(webRoot, '../vendor'), enforce: 'pre',
