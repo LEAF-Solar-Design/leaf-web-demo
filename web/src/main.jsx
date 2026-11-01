@@ -11,6 +11,7 @@ import SiteRoot from './site/SiteRoot.jsx'
 import ErrorBoundary from './ErrorBoundary.jsx'
 import './standard/leaf-standard.css'
 import './styles.css'
+import './standard/parity-foundation.css'
 import { installSurfaceConfigProofBridge } from './proofBridge.js'
 import { getSession, getSurfaceConfig, submitSurfaceConfig } from './api.js'
 
