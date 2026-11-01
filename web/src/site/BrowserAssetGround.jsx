@@ -12,7 +12,7 @@ import './browserAssetGround.css'
 export const BrowserArtifactContext = createContext(null)
 
 export function BrowserAssetGround({ browserActive = false, browserPanel: controlledPanel, onBrowserPanel: setControlledPanel,
-  projectId, accountScope, signedIn, profile = 'browser', profiles, onSelect, onDescribe, onEnterWorkspace, sampleEntry, ...boardProps }) {
+  projectId, accountScope, signedIn, profile = 'browser', profiles, onSelect, onDescribe, onEnterWorkspace, sampleEntry, canApplyLayout = false, ...boardProps }) {
   const [localPanel, setLocalPanel] = useState('none')
   const browserPanel = controlledPanel ?? localPanel
   const onBrowserPanel = setControlledPanel || setLocalPanel
@@ -125,6 +125,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
       </div>
     </section>
     <WorkspaceEnvironment scopeKey={currentScope} profile={profile} profiles={profiles} onSelect={onSelect} onDescribe={onDescribe}
+      mock={boardProps.mock} canApplyLayout={signedIn === true && canApplyLayout}
       panel={browserPanel} onPanel={onBrowserPanel} activation={activation} sampleEntry={sampleEntry}
       chooseRequest={boardProps.startFocusRequest} onEnter={onEnterWorkspace}
       onSignIn={showSignIn ? () => { void login() } : undefined}
