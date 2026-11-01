@@ -5,8 +5,11 @@ import { humanizeError } from '../../errorHumanize.js'
 export const SAVED_REVISION_EVENT = 'leaf.lab.saved-revision'
 export const MSG_LAB_TOO_LARGE = 'This document is too large to save.'
 export const MSG_LAB_STORAGE_FULL = 'This save is over the Lab storage limit.'
+export function isValidDocId(id) {
+  return typeof id === 'string' && /^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)
+}
 function identifier(id) {
-  if (typeof id !== 'string' || !/^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,127}(?![\s\S])/.test(id)) throw new Error('Enter a valid Document ID.')
+  if (!isValidDocId(id)) throw new Error('Enter a valid Document ID.')
 }
 const initial = () => ({ head: null, published: null, revisions: [], lastSaved: null, conflict: null,
   events: [], saveTimes: [], requestTimes: [], restoredGraph: null, restoredKey: 0, headLoaded: false, headLookupFailed: false })
