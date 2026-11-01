@@ -2,13 +2,155 @@ import { cleanup, fireEvent, render, screen, waitFor, within } from '@testing-li
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import WidgetsView from './WidgetsView.jsx'
 import WidgetPreview from './WidgetPreview.jsx'
-import { createTextElement, validateElement, validateElements } from './widgetDoc.js'
+import { createTextElement, validateElement, validateElements, validateWidgetDoc } from './widgetDoc.js'
 import { createWidgetDoc } from './useWidgetEditor.js'
+import { DESIGNER_DEFAULT_DOC } from './designerDefault.js'
 
-afterEach(() => { cleanup(); vi.unstubAllGlobals() })
+afterEach(() => { cleanup(); vi.restoreAllMocks(); vi.unstubAllGlobals() })
 const add = () => fireEvent.click(screen.getByRole('button', { name: 'Add text' }))
 const text = (value) => fireEvent.change(screen.getByLabelText('Text'), { target: { value } })
 const preview = () => screen.getByRole('region', { name: 'Preview' })
+const download = () => screen.getByRole('button', { name: 'Download widget definition' })
+function captureDownload() {
+  const createObjectURL = vi.fn(() => 'blob:widget-definition'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', class extends URL {
+    static createObjectURL = createObjectURL
+    static revokeObjectURL = revokeObjectURL
+  })
+  let anchor
+  vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(function () {
+    expect(this.isConnected).toBe(true)
+    anchor = this
+  })
+  return { createObjectURL, revokeObjectURL, anchor: () => anchor }
+}
+function readBlob(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(JSON.parse(reader.result))
+    reader.onerror = () => reject(reader.error)
+    reader.readAsText(blob)
+  })
+}
+
+describe('widget definition download', () => {
+  it('downloads a new valid document locally with a safe filename and cleans up', async () => {
+    const captured = captureDownload(), fetchImpl = vi.fn(), requestPublication = vi.fn()
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<WidgetsView requestPublication={requestPublication} />)
+    expect(download()).toBeDisabled()
+    fireEvent.click(download())
+    expect(captured.createObjectURL).not.toHaveBeenCalled()
+    for (const value of ['../escape', 'bad/name', 'bad?']) {
+      fireEvent.change(screen.getByLabelText('Document ID'), { target: { value } })
+      expect(screen.getByRole('button', { name: 'New' })).toBeDisabled()
+      expect(download()).toBeDisabled()
+    }
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'CON' } })
+    fireEvent.click(screen.getByRole('button', { name: 'New' }))
+    expect(download()).toBeEnabled()
+    expect(screen.getByText('Downloading does not save edits to the project.')).toBeInTheDocument()
+    fireEvent.click(download())
+    const blob = captured.createObjectURL.mock.calls[0][0]
+    expect(blob).toBeInstanceOf(Blob)
+    expect(blob.type).toBe('application/json')
+    expect(await readBlob(blob)).toEqual(validateWidgetDoc(createWidgetDoc(DESIGNER_DEFAULT_DOC)))
+    expect(captured.anchor().download).toBe('widget-CON.json')
+    expect(captured.anchor().getAttribute('href')).toBe('blob:widget-definition')
+    expect(captured.anchor().isConnected).toBe(false)
+    expect(document.querySelector('a[download]')).toBeNull()
+    await waitFor(() => expect(captured.revokeObjectURL).toHaveBeenCalledExactlyOnceWith('blob:widget-definition'))
+    expect(fetchImpl).not.toHaveBeenCalled()
+    expect(requestPublication).not.toHaveBeenCalled()
+  })
+
+  it('exports the validated loaded structure with current unsaved edits, without a request', async () => {
+    const captured = captureDownload(), doc = createWidgetDoc()
+    doc.formats.la.els = [{ ...createTextElement('text1'), preset: 'text', min_renderer: '1.0.0' }]
+    const fetchImpl = vi.fn(async () => ({ ok: true, json: async () => ({ graph: doc, revision: 1, kind: 'widget' }) }))
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<WidgetsView />)
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'my-widget.v1' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+    expect(download()).toBeDisabled()
+    await waitFor(() => expect(download()).toBeEnabled())
+    fireEvent.click(within(screen.getByRole('list', { name: 'Text elements' })).getByRole('button', { name: 'Text 1: Your text' }))
+    text('Current unsaved text')
+    const requestCount = fetchImpl.mock.calls.length
+    fireEvent.click(download())
+    const exported = await readBlob(captured.createObjectURL.mock.calls[0][0])
+    const expected = createWidgetDoc(doc)
+    expected.formats.la.els[0].text = 'Current unsaved text'
+    expect(exported).toEqual(validateWidgetDoc(expected))
+    expect(exported.schema).toBe('widget-doc.v1')
+    expect(exported.formats.la.els[0].text).toBe('Current unsaved text')
+    expect(captured.anchor().download).toBe('widget-my-widget.v1.json')
+    expect(fetchImpl).toHaveBeenCalledTimes(requestCount)
+    expect(screen.getByRole('status')).toHaveTextContent('Local edits')
+  })
+
+  it('blocks mismatched IDs, invalid edits and unfinished editor transactions', () => {
+    const captured = captureDownload()
+    vi.stubGlobal('PointerEvent', class extends MouseEvent {
+      constructor(type, options) { super(type, options); this.pointerId = options.pointerId ?? 1 }
+    })
+    render(<WidgetsView />)
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'widget' } })
+    fireEvent.click(screen.getByRole('button', { name: 'New' }))
+    add()
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'other' } })
+    expect(download()).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'widget' } })
+    expect(download()).toBeEnabled()
+    fireEvent.change(screen.getByLabelText('Binding source'), { target: { value: 'graph.output' } })
+    expect(download()).toBeDisabled()
+    fireEvent.click(download())
+    fireEvent.change(screen.getByLabelText('Binding source'), { target: { value: 'none' } })
+    expect(download()).toBeEnabled()
+    const surface = screen.getByTestId('widget-surface')
+    fireEvent.pointerDown(surface.querySelector('.widget-interaction [data-element-id]'), { clientX: 20, clientY: 20, pointerId: 1, button: 0 })
+    expect(download()).toBeDisabled()
+    fireEvent.click(download())
+    fireEvent.pointerCancel(surface, { pointerId: 1 })
+    expect(download()).toBeEnabled()
+    expect(captured.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it.each([422, 409, 503])('blocks saving and the resulting server status %s', async (status) => {
+    const captured = captureDownload()
+    let finish
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { finish = resolve })))
+    render(<WidgetsView />)
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'widget' } })
+    fireEvent.click(screen.getByRole('button', { name: 'New' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Save' }))
+    expect(download()).toBeDisabled()
+    fireEvent.click(download())
+    finish({ ok: false, status, json: async () => ({ detail: 'Server refused the document' }) })
+    await screen.findByRole('alert')
+    expect(download()).toBeDisabled()
+    fireEvent.click(download())
+    expect(captured.createObjectURL).not.toHaveBeenCalled()
+  })
+
+  it('blocks an existing document during reload and after an invalid loaded document', async () => {
+    const captured = captureDownload()
+    let finish
+    vi.stubGlobal('fetch', vi.fn(() => new Promise((resolve) => { finish = resolve })))
+    render(<WidgetsView />)
+    fireEvent.change(screen.getByLabelText('Document ID'), { target: { value: 'widget' } })
+    fireEvent.click(screen.getByRole('button', { name: 'New' }))
+    expect(download()).toBeEnabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Load', exact: true }))
+    expect(download()).toBeDisabled()
+    fireEvent.click(download())
+    finish({ ok: true, json: async () => ({ graph: { schema: 'invalid' }, revision: 1, kind: 'widget' }) })
+    await screen.findByRole('alert')
+    expect(download()).toBeDisabled()
+    fireEvent.click(download())
+    expect(captured.createObjectURL).not.toHaveBeenCalled()
+  })
+})
 
 describe('scoped widget designer', () => {
   it('hides publication in standalone Studio', () => {
