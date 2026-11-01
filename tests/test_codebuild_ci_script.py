@@ -20,6 +20,54 @@ BASH = shutil.which("bash")
 
 
 class TestCodebuildCiScript(unittest.TestCase):
+    @unittest.skipUnless(BASH, "bash is not on PATH; capture guard requires bash")
+    def test_process_capture_guard(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block = script.split("# LEAF_PROCESS_CAPTURE_BEGIN\n", 1)[1].split(
+            "# LEAF_PROCESS_CAPTURE_END", 1)[0]
+        cases = [
+            ({}, None),
+            ({"LEAF_PROCESS_CAPTURE": "0"}, None),
+            ({"LEAF_PROCESS_CAPTURE": "1", "CODEBUILD_WEBHOOK_EVENT": "PUSH"}, "non_manual_event"),
+            ({"LEAF_PROCESS_CAPTURE": "1", "CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED"},
+             "non_manual_event"),
+            ({"LEAF_PROCESS_CAPTURE": "1", "CODEBUILD_INITIATOR": "states/leaf-forge-ci-relay"},
+             "non_manual_event"),
+            ({"LEAF_PROCESS_CAPTURE": "1", "FORGE_CI_OPERATION": "push"}, "non_manual_event"),
+            ({"LEAF_PROCESS_CAPTURE": "1", "CODEBUILD_WEBHOOK_HEAD_REF": "refs/pull/7/head"},
+             "non_manual_event"),
+            ({"LEAF_PROCESS_CAPTURE": "1", "CODEBUILD_SOURCE_VERSION": "pr/7"}, "non_manual_event"),
+            ({"LEAF_PROCESS_CAPTURE": "1", "CI_SHARD_TOTAL": "3"}, "sharded_build"),
+            ({"LEAF_PROCESS_CAPTURE": "1"}, "strace_unavailable"),
+            ({"LEAF_PROCESS_CAPTURE": "1", "CI_SHARD_TOTAL": "1"}, "strace_unavailable"),
+        ]
+        for overrides, reason in cases:
+            with self.subTest(overrides=overrides):
+                env = {key: value for key, value in os.environ.items()
+                       if not key.startswith(("LEAF_", "FORGE_", "CODEBUILD_", "CI_SHARD_"))}
+                env.update(overrides)
+                env.update(LEAF_PROCESS_CAPTURE_CONTEXT="ambient-context",
+                           LEAF_PROCESS_CAPTURE_OUT="ambient-output", LEAF_PROOF_TRACING="1")
+                # No apt or tracer is ever launched by these snippet tests.
+                command = ('set -euo pipefail\n'
+                           'command() { if [[ "$*" == "-v strace" ]]; then return 1; '
+                           'else builtin command "$@"; fi; }\n'
+                           'timeout() { printf "APT %s\\n" "$*" >&2; return 1; }\n'
+                           + block + '\n'
+                           'printf "ENV %s %s %s\\n" "${LEAF_PROCESS_CAPTURE_CONTEXT:-unset}" '
+                           '"${LEAF_PROCESS_CAPTURE_OUT:-unset}" "$LEAF_PROOF_TRACING"\n')
+                result = subprocess.run([BASH, "-c", command], env=env,
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, 0, result.stderr)
+                if reason is None:
+                    self.assertEqual(result.stdout, "ENV ambient-context ambient-output 1\n")
+                    self.assertEqual(result.stderr, "")
+                else:
+                    self.assertEqual(result.stdout, f"LEAF_CAPTURE refused {reason}\nENV unset unset 1\n")
+                    self.assertEqual("APT" in result.stderr, reason == "strace_unavailable")
+                    if reason == "strace_unavailable":
+                        self.assertIn("120 apt-get update", result.stderr)
+
     def test_forge_relay_event_manifest(self):
         script = CI_PATH.read_text(encoding="utf-8")
         block = script.split("<<'LEAF_SELECTION_INPUTS'\n", 1)[1].split(

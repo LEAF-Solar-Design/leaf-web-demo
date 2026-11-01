@@ -35,6 +35,59 @@ def fixture_catalog(extra_suites=()):
 
 @unittest.skipUnless(BASH, "bash is not on PATH; read-set publication requires bash")
 class TestCodebuildCiReadsets(unittest.TestCase):
+    def test_process_capture_packaging_closes_references_without_changing_verdict(self):
+        from test_full_run_manifest_certificates import capture_fixture
+
+        source = CI_PATH.read_text(encoding="utf-8")
+        publication = source[source.index('readsets_object=""'):source.index(
+            'export readsets_object readsets_sha256 readsets_bytes readsets_status readsets_archive_members')]
+        for missing in (None, "certificate", "outcome"):
+            for gate_status in (0, 7):
+                with self.subTest(missing=missing, gate_status=gate_status), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    _, catalog, _, _, members, readsets, selection = capture_fixture(root)
+                    (selection / "catalog.json").write_text(json.dumps(catalog), encoding="utf-8")
+                    (selection / "readsets-partitioned").write_text("ready\n", encoding="ascii")
+                    for name in ("full_run_manifest.py", "select_tests.py"):
+                        shutil.copyfile(ROOT / "scripts/ci" / name, selection / name)
+                    if missing:
+                        shard = json.loads(next(readsets.rglob("*.json")).read_text())
+                        reference = shard["process_tree_ref" if missing == "certificate" else "outcomes_ref"]
+                        members[reference].unlink()
+                    body = publication.replace("/tmp/gate-logs", str(readsets.parent))
+                    command = ('set -euo pipefail\n'
+                               'aws() { printf "published\\n"; }\n'
+                               + body + '\nexit "$gate_status"\n')
+                    env = dict(os.environ, selection_dir=str(selection), process_capture_active="1",
+                               tracing_ready="1", manifest_failed="0", CODEBUILD_BUILD_ID=BUILD_ID,
+                               HEAD_SHA="a" * 40, TRUSTED_SHA="b" * 40, trusted_sha_override="0",
+                               gate_status=str(gate_status))
+                    result = subprocess.run([BASH, "-c", command], env=env,
+                                            capture_output=True, text=True)
+                    self.assertEqual(result.returncode, gate_status, result.stdout + result.stderr)
+                    archive = selection / "readsets.tar.gz"
+                    if missing:
+                        self.assertIn("LEAF_CAPTURE package_error", result.stdout)
+                        self.assertNotIn("published", result.stdout)
+                        self.assertFalse(archive.exists())
+                    else:
+                        self.assertNotIn("package_error", result.stdout + result.stderr)
+                        with tarfile.open(archive, "r:gz") as packed:
+                            names = packed.getnames()
+                            self.assertEqual(len(names), len(set(names)))
+                            self.assertEqual(len([name for name in names if name.startswith(
+                                "reports/process-tree-")]), 2)
+                            self.assertEqual(len([name for name in names if name.startswith(
+                                "reports/trace-receipt-")]), 2)
+                            self.assertIn("capture/context.json", names)
+                            self.assertIn("capture/capture-epoch.json", names)
+                            self.assertIn("diagnostics/startup.json", names)
+                            for name in names:
+                                if name.startswith("readsets/") and name.endswith(".json"):
+                                    shard = json.loads(packed.extractfile(name).read())
+                                    self.assertIn(shard["process_tree_ref"], names)
+                                    self.assertIn(shard["outcomes_ref"], names)
+
     def run_publication(self, *, tracing=True, aws_status=0, gate_status=0,
                         missing_decision=False, malformed_manifest=False, foreign_shards=False,
                         foreign_attempts=False, missing_completion=False, differing_collection=False,
