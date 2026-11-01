@@ -1,0 +1,9 @@
+/* leaf-dp-v1 */
+.pb-result{display:flex;align-items:center;justify-content:space-between;gap:var(--leaf-space-3);min-height:var(--leaf-metric-row-compact);padding:0 var(--leaf-space-3);font-size:var(--leaf-size-dense);line-height:var(--leaf-leading-dense);border-left:2px solid transparent}
+.pb-result[aria-selected="true"]{border-left-color:var(--leaf-accent);background:var(--leaf-accent-tint)}
+.pb-result .dp-keycap{display:inline-flex;align-items:center;min-width:20px;height:20px;padding:0 var(--leaf-space-1);border:1px solid var(--leaf-line-control);border-radius:var(--leaf-radius-key);font-size:var(--leaf-size-caption);line-height:var(--leaf-leading-caption)}
+.bar ul.resolver{list-style:none;margin:0;padding:0}
+.pb-result .dp-keycap{margin-left:auto;flex-shrink:0}
+/* Keep the recipe above authoritative over the shared resolver styles. */
+.pb-result.resolver-row{gap:var(--leaf-space-3);padding:0 var(--leaf-space-3);border-left:2px solid transparent}
+.pb-result.resolver-row[aria-selected="true"]{border-left-color:var(--leaf-accent);background:var(--leaf-accent-tint)}

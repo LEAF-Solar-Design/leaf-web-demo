@@ -57,6 +57,7 @@ import {
 } from '../composer.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
+import './promptParity.css'
 
 // The client's own "/" rows, projected from the action registry (slice 10a):
 // `mcp` is the one command with no server entry, so this client contributes
@@ -452,10 +453,13 @@ export default function PromptBox({
     ...projectMatches.slice(0, MAX_ARTIFACT_ROWS_PER_KIND),
     ...findResultRows(findResults),
   ] : []
-  const scopeRows = (activeScope === 'act' ? paletteRows : activeScope === 'find' ? findRows : []).map((row) => {
+  const deterministicRows = (activeScope === 'act' ? paletteRows : activeScope === 'find' ? findRows : []).map((row) => {
     if (row.kind === 'drawing-object' || row.kind === 'action' || row.kind === 'tool' || row.kind === 'command') return row
     return { ...row, disabled: true, reason: 'Open this item from its project or history view.' }
   })
+  const scopeRows = value.trim() && !value.startsWith('/') && !trigger
+    ? [...deterministicRows, { kind: 'ask', id: 'ask-opt', label: `Ask Leaf: "${value}"` }]
+    : deterministicRows
   // NOT gated on scopeMenu.shown (unlike menuOpen above): activeScope is set
   // in the SAME tick pickScope closes the scope picker, so gating on the
   // picker's own 180 ms exit fade left this palette dark for that whole
@@ -573,12 +577,15 @@ export default function PromptBox({
     // branch only ever runs when the "/" menu isn't already open.
     if (scopeMenuOpen && !menuOpen && !e.isComposing) {
       if (e.key === 'ArrowDown' && scopeRows.length > 0) {
-        e.preventDefault(); setPaletteIdx(Math.min(paletteIdxClamped + 1, scopeRows.length - 1)); return
+        e.preventDefault(); setPaletteIdx((paletteIdxClamped + 1) % scopeRows.length); return
       }
       if (e.key === 'ArrowUp' && scopeRows.length > 0) {
-        e.preventDefault(); setPaletteIdx(Math.max(paletteIdxClamped - 1, 0)); return
+        e.preventDefault(); setPaletteIdx((paletteIdxClamped - 1 + scopeRows.length) % scopeRows.length); return
       }
-      if (e.key === 'Enter' && scopeRows[paletteIdxClamped]) {
+      if (e.key === 'Tab' && !e.shiftKey && scopeRows.at(-1)?.kind === 'ask') {
+        e.preventDefault(); setPaletteIdx(scopeRows.length - 1); return
+      }
+      if (e.key === 'Enter' && !e.shiftKey && scopeRows[paletteIdxClamped]) {
         e.preventDefault(); runPaletteRow(scopeRows[paletteIdxClamped]); return
       }
     }
@@ -592,7 +599,7 @@ export default function PromptBox({
       if (e.key === 'Tab' && matches[idx]) {
         e.preventDefault(); complete(matches[idx]); return
       }
-      if (e.key === 'Enter' && matches[idx]) {
+      if (e.key === 'Enter' && !e.shiftKey && matches[idx]) {
         e.preventDefault(); pick(matches[idx]); return
       }
     }
@@ -661,6 +668,7 @@ export default function PromptBox({
   }
   const runPaletteRow = (row) => {
     if (row.disabled) return
+    if (row.kind === 'ask') { dispatchPrompt(); return }
     const labels = {
       scope: activeScope,
       row_kind: row.kind,
@@ -771,26 +779,26 @@ export default function PromptBox({
           </div>
         )}
         {menuOpen && (
-          <div className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
-            <div className="resolver-header">
+          <ul className="resolver slash-menu" id="slash-menu-listbox" role="listbox" aria-label="Tool commands">
+            <li className="resolver-header" role="presentation">
               {matches.length > 0
                 ? <>{trigger.kind === 'resource' ? 'MCP servers · Tab inserts · Enter picks' : 'Tools · Tab completes · Enter picks. You still confirm before it runs'}</>
                 : <>{trigger.kind === 'resource' ? 'No MCP servers mounted.' : <>No tool matches “/{afterSlash}”. Keep typing, or Esc to close</>}</>}
-            </div>
+            </li>
             {matches.map((t, i) => {
               const isWrite = isWriteTool(t)
               return (
-                <div
+                <li
                   key={t.name}
                   id={`slash-opt-${i}`}
-                  className={`resolver-row ${i === idx ? 'active' : ''}`}
+                  className={`pb-result resolver-row ${i === idx ? 'active' : ''}`}
+                  data-kind={t.kind || 'tool'}
                   role="option"
                   aria-selected={i === idx}
                   onMouseEnter={() => setMenuIdx(i)}
                   onMouseDown={(e) => e.preventDefault()} // keep the input focused
                   onClick={() => pick(t)}
                 >
-                  <span className="lbar" aria-hidden="true" />
                   {/* The SAME glyph the ribbon shows for this tool (one record,
                       one icon) — decorative, aria-hidden inside CockpitIcon, so
                       the row's accessible name is still the `.label` text
@@ -816,38 +824,40 @@ export default function PromptBox({
                         a capability this release does not ship (review round 2). */}
                     {t.kind === 'resource' ? 'server' : (t.kind && t.kind !== 'tool' ? t.kind : (isWrite ? 'write' : 'read'))}
                   </span>
-                  {i === idx && <span className="key hot">Tab</span>}
-                </div>
+                  {i === idx && <kbd className="dp-keycap">Tab</kbd>}
+                </li>
               )
             })}
-          </div>
+          </ul>
         )}
         {scopeMenuOpen && activeScope === 'act' && (
-          <div className="resolver act-palette" id="act-palette-listbox" role="listbox" aria-label="Actions and artifacts">
-            <div className="resolver-header">
-              {scopeRows.length > 0
+          <ul className="resolver act-palette" id="act-palette-listbox" role="listbox" aria-label="Actions and artifacts">
+            <li className="resolver-header" role="presentation">
+              {deterministicRows.length > 0
                 ? 'Actions · Enter chooses an available item'
                 : <>No action or artifact matches {value ? `“${value}”` : 'anything yet. Keep typing'}</>}
-            </div>
-            {actLoading && <div className="resolver-header" role="status">Loading saved items…</div>}
-            {actError && <div className="resolver-header" role="alert">{actError} <button type="button" onClick={() => { setLoadAttempt((n) => n + 1); focusPrompt() }}>Retry</button></div>}
+            </li>
+            {actLoading && <li className="resolver-header" role="status">Loading saved items…</li>}
+            {actError && <li className="resolver-header" role="alert">{actError} <button type="button" onClick={() => { setLoadAttempt((n) => n + 1); focusPrompt() }}>Retry</button></li>}
             {scopeRows.map((row, i) => (
               <Fragment key={`${row.kind}:${row.id}`}>
-              {(i === 0 || scopeRows[i - 1].kind !== row.kind) && (
-                <div className="resolver-header">{PALETTE_GROUP_LABELS[row.kind] || row.kind}</div>
+              {row.kind !== 'ask' && (i === 0 || scopeRows[i - 1].kind !== row.kind) && (
+                <li className="resolver-header" role="presentation">{PALETTE_GROUP_LABELS[row.kind] || row.kind}</li>
               )}
-              <div
+              <li
                 key={`${row.kind}:${row.id}`}
-                id={`act-opt-${i}`}
-                className={`resolver-row ${i === paletteIdxClamped ? 'active' : ''}${row.disabled ? ' disabled' : ''}`}
+                id={row.kind === 'ask' ? 'ask-opt' : `act-opt-${i}`}
+                className={`pb-result resolver-row ${i === paletteIdxClamped ? 'active' : ''}${row.disabled ? ' disabled' : ''}`}
+                data-kind={row.kind}
                 role="option"
+                aria-label={row.kind === 'ask' ? 'Ask Leaf' : undefined}
+                aria-description={row.kind === 'ask' ? value : undefined}
                 aria-selected={i === paletteIdxClamped}
                 aria-disabled={row.disabled || undefined}
                 onMouseEnter={() => setPaletteIdx(i)}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => runPaletteRow(row)}
               >
-                <span className="lbar" aria-hidden="true" />
                 {row.kind === 'action' && <CockpitIcon id={row.icon || ''} fallback={row.label} size="small" />}
                 <span className={row.disabled ? 'dot hollow' : 'dot'} aria-hidden="true" />
                 <span className="label">
@@ -857,57 +867,59 @@ export default function PromptBox({
                   {row.disabled && <span className="dim"> · unavailable: {row.reason || 'This action is not available right now.'}</span>}
                   {row.kind !== 'action' && row.description && <span className="dim"> · {row.description}</span>}
                 </span>
-                <span className="count">{row.kind}</span>
-                {row.kind === 'action' && row.kbd && <span className="key hot">{row.kbd}</span>}
-              </div>
+                {row.kind !== 'ask' && <span className="count">{row.kind}</span>}
+                {row.kind === 'action' && row.kbd && <kbd className="dp-keycap">{row.kbd}</kbd>}
+              </li>
               </Fragment>
             ))}
-          </div>
+          </ul>
         )}
         {scopeMenuOpen && activeScope === 'find' && (
-          <div className="resolver find-results" id="find-results-listbox" role="listbox" aria-label="Search results">
-            <div className="resolver-header">
+          <ul className="resolver find-results" id="find-results-listbox" role="listbox" aria-label="Search results">
+            <li className="resolver-header" role="presentation">
               {!liveCallsAllowed || mock
                 ? 'Sign in to search your projects.'
                 : !value.trim()
                 ? 'Type to search drawing objects, projects, versions, sessions and tools'
                 : findLoading || projectsLoading ? 'Searching…'
                 : findError ? 'Search is unavailable.'
-                : scopeRows.length > 0
-                  ? `${scopeRows.length} result${scopeRows.length === 1 ? '' : 's'} · Enter chooses an available item`
+                : deterministicRows.length > 0
+                  ? `${deterministicRows.length} result${deterministicRows.length === 1 ? '' : 's'} · Enter chooses an available item`
                   : `No results for “${value}”`}
-            </div>
-            {(findError || projectsError) && <div className="resolver-header" role="alert">{findError || projectsError} <button type="button" onClick={() => { setLoadAttempt((n) => n + 1); focusPrompt() }}>Retry</button></div>}
+            </li>
+            {(findError || projectsError) && <li className="resolver-header" role="alert">{findError || projectsError} <button type="button" onClick={() => { setLoadAttempt((n) => n + 1); focusPrompt() }}>Retry</button></li>}
             {scopeRows.map((row, i) => (
               <Fragment key={`${row.kind}:${row.id}`}>
-              {(i === 0 || scopeRows[i - 1].kind !== row.kind) && (
-                <div className="resolver-header">{PALETTE_GROUP_LABELS[row.kind] || row.kind}</div>
+              {row.kind !== 'ask' && (i === 0 || scopeRows[i - 1].kind !== row.kind) && (
+                <li className="resolver-header" role="presentation">{PALETTE_GROUP_LABELS[row.kind] || row.kind}</li>
               )}
-              <div
+              <li
                 key={`${row.kind}:${row.id}`}
-                id={`find-opt-${i}`}
-                className={`resolver-row ${i === paletteIdxClamped ? 'active' : ''}`}
+                id={row.kind === 'ask' ? 'ask-opt' : `find-opt-${i}`}
+                className={`pb-result resolver-row ${i === paletteIdxClamped ? 'active' : ''}`}
+                data-kind={row.kind}
                 role="option"
+                aria-label={row.kind === 'ask' ? 'Ask Leaf' : undefined}
+                aria-description={row.kind === 'ask' ? value : undefined}
                 aria-selected={i === paletteIdxClamped}
                 aria-disabled={row.disabled || undefined}
                 onMouseEnter={() => setPaletteIdx(i)}
                 onMouseDown={(e) => e.preventDefault()}
                 onClick={() => runPaletteRow(row)}
               >
-                <span className="lbar" aria-hidden="true" />
                 <span className="dot hollow" aria-hidden="true" />
                 <span className="label">
                   {row.label}
                   {row.disabled && <span className="dim"> · unavailable: {row.reason}</span>}
                   {row.description && <span className="dim"> · {row.description}</span>}
                 </span>
-                <span className="count">{row.kind}</span>
-              </div>
+                {row.kind !== 'ask' && <span className="count">{row.kind}</span>}
+              </li>
               </Fragment>
             ))}
-            {objectMatches.length > MAX_ARTIFACT_ROWS_PER_KIND && <div className="resolver-header">More drawing objects match. Keep typing to narrow the results.</div>}
-            {projectMatches.length > MAX_ARTIFACT_ROWS_PER_KIND && <div className="resolver-header">More projects match. Keep typing to narrow the results.</div>}
-          </div>
+            {objectMatches.length > MAX_ARTIFACT_ROWS_PER_KIND && <li className="resolver-header" role="presentation">More drawing objects match. Keep typing to narrow the results.</li>}
+            {projectMatches.length > MAX_ARTIFACT_ROWS_PER_KIND && <li className="resolver-header" role="presentation">More projects match. Keep typing to narrow the results.</li>}
+          </ul>
         )}
         {mcpOpen && (
           <div className="resolver mcp-panel" role="status" aria-label="Mounted MCP servers">
@@ -960,7 +972,7 @@ export default function PromptBox({
             aria-activedescendant={menuOpen && matches[idx]
               ? `slash-opt-${idx}`
               : scopeMenuOpen && scopeRows[paletteIdxClamped]
-                ? `${activeScope === 'act' ? 'act-opt' : 'find-opt'}-${paletteIdxClamped}`
+                ? scopeRows[paletteIdxClamped].kind === 'ask' ? 'ask-opt' : `${activeScope === 'act' ? 'act-opt' : 'find-opt'}-${paletteIdxClamped}`
                 : undefined}
             style={{ height: autoGrowHeight(value), resize: 'none', overflowY: 'auto' }}
           />

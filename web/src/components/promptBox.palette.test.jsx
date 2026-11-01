@@ -5,7 +5,7 @@
 // these tests cover what picking the existing find/act scope chip rows now
 // resolves to.
 import { useState } from 'react'
-import { cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
+import { act, cleanup, createEvent, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import PromptBox from './PromptBox.jsx'
@@ -162,7 +162,10 @@ describe('the shortcut sheet row (slice 10b)', () => {
     const { container } = mount({ paletteActions: [shortcuts] })
     openScope(container, 'act')
     expect(screen.getByText('Keyboard shortcuts')).toBeTruthy()
-    expect(screen.getByText('Shift+?')).toBeTruthy()
+    const cap = screen.getByText('Shift+?')
+    expect(cap.tagName).toBe('KBD')
+    expect(cap).toHaveClass('dp-keycap')
+    expect(cap.closest('[role="option"]').tagName).toBe('LI')
   })
 })
 
@@ -187,6 +190,36 @@ function CompositionPalettePrompt({ initialValue = '', onChange, ...props }) {
   const [value, setValue] = useState(initialValue)
   return <PromptBox value={value} onChange={(next) => { onChange(next); setValue(next) }} {...props} />
 }
+
+it('keeps Ask distinct from search results while successive find queries settle', async () => {
+  let resolveNext
+  const next = new Promise((resolve) => { resolveNext = resolve })
+  const originalFetch = fetch
+  const queries = []
+  vi.stubGlobal('fetch', vi.fn((url, options) => {
+    if (!String(url).includes('/api/search')) return originalFetch(url, options)
+    queries.push(new URL(String(url), 'http://localhost').searchParams.get('q'))
+    return queries.length === 1
+      ? jsonResponse({ results: [{ kind: 'tool', id: 'tool:pump', label: 'pump' }] })
+      : next
+  }))
+  const view = render(<CompositionPalettePrompt initialValue="pump" onChange={noop}
+    onDispatch={noop} liveCallsAllowed mcpDiscoveryEnabled={false} />)
+  openScope(view.container, 'find')
+  const input = screen.getByRole('combobox')
+  // Ask is available immediately, but it must not masquerade as a query result.
+  expect(screen.getByRole('option', { name: 'Ask Leaf' })).toHaveTextContent('Ask Leaf: "pump"')
+  expect(screen.queryByRole('option', { name: /pump/ })).toBeNull()
+  await screen.findByRole('option', { name: /pump/ })
+  expect(queries).toEqual(['pump'])
+  fireEvent.change(input, { target: { value: 'zzz' } })
+  expect(screen.getByText('Searching…')).toBeTruthy()
+  expect(screen.queryByRole('option', { name: /pump/ })).toBeNull()
+  expect(screen.getByRole('option', { name: 'Ask Leaf' })).toHaveAttribute('aria-description', 'zzz')
+  await waitFor(() => expect(queries).toEqual(['pump', 'zzz']))
+  await act(async () => resolveNext(await jsonResponse({ results: [] })))
+  expect(screen.getByText('No results for “zzz”')).toBeTruthy()
+})
 
 function scopeComposition(marks) {
   for (const key of ['ArrowDown', 'ArrowUp', 'Enter']) {
