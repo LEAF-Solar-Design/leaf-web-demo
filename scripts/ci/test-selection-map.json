@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "ci-process-capture-core",
     "platform-native-service-binding",
     "platform-org-invitations",
     "server-lab-activation",
