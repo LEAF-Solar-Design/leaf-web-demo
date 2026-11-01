@@ -13,7 +13,10 @@ import sys
 import pytest
 
 
-SELECTOR = Path(os.environ.get("LEAF_TRUSTED_CI_DIR") or Path(__file__).resolve().parents[1] / "scripts" / "ci")
+# Ordinary CI's trusted dir holds only the selection helpers; use it only when it carries the tracer.
+_TRUSTED = os.environ.get("LEAF_TRUSTED_CI_DIR")
+SELECTOR = (Path(_TRUSTED) if _TRUSTED and (Path(_TRUSTED) / "trace_supervisor.py").is_file()
+            else Path(__file__).resolve().parents[1] / "scripts" / "ci")
 sys.path.insert(0, str(SELECTOR))
 import trace_supervisor as supervisor
 
