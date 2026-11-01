@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { useDrawingObjects } from '../site/DrawingObjectsContext.jsx'
 import './resultObjectLinks.css'
+import './resultParity.css'
 import { humanKey } from '../labels.js'
 import { errorActorLabel, errorPresentation } from '../errorPresentation.js'
 import { modChord } from '../lib/keys.js'
@@ -28,28 +29,34 @@ function isRetryable(e) {
   return !!(e && typeof e === 'object' && e.retryable)
 }
 
-function CountsTable({ counts }) {
+function isNumericCell(value) {
+  return typeof value === 'number'
+    ? Number.isFinite(value)
+    : typeof value === 'string' && /^-?\d[\d,]*(\.\d+)?$/.test(value)
+}
+
+function CountsTable({ counts, density }) {
   const rows = Object.entries(counts)
   return (
-    <table className="counts">
-      <thead><tr><th>Layer</th><th>Count</th></tr></thead>
+    <table className="counts" data-density={density}>
+      <thead><tr><th scope="col">Layer</th><th scope="col">Count</th></tr></thead>
       <tbody>
         {rows.map(([k, v]) => (
-          <tr key={k}><td>{k}</td><td className="num">{Number(v).toLocaleString()}</td></tr>
+          <tr key={k}><td className={isNumericCell(k) ? 'dp-number' : ''}>{k}</td><td className={isNumericCell(v) ? 'num dp-number' : ''}>{Number(v).toLocaleString()}</td></tr>
         ))}
       </tbody>
     </table>
   )
 }
 
-function KeyValue({ data }) {
+function KeyValue({ data, density }) {
   return (
-    <table className="kv">
+    <table className="kv" data-density={density}>
       <tbody>
         {Object.entries(data).map(([k, v]) => (
           <tr key={k}>
-            <td className="k">{humanKey(k)}</td>
-            <td className="v num">{typeof v === 'number' ? v.toLocaleString() : String(v)}</td>
+            <th scope="row" className="k">{humanKey(k)}</th>
+            <td className={isNumericCell(v) ? 'v num dp-number' : 'v'}>{typeof v === 'number' ? v.toLocaleString() : String(v)}</td>
           </tr>
         ))}
       </tbody>
@@ -59,17 +66,17 @@ function KeyValue({ data }) {
 
 // Generic table: result.table = { columns: string[], rows: any[][] }. Used by tools whose
 // output is a list of inspection rows, rendered before the scalar key/values.
-function GridTable({ table }) {
+function GridTable({ table, density }) {
   const cols = Array.isArray(table.columns) ? table.columns : []
   const rows = Array.isArray(table.rows) ? table.rows : []
   return (
-    <table className="counts grid">
-      <thead><tr>{cols.map((c, i) => <th key={i}>{String(c)}</th>)}</tr></thead>
+    <table className="counts grid" data-density={density}>
+      <thead><tr>{cols.map((c, i) => <th key={i} scope="col">{String(c)}</th>)}</tr></thead>
       <tbody>
         {rows.map((r, i) => (
           <tr key={i}>
             {(Array.isArray(r) ? r : [r]).map((v, j) => (
-              <td key={j} className={typeof v === 'number' ? 'num' : ''}>
+              <td key={j} className={isNumericCell(v) ? 'num dp-number' : ''}>
                 {typeof v === 'number' ? v.toLocaleString() : String(v ?? '')}
               </td>
             ))}
@@ -108,7 +115,7 @@ function FileLinks({ files }) {
   )
 }
 
-function ResultBody({ result, solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
+function ResultBody({ result, density, solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
   const data = result?.result
   if (!data) return result?.overlay ? null : <p className="result-empty">Completed with no output.</p>
   if (isSolarProjectReadResult(data)) {
@@ -132,19 +139,19 @@ function ResultBody({ result, solarBinding, authorityKey, projectClient, catalog
     }
     return (
       <>
-        <GridTable table={data.table} />
+        <div className="table-scroll"><GridTable table={data.table} density={density} /></div>
         {Array.isArray(data.warnings) && data.warnings.length > 0 && (
           <ul className="warnings">{data.warnings.map((w, i) => <li key={i}>{String(w)}</li>)}</ul>
         )}
         <FileLinks files={data.files} />
-        {Object.keys(scalars).length > 0 && <KeyValue data={scalars} />}
+        {Object.keys(scalars).length > 0 && <div className="table-scroll"><KeyValue data={scalars} density={density} /></div>}
       </>
     )
   }
   if (data.counts && typeof data.counts === 'object') {
     return (
       <>
-        <CountsTable counts={data.counts} />
+        <div className="table-scroll"><CountsTable counts={data.counts} density={density} /></div>
         {'total' in data && <div className="total">Total: <b>{Number(data.total).toLocaleString()}</b></div>}
       </>
     )
@@ -156,7 +163,7 @@ function ResultBody({ result, solarBinding, authorityKey, projectClient, catalog
     scalars[k] = v
   }
   return Object.keys(scalars).length > 0
-    ? <KeyValue data={scalars} />
+    ? <div className="table-scroll"><KeyValue data={scalars} density={density} /></div>
     : result.overlay || (Array.isArray(data.files) && data.files.length > 0)
       ? null
       : <p className="result-empty">Completed with no output.</p>
@@ -250,10 +257,12 @@ function ResultObjectLinks({ result, navigation, announce }) {
 // `notices` is the NR banner slot: ongoing-condition banners dock UNDER the
 // header of the pane they affect, so App passes them in and they render
 // immediately after the <h3> — never above the pane.
-export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation,
+export default function ResultPanel({ running, error, result, tool, onRetry, notices, navigation, density,
   solarBinding, authorityKey, projectClient, catalogDigest, projectCurrent, save }) {
   const [announcement, setAnnouncement] = useState('')
   const announcementFrame = useRef(null)
+  const tableDensity = density ?? (typeof window !== 'undefined' && window.matchMedia?.('(pointer: coarse)')?.matches
+    ? 'comfortable' : 'compact')
   useEffect(() => () => cancelAnimationFrame(announcementFrame.current), [])
   const announce = (message) => {
     cancelAnimationFrame(announcementFrame.current)
@@ -323,7 +332,7 @@ export default function ResultPanel({ running, error, result, tool, onRetry, not
             )}
           </div>
 
-          {result.ok && <ResultBody result={result} solarBinding={solarBinding} authorityKey={authorityKey}
+          {result.ok && <ResultBody result={result} density={tableDensity} solarBinding={solarBinding} authorityKey={authorityKey}
             projectClient={projectClient} catalogDigest={catalogDigest} projectCurrent={projectCurrent} save={save} />}
           {result.error && <ErrorLine err={result.error} onRetry={onRetry} retry={!isEnt && isRetryable(result.error)} quota={calm} toolName={result.tool} />}
           {!result.ok && !result.error && <p className="result-empty">The run failed without reporting a reason.</p>}
