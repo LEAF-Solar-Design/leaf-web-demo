@@ -34,6 +34,13 @@ SCRIPTS = Path(__file__).resolve().parent
 REPO = SCRIPTS.parent
 
 
+@pytest.fixture(autouse=True)
+def _isolate_nested_process_capture(monkeypatch):
+    # This suite runs within the outer supervisor; its drills must stay untraced.
+    monkeypatch.delenv("LEAF_PROCESS_CAPTURE_CONTEXT", raising=False)
+    monkeypatch.delenv("LEAF_PROCESS_CAPTURE_OUT", raising=False)
+
+
 def _load_runner():
     spec = importlib.util.spec_from_file_location(
         "run_all_gates", SCRIPTS / "run-all-gates.py")

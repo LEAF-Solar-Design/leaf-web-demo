@@ -196,6 +196,7 @@ class Result:
     counts: dict = field(default_factory=dict)
     test_report: dict = field(default_factory=dict)
     skipped_by_gate: str = ""
+    process_capture: dict = field(default_factory=dict)
 
 
 def _py_pytest(target: str) -> List[str]:
@@ -3253,6 +3254,8 @@ def build_suites() -> List[Suite]:
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
+        Suite("ci-process-capture-runner", "process capture runner", "pytest",
+              REPO, _py_pytest("tests/test_process_capture_runner.py"), None),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
@@ -3923,6 +3926,8 @@ def clean_env() -> dict:
         env.pop(k, None)
     env["PY_COLORS"] = "0"
     env["PYTHONIOENCODING"] = "utf-8"
+    if process_capture_enabled():
+        env = scrub_process_capture_env(env)
     return env
 
 
@@ -3934,6 +3939,83 @@ def _text(value) -> str:
 
 def encoded_suite_id(suite_id: str) -> str:
     return quote(suite_id, safe="").replace(".", "%2E") or "%00"
+
+
+PROCESS_CAPTURE_DECODE_BUDGET_S = 1800
+PROCESS_CAPTURE_TERMINATE_GRACE_S = 45
+# Isolated Python omits the script directory; explicitly load the trusted helpers.
+CAPTURE_WRAPPER = ("import sys; sys.path.insert(0, sys.argv.pop(1)); "
+                   "from trace_supervisor import main; sys.exit(main())")
+
+
+def process_capture_enabled() -> bool:
+    context = os.environ.get("LEAF_PROCESS_CAPTURE_CONTEXT")
+    output = os.environ.get("LEAF_PROCESS_CAPTURE_OUT")
+    return bool(context and output and Path(context).is_file() and
+                Path(output).is_dir() and os.access(output, os.W_OK))
+
+
+def process_capture_eligible(suite: Suite) -> bool:
+    return suite.kind == "pytest"
+
+
+def scrub_process_capture_env(env: dict) -> dict:
+    env = dict(env)
+    env.pop("LEAF_PROCESS_CAPTURE_CONTEXT", None)
+    env.pop("LEAF_PROCESS_CAPTURE_OUT", None)
+    return env
+
+
+def capture_spawn(suite: Suite, attempt: int, command, trace_env: dict):
+    if not (process_capture_enabled() and process_capture_eligible(suite)):
+        return None
+    output = (Path(os.environ["LEAF_PROCESS_CAPTURE_OUT"]).resolve() /
+              encoded_suite_id(suite.id) / str(attempt))
+    output.mkdir(parents=True, exist_ok=True)
+    suites_file = output / "capture-suites.json"
+    suites_file.unlink(missing_ok=True)
+    trace_env["LEAF_PROCESS_CAPTURE_DIR"] = str(output)
+    trusted = os.environ.get("LEAF_TRUSTED_CI_DIR") or str(SCRIPTS_DIR / "ci")
+    return ([sys.executable, "-I", "-B", "-c", CAPTURE_WRAPPER, trusted,
+             "run", "--context", str(Path(os.environ["LEAF_PROCESS_CAPTURE_CONTEXT"]).resolve()),
+             "--out", str(output), "--suites-file", str(suites_file), "--sink", "file",
+             "--spool-quota-bytes", "8589934592", "--", *command], output)
+
+
+def run_capture_command(command, **kwargs):
+    """Let the supervisor forward TERM and finish its receipt before escalation."""
+    timeout = kwargs.pop("timeout")
+    kwargs.pop("capture_output")
+    with subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, **kwargs) as proc:
+        try:
+            stdout, stderr = proc.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            proc.terminate()
+            try:
+                stdout, stderr = proc.communicate(timeout=PROCESS_CAPTURE_TERMINATE_GRACE_S)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+                stdout, stderr = proc.communicate()
+            raise subprocess.TimeoutExpired(command, timeout, output=stdout, stderr=stderr)
+        return subprocess.CompletedProcess(command, proc.returncode, stdout, stderr)
+
+
+def capture_attempt_evidence(output: Path, rc: int) -> tuple[dict, int]:
+    paths = sorted((output / "reports").glob("trace-receipt-*.json"))
+    evidence = {"process_capture_receipt": str(paths[0]) if len(paths) == 1 else None,
+                "process_capture_exit_status": rc, "process_capture_errors": []}
+    try:
+        if len(paths) != 1:
+            raise ValueError("receipt_unavailable")
+        receipt = json.loads(paths[0].read_text(encoding="utf-8"))
+        evidence["process_capture_errors"] = receipt.get("capture_errors", [])
+        code = receipt.get("command_exit_code")
+        if type(code) is int and rc != 124:
+            rc = code
+        evidence["process_capture_command_exit_status"] = code
+    except (OSError, ValueError, TypeError, AttributeError) as exc:
+        evidence["process_capture_errors"] = [f"receipt_unavailable:{type(exc).__name__}"]
+    return evidence, rc
 
 
 def suite_trace_env(suite: Suite, log_dir: Path, attempt: int) -> dict:
@@ -3955,15 +4037,19 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     """Add reporting only; pytest selection remains at the runner's suite level."""
     argv = [os.fsdecode(word) for word in argv]
     trusted = os.environ.get("LEAF_TRUSTED_CI_DIR")
-    if not trusted:
+    capturing = process_capture_enabled() and process_capture_eligible(suite)
+    if not trusted and not capturing:
         return argv
-    directory = Path(trusted)
+    directory = Path(trusted) if trusted else SCRIPTS_DIR / "ci"
     output = Path(trace_env["LEAF_TEST_REPORT_DIR"])
     output.mkdir(parents=True, exist_ok=True)
     # S8c (measured 2026-09-25, proofs E3 and 148574c1): the shadow plugin's per-test outcome path costs about 150 ms per
     # test in CI (a 356-test suite 0.5 s -> 54 s), so pytest loads it only on tracing builds, where the parent carries
     # LEAF_READSET_DIR. PR and merge-group suites run plain pytest; their attempt records stay reporting-incomplete.
-    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv and os.environ.get("LEAF_READSET_DIR"):
+    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv and (os.environ.get("LEAF_READSET_DIR") or capturing):
+        if capturing and not trusted:
+            trace_env["PYTHONPATH"] = str(directory) + (os.pathsep + os.environ["PYTHONPATH"]
+                                                       if os.environ.get("PYTHONPATH") else "")
         # Report-only inputs deliberately cannot enable the core's module filter.
         decision = output / "report-only.json"
         catalog = output / "report-catalog.json"
@@ -4110,6 +4196,8 @@ def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
                    run_id=os.environ.get("LEAF_READSET_RUN", ""),
                    log_path=(os.path.relpath(result.log_path, log_dir).replace("\\", "/")
                              if result.log_path else None))
+        if process_capture_eligible(result.suite):
+            row.update(result.process_capture)
         readsets = Path(os.environ.get("LEAF_READSET_DIR", str(log_dir.resolve() / "readsets")))
         shards = sorted((readsets / encoded_suite_id(result.suite.id) / str(attempt)).glob("*.json"))
         row["readsets_ref"] = str(readsets / encoded_suite_id(result.suite.id) / str(attempt))
@@ -4816,6 +4904,17 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
     if fault and attempt == 1 and fault == f"{suite.id}:spawn":
         argv = [argv[0] + ".fault-injected-missing.exe"] + argv[1:]
     spawn_command, use_shell, shell_executable = normalize_spawn_command(argv)
+    capture_output = None
+    capture_evidence = {}
+    timeout_s = suite.timeout_s
+    try:
+        captured = capture_spawn(suite, attempt, spawn_command, trace_env)
+        if captured is not None:
+            spawn_command, capture_output = captured
+            use_shell, shell_executable = False, None
+            timeout_s += PROCESS_CAPTURE_DECODE_BUDGET_S
+    except Exception as exc:
+        capture_evidence = {"process_capture_errors": [f"capture_setup_failed:{type(exc).__name__}"]}
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
@@ -4824,10 +4923,11 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             logf.write("WARNING: " + report_failure["test_report_incomplete_reasons"][0] + "\n")
         logf.flush()
         try:
-            proc = subprocess.run(
+            spawn = run_capture_command if capture_output is not None else subprocess.run
+            proc = spawn(
                 spawn_command,
                 cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env},
-                capture_output=True, text=True, timeout=suite.timeout_s,
+                capture_output=True, text=True, timeout=timeout_s,
                 shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
                 # ANSI codepage (cp1252 here), and vitest/tsc emit UTF-8 box and
@@ -4840,7 +4940,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             rc = proc.returncode
         except subprocess.TimeoutExpired as exc:
             out = (_text(exc.stdout) + "\n" + _text(exc.stderr)
-                   + f"\n[TIMEOUT >{suite.timeout_s}s]")
+                   + f"\n[TIMEOUT >{timeout_s}s]")
             rc = 124
         except OSError as exc:
             # Spawn failure (missing binary, AV/file lock, process pressure).
@@ -4851,6 +4951,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             out = f"[SPAWN FAILURE] {spawn_err}"
             rc = 127
         logf.write(out)
+    if capture_output is not None:
+        capture_evidence, rc = capture_attempt_evidence(capture_output, rc)
     seconds = time.perf_counter() - t0
 
     if reporting_injected and rc != 0:
@@ -4870,8 +4972,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
     fail_hint = ""
     if spawn_err:
         fail_hint = f"spawn failure: {spawn_err}"
-    elif rc == 124 and f"[TIMEOUT >{suite.timeout_s}s]" in out:
-        fail_hint = f"[TIMEOUT >{suite.timeout_s}s]"
+    elif rc == 124 and f"[TIMEOUT >{timeout_s}s]" in out:
+        fail_hint = f"[TIMEOUT >{timeout_s}s]"
     elif rc != 0 and not out.strip():
         fail_hint = f"no output (exit {rc}): child failed to start or was killed externally"
 
@@ -4908,7 +5010,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         if not passed and not note:
             note = "suite FAILED"
         return Result(suite, "PASS" if passed else "FAIL", str(c["got"]), seconds,
-                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure)
+                      note=note.strip(), log_path=log_path, counts=c, test_report=report_failure,
+                      process_capture=capture_evidence)
 
     if suite.kind == "vitest":
         c = parse_vitest(out)
@@ -5777,6 +5880,8 @@ def selection_catalog(root: Path) -> dict:
                 "trace_kind": "python" if python_child else "unsupported",
                 "python_only": False, "classification": "unclassified",
             }
+            if process_capture_enabled() and process_capture_eligible(suite):
+                row["capture"] = "linux-process-tree"
             rows.append(row)
         return {"schema": "leaf.ci.catalog.v1", "kind": "web",
                 "catalog_sha256": catalog_fingerprint(suites), "suites": rows}
