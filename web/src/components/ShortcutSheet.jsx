@@ -3,25 +3,39 @@ import EscCap from './EscCap.jsx'
 import { keyboardTable } from '../lib/actionRegistry.js'
 import { readSingleKeyShortcuts, writeSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
+import './shortcutParity.css'
 
-// Slice 10b: the shortcut sheet. GENERATED straight from the action
-// registry's own `kbd` fields (keyboardTable()) — a cap added to the
-// registry shows up here with no second list to keep in sync, and a cap
-// this file invented would already fail actionRegistry's own honesty gate
-// before it got here. Not a modal (the spec's own rule for this slice): an
-// anchored panel, same `.resolver` anatomy as the bar's own menus, closed by
-// its own Escape / outside-click pair rather than trapping focus.
+// Shortcut rows and preference membership come from the action registry.
+// The modal keeps the resolver anatomy and the shared Escape owner stack.
 export default function ShortcutSheet({ open, onClose }) {
   const rootRef = useRef(null)
   const openerRef = useRef(null)
   const close = () => {
+    const dialog = rootRef.current
+    if (dialog?.open) {
+      if (typeof dialog.close === 'function') dialog.close()
+      else dialog.removeAttribute('open')
+    }
     openerRef.current?.focus()
     onClose?.()
   }
   useEffect(() => {
     if (!open) return
-    openerRef.current = document.activeElement
-    rootRef.current?.querySelector('[role="switch"]')?.focus()
+    const dialog = rootRef.current
+    const opener = document.activeElement
+    openerRef.current = opener
+    if (!dialog.open) {
+      if (typeof dialog.showModal === 'function') dialog.showModal()
+      else dialog.setAttribute('open', '')
+    }
+    dialog.querySelector('[role="switch"]')?.focus()
+    return () => {
+      if (dialog.open) {
+        if (typeof dialog.close === 'function') dialog.close()
+        else dialog.removeAttribute('open')
+      }
+      opener?.focus()
+    }
   }, [open])
   // S25: the single-key switch (WCAG 2.1.4). Readers (the ladder, ResultPanel)
   // read the stored value at keystroke time, so writing it is the whole effect.
@@ -48,13 +62,18 @@ export default function ShortcutSheet({ open, onClose }) {
 
   if (!open) return null
   const rows = keyboardTable()
+  const groups = [
+    { title: 'Shortcuts', singleKey: false },
+    { title: 'Single keys', singleKey: true },
+  ]
 
   return (
-    <div
+    <dialog
       className="resolver shortcut-sheet"
       role="dialog"
       aria-label="Keyboard shortcuts"
       ref={rootRef}
+      onCancel={(event) => { event.preventDefault(); close() }}
       // This sheet is a shell sibling, not a child of the bar dock. Keep it
       // above the dock and tool rail, and scroll the growing registry inside
       // the panel so every control remains reachable in a short viewport.
@@ -64,30 +83,41 @@ export default function ShortcutSheet({ open, onClose }) {
         Keyboard shortcuts
         <EscCap type="button" onClick={close} label="Close" />
       </div>
-      <button
-        type="button"
-        className="resolver-row"
-        role="switch"
-        aria-checked={singleKeyOn}
-        aria-label="Single-key shortcuts"
-        data-testid="single-key-switch"
-        onClick={toggleSingleKey}
-      >
-        <span className="lbar" aria-hidden="true" />
-        <span className="label">Single-key shortcuts</span>
-        <span className="key" aria-hidden="true">{singleKeyOn ? 'On' : 'Off'}</span>
-      </button>
-      {rows.map((row) => {
-        const off = row.singleKey && !singleKeyOn
-        return (
-          <div className="resolver-row" key={row.id} data-testid="shortcut-row" data-shortcut-id={row.id} aria-disabled={off || undefined}>
-            <span className="lbar" aria-hidden="true" />
-            <span className="label">{row.label}</span>
-            <span className="context" data-testid="shortcut-context">{off ? `${row.context} (off)` : row.context}</span>
-            <span className="key hot">{row.kbd}</span>
-          </div>
-        )
-      })}
+      {groups.map((group) => (
+        <section key={group.title} aria-label={group.title}>
+          <h2 className="resolver-header">{group.title}</h2>
+          {group.singleKey && (
+            <button
+              type="button"
+              className="resolver-row"
+              role="switch"
+              aria-checked={singleKeyOn}
+              aria-label="Single-key shortcuts"
+              data-testid="single-key-switch"
+              onClick={toggleSingleKey}
+            >
+              <span className="lbar" aria-hidden="true" />
+              <span className="label">Single-key shortcuts</span>
+              <span className="key" aria-hidden="true">{singleKeyOn ? 'On' : 'Off'}</span>
+            </button>
+          )}
+          {rows.filter((row) => !!row.singleKey === group.singleKey).map((row) => {
+            const off = row.singleKey && !singleKeyOn
+            return (
+              <div className="resolver-row row" key={row.id} data-testid="shortcut-row" data-shortcut-id={row.id} aria-disabled={off || undefined}>
+                <span className="lbar" aria-hidden="true" />
+                <span className="label">{row.label}</span>
+                <span className="context" data-testid="shortcut-context">{off ? `${row.context} (off)` : row.context}</span>
+                <span className="shortcut-keys">
+                  {row.kbd.split(/(\+| \/ )/).map((key, index) => index % 2
+                    ? <span key={index}>{key}</span>
+                    : <kbd className="dp-keycap" key={index}>{key}</kbd>)}
+                </span>
+              </div>
+            )
+          })}
+        </section>
+      ))}
       {/* Honest gap (slice 10b spec): sheets anchors and receipts have no
           index today. Named here rather than rendered as a row nothing
           backs. */}
@@ -112,7 +142,7 @@ export default function ShortcutSheet({ open, onClose }) {
           <span className="label">{doc.label}</span>
         </a>
       ))}
-    </div>
+    </dialog>
   )
 }
 

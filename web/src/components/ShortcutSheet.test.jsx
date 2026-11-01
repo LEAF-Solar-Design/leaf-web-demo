@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 //
 // Standardization slice 13d: the "?" bar row and Shift+? both resolve to this
-// ONE anchored panel (no new modal grammar). ShortcutSheet itself is
+// ONE shortcut dialog. ShortcutSheet itself is
 // GENERATED from the action registry's keyboardTable(), so this file pins the
 // rendered shape rather than re-deriving it; actionRegistry.test.js already
 // pins the table's own contents and the Shift+? ladder decision.
@@ -12,6 +12,13 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import ShortcutSheet, { DOC_LINKS } from './ShortcutSheet.jsx'
 import { keyboardTable, ladderListener } from '../lib/actionRegistry.js'
 import { SINGLE_KEY_SHORTCUTS_KEY, readSingleKeyShortcuts } from '../lib/singleKeyPreference.js'
+
+if (!HTMLDialogElement.prototype.showModal) {
+  HTMLDialogElement.prototype.showModal = function () { this.open = true }
+}
+if (!HTMLDialogElement.prototype.close) {
+  HTMLDialogElement.prototype.close = function () { this.open = false }
+}
 
 afterEach(() => {
   cleanup()
@@ -28,10 +35,11 @@ describe('ShortcutSheet', () => {
     render(<ShortcutSheet open onClose={() => {}} />)
     const rows = screen.getAllByTestId('shortcut-row')
     expect(rows).toHaveLength(keyboardTable().length)
-    keyboardTable().forEach((row, i) => {
-      expect(rows[i].querySelector('.label').textContent).toBe(row.label)
-      expect(rows[i].querySelector('.key').textContent).toBe(row.kbd)
-      expect(rows[i].querySelector('.context').textContent).toBe(row.context)
+    keyboardTable().forEach((row) => {
+      const rendered = rows.find((element) => element.getAttribute('data-shortcut-id') === row.id)
+      expect(rendered.querySelector('.label').textContent).toBe(row.label)
+      expect(rendered.querySelector('.shortcut-keys').textContent).toBe(row.kbd)
+      expect(rendered.querySelector('.context').textContent).toBe(row.context)
     })
   })
 
