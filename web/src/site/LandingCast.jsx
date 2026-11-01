@@ -23,7 +23,7 @@ export function enterDemo() {
   // Lands in the cockpit demo (the one shell: sample rooftop, guided tour,
   // the four profiles), not the ToolCast stage; the website's forwarded
   // /try?demo=1 reaches the same console via authBoot.js under ONE_SHELL.
-  window.location.assign('/app?demo=1')
+  window.location.assign('/try?demo=1')
 }
 
 const SHEETS = [

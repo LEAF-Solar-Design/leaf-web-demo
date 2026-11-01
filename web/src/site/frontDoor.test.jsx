@@ -105,7 +105,7 @@ describe('Leaf workspace guest front door', () => {
     // The trial button is a full navigation so the boot path reads ?demo=1,
     // landing in the cockpit demo (the one shell); the workspace buttons stay
     // on the SPA router and on /try.
-    expect(mocks.assign.mock.calls).toEqual([['/app?demo=1']])
+    expect(mocks.assign.mock.calls).toEqual([['/try?demo=1']])
     expect(mocks.navigate.mock.calls).toEqual([['/try'], ['/try']])
     expect(mocks.hrefSet).not.toHaveBeenCalled()
     expect(mocks.demand).not.toHaveBeenCalled()
@@ -154,7 +154,7 @@ describe('Leaf workspace guest front door', () => {
       fireEvent.click(screen.getByRole('button', { name }))
     }
     fireEvent.keyDown(document.body, { key: 'T' })
-    expect(mocks.assign.mock.calls).toEqual([['/app?demo=1']])
+    expect(mocks.assign.mock.calls).toEqual([['/try?demo=1']])
     expect(mocks.navigate.mock.calls).toEqual([['/try'], ['/try'], ['/try']])
     expect(mocks.replace).not.toHaveBeenCalled()
   })
@@ -187,7 +187,7 @@ describe('Leaf workspace guest front door', () => {
     expect(screen.queryByText('Interest saved. No payment required.')).toBeNull()
     expect(screen.getByRole('button', { name: 'Register interest' }).disabled).toBe(false)
     fireEvent.click(screen.getByRole('button', { name: 'Try Branch on the sample rooftop' }))
-    expect(mocks.assign).toHaveBeenCalledWith('/app?demo=1')
+    expect(mocks.assign).toHaveBeenCalledWith('/try?demo=1')
   })
 
   it('contains no handler assigning the visitor to leafautomation.ai or a payment funnel', () => {

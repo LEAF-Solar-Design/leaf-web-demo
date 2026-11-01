@@ -6,11 +6,45 @@
 // and every other path booted the console immediately, which is what put the
 // API burst in front of the token write.
 
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
-import { bootWantsApp, shouldDeferForAuthCallback } from './authBoot.js'
+import { bootWantsApp, canonicalDemoUrl, canonicalizeDemoEntry, shouldDeferForAuthCallback } from './authBoot.js'
 
 const CALLBACK = '?code=abc&state=xyz'
+
+describe('canonical demo entry', () => {
+  it.each([
+    ['?demo=1', '/app', '/try?demo=1'],
+    ['?demo=1&x=2', '/app', '/try?demo=1&x=2'],
+    ['?x=2&demo=1', '/app', '/try?x=2&demo=1'],
+    ['?demo=1', '/try', null],
+    ['', '/app', null],
+    ['?demo=0', '/app', null],
+  ])('canonicalizes %s at %s to %s', (search, pathname, expected) => {
+    expect(canonicalDemoUrl(search, pathname)).toBe(expected)
+  })
+
+  it('replaces the legacy entry while preserving history state and the hash', () => {
+    const win = {
+      location: { pathname: '/app', search: '?demo=1', hash: '#x' },
+      history: { state: { entry: 'sample' }, replaceState: vi.fn() },
+    }
+
+    expect(canonicalizeDemoEntry(win)).toBe('/try?demo=1#x')
+    expect(win.history.replaceState).toHaveBeenCalledTimes(1)
+    expect(win.history.replaceState).toHaveBeenCalledWith(win.history.state, '', '/try?demo=1#x')
+  })
+
+  it('leaves the canonical entry unchanged', () => {
+    const win = {
+      location: { pathname: '/try', search: '?demo=1', hash: '' },
+      history: { state: null, replaceState: vi.fn() },
+    }
+
+    expect(canonicalizeDemoEntry(win)).toBeNull()
+    expect(win.history.replaceState).not.toHaveBeenCalled()
+  })
+})
 
 it('removing drawing leaves only the remaining boot overrides', () => {
   expect(bootWantsApp('?drawing=&surface=solar', '/')).toBe(true)
