@@ -793,9 +793,13 @@ for path in sorted({Path(repo, "web", "node_modules"), *Path(repo).glob("node_mo
                     *Path(repo).glob("*/node_modules")}):
     if path.is_dir():
         roots[str(path)] = os_image
+        if os.path.realpath(path) != str(path):
+            roots[os.path.realpath(path)] = os_image
 browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or Path.home() / ".cache" / "ms-playwright")
 if browsers.is_absolute() and browsers.is_dir():
     roots[str(browsers)] = os_image
+    if os.path.realpath(browsers) != str(browsers):
+        roots[os.path.realpath(browsers)] = os_image
 strace_package = None
 try:
     probe = subprocess.run(["dpkg-query", "-W", "-f", "${Version}", "strace"], stdin=subprocess.DEVNULL,

@@ -371,6 +371,17 @@ class TestCodebuildCiScript(unittest.TestCase):
             self.assertTrue(any(line.startswith("cd ") for line in lines[max(0, i - 3):i]),
                             f"Step must reset cwd: {lines[i]}")
 
+    def test_capture_context_has_realpath_aliases(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        context = script.split("<<'LEAF_CAPTURE_BASE'", 1)[1].split("\n", 1)[1].split(
+            "\nLEAF_CAPTURE_BASE\n", 1)[0]
+        self.assertIn('roots[str(path)] = os_image\n'
+                      '        if os.path.realpath(path) != str(path):\n'
+                      '            roots[os.path.realpath(path)] = os_image', context)
+        self.assertIn('roots[str(browsers)] = os_image\n'
+                      '    if os.path.realpath(browsers) != str(browsers):\n'
+                      '        roots[os.path.realpath(browsers)] = os_image', context)
+
     def test_capture_environment_scope(self):
         script = CI_PATH.read_text(encoding="utf-8")
         start = script.index('if [[ "$tracing_ready" == 1 ]]; then')
