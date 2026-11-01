@@ -33,6 +33,15 @@ def _bash_runs_python() -> bool:
 
 
 class TestCodebuildCiScript(unittest.TestCase):
+    def test_tracer_helpers_are_not_run_as_isolated_scripts(self):
+        # python -I implies -P: a helper run as a script cannot import its siblings, so capture 1
+        # (build 0779b89d, 2026-11-01) refused with epoch_unavailable. Helpers that import
+        # trace_supervisor must be loaded from the helper dir through -c.
+        script = CI_PATH.read_text(encoding="utf-8")
+        for helper in ("epoch_probe", "trace_supervisor", "trace_process_tree", "external_inventory"):
+            self.assertNotRegex(script, r'python3? -I[^\n]*"\$selection_dir/' + helper + r'\.py"', helper)
+        self.assertIn("from epoch_probe import main; sys.exit(main())", script)
+
     @unittest.skipUnless(BASH, "bash is not on PATH; capture guard requires bash")
     def test_process_capture_guard(self):
         script = CI_PATH.read_text(encoding="utf-8")

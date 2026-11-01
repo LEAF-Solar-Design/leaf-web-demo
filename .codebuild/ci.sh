@@ -847,7 +847,9 @@ print("TRACING capture_base_context files={} symlinks={} roots={} strace_package
                                                     (node_identity or {}).get("version")))
 LEAF_CAPTURE_BASE
     then
-      if python -I -B "$selection_dir/epoch_probe.py" --context /tmp/process-capture/context.json \
+      # -I implies -P, so a helper run as a script cannot import its siblings; load it from the dir.
+      if python -I -B -c 'import sys; sys.path.insert(0, sys.argv.pop(1)); from epoch_probe import main; sys.exit(main())' \
+          "$selection_dir" --context /tmp/process-capture/context.json \
           --out /tmp/process-capture/capture-epoch.json --sink file; then
         process_capture_active=1
         export LEAF_PROCESS_CAPTURE_CONTEXT=/tmp/process-capture/context.json
