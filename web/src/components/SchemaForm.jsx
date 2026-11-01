@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useId, useRef, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
+import './schemaFormParity.css'
 
 export function schemaTypes(param) {
   return Array.isArray(param?.type) ? param.type : [param?.type]
@@ -61,7 +62,7 @@ function enumValuesEqual(left, right, depth = 0) {
 }
 
 function ParamField({ property, fieldKey, value, present, required, onChange, onValidityChange }) {
-  const id = useId()
+  const id = `sf-${fieldKey}`
   const input = useRef(null)
   const types = schemaTypes(property)
   const label = sentence((property.title || fieldKey).replace(/_/g, ' '))
@@ -86,9 +87,11 @@ function ParamField({ property, fieldKey, value, present, required, onChange, on
     onValidityChange(fieldKey, !error)
     return () => onValidityChange(fieldKey, true)
   }, [fieldKey, error, onValidityChange])
-  const describedBy = [property.description && `${id}-description`, numeric && range.text && `${id}-range`,
+  const unit = property['x-leaf-unit']
+  const hasUnit = unit !== undefined && unit !== null
+  const describedBy = [property.description && `${id}-help`, numeric && range.text && `${id}-range`,
     numeric && present && value === null && `${id}-null`, error && `${id}-error`].filter(Boolean).join(' ')
-  const attributes = { ref: input, 'aria-label': label, 'aria-required': required ? 'true' : undefined,
+  const attributes = { id, ref: input, 'aria-label': label, 'aria-required': required ? 'true' : undefined,
     'aria-invalid': !!error, 'aria-describedby': describedBy || undefined }
   function changeJson(next) {
     setDraft(next)
@@ -103,8 +106,8 @@ function ParamField({ property, fieldKey, value, present, required, onChange, on
     setJsonError('')
     onChange(parsed)
   }
-  return <label className="param">
-    <span>{label}{required && <span aria-hidden="true"> *</span>}</span>
+  return <div className={`param${hasUnit ? ' has-unit' : ''}`} data-dp-field>
+    <label htmlFor={id}>{label}{required && <span aria-hidden="true"> *</span>}</label>
     {choices ? <select {...attributes} value={present ? String(choices.findIndex((choice) => enumValuesEqual(choice, value))).replace('-1', '') : ''}
       onChange={(event) => onChange(choices[Number(event.target.value)], event.target.value === '')}>
       <option value="">Choose a value</option>
@@ -117,11 +120,12 @@ function ParamField({ property, fieldKey, value, present, required, onChange, on
       value={json ? draft : value ?? ''}
       onChange={(event) => json ? changeJson(event.target.value)
         : onChange(numeric ? Number(event.target.value) : event.target.value, event.target.value === '')} />}
-    {property.description && <span id={`${id}-description`}>{property.description}</span>}
+    {hasUnit && <span className="sf-unit" aria-hidden="true">{unit}</span>}
+    {property.description && <span id={`${id}-help`}>{property.description}</span>}
     {numeric && range.text && <span id={`${id}-range`}>{range.text}</span>}
     {numeric && present && value === null && <span id={`${id}-null`}>Current value: null.</span>}
     {error && <span id={`${id}-error`} role="alert">{error}</span>}
-  </label>
+  </div>
 }
 
 // Renders a JSON-Schema params object (CONTRACT §2 .params) as a small form.

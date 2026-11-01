@@ -94,6 +94,9 @@ it('FORM01 required marks keep the exact control name', () => {
 it('FORM02 descriptions are visible and describe the field', () => {
   mountForm({ name: { type: 'string', description: 'Name this roof.' } })
   const description = screen.getByText('Name this roof.')
+  expect(field('Name').id).toBe('sf-name')
+  expect(field('Name').labels[0].htmlFor).toBe('sf-name')
+  expect(description.id).toBe('sf-name-help')
   expect(field('Name').getAttribute('aria-describedby')).toBe(description.id)
 })
 
