@@ -5651,9 +5651,10 @@ function assertCadBundleWhitelist(probe) {
   keys(probe, ['manifestFlag', 'dom', 'servedJs', 'consoleErrorCount', 'binding'])
   keys(probe.dom, ['workbench', 'objectsPanel', 'importPane'])
   keys(probe.binding, ['worker', 'pageUrlPathSha256'])
-  keys(probe.servedJs, ['indexSha256', 'assets', 'markerFound', 'coverage', 'source', 'pageAssetCount'])
+  keys(probe.servedJs, ['indexSha256', 'assets', 'markerFound', 'coverage', 'source', 'pageAssetCount', 'truncated'])
   assert.ok(['page-loaded', 'index-fallback'].includes(probe.servedJs.source))
-  assert.ok(Number.isInteger(probe.servedJs.pageAssetCount) && probe.servedJs.pageAssetCount <= 40)
+  assert.ok(Number.isInteger(probe.servedJs.pageAssetCount) && probe.servedJs.pageAssetCount >= 0)
+  assert.equal(typeof probe.servedJs.truncated, 'boolean')
   for (const value of Object.values(probe.dom)) assert.ok(value === null || Number.isInteger(value))
   assert.ok(probe.consoleErrorCount === null || Number.isInteger(probe.consoleErrorCount))
   for (const asset of probe.servedJs.assets) {
@@ -5728,10 +5729,50 @@ test('WL60 U2 page collection merges resource, script and preload URLs, deduplic
   assertCadBundleWhitelist(probe)
   const capped = cadBundleFake({ scripts: Array.from({ length: 45 }, (_, i) => `/assets/loaded${i}.js`) })
   const cappedProbe = await collectCadEditBundleProbe(capped.page, capped.runtime)
-  assert.equal(cappedProbe.servedJs.pageAssetCount, 40)
+  assert.equal(cappedProbe.servedJs.pageAssetCount, 45)
   assert.equal(cappedProbe.servedJs.assets.length, 40)
   assert.equal(capped.requests.length, 41)
   assertCadBundleWhitelist(cappedProbe)
+})
+
+test('WL60b U1 loaded scripts beyond the cap leave absent marker evidence UNKNOWN', async () => {
+  const scripts = Array.from({ length: 44 }, (_, i) => `/assets/loaded${i}.js`)
+  scripts.push('/assets/chunk.js')
+  const fake = cadBundleFake({ scripts })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 45)
+  assert.equal(probe.servedJs.truncated, true)
+  assert.equal(probe.servedJs.coverage, 'partial')
+  assert.equal(probe.servedJs.markerFound, 'UNKNOWN')
+  assert.equal(probe.servedJs.assets.length, 40)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', ...scripts.slice(0, 40)])
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL60b U2 a marker in a kept asset remains true with truncated coverage', async () => {
+  const scripts = ['/assets/chunk.js', ...Array.from({ length: 44 }, (_, i) => `/assets/loaded${i}.js`)]
+  const fake = cadBundleFake({ scripts })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 45)
+  assert.equal(probe.servedJs.truncated, true)
+  assert.equal(probe.servedJs.coverage, 'partial')
+  assert.equal(probe.servedJs.markerFound, true)
+  assert.equal(probe.servedJs.assets.length, 40)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', ...scripts.slice(0, 40)])
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL60b U3 two fully fetched loaded assets retain complete coverage without truncation', async () => {
+  const scripts = ['/assets/main.js', '/assets/chunk.js']
+  const fake = cadBundleFake({ marker: false, scripts })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 2)
+  assert.equal(probe.servedJs.truncated, false)
+  assert.equal(probe.servedJs.coverage, 'loaded-complete')
+  assert.equal(probe.servedJs.markerFound, false)
+  assert.equal(probe.servedJs.assets.length, 2)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', ...scripts])
+  assertCadBundleWhitelist(probe)
 })
 
 test('WL58 U2 failed fetches, computed imports, byte budgets and asset caps leave negative coverage UNKNOWN', async () => {

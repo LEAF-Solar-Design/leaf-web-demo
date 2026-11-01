@@ -688,7 +688,7 @@ export async function collectCadEditBundleProbe(page, runtime) {
     manifestFlag: null,
     dom: { workbench: null, objectsPanel: null, importPane: null },
     servedJs: { indexSha256: null, assets: [], markerFound: 'UNKNOWN', coverage: 'partial',
-      source: 'index-fallback', pageAssetCount: 0 },
+      source: 'index-fallback', pageAssetCount: 0, truncated: false },
     consoleErrorCount: null,
     binding: { worker: null, pageUrlPathSha256: null },
   }
@@ -748,14 +748,18 @@ export async function collectCadEditBundleProbe(page, runtime) {
     } catch { /* Unknown manifest flag does not change JS coverage. */ }
     let pageAssets = []
     try {
-      pageAssets = await bounded(() => page.evaluate(() => {
+      const collection = await bounded(() => page.evaluate(() => {
         const assets = new Set()
+        const kept = []
         const add = href => {
           if (!href) return
           try {
             const asset = new URL(href, document.baseURI)
             asset.hash = ''
-            if (asset.origin === location.origin && assets.size < 40) assets.add(asset.href)
+            if (asset.origin === location.origin && !assets.has(asset.href)) {
+              assets.add(asset.href)
+              if (kept.length < 40) kept.push(asset.href)
+            }
           } catch { /* Ignore invalid resource URLs. */ }
         }
         for (const entry of performance.getEntriesByType('resource')) {
@@ -765,13 +769,15 @@ export async function collectCadEditBundleProbe(page, runtime) {
         }
         for (const script of document.scripts) add(script.src)
         for (const link of document.querySelectorAll('link[rel~="modulepreload"]')) add(link.href)
-        return [...assets]
+        return { assets: kept, total: assets.size }
       }))
+      pageAssets = collection.assets
+      result.servedJs.pageAssetCount = collection.total
     } catch { /* Fall back to the index when page assets are unavailable. */ }
-    result.servedJs.pageAssetCount = pageAssets.length
+    result.servedJs.truncated = result.servedJs.pageAssetCount > pageAssets.length
     const pageLoaded = pageAssets.length > 0
     if (pageLoaded) result.servedJs.source = 'page-loaded'
-    let complete = true
+    let complete = !result.servedJs.truncated
     let found = false
     const queue = []
     const seen = new Set()
