@@ -3254,8 +3254,11 @@ def build_suites() -> List[Suite]:
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
+        # cwd is the repo root; -P keeps it off sys.path so the repo's platform/
+        # package cannot shadow the stdlib (the same reason as the executor suite).
         Suite("ci-process-capture-runner", "process capture runner", "pytest",
-              REPO, _py_pytest("tests/test_process_capture_runner.py"), None),
+              REPO, [sys.executable, "-P", "-m", "pytest", "tests/test_process_capture_runner.py", "-q",
+                     "--color=no", "-r", "s", "-p", "no:cacheprovider"], None),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the
