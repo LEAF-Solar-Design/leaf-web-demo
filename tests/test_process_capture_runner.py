@@ -79,6 +79,14 @@ def test_predicate(runner, tmp_path, kind):
     assert runner.process_capture_eligible(suite(runner, tmp_path, kind)) is (kind == "pytest")
 
 
+def test_strace_smoke_suite_is_never_wrapped(runner, tmp_path):
+    # The smoke suite runs strace itself and ptrace cannot nest.
+    smoke = runner.Suite("ci-trace-smoke-linux", "smoke", "pytest", tmp_path,
+                         [sys.executable, "-m", "pytest", "sample.py"], None, timeout_s=17)
+    assert not runner.process_capture_eligible(smoke)
+    assert "ci-trace-smoke-linux" in {s.id for s in runner.build_suites()}
+
+
 @pytest.mark.parametrize("trusted", [False, True])
 def test_capture_exact_argv_and_nested_env(runner, monkeypatch, tmp_path, trusted):
     context, output = enable_capture(monkeypatch, tmp_path)
