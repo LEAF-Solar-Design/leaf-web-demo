@@ -1,19 +1,40 @@
 'use client'
 
 import dynamic from 'next/dynamic'
+import { Component, useMemo, useState } from 'react'
+import GroundSkeleton from '../components/GroundSkeleton.jsx'
 
-const StudioRoot = dynamic(() => import('../main.jsx'), {
+const createStudioRoot = () => dynamic(() => import('../main.jsx'), {
   ssr: false,
-  loading: () => (
-    <div style={{ minHeight: '100dvh', display: 'flex', alignItems: 'center', justifyContent: 'center', background: '#131614', color: '#a3aca3', fontFamily: "'Barlow',system-ui,-apple-system,sans-serif" }}>
-      <div style={{ textAlign: 'center' }}>
-        <div style={{ width: 18, height: 18, margin: '0 auto 16px', background: '#1e6b45', transform: 'rotate(45deg)', borderRadius: 4 }} />
-        <div style={{ fontSize: 14, letterSpacing: '0.01em' }}>Loading workspace…</div>
+  loading: ({ error }) => {
+    if (error) throw error
+    return (
+      <div style={{ minHeight: '100dvh', background: '#131614', color: '#a3aca3', fontFamily: "'Barlow',system-ui,-apple-system,sans-serif" }}>
+        <GroundSkeleton label="workspace" />
       </div>
-    </div>
-  ),
+    )
+  },
 })
 
+class StudioLoadBoundary extends Component {
+  state = { failed: false }
+
+  static getDerivedStateFromError() {
+    return { failed: true }
+  }
+
+  render() {
+    return this.state.failed ? <div role="alert" className="ground-failed">
+      <p>The workspace did not load. Your project and session are unchanged.</p>
+      <button type="button" className="btn dp-focus" onClick={this.props.retry}>Retry</button>
+    </div> : this.props.children
+  }
+}
+
 export default function StudioClient() {
-  return <StudioRoot />
+  const [generation, setGeneration] = useState(0)
+  const StudioRoot = useMemo(createStudioRoot, [generation])
+  return <StudioLoadBoundary key={generation} retry={() => setGeneration((value) => value + 1)}>
+    <StudioRoot />
+  </StudioLoadBoundary>
 }

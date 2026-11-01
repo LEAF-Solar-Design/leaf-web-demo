@@ -43,7 +43,7 @@ it.each([false, true])('shows a Lab status in its themed ground while the import
   else expect(lab).not.toHaveAttribute('data-studio-shell')
   expect(lab).toHaveAttribute('aria-label', 'Lab workspace')
   expect(lab).not.toHaveAttribute('hidden')
-  expect(lab.querySelector('[role="status"]')).toHaveTextContent('Loading Lab…')
+  expect(await screen.findByRole('status')).toHaveTextContent('Loading Lab')
   expect(lab.querySelector('[data-measured]')).toHaveAttribute('data-measured', 'true')
   expect(lab.querySelector('[data-measured]').style.visibility).not.toBe('hidden')
   expect(screen.getByRole('status')).toBeVisible()
@@ -52,17 +52,19 @@ it.each([false, true])('shows a Lab status in its themed ground while the import
   expect(load).toHaveBeenCalledOnce()
 })
 
-it.each([false, true])('contains a rejected import and shows the reload message with current ground visibility (studioShell=%s)', async (studioShell) => {
+it.each([false, true])('contains a rejected import and shows Retry with current ground visibility (studioShell=%s)', async (studioShell) => {
   measuredWindow()
   vi.spyOn(console, 'error').mockImplementation(() => {})
   const { rerender } = render(<SurfaceGrounds surface="lab" studioShell={studioShell} />)
   await waitFor(() => expect(load).toHaveBeenCalledOnce())
-  const pendingWindow = screen.getByText('Loading Lab…').closest('[data-measured]')
+  const pendingWindow = (await screen.findByRole('status')).closest('[data-measured]')
   expect(pendingWindow).toHaveAttribute('data-measured', 'true')
   expect(pendingWindow.style.visibility).not.toBe('hidden')
   await act(async () => { rejectLoad(new Error('Chunk unavailable')) })
-  const failure = await screen.findByText('Lab could not be loaded. Reload the page to try again.')
+  const failure = await screen.findByRole('alert')
   expect(failure).toHaveAttribute('role', 'alert')
+  expect(failure).toHaveTextContent('The Lab workspace did not load. Your project and session are unchanged.')
+  expect(screen.getByRole('button', { name: 'Retry' })).toBeVisible()
   const failureWindow = failure.closest('[data-measured]')
   expect(failureWindow).toHaveAttribute('data-measured', 'true')
   expect(failureWindow.style.visibility).not.toBe('hidden')
@@ -80,13 +82,13 @@ it('replaces the loading status with the resolved Lab ground', async () => {
   measuredWindow()
   render(<SurfaceGrounds surface="lab" studioShell />)
   await waitFor(() => expect(load).toHaveBeenCalledOnce())
-  expect(screen.getByRole('status')).toHaveTextContent('Loading Lab…')
+  expect(await screen.findByRole('status')).toHaveTextContent('Loading Lab')
   function LoadedLab({ active }) {
     return <section data-ground="lab" hidden={!active}>Loaded Lab workspace</section>
   }
   await act(async () => { resolveLoad({ default: LoadedLab }) })
   expect(await screen.findByText('Loaded Lab workspace')).toBeVisible()
-  expect(screen.queryByText('Loading Lab…')).toBeNull()
+  expect(screen.queryByText('Loading Lab')).toBeNull()
   expect(load).toHaveBeenCalledOnce()
 })
 
@@ -101,6 +103,6 @@ it('never requests or renders Lab before activation', async () => {
     await act(async () => { await Promise.resolve() })
     expect(load).not.toHaveBeenCalled()
     expect(container.querySelector('[data-ground="lab"]')).toBeNull()
-    expect(screen.queryByText('Loading Lab…')).toBeNull()
+    expect(screen.queryByText('Loading Lab')).toBeNull()
   }
 })
