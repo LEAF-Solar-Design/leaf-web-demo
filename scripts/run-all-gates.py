@@ -3250,6 +3250,9 @@ def build_suites() -> List[Suite]:
               # SEL-303b adds the mirror/stage-policy registration contract.
               # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
               ["test_studio_walk_regression_gate.py"], 272),
+        # Dormant process-capture core: pure Python fixtures, no strace or network.
+        Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
+              SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

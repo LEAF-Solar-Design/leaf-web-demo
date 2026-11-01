@@ -1,0 +1,99 @@
+"""Dormant process-capture contracts; no Linux tracer or network is required."""
+
+import copy
+import importlib
+from pathlib import Path
+
+import pytest
+
+
+CI_DIR = Path(__file__).resolve().parents[1]
+MODULE_NAMES = ("trace_process_tree", "trace_supervisor", "external_inventory", "epoch_probe")
+EPOCH_FUNCTIONS = ("normalize_root_name", "_normalize_epoch_manifest", "normalized_epoch")
+
+
+@pytest.fixture
+def modules(monkeypatch):
+    # Exercise the plain-module fallback used by the CI entrypoints.
+    monkeypatch.syspath_prepend(str(CI_DIR))
+    return {name: importlib.import_module(name) for name in (*MODULE_NAMES, "select_tests")}
+
+
+@pytest.mark.parametrize("name", MODULE_NAMES)
+def test_plain_module_import(modules, name):
+    module = modules[name]
+    assert Path(module.__file__).resolve() == CI_DIR / (name + ".py")
+    assert module.__package__ == ""
+
+
+@pytest.mark.parametrize("name", EPOCH_FUNCTIONS)
+def test_supervisor_reexports_selector_epoch_functions(modules, name):
+    assert getattr(modules["trace_supervisor"], name) is getattr(modules["select_tests"], name)
+
+
+@pytest.mark.parametrize("first,second,folded", [
+    ("tmp.ABCDEF1234", "tmp.9876543210", "tmp.*"),
+    ("leaf-selection.ABCDEF12", "leaf-selection.87654321", "leaf-selection.*"),
+    ("relay-src.ABC123", "relay-src.654321", "relay-src.*"),
+])
+def test_normalized_epoch_is_deterministic(modules, first, second, folded):
+    selector = modules["select_tests"]
+    root = "/tmp/" + first + "/lib"
+    manifest = {
+        "external_root_table": {root: {"class": "python-installation"}},
+        "external_root_digests": {root: {"sha256": "a" * 64}},
+        "reporting_helper_sha256s": {"select_tests.py": "b" * 64, "trace_supervisor.py": "c" * 64},
+        "parser_version": "s15b-6",
+    }
+    original = copy.deepcopy(manifest)
+    renamed = copy.deepcopy(manifest)
+    for field in ("external_root_table", "external_root_digests"):
+        renamed[field] = {"/tmp/" + second + "/lib": manifest[field][root]}
+    assert selector.normalize_root_name(root) == "/tmp/" + folded + "/lib"
+    normalized = selector._normalize_epoch_manifest(manifest)
+    for field in ("external_root_table", "external_root_digests"):
+        assert normalized[field] == {"/tmp/" + folded + "/lib": manifest[field][root]}
+    epoch = selector.normalized_epoch(manifest)
+    assert len(epoch) == 64
+    assert epoch == selector.normalized_epoch(copy.deepcopy(manifest))
+    assert epoch == selector.normalized_epoch(renamed)
+    assert manifest == original
+    renamed["parser_version"] = "changed-parser"
+    assert epoch != selector.normalized_epoch(renamed)
+
+
+def test_inventory_has_no_terraform_roots_or_classes(modules):
+    inventory = modules["external_inventory"]
+    constants = {name: value for name, value in vars(inventory).items()
+                 if name.isupper() and not name.startswith("_")}
+    assert "terraform" not in repr(constants).lower()
+    assert "TF_PLUGIN_CACHE_DIR" not in repr(constants)
+    assert inventory.ADMISSIBLE_CLASSES == ("python-installation", "os-image")
+    assert "terraform" not in repr(modules["trace_supervisor"].ADMISSION_POLICY).lower()
+
+
+# Documented strace -f -ttt -x line formats: a normal call and its split equivalent.
+@pytest.mark.parametrize("transcript,kinds", [
+    (b'123 1700000000.000001 openat(AT_FDCWD, "config.json", O_RDONLY|O_CLOEXEC) = 3\n',
+     ["syscall"]),
+    (b'123 1700000000.000001 openat(AT_FDCWD, "config.json", O_RDONLY|O_CLOEXEC <unfinished ...>\n'
+     b'123 1700000000.000002 <... openat resumed>) = 3\n',
+     ["unfinished", "resumed"]),
+])
+def test_decoder_parses_openat_fixtures(modules, transcript, kinds):
+    decoder = modules["trace_process_tree"]
+    events, reasons = decoder.parse_stream(transcript)
+    assert reasons == []
+    assert [event["kind"] for event in events] == kinds
+    assert events[0]["name"] == "openat"
+    assert events[0]["paths"] == {1: "config.json"}
+    assert "O_RDONLY" in events[0]["flags"]
+    assert events[-1]["return_value"] == 3
+    assert decoder.PARSER_VERSION == "s15b-6"
+
+
+def test_supervisor_help_exits_zero(modules, capsys):
+    with pytest.raises(SystemExit) as result:
+        modules["trace_supervisor"].main(["--help"])
+    assert result.value.code == 0
+    assert "usage:" in capsys.readouterr().out
