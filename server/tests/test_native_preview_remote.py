@@ -609,7 +609,7 @@ def test_real_postgres_binding_drift_and_source_integrity_fail_closed(protocol, 
 
 
 @pytest.fixture
-def linked_remote(protocol, postgres_authority):
+def linked_remote(protocol, postgres_authority, monkeypatch):
     """Real authority and platform rows; protocol source bytes remain synthetic."""
     c = protocol
     db, executors = postgres_authority
@@ -623,6 +623,19 @@ def linked_remote(protocol, postgres_authority):
         conn.execute("INSERT INTO jobs (job_id, project_id, org_id, kind, status, spine_ref) "
                      "VALUES (%s, %s, %s, 'run', 'running', %s)",
                      (mirror, c.project, c.org, jid))
+    # Run the real recovery selectors, but recover only this fixture's job: the gate runs every
+    # database suite against one shared database, and other suites leave durable rows there.
+    reclaimable = jobs._pg_store.reclaimable
+    submitted_ids = jobs._pg_store.submitted_ids
+
+    def own_reclaimable(*args, **kwargs):
+        return [row for row in reclaimable(*args, **kwargs) if row['job_id'] == jid]
+
+    def own_submitted_ids(*args, **kwargs):
+        return [value for value in submitted_ids(*args, **kwargs) if value == jid]
+
+    monkeypatch.setattr(jobs._pg_store, 'reclaimable', own_reclaimable)
+    monkeypatch.setattr(jobs._pg_store, 'submitted_ids', own_submitted_ids)
     try:
         yield c, db, executors, jid, job, ident, mirror
     finally:
