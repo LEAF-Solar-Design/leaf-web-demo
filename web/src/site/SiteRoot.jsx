@@ -23,6 +23,7 @@
 // console's identity to the stage or the reverse.
 
 import React, { Suspense, useCallback, useEffect, useRef, useState } from 'react'
+import GroundSkeleton from '../components/GroundSkeleton.jsx'
 import { markInstant } from '../lib/instant.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { useRoute, navigate } from './router.js'
@@ -282,18 +283,18 @@ export default function SiteRoot() {
           <div className="studio-ground" ref={setStudioGround} role="region" aria-label="Drawing" aria-hidden={studioGround ? undefined : true} />
           <StudioGroundContext.Provider value={studioGround}>
             <WorkspaceControllerProvider {...consoleWorkspaceMount()}>
-              <Suspense fallback={null}>
+              <Suspense fallback={<GroundSkeleton label="Studio" />}>
                 <App />
               </Suspense>
             </WorkspaceControllerProvider>
           </StudioGroundContext.Provider>
         </div>
       ) : scene === 'leaf-platform' ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={<GroundSkeleton label="Studio" />}>
           <LeafPlatformScene />
         </Suspense>
       ) : scene === 'sheets' ? (
-        <Suspense fallback={null}>
+        <Suspense fallback={<GroundSkeleton label="Sheets" />}>
           <SheetsPage />
         </Suspense>
       ) : (

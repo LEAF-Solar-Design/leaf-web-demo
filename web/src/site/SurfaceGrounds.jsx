@@ -16,7 +16,8 @@
 //     an unmount): the drawing ground survives tab switches with its WebGL
 //     context, lock, and job state, exactly as the workspace card always
 //     did (`display: none`, not unmount).
-import { Component, lazy, Suspense, useRef, useState } from 'react'
+import { Component, lazy, Suspense, useMemo, useRef, useState } from 'react'
+import GroundSkeleton from '../components/GroundSkeleton.jsx'
 import { PRODUCT_SURFACES, surfaceGround } from './productSurfaces.js'
 import { ProjectBoardGround } from './ProjectBoardGround.jsx'
 import { BrowserAssetGround } from './BrowserAssetGround.jsx'
@@ -24,10 +25,6 @@ import { DeviceGround } from '../ios/DeviceGround.jsx'
 import { NO_OCCLUDERS, useGroundWindow, windowStyle } from './groundWindow.js'
 import { isLabEmbedded, parseLabRoute } from '../lab/labRoute.js'
 import '../integrations/ops-workspace.css'
-
-const OpsWorkspaceGround = lazy(() => import('../integrations/OpsWorkspaceGround.jsx')
-  .then((module) => ({ default: module.OpsWorkspaceGround })))
-const LabGround = lazy(() => import('../lab/LabGround.jsx'))
 
 // The left tools column overlays the non-drawing grounds, so each ground's window starts right of it.
 const GROUND_TOOLS_OCCLUDER = Object.freeze(['#project-workspace-tools', 'left'])
@@ -42,7 +39,14 @@ function withGroundToolsOccluder(occluders) {
   return groundOccluders
 }
 
-function LabLoadState({ active, studioShell, occluders, failed = false }) {
+function GroundFailure({ label, retry }) {
+  return <div role="alert" className="ground-failed">
+    <p>The {label} workspace did not load. Your project and session are unchanged.</p>
+    <button type="button" className="btn dp-focus" onClick={retry}>Retry</button>
+  </div>
+}
+
+function LabLoadState({ active, studioShell, occluders, failed = false, retry }) {
   const boardRef = useRef(null)
   const route = typeof window === 'undefined' ? null : parseLabRoute(window.location.pathname, window.location.search)
   const embedded = isLabEmbedded(route)
@@ -53,7 +57,7 @@ function LabLoadState({ active, studioShell, occluders, failed = false }) {
     style={{ position: embedded ? 'fixed' : 'absolute', inset: 0, minWidth: 0, overflow: 'hidden' }}>
     <div data-measured={Boolean(win)}
       style={{ position: 'absolute', ...(embedded ? { inset: 0 } : win ? windowStyle(win) : { visibility: 'hidden' }) }}>
-      <p role={failed ? 'alert' : 'status'} style={{ color: 'var(--leaf-ink-muted)' }}>{failed ? 'Lab could not be loaded. Reload the page to try again.' : 'Loading Lab…'}</p>
+      {failed ? <GroundFailure label="Lab" retry={retry} /> : <GroundSkeleton label="Lab" />}
     </div>
   </section>
 }
@@ -66,22 +70,24 @@ class LabLoadBoundary extends Component {
   }
 
   render() {
-    return this.state.failed ? <LabLoadState {...this.props.groundProps} failed /> : this.props.children
+    return this.state.failed ? <LabLoadState {...this.props.groundProps} failed retry={this.props.retry} /> : this.props.children
   }
 }
 
 function LazyLabGround(props) {
+  const [generation, setGeneration] = useState(0)
+  const LabGround = useMemo(() => lazy(() => import('../lab/LabGround.jsx')), [generation])
   const [activated, setActivated] = useState(props.active)
   if (props.active && !activated) setActivated(true)
   if (!activated && !props.active) return null
-  return <LabLoadBoundary groundProps={props}>
+  return <LabLoadBoundary key={generation} groundProps={props} retry={() => setGeneration((value) => value + 1)}>
     <Suspense fallback={<LabLoadState {...props} />}>
       <LabGround {...props} />
     </Suspense>
   </LabLoadBoundary>
 }
 
-function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = false }) {
+function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = false, retry }) {
   const boardRef = useRef(null)
   const leaving = leavingGround === 'integrations'
   const win = useGroundWindow(active || leaving, studioShell, boardRef, occluders)
@@ -91,8 +97,7 @@ function OpsLoadState({ active, leavingGround, studioShell, occluders, failed = 
     data-ground-phase={leaving ? 'leaving' : active && leavingGround ? 'entering' : undefined}>
     <div className="ops-workspace" data-measured={Boolean(win)}
       style={win ? windowStyle(win) : { visibility: 'hidden' }}>
-      <h1>Ops workspace</h1>
-      <p role={failed ? 'alert' : 'status'}>{failed ? 'Ops workspace could not be loaded. Reload the page to try again.' : 'Loading Ops workspace…'}</p>
+      {failed ? <GroundFailure label="Ops" retry={retry} /> : <GroundSkeleton label="Ops workspace" />}
     </div>
   </section>
 }
@@ -105,17 +110,20 @@ class OpsLoadBoundary extends Component {
   }
 
   render() {
-    return this.state.failed ? <OpsLoadState {...this.props.groundProps} failed /> : this.props.children
+    return this.state.failed ? <OpsLoadState {...this.props.groundProps} failed retry={this.props.retry} /> : this.props.children
   }
 }
 
 // Latch only the mount, never the authority props. Ops retains responsibility
 // for invalidating its own project/session state as those props change.
 function LazyOpsGround(props) {
+  const [generation, setGeneration] = useState(0)
+  const OpsWorkspaceGround = useMemo(() => lazy(() => import('../integrations/OpsWorkspaceGround.jsx')
+    .then((module) => ({ default: module.OpsWorkspaceGround }))), [generation])
   const [activated, setActivated] = useState(props.active)
   if (props.active && !activated) setActivated(true)
   if (!activated && !props.active) return null
-  return <OpsLoadBoundary groundProps={props}>
+  return <OpsLoadBoundary key={generation} groundProps={props} retry={() => setGeneration((value) => value + 1)}>
     <Suspense fallback={<OpsLoadState {...props} />}>
       <OpsWorkspaceGround {...props} />
     </Suspense>
