@@ -2,6 +2,7 @@ import { useEffect, useRef, useState } from 'react'
 import { canonicalJSON } from '../contract.js'
 import { contract } from '../canvas/registry.js'
 import BlockChecks, { CHECKS, checkStatus } from './BlockChecks.jsx'
+import './codeParity.css'
 
 // Commands are displayed for an operator's terminal; they are never executed here.
 const quote = value => `'${String(value).replaceAll("'", "'\\''")}'`
@@ -41,19 +42,44 @@ export function SettingField({ name, schema, label, required, value, onChange, o
   </label>
 }
 
-function CopyText({ label, text }) {
-  const [message, setMessage] = useState('')
-  const [fallback, setFallback] = useState(false)
-  const input = useRef(null)
+function CopyText({ label, text, language, filename }) {
+  const [message, setMessage] = useState('Copy')
+  const code = useRef(null)
+  const request = useRef(0)
+  const reset = useRef(null)
   const currentText = useRef(text)
   currentText.current = text
-  useEffect(() => { setMessage(''); setFallback(false) }, [text])
-  useEffect(() => { if (fallback) { input.current?.focus(); input.current?.select() } }, [fallback])
-  return <div><pre>{text}</pre><button type="button" onClick={async () => {
-    try { await navigator.clipboard.writeText(text); if (currentText.current === text) setMessage('Copied') }
-    catch { if (currentText.current === text) { setMessage('Copy unavailable; use the selected text.'); setFallback(true); input.current?.focus(); input.current?.select() } }
-  }}>Copy {label}</button>{message && <span role="status">{message}</span>}
-    {fallback && <textarea ref={input} aria-label={`Copy ${label} manually`} readOnly value={text} />}</div>
+  useEffect(() => {
+    setMessage('Copy')
+    return () => { request.current += 1; clearTimeout(reset.current) }
+  }, [text])
+  const copy = async () => {
+    const id = ++request.current
+    clearTimeout(reset.current)
+    setMessage('Copy')
+    let result = 'Copied'
+    try { await navigator.clipboard.writeText(text) }
+    catch { result = 'Copy failed' }
+    if (request.current !== id || currentText.current !== text) return
+    setMessage(result)
+    if (result === 'Copy failed') {
+      const selection = window.getSelection?.()
+      if (selection && code.current) {
+        const range = document.createRange()
+        range.selectNodeContents(code.current)
+        selection.removeAllRanges()
+        selection.addRange(range)
+      }
+    }
+    reset.current = setTimeout(() => {
+      if (request.current === id) setMessage('Copy')
+    }, 2000)
+  }
+  return <div className="dp-code-block">
+    <div className="dp-code-header"><span>{language || filename || 'Command'}</span>
+      <button type="button" className="dp-focus" data-dp-action aria-label={`Copy ${label}`} aria-live="polite" onClick={copy}>{message}</button></div>
+    <pre><code ref={code}>{text}</code></pre>
+  </div>
 }
 
 export function SettingsJSON({ value, onChange, onApply }) {
@@ -119,10 +145,10 @@ export default function CodeTab({ block, manifest, evidence = null, onSettings }
     <div role="group" aria-label="How it runs">{['Built-in', 'Settings only', 'Custom Rust'].map(name =>
       <button type="button" key={name} aria-pressed={mode === name} onClick={() => setMode(name)}>{name}</button>)}</div>
     <h4>Typed contract</h4>
-    <pre>{`in: ${ports(manifest.inputs)}\nout: ${ports(manifest.outputs)}\nbudget: p50 at most ${budget.p50} µs · p99 at most ${budget.p99} µs`}</pre>
+    <CopyText label="Typed contract" language="Text" text={`in: ${ports(manifest.inputs)}\nout: ${ports(manifest.outputs)}\nbudget: p50 at most ${budget.p50} µs · p99 at most ${budget.p99} µs`} />
     <p>Runs inside the bot (native module through PyO3). Takes effect at the next restart with owner approval.</p>
     <label>Ask Claude<textarea value={prompt} onChange={event => setPrompt(event.target.value)} /></label>
-    <CopyText label="Ask Claude prompt" text={`${prompt}\n\n${contractText}`} />
+    <CopyText label="Ask Claude prompt" language="Text" text={`${prompt}\n\n${contractText}`} />
     <p>Copy this prompt to your own Claude session. No model calls or host data uploads happen here.</p>
     <h4>Terminal commands</h4>
     <CopyText label="export-contract" text={command('export-contract')} />
@@ -132,7 +158,7 @@ export default function CodeTab({ block, manifest, evidence = null, onSettings }
     <CopyText label="check corpus" text={`python -m leafhft.studio_blocks.cli check corpus --crate ./studio-block --kind ${quote(manifest.id)} --version ${quote(manifest.version.semver)} --journal-dir ./journal --out ./studio-block-check.json`} />
     {mode === 'Built-in' && <p>Uses the registered built-in implementation.</p>}
     {mode === 'Settings only' && <>
-      <details><summary>Settings schema and UI schema</summary><pre>{canonicalJSON(manifest.settings_schema)}</pre><pre>{canonicalJSON(manifest.ui_schema)}</pre></details>
+      <details><summary>Settings schema and UI schema</summary><CopyText label="Settings schema" language="JSON" text={canonicalJSON(manifest.settings_schema)} /><CopyText label="UI schema" language="JSON" text={canonicalJSON(manifest.ui_schema)} /></details>
       <form onSubmit={event => {
         event.preventDefault()
         try { saveSettings(settings) } catch (error) { setMessage(error.message) }

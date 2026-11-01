@@ -82,10 +82,10 @@ describe('Block Code tab', () => {
       ['new-rust', `new-rust ${selector} --out ./studio-block`],
       ['check', `check --crate ./studio-block ${selector} --out ./studio-block-check.json`],
       ['check corpus', `check corpus --crate ./studio-block ${selector} --journal-dir ./journal --out ./studio-block-check.json`],
-    ]) expect(screen.getByRole('button', { name: `Copy ${label}`, exact: true }).previousElementSibling.textContent).toBe(prefix + command)
+    ]) expect(screen.getByRole('button', { name: `Copy ${label}`, exact: true }).closest('.dp-code-block').querySelector('code').textContent).toBe(prefix + command)
     expect(document.body).not.toHaveTextContent('request-use')
     fireEvent.click(screen.getByRole('button', { name: 'Use as a Change' }))
-    expect(screen.getByRole('button', { name: 'Copy Use as a Change command' }).previousElementSibling.textContent)
+    expect(screen.getByRole('button', { name: 'Copy Use as a Change command' }).closest('.dp-code-block').querySelector('code').textContent)
       .toBe(prefix + 'request-use --manifest ./studio-block-check.json')
     expect(screen.getByText(/Evidence digest:/)).toHaveTextContent(digest)
     expect(document.body).not.toHaveTextContent('--digest')
@@ -232,16 +232,13 @@ describe('Block Code tab', () => {
     expect(screen.queryByText('Copied')).toBeNull()
   })
 
-  it('C14 focuses and selects a read-only keyboard fallback when clipboard access is denied', async () => {
+  it('C14 selects the displayed code when clipboard access is denied', async () => {
     clipboard.mockRejectedValue(new Error('denied'))
     mount()
     fireEvent.click(screen.getByRole('button', { name: 'Copy export-contract', exact: true }))
-    const fallback = await screen.findByRole('textbox', { name: 'Copy export-contract manually' })
-    expect(fallback).toHaveAttribute('readonly')
-    expect(fallback).toHaveFocus()
-    expect(fallback.selectionStart).toBe(0)
-    expect(fallback.selectionEnd).toBe(fallback.value.length)
-    expect(fallback.value).toBe("python -m leafhft.studio_blocks.cli export-contract --kind 'adjust-none' --version '1.0.0'")
+    await screen.findByText('Copy failed')
+    expect(window.getSelection().toString()).toBe("python -m leafhft.studio_blocks.cli export-contract --kind 'adjust-none' --version '1.0.0'")
+    expect(screen.queryByText('Copied')).toBeNull()
   })
 
   it.each(['Built-in', 'Settings only', 'Custom Rust'])('shows the exact manifest contract and commands in %s', mode => {
@@ -254,7 +251,7 @@ describe('Block Code tab', () => {
     expect(typed).toHaveTextContent('out: size: number [count], non-nullable')
     expect(typed).toHaveTextContent('budget: p50 at most 10 µs · p99 at most 100 µs')
     for (const command of ['export-contract', 'validate-settings', 'new-rust']) {
-      expect(screen.getByRole('button', { name: `Copy ${command}`, exact: true }).previousElementSibling)
+      expect(screen.getByRole('button', { name: `Copy ${command}`, exact: true }).closest('.dp-code-block').querySelector('code'))
         .toHaveTextContent(`python -m leafhft.studio_blocks.cli ${command} --kind 'adjust-none' --version '1.0.0'`)
     }
     expect(document.body).not.toHaveTextContent('request-use')
@@ -290,7 +287,7 @@ describe('Block Code tab', () => {
     expect(document.body).not.toHaveTextContent('request-use')
     expect(screen.queryByRole('button', { name: 'Copy Use as a Change command' })).not.toBeInTheDocument()
     fireEvent.click(use)
-    expect(screen.getByRole('button', { name: 'Copy Use as a Change command' }).previousElementSibling)
+    expect(screen.getByRole('button', { name: 'Copy Use as a Change command' }).closest('.dp-code-block').querySelector('code'))
       .toHaveTextContent('request-use --manifest ./studio-block-check.json')
     expect(screen.getByText(/Evidence digest:/)).toHaveTextContent(digest)
   })
