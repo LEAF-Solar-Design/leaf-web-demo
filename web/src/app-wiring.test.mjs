@@ -25,6 +25,7 @@ import {
   stageRunIntent, confirmRunIntent, dismissRunIntent,
 } from './runIntent.js'
 import { slashDecision, alternativeDecision } from './controllers/catalog/catalogRouting.js'
+import { createCatalogController } from './controllers/catalog/createCatalogController.js'
 import { createWorkspaceController } from './controllers/workspace/createWorkspaceController.js'
 import { solarSettingsScope } from './solar/solarSettingsWire.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
@@ -824,6 +825,50 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.equal(other.callback('armDecision')(missing), undefined)
     assert.equal(other.calls('lookup').length, 1)
     assert.deepEqual(other.errors, ['This tool is no longer in your catalog. Choose another tool to run.'])
+  })
+
+  it('WL52a U1 unknown slash publishes an unresolved route without preparing or requesting a run', async () => {
+    const h = r13Fixture({ project: false })
+    // Use the real in-memory catalog array; the fixture's `lookup` spy wraps
+    // Array.find, while getTools/preparePending/run spies represent requests.
+    h.env.tools = []
+    r13Intent(h)
+    const adaptersNode = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'catalogAdapters')
+    const adapters = r13Evaluate(adaptersNode.init.arguments[0], {
+      humanizeError: String, THRESHOLDS: {}, matchPrompt: () => {},
+      catalogUiRef: { current: { armDecision: h.callback('armDecision') } },
+      runIntentStateRef: h.env.runIntentStateRef, dismissRunIntent,
+      agentBannerFor: () => {}, drawingCommandOnRef: { current: false },
+    })()
+    const unexpected = () => assert.fail('unknown slash must not request routing or catalog lookup')
+    const controller = createCatalogController({
+      services: { getTools: unexpected, getCapabilities: unexpected, routePrompt: unexpected },
+      adapters, context: { mock: true },
+    })
+    const decision = await controller.actions.dispatch('/w1k-no-such-tool')
+    assert.deepEqual(decision, slashDecision('/w1k-no-such-tool', []).decision)
+    assert.equal(controller.getState().route, decision, 'defined adapter result publishes the unresolved route')
+    assert.equal(controller.getState().routeError, null)
+    assert.equal(decision.runIntent, undefined)
+    assert.equal(h.env.runIntentStateRef.current.pending, null)
+    assert.deepEqual(h.errors, [])
+    assert.deepEqual(h.work, [], 'no lookup, preparation, confirmation or execution work in armDecision')
+  })
+
+  it('WL52a U3 known slash still arms and prepares the catalog tool once', () => {
+    const h = r13Fixture({ project: false })
+    h.env.catalogRunContextRef.current = h.standalone
+    const decision = slashDecision(`/${h.tool.name}`, [h.tool]).decision
+    const armed = h.callback('armDecision')(decision)
+    assert.equal(armed.tool, h.tool.name)
+    assert.equal(armed.slash, true)
+    assert.deepEqual(armed.params, h.params)
+    assert.equal(armed.runIntent, h.env.runIntentStateRef.current.pending)
+    assert.equal(h.calls('lookup').length, 1)
+    assert.deepEqual(h.calls('prepare').map(call => call.args), [[h.tool, decision.params, { complete: false }]])
+    assert.equal(h.calls('getTools').length, 0)
+    assert.equal(h.calls('run').length, 0)
+    assert.deepEqual(h.errors, [])
   })
 
   it('R13F-11 slash dispatch refuses project Solar before routing', () => {
@@ -4826,7 +4871,7 @@ describe('App.jsx wiring', () => {
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, new RegExp('showToast\\(result != null\\s*\\?\\s*\\{\\s*text:\\s*`Stopped waiting for the drawing to refresh after \\$\\{tool\\}\\.`'))
-    assert.match(stripped, /interruptRun,\s*selectedTool\?\.label,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
+    assert.match(stripped, /interruptRun,\s*selectedTool\?\.label,\s*selectedTool\?\.name,\s*currentJob\?\.job_id,\s*result,\s*mock,\s*showToast/)
     assert.match(stripped, /onInterruptRun: onStopRun/)
   })
 
@@ -4836,8 +4881,33 @@ describe('App.jsx wiring', () => {
     assert.ok(start >= 0 && end > start, 'interrupt handler must survive the transform')
     const handler = stripped.slice(start, end)
     assert.match(handler, /interruptRun\(\);[\s\S]*showToast\(/)
-    assert.match(handler, /selectedTool\?\.label \|\| "the run"/)
+    assert.match(handler, /selectedTool\?\.label \|\| selectedTool\?\.name \|\| "the run"/)
     assert.match(handler, new RegExp('text:\\s*mock\\s*\\?\\s*`Stopped waiting for \\$\\{tool\\}\\.`\\s*:\\s*currentJob\\?\\.job_id\\s*\\?\\s*`Stopped following \\$\\{tool\\}\\. It keeps running; find it in Jobs\\.`\\s*:\\s*`Stopped waiting for \\$\\{tool\\} to be accepted\\. If the server accepts it, it will appear in Jobs\\.`'))
+  })
+
+  it('WL52a U4 interrupt toasts prefer the label, then the catalog name, then the fallback', () => {
+    for (const [selectedTool, tool] of [
+      [{ name: 'count-by-layer' }, 'count-by-layer'],
+      [{ label: 'Count by layer', name: 'count-by-layer' }, 'Count by layer'],
+      [null, 'the run'],
+    ]) {
+      for (const [result, mock, currentJob, text] of [
+        [{ ok: true }, false, { job_id: 'job-1' }, `Stopped waiting for the drawing to refresh after ${tool}.`],
+        [null, true, null, `Stopped waiting for ${tool}.`],
+        [null, false, { job_id: 'job-1' }, `Stopped following ${tool}. It keeps running; find it in Jobs.`],
+        [null, false, null, `Stopped waiting for ${tool} to be accepted. If the server accepts it, it will appear in Jobs.`],
+      ]) {
+        const calls = []
+        const stop = r13Evaluate(r13Callback('onStopRun'), {
+          selectedTool, result, mock, currentJob,
+          interruptSnapshotRef: { current: { tool: selectedTool?.name, elapsedMs: 1000 } },
+          track: () => {}, interruptRun: () => calls.push('interrupt'),
+          showToast: toast => calls.push(toast),
+        })
+        stop()
+        assert.deepEqual(calls, ['interrupt', { text }])
+      }
+    }
   })
 
   it('names the quick tools as version history actions', () => {

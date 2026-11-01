@@ -1,5 +1,6 @@
 """Pin the leaf-web-demo native CodeBuild CI rail without parsing YAML."""
 
+from functools import lru_cache
 import hashlib
 import json
 import os
@@ -17,6 +18,18 @@ ROOT = Path(__file__).resolve().parents[1]
 CI_PATH = ROOT / ".codebuild/ci.sh"
 PROJECT_PATH = ROOT / "scripts/ci/pr-codebuild-project.sh"
 BASH = shutil.which("bash")
+
+
+@lru_cache(maxsize=None)
+def _bash_runs_python() -> bool:
+    if not BASH:
+        return False
+    try:
+        return subprocess.run(
+            [BASH, "-c", "python3 -c 'import sys'"],  # pr-codebuild-project.sh runs python3
+            capture_output=True, text=True, timeout=30).returncode == 0
+    except (subprocess.TimeoutExpired, OSError):
+        return False
 
 
 class TestCodebuildCiScript(unittest.TestCase):
@@ -429,6 +442,8 @@ class TestPrCodebuildProject(unittest.TestCase):
 
     @unittest.skipUnless(BASH, "bash is not on PATH; project dry-run requires bash")
     def test_dry_run(self):
+        if not _bash_runs_python():
+            self.skipTest("bash cannot run python3 (for example only the Windows Store python alias); the project dry-run shells out to python3")
         result = subprocess.run(
             [BASH, "scripts/ci/pr-codebuild-project.sh", "--dry-run"],
             cwd=ROOT, capture_output=True, text=True)
