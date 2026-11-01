@@ -1,0 +1,8 @@
+/* leaf-dp-v1 */
+.result-panel table{border-collapse:collapse;min-width:0;max-width:100%}
+.result-panel table[data-density] th,.result-panel table[data-density] td{padding:0 var(--leaf-space-2);font-size:var(--leaf-size-dense);line-height:var(--leaf-leading-dense);border-bottom:1px solid var(--leaf-line);text-align:left}
+.result-panel table[data-density] thead th{font-size:var(--leaf-size-caption);line-height:var(--leaf-leading-caption);color:var(--leaf-ink-muted);font-weight:var(--leaf-weight-medium)}
+.result-panel table[data-density] .dp-number{font-variant-numeric:tabular-nums;text-align:right}
+.result-panel table[data-density="compact"] tr{height:var(--leaf-metric-row-compact)}
+.result-panel table[data-density="comfortable"] tr{height:var(--leaf-metric-row-comfortable)}
+.result-panel .table-scroll{overflow-x:auto;scrollbar-gutter:stable}
