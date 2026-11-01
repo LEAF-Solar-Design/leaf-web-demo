@@ -531,6 +531,9 @@ export default function App() {
   })
   const committedSurfaceRef = useRef(activeSurface)
   committedSurfaceRef.current = activeSurface
+  // Explicit sample opens enter once, only after the fenced intake load succeeds.
+  const sampleEntryPending = useRef(new URLSearchParams(window.location.search).get('demo') === '1')
+  const [sampleEntry, setSampleEntry] = useState(null)
   const onCommit = useCallback((id) => {
     committedSurfaceRef.current = id
     setActiveSurface(id)
@@ -1576,6 +1579,10 @@ export default function App() {
       if (requestedDrawingIdRef.onDrawingLoad?.(loadGeneration) === false) return
       seatIntake(d, options)
       setDrawingLoad({ drawingId: loadDrawingId, state: d != null ? 'seated' : 'absent' })
+      if (d != null && DRAWING_SOURCE === 'rooftop_demo' && !isEditFixture && sampleEntryPending.current) {
+        sampleEntryPending.current = false
+        setSampleEntry({ request: 1, profile: committedSurfaceRef.current })
+      }
       // MOCK write loop (M3): v1 of the 'demo' chain is the intake just seated,
       // so re-running the demo always starts from a clean v1.
       if (mock && !isEditFixture) mockVersions.seedBase(d)
@@ -5155,6 +5162,7 @@ export default function App() {
             environmentProfiles={PRODUCT_SURFACES.filter(item => item.contract.scene === 'app' && item.contract.chrome.shell === 'cockpit' && item.contract.chrome.tab && surfaceRailState(item.id, labStatus, 'app'))}
             onDescribe={() => { setTimeout(() => barInputRef.current?.focus(), 0) }}
             onEnterWorkspace={returnToDrawing}
+            sampleEntry={sampleEntry}
             surface={activeSurface}
             boardVisible={boardVisible}
             leavingGround={leavingGround}

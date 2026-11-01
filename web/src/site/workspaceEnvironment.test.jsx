@@ -119,6 +119,50 @@ it('the existing Start request brings the mounted chooser forward without replac
   expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open project or material' }))
 })
 
+it('enters the requested CAD profile once, and keeps Choose and Start in control afterwards', () => {
+  const onEnter = vi.fn()
+  const onPanel = vi.fn()
+  const props = { scopeKey: 'scope', profile: 'cad', profiles, onPanel, onEnter, hasContent: true }
+  const { container, rerender } = render(<WorkspaceEnvironment {...props} />)
+  const sampleEntry = { request: 1, profile: 'cad' }
+  rerender(<WorkspaceEnvironment {...props} sampleEntry={sampleEntry} />)
+  const chooser = container.querySelector('.environment-chooser')
+  expect(environment(container).dataset.entered).toBe('true')
+  expect(chooser.getAttribute('aria-hidden')).toBe('true')
+  expect(chooser.hasAttribute('inert')).toBe(true)
+  expect(document.activeElement).toBe(screen.getByRole('region', { name: 'cad workspace' }))
+  expect(onEnter).toHaveBeenCalledOnce()
+  expect(onPanel).toHaveBeenLastCalledWith('none')
+
+  fireEvent.click(screen.getByRole('button', { name: 'Choose' }))
+  rerender(<WorkspaceEnvironment {...props} sampleEntry={{ ...sampleEntry }} />)
+  expect(environment(container).dataset.entered).toBe('false')
+  expect(chooser.hasAttribute('inert')).toBe(false)
+  expect(onEnter).toHaveBeenCalledOnce()
+
+  rerender(<WorkspaceEnvironment {...props} sampleEntry={{ request: 2, profile: 'cad' }} />)
+  expect(environment(container).dataset.entered).toBe('true')
+  rerender(<WorkspaceEnvironment {...props} sampleEntry={{ request: 2, profile: 'cad' }} chooseRequest={1} />)
+  expect(environment(container).dataset.entered).toBe('false')
+  expect(document.activeElement).toBe(screen.getByRole('button', { name: 'Open project or material' }))
+  expect(onEnter).toHaveBeenCalledTimes(2)
+})
+
+it('consumes an initial sample request without entering other profiles or replaying on scope changes', () => {
+  const onEnter = vi.fn()
+  const props = { scopeKey: 'scope', profile: 'solar', onPanel: vi.fn(), onEnter,
+    sampleEntry: { request: 1, profile: 'solar' } }
+  const { container, rerender } = render(<WorkspaceEnvironment {...props} />)
+  expect(environment(container).dataset.entered).toBe('true')
+  rerender(<WorkspaceEnvironment {...props} profile="cad" />)
+  expect(environment(container).dataset.entered).toBe('false')
+  rerender(<WorkspaceEnvironment {...props} />)
+  expect(environment(container).dataset.entered).toBe('true')
+  rerender(<WorkspaceEnvironment {...props} scopeKey="other" />)
+  expect(environment(container).dataset.entered).toBe('false')
+  expect(onEnter).toHaveBeenCalledOnce()
+})
+
 it('uses one edge panel at a time, restores toggle focus, and yields Escape to a foreground modal', () => {
   const { rerender } = render(<Host />)
   const project = screen.getByRole('button', { name: 'Project' })

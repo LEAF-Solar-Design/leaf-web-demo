@@ -14,7 +14,7 @@ export const ENVIRONMENT_OCCLUDERS = Object.freeze([
 
 // Session memory belongs to this mounted authority scope, never to storage.
 export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', profiles = [], onSelect,
-  panel = 'none', onPanel, hasContent = false, activation = 0, chooseRequest = 0, onEnter, onDescribe, onSignIn, children }) {
+  panel = 'none', onPanel, hasContent = false, activation = 0, sampleEntry, chooseRequest = 0, onEnter, onDescribe, onSignIn, children }) {
   const [memory, setMemory] = useState(() => ({ scopeKey, entered: {} }))
   if (memory.scopeKey !== scopeKey) setMemory({ scopeKey, entered: {} })
   const entered = memory.scopeKey === scopeKey && memory.entered[profile] === true
@@ -24,6 +24,7 @@ export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', pr
   const chooser = useRef(null)
   const [focusChooser, setFocusChooser] = useState(0)
   const previousActivation = useRef(activation)
+  const previousSampleEntry = useRef(0)
   const pendingViewportFocus = useRef(null)
   const close = () => {
     onPanel('none')
@@ -58,6 +59,17 @@ export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', pr
       pendingViewportFocus.current = 'browser'
     }
   }, [activation, profile, scopeKey])
+  useLayoutEffect(() => {
+    // Consume by request value, so Choose, profile and scope changes cannot replay it.
+    if (!sampleEntry?.request || sampleEntry.request === previousSampleEntry.current) return
+    previousSampleEntry.current = sampleEntry.request
+    const target = sampleEntry.profile
+    if (!target) return
+    onEnter?.()
+    setMemory(current => ({ scopeKey, entered: { ...(current.scopeKey === scopeKey ? current.entered : {}), [target]: true } }))
+    onPanel('none')
+    pendingViewportFocus.current = target
+  }, [sampleEntry, scopeKey])
   useLayoutEffect(() => {
     if (!entered || panel !== 'none' || pendingViewportFocus.current !== profile) return
     pendingViewportFocus.current = null
