@@ -386,6 +386,12 @@ def usage_policy():
     return _USAGE_POLICY
 
 
+def exempt_tenants() -> frozenset[str]:
+    entries = os.environ.get("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", "").split(",")
+    tenants = [entry.strip() for entry in entries if entry.strip()]
+    return frozenset(tenants[:32])
+
+
 def enforce(
     tenant_id: str, tier: str, *, now_ts: Optional[float] = None,
     idempotency_key: str | None = None,
@@ -397,7 +403,10 @@ def enforce(
     never consumes a slot. Raises ``AuthorQuotaExceeded`` when the tenant is out
     of attempts for the UTC day, or ``AuthorQuotaStoreError`` when a configured
     quota cannot be evaluated — never silently unmetered.
+    LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS bypasses the quota for staging test tenants only.
     """
+    if tenant_id in exempt_tenants():
+        return None
     durable = durability_required()
     if idempotency_key is not None:
         prior = lookup_attempt(tenant_id, idempotency_key)
