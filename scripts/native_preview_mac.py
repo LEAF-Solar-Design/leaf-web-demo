@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import re
+import queue
 import secrets
 import shlex
 import signal
@@ -64,9 +65,11 @@ def supervise(argv, permit, *, input_bytes=None, clock=time.monotonic, sleep=tim
         writer = threading.Thread(target=feed, daemon=True)
         writer.start()
         cancelled = False
+        permit_expired = False
         try:
             while child.poll() is None:
-                if not valid() or output.tell() > 24 * 1024 * 1024:
+                permit_expired = not valid()
+                if permit_expired or output.tell() > 24 * 1024 * 1024:
                     cancelled = True
                     break
                 sleep(.1)
@@ -97,8 +100,11 @@ def supervise(argv, permit, *, input_bytes=None, clock=time.monotonic, sleep=tim
             sleep(.05)
         if extinct_file is not None:
             Path(extinct_file).write_text('yes')
-        if cancelled or writer_error or not valid() or child.returncode:
-            raise RuntimeError('native-supervised-failure')
+        permit_expired = permit_expired or not valid()
+        if cancelled or writer_error or permit_expired or child.returncode:
+            error = RuntimeError('native-supervised-failure')
+            error.permit_expired = permit_expired
+            raise error
         output.seek(0)
         result = output.read(24 * 1024 * 1024 + 1)
         if len(result) > 24 * 1024 * 1024:
@@ -188,6 +194,176 @@ os.replace(temporary,source/'permit')
 print('{}')
 '''
 
+PERMIT_STREAM = r'''
+def closed_line(limit):
+    raw=sys.stdin.buffer.readline(limit+1)
+    if not raw: return None
+    assert len(raw)<=limit and raw.endswith(b'\n')
+    def pairs(items):
+        value={}
+        for key,item in items:
+            assert key not in value
+            value[key]=item
+        return value
+    return json.loads(raw,object_pairs_hook=pairs)
+
+p=closed_line(16384)
+assert type(p) is dict and set(p)=={'ticket','udid','name'}
+source,derived,internal=roots(p)
+def owned():
+    assert source.is_dir() and not source.is_symlink()
+    owner=source/'owner'
+    assert not owner.is_symlink() and owner.is_file() and owner.stat().st_size<=256
+    assert owner.read_text()==p['name']
+def write_permit(expiry):
+    owned()
+    assert not (source/'permit').is_symlink()
+    fd,name=tempfile.mkstemp(prefix='.permit-',dir=source)
+    try:
+        with os.fdopen(fd,'w') as stream:
+            os.fchmod(stream.fileno(),0o600)
+            stream.write(str(expiry))
+        os.replace(name,source/'permit')
+    finally:
+        if os.path.exists(name): os.unlink(name)
+owned()
+fd=os.open(source/'stream.lock',os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
+with os.fdopen(fd,'a+') as lock:
+    import stat
+    assert stat.S_ISREG(os.fstat(lock.fileno()).st_mode)
+    fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+    try:
+        print('{"ready":true}',flush=True)
+        while True:
+            value=closed_line(1024)
+            if value is None: break
+            assert type(value) is dict and set(value)=={'expiry'}
+            expiry=value['expiry']
+            assert type(expiry) in (int,float) and math.isfinite(expiry)
+            assert permit_clock()<expiry<=permit_clock()+10
+            write_permit(expiry)
+            print('{}',flush=True)
+    finally:
+        # Only this lock owner may revoke; never touch a replaced/foreign tree.
+        write_permit(0)
+'''
+
+
+class PermitStream:
+    """One bounded permit channel inside the current canonical allocator lease."""
+    def __init__(self, allocator, held, context, guard, offset):
+        self.held, self.guard, self.offset = held, guard, offset
+        self.clock, self.end = guard.monotonic, guard.end
+        self.lock = threading.Lock()
+        self.replies = queue.Queue(maxsize=2)
+        self.failed = threading.Event()
+        self.child = self.reader = self.writer = None
+        self.closed = False
+        try:
+            guard.check()
+            require(not held.lost and self.end > self.clock(), 'mac-transport-failed')
+            args = ['run', '--ticket', held.ticket, '--timeout-s',
+                    str(max(1, math.ceil(self.end-self.clock()))), '--',
+                    '/usr/bin/python3', '-u', '-c', REMOTE_COMMON + PERMIT_STREAM]
+            self.child = held.client.popen(allocator.ssh_argv(args, host=held.client.host),
+                stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                bufsize=0)
+            self.reader = threading.Thread(target=self._read, daemon=True)
+            self.reader.start()
+            until = min(self.end, self.clock()+10)
+            self._send(context, 16384, until)
+            self._ack({'ready': True}, until)
+        except BaseException:
+            self.close()
+            raise WorkerError('mac-transport-failed') from None
+
+    def _read(self):
+        try:
+            while True:
+                line = self.child.stdout.readline(1025)
+                if not line or len(line)>1024 or not line.endswith(b'\n'):
+                    self.failed.set()
+                    return
+                self.replies.put_nowait(line)
+        except BaseException:
+            self.failed.set()
+
+    def _remaining(self, until):
+        remaining = min(until, self.end)-self.clock()
+        require(remaining > 0 and not self.failed.is_set(), 'mac-transport-failed')
+        return remaining
+
+    def _send(self, value, limit, until):
+        raw = json.dumps(value,allow_nan=False,separators=(',',':')).encode()+b'\n'
+        require(len(raw)<=limit, 'mac-transport-failed')
+        errors = []
+        def write():
+            try:
+                remaining = memoryview(raw)
+                while remaining:
+                    count = self.child.stdin.write(remaining)
+                    if not count: raise OSError()
+                    remaining = remaining[count:]
+                self.child.stdin.flush()
+            except BaseException:
+                errors.append(True)
+        self.writer = threading.Thread(target=write,daemon=True)
+        self.writer.start()
+        self.writer.join(timeout=self._remaining(until))
+        require(not self.writer.is_alive() and not errors, 'mac-transport-failed')
+
+    def _ack(self, expected, until):
+        try:
+            line = self.replies.get(timeout=self._remaining(until))
+            reply = parse(line)
+            require(reply==expected and type(reply) is dict
+                    and all(type(reply[key]) is type(value) for key,value in expected.items())
+                    and not self.failed.is_set(), 'mac-transport-failed')
+        except BaseException:
+            raise WorkerError('mac-transport-failed') from None
+
+    def grant(self, expiry):
+        with self.lock:
+            try:
+                self.guard.check()
+                require(not self.closed and not self.held.lost and self.child.poll() is None
+                        and self.replies.empty(), 'mac-transport-failed')
+                until = min(self.end,self.clock()+4)
+                self._send({'expiry': expiry+self.offset},1024,until)
+                self._ack({},until)
+                self.guard.check()
+            except BaseException:
+                self.failed.set()
+                raise WorkerError('mac-transport-failed') from None
+
+    def close(self):
+        self.closed = True
+        child = self.child
+        if child is None: return True
+        try:
+            # A blocked pipe writer must be released by killing its local SSH.
+            if self.writer is not None and self.writer.is_alive():
+                child.kill()
+            child.stdin.close()
+            try: child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=2)
+            if self.reader is not None: self.reader.join(timeout=1)
+            if self.writer is not None: self.writer.join(timeout=1)
+            return (child.poll() is not None
+                    and (self.reader is None or not self.reader.is_alive())
+                    and (self.writer is None or not self.writer.is_alive()))
+        except BaseException:
+            try:
+                child.kill()
+                child.wait(timeout=2)
+            except BaseException: pass
+            return False
+        finally:
+            try: child.stdout.close()
+            except BaseException: pass
+
 DRIVER = r'''
 p=json.load(sys.stdin)
 source,derived,internal=roots(p)
@@ -269,9 +445,15 @@ with (source/'supervisor.lock').open('a') as lock:
     permitted(source)
     driver=p.pop('driver')
     (source/'started').write_text('yes')
-    result=supervise(['/usr/bin/python3','-c',driver],source/'permit',
-                     input_bytes=json.dumps(p).encode(),clock=permit_clock,
-                     extinct_file=source/'extinct')
+    try:
+        result=supervise(['/usr/bin/python3','-c',driver],source/'permit',
+                         input_bytes=json.dumps(p).encode(),clock=permit_clock,
+                         extinct_file=source/'extinct')
+    except RuntimeError as error:
+        if getattr(error,'permit_expired',False) or str(error)=='permit-expired': sys.exit(71)
+        if str(error)=='native-supervised-failure': sys.exit(72)
+        if str(error)=='extinction-unconfirmed': sys.exit(73)
+        raise
     sys.stdout.buffer.write(result)
 '''
 
@@ -281,6 +463,19 @@ source,derived,internal=roots(p)
 # Cleanup is allowed after cancellation, but never broadens its ownership.
 if source.exists():
     assert not source.is_symlink() and (source/'owner').read_text()==p['name']
+    # EOF revocation must finish before cleanup can delete the owned source.
+    stream_fd=os.open(source/'stream.lock',os.O_CREAT|os.O_RDWR|getattr(os,'O_NOFOLLOW',0),0o600)
+    stream_lock=os.fdopen(stream_fd,'a+')
+    import stat
+    assert stat.S_ISREG(os.fstat(stream_lock.fileno()).st_mode)
+    until=time.monotonic()+20
+    while True:
+        try:
+            fcntl.flock(stream_lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+            break
+        except BlockingIOError:
+            assert time.monotonic()<until
+            time.sleep(.1)
     (source/'permit').write_text('0')
     lock=(source/'supervisor.lock').open('a')
     until=time.monotonic()+20
@@ -488,9 +683,10 @@ except BaseException: sys.exit(1)
 
 
 class MacAdapter:
-    def __init__(self, allocator=None, *, reconciliation_transport=None):
+    def __init__(self, allocator=None, *, reconciliation_transport=None, permit_factory=PermitStream):
         self.allocator = allocator
         self.reconciliation_transport = reconciliation_transport or reconciliation_transport_bounded
+        self.permit_factory = permit_factory
         self.report = {'cleanup_complete': False, 'allocator_release_confirmed': False}
 
     def read_reconciliation_allocator(self, job_id, attempt):
@@ -521,6 +717,7 @@ class MacAdapter:
         released = False
         cleanup = False
         facts = image = None
+        stream = None
         with allocator.lease('studio-native-preview', name, slots='sim,build', kind='ios-preview',
                              sim_types=('iPhone 17 Pro Max',), markers=(name,), client=client,
                              deadline_s=max(1, guard.end - guard.monotonic()),
@@ -542,13 +739,16 @@ class MacAdapter:
             p = {'ticket': held.ticket, 'udid': udid, 'name': name}
             require(re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}', held.ticket), 'invalid-ticket')
 
-            def call(code, payload, *, limit=16384, cleanup_call=False, timeout=10):
+            def call(code, payload, *, limit=16384, cleanup_call=False, producer_call=False, timeout=10):
                 if not cleanup_call:
                     guard.check()
                 result = held.ssh('/usr/bin/python3 -c ' + shlex.quote(REMOTE_COMMON + code),
                                   payload=json.dumps(payload), timeout=timeout)
                 if not cleanup_call:
                     guard.check()
+                if producer_call and result.returncode in (71,72,73):
+                    raise WorkerError({71:'mac-permit-expired',72:'mac-producer-failed',
+                                       73:'mac-extinction-unconfirmed'}[result.returncode])
                 require(result.returncode == 0 and len(result.stdout.encode()) <= limit, 'mac-transport-failed')
                 return parse(result.stdout)
 
@@ -560,11 +760,9 @@ class MacAdapter:
                         and math.isfinite(bootstrap['remote_clock']), 'invalid-remote-clock')
                 # Lower-bound remote monotonic offset: receive delay only shortens validity.
                 offset = bootstrap['remote_clock'] - guard.monotonic()
-                def refresh(expiry):
-                    guard.check()
-                    call(REFRESH, {**p, 'expiry': expiry + offset})
+                stream = self.permit_factory(allocator, held, p, guard, offset)
                 with guard.lock:
-                    guard.refresh = refresh
+                    guard.refresh = stream.grant
                     guard.stage('mac-permit-refresh')
                     guard.beat()
                 guard.record({'event': 'producer', 'producer_may_have_started': True})
@@ -574,7 +772,7 @@ class MacAdapter:
                            'budget': max(1, guard.end - guard.monotonic()),
                            'driver': REMOTE_COMMON + DRIVER}
                 code = inspect.getsource(supervise) + SUPERVISOR_END
-                facts = call(code, payload, limit=MAX_TRANSFER,
+                facts = call(code, payload, limit=MAX_TRANSFER, producer_call=True,
                              timeout=max(1, min(1300, guard.end - guard.monotonic())))
                 guard.stage('evidence')
                 encoded = facts.pop('screenshot_base64')
@@ -586,8 +784,10 @@ class MacAdapter:
                 # Synchronize with the refresher before deleting its owned permit directory.
                 with guard.lock:
                     guard.refresh = None
+                stream_closed = stream is None or stream.close()
                 try:
-                    cleanup = call(CLEANUP, p, cleanup_call=True, timeout=180) == {'cleanup_complete': True}
+                    cleanup = (call(CLEANUP, p, cleanup_call=True, timeout=180) == {'cleanup_complete': True}
+                               and stream_closed)
                 except BaseException:
                     cleanup = False
                 self.report['cleanup_complete'] = cleanup
