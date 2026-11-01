@@ -99,7 +99,7 @@ export const TOUR_STEPS = [
     title: 'Edits are versioned, your call',
     body:
       'Deleting a panel is a real write, so nothing auto-runs. Click Run in the ' +
-      'bar below to stage the next version, then press Undo to walk the drawing back.',
+      'bar below, then confirm Run on the card to stage the next version.',
     // The confirm strip is where the decision actually lives; fall back to the
     // dock before it mounts so the light is never on the wrong half of the screen.
     target: '.strip-decision, .bar-dock',

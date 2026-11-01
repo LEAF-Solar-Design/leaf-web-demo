@@ -822,6 +822,18 @@ export default function App() {
   // review #428 round-1 blocker 3); step 0 is emitted as reached so per-step
   // dropout starts at the first step.
   const tourStepRef = useRef(0)
+  const tourVersionStartRef = useRef(null)
+  const onTourVersionSeated = useCallback(({ drawingState: seated }) => {
+    const start = tourVersionStartRef.current
+    if (mock && tourOn && TOUR_STEPS[tourStepRef.current]?.id === 'version'
+      && start && start.seq === cannedSeq.current
+      && start.drawingId != null && seated?.drawing_id === start.drawingId
+      && start.head != null && Number.isFinite(Number(start.head))
+      && Number.isFinite(Number(seated.head)) && Number(seated.head) > Number(start.head)
+      && Number(seated.version) === Number(seated.head)) {
+      setTourLanded(true)
+    }
+  }, [mock, tourOn])
   const tourStartedRef = useRef(false)
   useEffect(() => {
     if (tourOn && mock && !tourStartedRef.current) {
@@ -970,6 +982,7 @@ export default function App() {
     onApplyIntake: applySelectedDrawingIntake,
     onResetSelection: resetDrawingSelection,
     onError: reportDrawingError,
+    onVersionEvent: onTourVersionSeated,
   })
   const {
     intake,
@@ -3310,6 +3323,9 @@ export default function App() {
     // in-flight beat rather than interleave two typing loops.
     const seq = (cannedSeq.current += 1)
     setTourLanded(false)
+    tourVersionStartRef.current = step?.action === 'version'
+      ? { seq, drawingId: drawingState?.drawing_id, head: drawingState?.head }
+      : null
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     // A leftover route at a tour beat's start was superseded, not user-dismissed.
@@ -3344,9 +3360,9 @@ export default function App() {
       if (cannedSeq.current === seq) setRunErr(humanizeError(e))
     } finally {
       // AuthorPanel reports staging only after its card or failure is rendered.
-      if (cannedSeq.current === seq && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
+      if (cannedSeq.current === seq && step?.action !== 'version' && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
     }
-  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState])
 
   const onTourStepChange = useCallback((index) => {
     tourStepRef.current = index
