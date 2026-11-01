@@ -1,6 +1,26 @@
 import React from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { act, cleanup, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+
+const proposalAuth = vi.hoisted(() => ({ account: 'account-a', scope: 'org-a', logout: new Set(), token: new Set(), active: new Set() }))
+vi.mock('../lib/composerDraft.js', async importOriginal => ({ ...await importOriginal(), composerDraftAccountScope: () => proposalAuth.account }))
+vi.mock('../auth/activeScope.js', async importOriginal => ({ ...await importOriginal(),
+  readActiveScope: () => proposalAuth.scope,
+  subscribeActiveScope: callback => { proposalAuth.active.add(callback); return () => proposalAuth.active.delete(callback) },
+}))
+vi.mock('../auth.js', async importOriginal => ({ ...await importOriginal(),
+  subscribeBeforeLogout: callback => { proposalAuth.logout.add(callback); return () => proposalAuth.logout.delete(callback) },
+  subscribeTokenStored: callback => { proposalAuth.token.add(callback); return () => proposalAuth.token.delete(callback) },
+}))
+vi.mock('../site/ProjectBoardGround.jsx', () => ({ ProjectBoardGround: () => null }))
+vi.mock('../site/WorkspaceEnvironment.jsx', () => ({ default: ({ children, panel }) => <section data-testid="workspace" data-panel={panel}>{children}</section> }))
+vi.mock('../site/projectPageClient.js', async importOriginal => ({ ...await importOriginal(),
+  loadProjectPage: vi.fn(), saveProjectPage: vi.fn(), submitProjectNativePreview: vi.fn(),
+}))
+vi.mock('../projects/api.js', async importOriginal => ({ ...await importOriginal(),
+  listProjectPhotos: vi.fn(async () => ({ materials: [] })),
+  readProjectPhotoPreview: vi.fn(async () => new Blob(['photo'], { type: 'image/jpeg' })),
+}))
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn(), setTourStep: vi.fn() }))
 vi.mock('../engineChanges.js', async (importOriginal) => ({
@@ -19,6 +39,10 @@ vi.mock('../converse.js', () => ({
 import { openStream } from '../converse.js'
 import ConversePanel from './ConversePanel.jsx'
 import { createCatalogController } from '../controllers/catalog/createCatalogController.js'
+import { BrowserAssetGround } from '../site/BrowserAssetGround.jsx'
+import { emptyPortfolio } from '../site/portfolioDocument.js'
+import { loadProjectPage, saveProjectPage, submitProjectNativePreview } from '../site/projectPageClient.js'
+import { deliverProjectPageProposal, subscribeProjectPageProposals } from '../site/projectPageProposalDelivery.js'
 
 const C = 'leaf.customization.v1'
 const I = '7f3a51f0-9d9a-43be-8d29-cbdba31249c8'
@@ -68,10 +92,159 @@ function cycle(o, count = 1) {
 }
 beforeEach(() => {
   subscriptions.length = 0
+  proposalAuth.account = 'account-a'; proposalAuth.scope = 'org-a'
+  proposalAuth.logout.clear(); proposalAuth.token.clear(); proposalAuth.active.clear()
   openStream.mockImplementation((_session, _seq, handlers) => {
     const close = vi.fn()
     subscriptions.push({ handlers, close })
     return { close }
+  })
+})
+
+const projectProposal = () => {
+  const document = emptyPortfolio()
+  document.categories[0].images = [{ material_id: I, sha256: H, preview_sha256: H, title: 'Photo', alt: 'A photo' }]
+  return { source: { project_id: I, revision: 7, digest: H }, proposed_document: { ...document, headline: 'Conversation headline' },
+    proposed_digest: 'b'.repeat(64), edits: [{ id: 'headline', value: 'Conversation headline' }], model: 'fixture', usage: {} }
+}
+const proposalEvent = (patch = {}) => event({ data: { tool: 'propose_project_page', ok: true, result: projectProposal() }, ...patch })
+const savedPortfolio = () => ({ revision: 7, digest: H, document: { ...projectProposal().proposed_document, headline: 'Selected work' } })
+function proposalGround(props = {}) {
+  return <BrowserAssetGround signedIn accountScope="account-a" projectId={I} browserActive {...props} />
+}
+
+describe('conversation delivery to private portfolio review', () => {
+  beforeEach(() => {
+    loadProjectPage.mockImplementation(async () => savedPortfolio())
+    URL.createObjectURL = vi.fn(() => 'blob:proposal-photo')
+    URL.revokeObjectURL = vi.fn()
+  })
+
+  it('routes the exact successful event to Browser and Project review, then Use changes only the draft and preview', async () => {
+    const select = vi.fn(), enter = vi.fn(), o = await owner()
+    render(<>{proposalGround({ onSelect: select, onEnterWorkspace: enter })}{panel(o)}</>)
+    await deliver(proposalEvent())
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    expect(select).toHaveBeenCalledWith('browser')
+    expect(enter).toHaveBeenCalled()
+    expect(screen.getByTestId('workspace')).toHaveAttribute('data-panel', 'project')
+    expect(screen.getByLabelText('Headline')).toHaveValue('Selected work')
+    fireEvent.click(screen.getByRole('button', { name: 'Use proposed changes' }))
+    expect(screen.getByLabelText('Headline')).toHaveValue('Conversation headline')
+    expect(screen.getByRole('heading', { name: 'Conversation headline' })).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+    expect(o.claim).not.toHaveBeenCalled()
+  })
+
+  it('consumes a duplicate once, and Discard preserves the saved original', async () => {
+    const select = vi.fn(), o = await owner()
+    render(<>{proposalGround({ onSelect: select })}{panel(o)}</>)
+    await deliver(proposalEvent())
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.click(screen.getByRole('button', { name: 'Discard proposal' }))
+    const count = select.mock.calls.length
+    await deliver(proposalEvent())
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(select).toHaveBeenCalledTimes(count)
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText('Headline')).toHaveValue('Selected work')
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each(['failed', 'wrong tool', 'wrong session', 'missing sequence', 'oversized'])('ignores %s without blocking the transcript or consuming a later success', async mode => {
+    const o = await owner()
+    const view = render(<>{proposalGround()}{panel(o)}</>)
+    const bad = proposalEvent()
+    if (mode === 'failed') bad.data.ok = false
+    if (mode === 'wrong tool') bad.data.tool = 'other_tool'
+    if (mode === 'wrong session') bad.session_id = 'other-session'
+    if (mode === 'missing sequence') delete bad.seq
+    if (mode === 'oversized') bad.data.summary = '😀'.repeat(270000)
+    await deliver(event({ type: 'turn_started', data: {} }))
+    await deliver(event({ type: 'tool_call', data: { tool: bad.data.tool, args_summary: 'text change' } }))
+    await expect(deliver(bad)).resolves.toBeUndefined()
+    expect(view.container.querySelector('.converse-step')).toHaveAttribute('data-state', mode === 'failed' ? 'failed' : 'done')
+    expect(loadProjectPage).not.toHaveBeenCalled()
+    await deliver(proposalEvent())
+    await screen.findByRole('region', { name: 'Review proposed text' })
+  })
+
+  it('does not consume a stale rejected event and can accept its corrected replay', async () => {
+    const o = await owner()
+    render(<>{proposalGround()}{panel(o)}</>)
+    const bad = proposalEvent(); bad.data.result.source.revision = 6
+    await deliver(bad)
+    await waitFor(() => expect(screen.getByLabelText('Headline')).toHaveValue('Selected work'))
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    await deliver(proposalEvent())
+    await screen.findByRole('region', { name: 'Review proposed text' })
+  })
+
+  it('accepts durable session and sequence without requiring a turn identifier', async () => {
+    const o = await owner()
+    render(<>{proposalGround()}{panel(o)}</>)
+    const env = proposalEvent(); delete env.turn_id
+    await deliver(env)
+    await screen.findByRole('region', { name: 'Review proposed text' })
+  })
+
+  it('clears project dedupe on a project switch while preserving it across profile changes', async () => {
+    const o = await owner(), view = render(<>{proposalGround()}{panel(o)}</>)
+    await deliver(proposalEvent())
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.click(screen.getByRole('button', { name: 'Discard proposal' }))
+    view.rerender(<>{proposalGround({ profile: 'ios' })}{panel(o)}</>)
+    await deliver(proposalEvent())
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    view.rerender(<>{proposalGround({ projectId: '22222222-2222-4222-8222-222222222222' })}{panel(o)}</>)
+    view.rerender(<>{proposalGround()}{panel(o)}</>)
+    await deliver(proposalEvent())
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    expect(loadProjectPage).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['session', 'account', 'org', 'project', 'logout', 'unmount'])('refuses an old stream after %s changes', async mode => {
+    const o = await owner()
+    const view = render(<>{proposalGround()}{panel(o)}</>)
+    const old = subscriptions.at(-1)
+    if (mode === 'session') view.rerender(<>{proposalGround()}{panel(o, { sessionId: 'session-2' })}</>)
+    if (mode === 'project') view.rerender(<>{proposalGround({ projectId: '22222222-2222-4222-8222-222222222222' })}{panel(o)}</>)
+    if (mode === 'account') {
+      proposalAuth.account = 'account-b'
+      act(() => [...proposalAuth.token].forEach(callback => callback()))
+    }
+    if (mode === 'org') {
+      proposalAuth.scope = 'org-b'
+      act(() => [...proposalAuth.active].forEach(callback => callback()))
+    }
+    if (mode === 'logout') act(() => [...proposalAuth.logout].forEach(callback => callback()))
+    if (mode === 'unmount') view.unmount()
+    await deliver(proposalEvent(), old)
+    expect(loadProjectPage).not.toHaveBeenCalled()
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+  })
+
+  it('has no pending delivery for a future subscriber', async () => {
+    const o = await owner()
+    const view = render(panel(o))
+    await deliver(proposalEvent())
+    view.rerender(<>{proposalGround()}{panel(o)}</>)
+    await flush()
+    expect(loadProjectPage).not.toHaveBeenCalled()
+    expect(deliverProjectPageProposal({ accountScope: 'foreign', result: projectProposal(), isCurrent: () => true })).toBe(false)
+  })
+
+  it('isolates a throwing subscriber from transcript ingestion and later delivery', async () => {
+    const o = await owner()
+    const unsubscribe = subscribeProjectPageProposals(() => { throw new Error('Intake failed') })
+    try {
+      const view = render(panel(o))
+      await deliver(event({ type: 'turn_started', data: {} }))
+      await deliver(event({ type: 'tool_call', data: { tool: 'propose_project_page', args_summary: 'text change' } }))
+      await expect(deliver(proposalEvent())).resolves.toBeUndefined()
+      expect(view.container.querySelector('.converse-step')).toHaveAttribute('data-state', 'done')
+    } finally { unsubscribe() }
   })
 })
 afterEach(() => {

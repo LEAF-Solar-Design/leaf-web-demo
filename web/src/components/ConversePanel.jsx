@@ -42,6 +42,10 @@ import { moveRovingTab } from '../lib/roving.js'
 import EngineChangesTab from './EngineChangesTab.jsx'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
+import { composerDraftAccountScope } from '../lib/composerDraft.js'
+import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
+import { deliverProjectPageProposal } from '../site/projectPageProposalDelivery.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -360,12 +364,40 @@ export default function ConversePanel({
     setQueueState(createQueuedTurnState())
     track('conversation.opened') // P2: panel opened/reopened a session — no session id in labels (identity is server-stamped)
     let active = true
+    const accountScope = composerDraftAccountScope()
+    const activeScope = readActiveScope()
+    let proposalScopeLive = true
+    const invalidateProposals = () => { proposalScopeLive = false }
+    const checkProposalScope = () => {
+      if (composerDraftAccountScope() !== accountScope || readActiveScope() !== activeScope) invalidateProposals()
+    }
+    const logoutProposals = subscribeBeforeLogout(invalidateProposals)
+    const tokenProposals = subscribeTokenStored(checkProposalScope)
+    const scopeProposals = subscribeActiveScope(checkProposalScope)
+    const currentProposalScope = () => active && proposalScopeLive && sessionIdRef.current === sessionId
+      && accountScope && accountScope !== 'guest' && activeScope
+      && composerDraftAccountScope() === accountScope && readActiveScope() === activeScope
+    const notifyPageProposal = env => {
+      try {
+        if (!currentProposalScope() || env?.session_id !== sessionId || env.type !== 'tool_result'
+          || !env.data || Array.isArray(env.data) || env.data.tool !== 'propose_project_page' || env.data.ok !== true
+          || !Number.isSafeInteger(env.seq) || env.seq < 1) return
+        const result = env.data.result
+        if (!result || typeof result !== 'object' || Array.isArray(result)
+          || typeof result.proposed_digest !== 'string' || !/^[0-9a-f]{64}$/.test(result.proposed_digest)
+          || new TextEncoder().encode(JSON.stringify(env)).length > 1024 * 1024) return
+        const key = JSON.stringify([sessionId, env.seq, result.proposed_digest])
+        deliverProjectPageProposal({ accountScope, activeScope, result: JSON.parse(JSON.stringify(result)), key,
+          isCurrent: currentProposalScope })
+      } catch { /* rejected proposals never prevent transcript ingestion */ }
+    }
     const stream = openStream(sessionId, 0, {
       onStreamDown: () => { if (active) setConnectionState('retrying') },
       onConnectionState: (state) => { if (active) setConnectionState(state) },
       onEvent: (env) => {
         if (!active) return
         notifyCatalogPublication(env, sessionId, active, sessionIdRef, onCatalogChangedRef, consumeCatalogPublicationRef)
+        notifyPageProposal(env)
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
         setQueueState(queued.state)
         if (queued.action === 'promote') {
@@ -379,7 +411,11 @@ export default function ConversePanel({
       },
     })
     streamRef.current = stream
-    return () => { active = false; streamRef.current = null; stream.close() }
+    return () => {
+      active = false; invalidateProposals()
+      logoutProposals(); tokenProposals(); scopeProposals()
+      streamRef.current = null; stream.close()
+    }
   }, [sessionId]) // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
