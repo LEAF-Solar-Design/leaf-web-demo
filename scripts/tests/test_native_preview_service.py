@@ -506,7 +506,7 @@ def test_settled_producer_recovers_once_preserves_evidence_and_resumes_polling(t
     assert value['failure_sha256'] == r.sha(originals[failure])
     assert value['local_evidence_sha256'] == r.sha(service.worker.encode(
         {path.name: r.sha(data) for path, data in originals.items()}))
-    assert value['worker_sha256'] == r.PRE_EXECUTION_WORKER_SHA256
+    assert value['worker_sha256'] == r.reviewed_worker_source(value['original_runtime_commit'])
     assert value['journal_source_sha256'] == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
     assert value['scope_sha256'] == directory(tmp_path).name
     assert value['cycle'] == failure.parent.name
@@ -1209,6 +1209,15 @@ def test_pre_execution_source_binding_requires_reviewed_git_history():
     assert r.journal_source_sha(journal) == r.PRE_EXECUTION_JOURNAL_SOURCE_SHA256
     current = r.read(Path(r.__file__), 262144)
     assert r.journal_source_sha(current) == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
+
+
+def test_worker_source_allowlist_contains_only_the_two_reviewed_producers():
+    r = service.recovery
+    assert r.REVIEWED_WORKER_SHA256 == {
+        'd0fa9e9778490278988382f573555538a2fe204160f8d57da44958858b2cd89d',
+        '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197',
+    }
+    assert r.sha(Path(service.worker.__file__).read_bytes()) in r.REVIEWED_WORKER_SHA256
 
 
 def test_pre_execution_receipt_records_the_actual_corrected_source(tmp_path, monkeypatch):

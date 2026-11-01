@@ -6,6 +6,7 @@ import hashlib
 import io
 import json
 import plistlib
+import queue
 from pathlib import Path
 import shutil
 import signal
@@ -14,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import time
+import threading
 import types
 import zipfile
 import zlib
@@ -647,11 +649,203 @@ class Allocator:
             self.held.release()
 
 
+class FixturePermitStream:
+    """Explicit hermetic substitute; production defaults to the leased stream."""
+    def __init__(self, allocator, held, context, guard, offset):
+        self.held, self.context, self.offset = held, context, offset
+    def grant(self, expiry):
+        result = self.held.ssh('/usr/bin/python3 -c ' + repr(mac.REFRESH),
+                              payload=json.dumps({**self.context, 'expiry': expiry+self.offset}))
+        if result.returncode: raise worker.WorkerError('mac-transport-failed')
+    def close(self): return True
+
+
+class PermitChild:
+    def __init__(self, *, ready=b'{"ready":true}\n', ack=b'{}\n', blocked_close=False):
+        self.lines = queue.Queue()
+        self.sent = []
+        self.ready, self.ack = ready, ack
+        self.returncode = None
+        self.killed = False
+        self.blocked_close = blocked_close
+        owner = self
+        class Input:
+            def write(self, raw):
+                raw = bytes(raw)
+                owner.sent.append(raw)
+                reply = owner.ready if len(owner.sent)==1 else owner.ack
+                if reply is not None: owner.lines.put(reply)
+                return len(raw)
+            def flush(self): pass
+            def close(self):
+                if not owner.blocked_close:
+                    owner.returncode = 0
+                    owner.lines.put(b'')
+        class Output:
+            def readline(self, limit):
+                line = owner.lines.get()
+                return line[:limit]
+            def close(self): owner.lines.put(b'')
+        self.stdin, self.stdout = Input(), Output()
+    def poll(self): return self.returncode
+    def kill(self):
+        self.killed = True
+        self.returncode = -9
+        self.lines.put(b'')
+    def wait(self, timeout):
+        if self.returncode is None: raise subprocess.TimeoutExpired('owned-stream', timeout)
+        return self.returncode
+
+
+def permit_client(child, *, seconds=30):
+    calls=[]
+    def popen(argv, **kw):
+        calls.append((argv, kw))
+        return child
+    client=types.SimpleNamespace(host='mac-mini',popen=popen)
+    held=types.SimpleNamespace(ticket='fixture-ticket',client=client,lost=False)
+    allocator=types.SimpleNamespace(ssh_argv=lambda args,host: [host,*args])
+    guard=types.SimpleNamespace(monotonic=time.monotonic,end=time.monotonic()+seconds,check=lambda:None)
+    return allocator,held,guard,calls
+
+
+def test_persistent_permit_stream_uses_same_lease_and_closed_grants():
+    child=PermitChild()
+    allocator,held,guard,calls=permit_client(child)
+    context={'ticket':held.ticket,'udid':UDID,'name':'owned'}
+    stream=mac.PermitStream(allocator,held,context,guard,100)
+    stream.grant(20)
+    stream.grant(21)
+    assert [json.loads(raw) for raw in child.sent]==[context,{'expiry':120},{'expiry':121}]
+    argv,options=calls[0]
+    assert argv[:4]==['mac-mini','run','--ticket',held.ticket]
+    assert argv[-4:-1]==['/usr/bin/python3','-u','-c']
+    assert options['stderr']==subprocess.DEVNULL and options['bufsize']==0
+    assert options['stdin']==options['stdout']==subprocess.PIPE
+    assert stream.replies.maxsize==2
+    assert stream.close() and child.poll()==0
+
+
+@pytest.mark.parametrize('ready', [b'', b'{"ready":false}\n', b'{"ready":1}\n', b'{"ready":true,"extra":1}\n', b'x'*1025])
+def test_persistent_permit_stream_refuses_bad_handshake_and_closes(ready):
+    child=PermitChild(ready=ready)
+    allocator,held,guard,_=permit_client(child)
+    with pytest.raises(worker.WorkerError,match='mac-transport-failed'):
+        mac.PermitStream(allocator,held,{},guard,0)
+    assert child.poll() is not None
+
+
+@pytest.mark.parametrize('ack', [b'',b'{"extra":true}\n',b'x'*1025,None])
+def test_persistent_permit_stream_refuses_eof_oversize_or_timeout(ack):
+    child=PermitChild(ack=ack)
+    allocator,held,guard,_=permit_client(child,seconds=.1)
+    stream=mac.PermitStream(allocator,held,{},guard,0)
+    with pytest.raises(worker.WorkerError,match='mac-transport-failed'): stream.grant(20)
+    assert stream.failed.is_set()
+    assert stream.close()
+
+
+def test_persistent_permit_stream_bounded_close_kills_only_owned_child():
+    child=PermitChild(blocked_close=True)
+    allocator,held,guard,_=permit_client(child)
+    stream=mac.PermitStream(allocator,held,{},guard,0)
+    assert stream.close() and child.killed
+    with pytest.raises(worker.WorkerError): stream.grant(20)
+
+
+def test_persistent_permit_stream_oversize_context_closes_child():
+    child=PermitChild()
+    allocator,held,guard,_=permit_client(child)
+    with pytest.raises(worker.WorkerError,match='mac-transport-failed'):
+        mac.PermitStream(allocator,held,{'name':'x'*16384},guard,0)
+    assert child.poll() is not None and not child.sent
+
+
+def test_persistent_permit_stream_refuses_lost_lease_or_nonfinite_grant():
+    child=PermitChild()
+    allocator,held,guard,_=permit_client(child)
+    stream=mac.PermitStream(allocator,held,{},guard,0)
+    held.lost=True
+    with pytest.raises(worker.WorkerError): stream.grant(20)
+    assert len(child.sent)==1 and stream.close()
+    child=PermitChild()
+    allocator,held,guard,_=permit_client(child)
+    stream=mac.PermitStream(allocator,held,{},guard,0)
+    with pytest.raises(worker.WorkerError): stream.grant(float('inf'))
+    assert len(child.sent)==1 and stream.close()
+
+
+def test_mac_adapter_stream_close_failure_never_returns_success(source):
+    class Unclosed(FixturePermitStream):
+        def close(self): return False
+    allocator=Allocator()
+    guard=worker.Authority(Transport(source),source[1])
+    guard.beat()
+    adapter=mac.MacAdapter(allocator,permit_factory=Unclosed)
+    with pytest.raises(worker.WorkerError,match='cleanup-release-unconfirmed'):
+        adapter(source[0],source[1],guard)
+    assert guard.refresh is None
+    assert adapter.report=={'cleanup_complete':False,'allocator_release_confirmed':True}
+
+
+@pytest.mark.skipif(sys.platform=='win32',reason='the shipped remote writer is POSIX-only')
+@pytest.mark.parametrize('tail', [b'{"expiry":10005}\n',b'{"expiry":9999}\n',
+                                b'{"expiry":10011}\n',b'{"expiry":true}\n',
+                                b'{"expiry":NaN}\n',b'{"expiry":10005,"extra":1}\n',
+                                b'x'*1025])
+def test_remote_permit_stream_bounds_expiry_and_revokes_eof(tmp_path, tail):
+    source=tmp_path/'source'
+    source.mkdir()
+    (source/'owner').write_text('owned')
+    context=json.dumps({'ticket':'ticket','udid':UDID,'name':'owned'}).encode()+b'\n'
+    script=mac.REMOTE_COMMON+f'''
+source=Path({str(source)!r})
+roots=lambda p:(source,source/'derived',source/'internal')
+permit_clock=lambda:10000
+''' + mac.PERMIT_STREAM
+    result=subprocess.run([sys.executable,'-c',script],input=context+tail,capture_output=True)
+    assert result.stdout.startswith(b'{"ready":true}\n')
+    assert (source/'permit').read_text()=='0'
+    assert result.returncode==(0 if tail==b'{"expiry":10005}\n' else 1)
+    if result.returncode==0: assert result.stdout.endswith(b'{}\n')
+
+
+def test_mac_adapter_default_is_real_permit_stream():
+    assert mac.MacAdapter().permit_factory is mac.PermitStream
+
+
+@pytest.mark.skipif(sys.platform=='win32',reason='the shipped remote writer is POSIX-only')
+@pytest.mark.parametrize('change', ['ticket','udid','owner','extra','lock'])
+def test_remote_permit_stream_refuses_foreign_scope_owner_or_lock(tmp_path, change):
+    name='preview-'+JOB+'-1-'+'a'*32
+    source=tmp_path/name
+    source.mkdir()
+    (source/'owner').write_text('foreign' if change=='owner' else name)
+    (source/'permit').write_text('previous')
+    context={'ticket':'ticket','udid':UDID,'name':name}
+    if change=='ticket': context['ticket']='foreign'
+    if change=='udid': context['udid']=JOB
+    if change=='extra': context['extra']=True
+    script=mac.REMOTE_COMMON+f'''
+os.environ['MINI_ALLOC_TICKET']='ticket'
+os.environ['MINI_ALLOC_UDIDS']={UDID!r}
+checked=lambda *args,**kwargs:{str(tmp_path)!r}.encode()
+permit_clock=lambda:10000
+''' + mac.PERMIT_STREAM
+    import fcntl
+    with (source/'stream.lock').open('a+') as lock:
+        if change=='lock': fcntl.flock(lock,fcntl.LOCK_EX|fcntl.LOCK_NB)
+        result=subprocess.run([sys.executable,'-c',script],
+                              input=json.dumps(context).encode()+b'\n',capture_output=True)
+    assert result.returncode != 0 and result.stdout==b''
+    assert (source/'permit').read_text()=='previous'
+
+
 def test_mac_adapter_actual_facts_transfer_cleanup_release(source):
     allocator = Allocator()
     guard = worker.Authority(Transport(source), source[1])
     guard.beat()
-    result, image = mac.MacAdapter(allocator)(source[0], source[1], guard)
+    result, image = mac.MacAdapter(allocator, permit_factory=FixturePermitStream)(source[0], source[1], guard)
     assert image == png() and result == facts()
     assert 'expiry' in allocator.calls[1]
     assert base64.b64decode(allocator.calls[2]['archive']) == source[0]
@@ -668,7 +862,7 @@ def test_mac_journal_error_still_cleans_and_releases(source, failed_event):
             raise OSError('synthetic-secret')
     guard = worker.Authority(Transport(source), source[1], journal=record)
     guard.beat()
-    adapter = mac.MacAdapter(allocator)
+    adapter = mac.MacAdapter(allocator, permit_factory=FixturePermitStream)
     with pytest.raises(worker.WorkerError, match='journal-failed'):
         adapter(source[0], source[1], guard)
     assert adapter.report == dict(cleanup_complete=True, allocator_release_confirmed=True)
@@ -851,7 +1045,7 @@ def test_mac_adapter_release_and_cleanup_fail_closed(source, release_code, clean
     guard = worker.Authority(Transport(source), source[1])
     guard.beat()
     with pytest.raises(worker.WorkerError, match='cleanup-release-unconfirmed'):
-        mac.MacAdapter(Allocator(release_code, cleanup))(source[0], source[1], guard)
+        mac.MacAdapter(Allocator(release_code, cleanup), permit_factory=FixturePermitStream)(source[0], source[1], guard)
 
 
 @pytest.mark.parametrize('cause', ['heartbeat-request', 'heartbeat-contract', 'permit-refresh',
@@ -904,6 +1098,77 @@ def test_delayed_heartbeat_keeps_send_time_expiry(source):
     with pytest.raises(worker.WorkerError, match='authority-lost'): guard.beat()
     assert guard.ack == 100.0
     assert guard.authority_failure == 'ack-expired'
+
+
+@pytest.mark.parametrize('http_seconds', [.3, 3.0])
+def test_heartbeat_cadence_preserves_remote_permit_under_bounded_io(source, monkeypatch, http_seconds):
+    now = [100.0]
+    source[1]['deadline'] = 500.0
+    http = Transport(source)
+    request = http.request
+    def delayed(*args, **kwargs):
+        now[0] += http_seconds
+        return request(*args, **kwargs)
+    http.request = delayed
+    guard = worker.Authority(http, source[1], clock=lambda: now[0], monotonic=lambda: now[0])
+    permits, margins, waits = [], [], []
+    def refresh(expiry):
+        # Model a short outbound leg and a conservative bootstrap return offset.
+        arrival = now[0] + .4
+        if permits:
+            margins.append(permits[-1] - arrival)
+        assert expiry <= guard.ack + 10
+        permits.append(expiry - 1.4)
+        now[0] += 1.4
+    guard.refresh = refresh
+    class Stop:
+        def wait(self, delay):
+            if len(waits) == 4:
+                return True
+            waits.append(delay)
+            now[0] += delay
+            return False
+        def set(self): pass
+    class Thread:
+        def __init__(self, *, target, daemon): self.target = target
+        def start(self): self.target()
+        def join(self, **kwargs): pass
+    guard.stop = Stop()
+    monkeypatch.setattr(worker.threading, 'Thread', Thread)
+    guard.start()
+    assert len(margins) == 4 and min(margins) > 0
+    assert guard.authority_failure == 'none' and not guard.cancelled.is_set()
+    if http_seconds == 3:
+        assert waits == [0, 0, 0, 0]
+        # The former extra two-second delay would create a real permit lapse.
+        assert min(margins) - 2 < 0
+    else:
+        assert all(.29 < wait < .31 for wait in waits)
+
+
+@pytest.mark.parametrize('remote_exit,error_code', [
+    (71, 'mac-permit-expired'), (72, 'mac-producer-failed'), (73, 'mac-extinction-unconfirmed'),
+])
+def test_remote_producer_exit_is_closed_and_cleanup_still_runs(source, remote_exit, error_code):
+    class FailingAllocator(Allocator):
+        @contextmanager
+        def lease(self, *args, **kwargs):
+            with super().lease(*args, **kwargs) as held:
+                original = held.ssh
+                def ssh(command, payload=None, **options):
+                    if 'driver' in json.loads(payload):
+                        return subprocess.CompletedProcess([], remote_exit, 'private body', 'private stderr')
+                    return original(command, payload, **options)
+                held.ssh = ssh
+                yield held
+    guard = worker.Authority(Transport(source), source[1])
+    guard.beat()
+    adapter = mac.MacAdapter(FailingAllocator(), permit_factory=FixturePermitStream)
+    with pytest.raises(worker.WorkerError) as caught:
+        adapter(source[0], source[1], guard)
+    assert worker.error_code(caught.value) == error_code
+    assert 'private' not in str(caught.value)
+    assert adapter.report == {'cleanup_complete': True, 'allocator_release_confirmed': True}
 
 
 def failure_receipt(tmp_path):
@@ -1002,7 +1267,7 @@ def test_mac_foreground_stage_survives_cleanup(source, stage):
                     return result
                 held.ssh = ssh
                 yield held
-    adapter = mac.MacAdapter(BrokenAllocator())
+    adapter = mac.MacAdapter(BrokenAllocator(), permit_factory=FixturePermitStream)
     with pytest.raises(Exception): adapter(source[0], source[1], guard)
     assert guard.execution_stage == stage
     assert cleanup_stages == [stage]

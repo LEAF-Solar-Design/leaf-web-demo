@@ -38,6 +38,7 @@ ERROR_CODES = frozenset({
     'invalid-ticket', 'mac-transport-failed', 'invalid-remote-clock',
     'screenshot-bounds', 'cleanup-release-unconfirmed',
     'journal-failed',
+    'mac-permit-expired', 'mac-producer-failed', 'mac-extinction-unconfirmed',
 })
 AUTHORITY_FAILURES = frozenset({'none', 'heartbeat-request', 'heartbeat-contract',
                               'permit-refresh', 'deadline', 'ack-expired',
@@ -310,7 +311,7 @@ class Authority:
     def start(self):
         self.beat()
         def beats():
-            while not self.stop.wait(2):
+            while not self.stop.wait(max(0, self.ack + 2 - self.monotonic())):
                 try:
                     self.beat()
                 except BaseException:

@@ -27,6 +27,8 @@ MAX_LOCAL = 16384
 # Reviewed ea666682 producer ordering. Bind content, never a mutable ref or
 # this whole module: a separate recovery must not change the Journal witness.
 PRE_EXECUTION_WORKER_SHA256 = 'd0fa9e9778490278988382f573555538a2fe204160f8d57da44958858b2cd89d'
+REVIEWED_WORKER_SHA256 = frozenset({PRE_EXECUTION_WORKER_SHA256,
+    '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197'})
 PRE_EXECUTION_JOURNAL_SOURCE_SHA256 = 'a8f668f0f84866ebf342229c7b707f6b985a66ad256d71f71e0431fde1a5a599'
 # Same ordering, with writable-descriptor receipt replay for Windows fsync.
 PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256 = '3375d56dcc1609b6b160e5af39365a8afc1b60d9d05c4360a88971931aea6ac0'
@@ -340,6 +342,7 @@ class LocalProof:
             need(failure['error_code'] not in ('completion-unknown', 'authority-lost', 'journal-failed'))
             need(not directory.is_symlink() and self.cycle_stat == cycle_stat)
             self.journal_source_sha256 = pre_execution_source(self.runtime)
+            self.worker_sha256 = reviewed_worker_source(self.runtime)
             self.stats = {path: PreExecutionProof.file_stat(path) for path in self.files}
             need(all(read(path) == raw for path, raw in self.files.items()))
         else:
@@ -416,7 +419,7 @@ class LocalProof:
             receipt.update(outcome='failed-producer-settled-reconciled',
                            backend_status_sha256=backend['backend_status_sha256'],
                            attempt_binding='local-accepted-failure-settlement',
-                           worker_sha256=PRE_EXECUTION_WORKER_SHA256,
+                           worker_sha256=self.worker_sha256,
                            journal_source_sha256=self.journal_source_sha256)
         else:
             receipt['disposition_sha256'] = backend['disposition_sha256']
@@ -452,13 +455,19 @@ def runtime_source(revision, path):
     return result.stdout
 
 
+def reviewed_worker_source(revision):
+    observed = sha(runtime_source(revision, 'scripts/native_preview_worker.py'))
+    need(observed in REVIEWED_WORKER_SHA256)
+    return observed
+
+
 def pre_execution_source(revision):
     paths = ('scripts/native_preview_worker.py', 'scripts/native_preview_reconciliation.py')
     root = Path(__file__).resolve().parents[1]
     original = [runtime_source(revision, path) for path in paths]
     current = [read(root / path, 262144) for path in paths]
     for producer, journal in (original, current):
-        need(sha(producer) == PRE_EXECUTION_WORKER_SHA256)
+        need(sha(producer) in REVIEWED_WORKER_SHA256)
         need(journal_source_sha(journal) in (PRE_EXECUTION_JOURNAL_SOURCE_SHA256,
                                         PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256))
     return journal_source_sha(original[1])
@@ -494,6 +503,7 @@ class PreExecutionProof:
              re.fullmatch('[0-9a-f]{40}', journal['runtime_commit']) is not None)
         self.runtime = runtime_commit(journal['runtime_commit'])
         self.journal_source_sha256 = pre_execution_source(self.runtime)
+        self.worker_sha256 = reviewed_worker_source(self.runtime)
 
     @staticmethod
     def file_stat(path):
@@ -530,7 +540,7 @@ class PreExecutionProof:
                    'journal_sha256': sha(self.files[self.journal_path]),
                    'local_evidence_sha256': sha(worker.encode(
                        {p.name: sha(raw) for p, raw in self.files.items()})),
-                   'worker_sha256': PRE_EXECUTION_WORKER_SHA256,
+                   'worker_sha256': self.worker_sha256,
                    'journal_source_sha256': self.journal_source_sha256,
                    'outcome': 'claim-unconfirmed-pre-execution',
                    'backend_settlement': 'unconfirmed'}
