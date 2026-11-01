@@ -202,7 +202,7 @@ permitted(source)
 derived.mkdir(mode=0o700,exist_ok=False)
 (derived/'owner').write_text(p['name'])
 effect(['/usr/bin/xcodebuild','-project','Portfolio.xcodeproj','-scheme','Portfolio',
-        '-sdk','iphonesimulator','-destination','id='+p['udid'],'-configuration','Debug',
+        '-sdk','iphonesimulator','-destination','generic/platform=iOS Simulator','-configuration','Debug',
         '-derivedDataPath',str(derived),'-disableAutomaticPackageResolution',
         '-onlyUsePackageVersionsFromResolvedFile','CODE_SIGNING_ALLOWED=NO','build'],
        max(1,min(1200,p['budget'])),project)
