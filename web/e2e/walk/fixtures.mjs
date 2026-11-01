@@ -687,7 +687,8 @@ export async function collectCadEditBundleProbe(page, runtime) {
   const result = {
     manifestFlag: null,
     dom: { workbench: null, objectsPanel: null, importPane: null },
-    servedJs: { indexSha256: null, assets: [], markerFound: 'UNKNOWN', coverage: 'partial' },
+    servedJs: { indexSha256: null, assets: [], markerFound: 'UNKNOWN', coverage: 'partial',
+      source: 'index-fallback', pageAssetCount: 0 },
     consoleErrorCount: null,
     binding: { worker: null, pageUrlPathSha256: null },
   }
@@ -745,9 +746,31 @@ export async function collectCadEditBundleProbe(page, runtime) {
       const flag = flags?.VITE_CAD_EDIT
       if (['0', '1', 0, 1, true, false].includes(flag)) result.manifestFlag = flag
     } catch { /* Unknown manifest flag does not change JS coverage. */ }
-    const indexUrl = new URL('/', url)
-    const index = await fetchBody(indexUrl.href)
-    result.servedJs.indexSha256 = hash(index)
+    let pageAssets = []
+    try {
+      pageAssets = await bounded(() => page.evaluate(() => {
+        const assets = new Set()
+        const add = href => {
+          if (!href) return
+          try {
+            const asset = new URL(href, document.baseURI)
+            asset.hash = ''
+            if (asset.origin === location.origin && assets.size < 40) assets.add(asset.href)
+          } catch { /* Ignore invalid resource URLs. */ }
+        }
+        for (const entry of performance.getEntriesByType('resource')) {
+          try {
+            if (['script', 'link'].includes(entry.initiatorType) || /\.(?:js|mjs)$/.test(new URL(entry.name, document.baseURI).pathname)) add(entry.name)
+          } catch { /* Ignore invalid resource URLs. */ }
+        }
+        for (const script of document.scripts) add(script.src)
+        for (const link of document.querySelectorAll('link[rel~="modulepreload"]')) add(link.href)
+        return [...assets]
+      }))
+    } catch { /* Fall back to the index when page assets are unavailable. */ }
+    result.servedJs.pageAssetCount = pageAssets.length
+    const pageLoaded = pageAssets.length > 0
+    if (pageLoaded) result.servedJs.source = 'page-loaded'
     let complete = true
     let found = false
     const queue = []
@@ -764,12 +787,19 @@ export async function collectCadEditBundleProbe(page, runtime) {
         queue.push({ url: asset, depth })
       } catch { complete = false }
     }
-    for (const tag of index.toString().matchAll(/<(?:script|link)\b[^>]*>/gi)) {
-      const attrs = Object.fromEntries([...tag[0].matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)]
-        .map(match => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]]))
-      if (/^<script/i.test(tag[0]) && attrs.type === 'module' && attrs.src) enqueue(attrs.src, indexUrl, 0)
-      if (/^<script/i.test(tag[0]) && attrs.type === 'module' && !attrs.src) complete = false
-      if (/^<link/i.test(tag[0]) && attrs.rel?.split(/\s+/).includes('modulepreload') && attrs.href) enqueue(attrs.href, indexUrl, 0)
+    if (pageLoaded) {
+      for (const href of pageAssets) enqueue(href, url, 0)
+    } else {
+      const indexUrl = new URL('/', url)
+      const index = await fetchBody(indexUrl.href)
+      result.servedJs.indexSha256 = hash(index)
+      for (const tag of index.toString().matchAll(/<(?:script|link)\b[^>]*>/gi)) {
+        const attrs = Object.fromEntries([...tag[0].matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)]
+          .map(match => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]]))
+        if (/^<script/i.test(tag[0]) && attrs.type === 'module' && attrs.src) enqueue(attrs.src, indexUrl, 0)
+        if (/^<script/i.test(tag[0]) && attrs.type === 'module' && !attrs.src) complete = false
+        if (/^<link/i.test(tag[0]) && attrs.rel?.split(/\s+/).includes('modulepreload') && attrs.href) enqueue(attrs.href, indexUrl, 0)
+      }
     }
     if (!queue.length) complete = false
     for (const asset of queue) {
@@ -778,7 +808,7 @@ export async function collectCadEditBundleProbe(page, runtime) {
       try {
         const body = (await fetchBody(asset.url.href, record)).toString()
         if (body.includes('cad-edit-workbench')) found = true
-        if (asset.depth === 0) {
+        if (!pageLoaded && asset.depth === 0) {
           for (const match of body.matchAll(/\b(?:import|export)\s*(?:[^;"'()]*?\bfrom\s*)?["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) {
             enqueue(match[1] || match[2], asset.url, 1)
           }
@@ -787,7 +817,7 @@ export async function collectCadEditBundleProbe(page, runtime) {
       } catch { complete = false }
       if (Date.now() >= deadline || remaining <= 0) { complete = false; break }
     }
-    result.servedJs.coverage = complete ? 'complete' : 'partial'
+    result.servedJs.coverage = complete ? (pageLoaded ? 'loaded-complete' : 'complete') : 'partial'
     result.servedJs.markerFound = found ? true : complete ? false : 'UNKNOWN'
   } catch { /* Best effort only; never mask the existing assertion. */ }
   return result
@@ -1226,7 +1256,8 @@ export const ACCESSIBILITY_DIALOG_SCOPE = Object.freeze({
     initialFocus: Object.freeze({ key: 'control:version-history' }), expectedModal: false, expectedEscapeClosed: true }),
   'action:bar-shortcuts': Object.freeze({ states: Object.freeze(['ready']), name: 'Keyboard shortcuts',
     initialFocus: Object.freeze({ role: 'switch', name: 'Single-key shortcuts', key: 'single-key-shortcuts' }),
-    expectedModal: false, expectedEscapeClosed: true }),
+    // PR #2632 made the shortcut sheet modal.
+    expectedModal: true, expectedEscapeClosed: true }),
 })
 
 export async function accessibilityDialogTargets({ page, probe, viewport, locator }) {
@@ -4844,7 +4875,9 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
         await withCensusStudioRail(page, async () => {
           await expect(page.getByRole('region', { name: 'Studio sidebar', exact: true })
             .getByRole('heading', { name: /^Job monitor/ })).toBeVisible()
-          await expect(studioJobMonitorContent(page).getByText('count-by-layer', { exact: true })).toBeVisible()
+          await expect(page.getByRole('region', { name: 'Studio sidebar' }).locator('aside.rail')
+            .filter({ has: page.getByRole('heading', { name: /^Job monitor/ }) })
+            .getByText('count-by-layer', { exact: true }).first()).toBeVisible()
         }, assertions)
       } else {
         await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions, false)
