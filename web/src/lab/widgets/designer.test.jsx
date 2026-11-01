@@ -410,15 +410,29 @@ describe('designer interactions', () => {
     edit('Height', '80'); edit('Corners', '10'); edit('Background', 'blur')
     click('Add text'); click('Edit surface'); click('Reset this format')
     expect(screen.getByRole('button', { name: 'Click again to reset' })).toBeInTheDocument()
-    // SEL-403c2 caps the reset la canvas at 128 pt.
+    // Reset retains the native content height while authoring supports taller designs.
     click('Click again to reset'); expect(screen.getByLabelText('Height')).toHaveValue('128')
-    expect(screen.getByLabelText('Height')).toHaveAttribute('max', '128')
-    edit('Height', '220'); expect(screen.getByLabelText('Height')).toHaveValue('128')
+    expect(screen.getByLabelText('Height')).toHaveAttribute('max', '220')
+    edit('Height', '220'); expect(screen.getByLabelText('Height')).toHaveValue('220')
     expect(screen.getByRole('region', { name: 'Preview' }).querySelectorAll('[data-element-id]')).toHaveLength(DESIGNER_DEFAULT_DOC.formats.la.els.length)
     vi.useFakeTimers(); click('Reset this format')
     // Date-based guard also prevents a delayed second click from resetting.
     vi.setSystemTime(Date.now() + 3001); click('Click again to reset')
     expect(screen.getByRole('button', { name: 'Click again to reset' })).toBeInTheDocument()
+  })
+  it('edits a 160 point lock-screen design with undo and redo while preserving native fit guidance', () => {
+    render(<WidgetsView scopeKey="local" />)
+    edit('Height', '128')
+    edit('Height', '160')
+    expect(screen.getByText('361 × 160 points')).toBeInTheDocument()
+    expect(screen.getByTestId('widget-surface')).toHaveStyle({ aspectRatio: '361 / 160' })
+    expect(screen.getByText('This design exceeds the 128 pt Live Activity content area. Reduce its height before publication.')).toBeInTheDocument()
+    click('Undo')
+    expect(screen.getByLabelText('Height')).toHaveValue('128')
+    expect(screen.queryByText(/Reduce its height before publication/)).not.toBeInTheDocument()
+    click('Redo')
+    expect(screen.getByLabelText('Height')).toHaveValue('160')
+    expect(screen.getByTestId('widget-surface')).toHaveStyle({ aspectRatio: '361 / 160' })
   })
   it('provides both typed binding sources and prevents discovery calls in local preview', () => {
     const fetchImpl = vi.fn(); vi.stubGlobal('fetch', fetchImpl)
