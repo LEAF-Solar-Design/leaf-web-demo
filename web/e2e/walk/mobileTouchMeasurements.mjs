@@ -39,6 +39,9 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
       if (measurements.control.clipped) {
         try {
           const style = window.getComputedStyle(target)
+          const identityOf = (element) => ({ tag: element.tagName.toLowerCase(),
+            id: (element.id || '').slice(0, 60),
+            classes: Array.from(element.classList || []).slice(0, 3).map(name => name.slice(0, 40)) })
           const nameOf = (element) => {
             const labelledBy = element.getAttribute('aria-labelledby')
             if (labelledBy) {
@@ -63,10 +66,16 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
               const offscreen = !inside(x, y)
               const key = `${x},${y}`
               const hit = offscreen ? null : hits.has(key) ? hits.get(key) : document.elementFromPoint(x, y)
+              const parentPath = []
+              for (let parent = hit?.parentElement; parent && parentPath.length < 3; parent = parent.parentElement) {
+                parentPath.push(identityOf(parent))
+                if (parent.tagName.toLowerCase() === 'body') break
+              }
               return {
                 position: ['top-left', 'top-right', 'bottom-left', 'bottom-right'][index],
-                hit: hit ? { tag: hit.tagName.toLowerCase(), role: hit.getAttribute('role') || '',
+                hit: hit ? { ...identityOf(hit), role: hit.getAttribute('role') || '',
                   name: nameOf(hit).trim().slice(0, 60) } : null,
+                parentPath,
                 insideTarget: hit !== null && (hit === target || target.contains(hit)), offscreen,
               }
             }),

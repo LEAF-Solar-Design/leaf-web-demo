@@ -3217,7 +3217,9 @@ test('WL45 phone drawer close receipts keep clipping diagnostics separate from p
     assert.equal(evidence.measurements.control.reachable, true)
     assert.equal(evidence.measurements.control.clipped, true)
     assert.deepEqual(evidence.touchClipDiagnostic[reference].corners.map(corner => corner.hit),
-      Array.from({ length: 4 }, () => ({ tag: 'section', role: '', name: 'Studio controls' })))
+      Array.from({ length: 4 }, () => ({ tag: 'section', id: '', classes: [], role: '', name: 'Studio controls' })))
+    assert.deepEqual(evidence.touchClipDiagnostic[reference].corners.map(corner => corner.parentPath),
+      Array.from({ length: 4 }, () => []))
     assert.deepEqual(evidence.touchClipDiagnostic[reference].borderRadiusPx,
       { topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 })
     assert.equal(Object.hasOwn(evidence.measurements, 'diagnostic'), false)
