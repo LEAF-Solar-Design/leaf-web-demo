@@ -682,6 +682,117 @@ export function protectedStateDigest(snapshot) {
   return createHash('sha256').update(JSON.stringify(snapshot)).digest('hex')
 }
 
+// Correlation evidence only: incomplete reads cannot establish an absent build marker.
+export async function collectCadEditBundleProbe(page, runtime) {
+  const result = {
+    manifestFlag: null,
+    dom: { workbench: null, objectsPanel: null, importPane: null },
+    servedJs: { indexSha256: null, assets: [], markerFound: 'UNKNOWN', coverage: 'partial' },
+    consoleErrorCount: null,
+    binding: { worker: null, pageUrlPathSha256: null },
+  }
+  const deadline = Date.now() + 45_000
+  const hash = value => createHash('sha256').update(value).digest('hex')
+  const bounded = async (operation, end = deadline) => {
+    let timer
+    try {
+      return await Promise.race([Promise.resolve().then(operation), new Promise((_, reject) => {
+        timer = setTimeout(() => reject(new Error('probe deadline')), Math.max(1, Math.min(10_000, end - Date.now())))
+      })])
+    } finally { clearTimeout(timer) }
+  }
+  try {
+    for (const [key, selector] of Object.entries({ workbench: '[data-testid=cad-edit-workbench]',
+      objectsPanel: 'details.drawing-objects-panel', importPane: '#cockpit-import-pane' })) {
+      try { result.dom[key] = await bounded(() => page.locator(selector).count()) } catch { /* Unknown. */ }
+    }
+    try {
+      result.consoleErrorCount = [...(runtime.evidence?.consoleErrors || []), ...(runtime.evidence?.pageErrors || [])]
+        .filter(error => /CadEdit|EngineSession|cadedit/i.test(error.text || error.message || '')).length
+    } catch { /* Unknown. */ }
+    try {
+      const worker = runtime.testInfo?.workerIndex ?? runtime.workerIndex ?? runtime.shard
+      if (Number.isInteger(worker)) result.binding.worker = worker
+    } catch { /* Unknown. */ }
+    const url = new URL(page.url())
+    result.binding.pageUrlPathSha256 = hash(url.pathname)
+    let remaining = 30 * 1024 * 1024
+    const fetchBody = async (href, record) => {
+      let response
+      const end = Math.min(deadline, Date.now() + 10_000)
+      try {
+        if (Date.now() >= deadline || remaining <= 0) throw new Error('probe budget')
+        response = await bounded(() => page.request.get(href, {
+          timeout: Math.max(1, Math.min(10_000, deadline - Date.now())), maxRedirects: 0,
+        }), end)
+        if (record) record.status = response.status()
+        if (!response.ok()) throw new Error('probe response')
+        const length = Number(response.headers()['content-length'])
+        if (length > remaining) throw new Error('probe bytes')
+        const body = await bounded(() => response.body(), end)
+        if (body.length > remaining) { remaining = 0; throw new Error('probe bytes') }
+        remaining -= body.length
+        if (record) { record.bytes = body.length; record.sha256 = hash(body) }
+        return body
+      } finally {
+        try { await bounded(() => response?.dispose(), end) } catch { /* No response bodies retained. */ }
+      }
+    }
+    try {
+      // Reuse the walk's served marker and cached flags, never process.env.
+      const cached = runtime.workerFacts?.buildFlags || runtime.evidence?.buildFlags
+      const flags = cached || JSON.parse((await fetchBody(new URL('/.leaf-walk-build.json', url).href)).toString()).flags
+      const flag = flags?.VITE_CAD_EDIT
+      if (['0', '1', 0, 1, true, false].includes(flag)) result.manifestFlag = flag
+    } catch { /* Unknown manifest flag does not change JS coverage. */ }
+    const indexUrl = new URL('/', url)
+    const index = await fetchBody(indexUrl.href)
+    result.servedJs.indexSha256 = hash(index)
+    let complete = true
+    let found = false
+    const queue = []
+    const seen = new Set()
+    const enqueue = (specifier, base, depth) => {
+      try {
+        if (depth > 0 && !/^(?:\.?\.?\/|\/|https?:\/\/)/.test(specifier)) { complete = false; return }
+        const asset = new URL(specifier, base)
+        asset.hash = ''
+        if (asset.origin !== url.origin) { complete = false; return }
+        if (seen.has(asset.href)) return
+        seen.add(asset.href)
+        if (queue.length >= 40) { complete = false; return }
+        queue.push({ url: asset, depth })
+      } catch { complete = false }
+    }
+    for (const tag of index.toString().matchAll(/<(?:script|link)\b[^>]*>/gi)) {
+      const attrs = Object.fromEntries([...tag[0].matchAll(/([\w-]+)\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/g)]
+        .map(match => [match[1].toLowerCase(), match[2] ?? match[3] ?? match[4]]))
+      if (/^<script/i.test(tag[0]) && attrs.type === 'module' && attrs.src) enqueue(attrs.src, indexUrl, 0)
+      if (/^<script/i.test(tag[0]) && attrs.type === 'module' && !attrs.src) complete = false
+      if (/^<link/i.test(tag[0]) && attrs.rel?.split(/\s+/).includes('modulepreload') && attrs.href) enqueue(attrs.href, indexUrl, 0)
+    }
+    if (!queue.length) complete = false
+    for (const asset of queue) {
+      const record = { pathSha256: hash(asset.url.pathname), status: null, bytes: null, sha256: null }
+      result.servedJs.assets.push(record)
+      try {
+        const body = (await fetchBody(asset.url.href, record)).toString()
+        if (body.includes('cad-edit-workbench')) found = true
+        if (asset.depth === 0) {
+          for (const match of body.matchAll(/\b(?:import|export)\s*(?:[^;"'()]*?\bfrom\s*)?["']([^"']+)["']|\bimport\s*\(\s*["']([^"']+)["']\s*\)/g)) {
+            enqueue(match[1] || match[2], asset.url, 1)
+          }
+          if (/\bimport\s*\(\s*[^\s"']/.test(body)) complete = false
+        }
+      } catch { complete = false }
+      if (Date.now() >= deadline || remaining <= 0) { complete = false; break }
+    }
+    result.servedJs.coverage = complete ? 'complete' : 'partial'
+    result.servedJs.markerFound = found ? true : complete ? false : 'UNKNOWN'
+  } catch { /* Best effort only; never mask the existing assertion. */ }
+  return result
+}
+
 const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
       annotation: 'Annotation', block: 'Block', groups: 'Groups', 'solar-panels': 'Panel placement',
       view: 'View', version: 'Version', author: 'Author', rail: 'Rail' }
@@ -2645,6 +2756,12 @@ export async function setupCensusDisclosure(runtime, recipe, assertions = expect
     await page.setViewportSize({ width: 900, height: original?.height || 900 })
   }
   const button = control(page, recipe.control)
+  try {
+    if (recipe.target === 'drawing-objects-expanded' && recipe.control?.name === 'Objects'
+      && typeof collectCadEditBundleProbe === 'function' && typeof button.count === 'function' && await button.count() === 0) {
+      runtime.evidence.cadEditBundleProbe = await collectCadEditBundleProbe(page, runtime)
+    }
+  } catch { /* Preserve the original visibility assertion. */ }
   await assertions(button).toBeVisible()
   const set = async (expanded) => {
     if (await censusDisclosureState(page, recipe.target, assertions) !== expanded) await button.click({ timeout: 15_000 })
@@ -2802,6 +2919,16 @@ export async function assertCensusEffect(probe, runtime, locator, before, assert
     }
     if (target === 'dxf-import-expanded') {
       try {
+        const input = page.getByLabel('DXF file', { exact: true })
+        try {
+          if (probe.assertion.value && ['control:open-dxf', 'control:open-dxf-browser'].includes(probe.featureId)
+            && typeof collectCadEditBundleProbe === 'function' && typeof input.count === 'function' && await input.count() === 0) {
+            runtime.evidence.cadEditBundleProbe = await collectCadEditBundleProbe(page, runtime)
+          }
+        } catch { /* Preserve the original input assertion. */ }
+        if (!probe.assertion.value) {
+          assertions(await input.count(), 'DXF control must exist before it can be collapsed').toBeGreaterThan(0)
+        }
         await assertions(page.getByLabel('DXF file', { exact: true }))
           [probe.assertion.value ? 'toBeVisible' : 'toBeHidden']()
       } catch (error) {
