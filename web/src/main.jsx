@@ -14,6 +14,9 @@ import './styles.css'
 import './standard/parity-foundation.css'
 import { installSurfaceConfigProofBridge } from './proofBridge.js'
 import { getSession, getSurfaceConfig, submitSurfaceConfig } from './api.js'
+import { canonicalizeDemoEntry } from './site/authBoot.js'
+
+if (typeof window !== 'undefined') canonicalizeDemoEntry()
 
 // Next owns the root and development StrictMode. This module is imported
 // exclusively by the ssr:false island, after telemetry has been installed.
