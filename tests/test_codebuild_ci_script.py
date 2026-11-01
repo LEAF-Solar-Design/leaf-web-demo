@@ -6,6 +6,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -33,6 +34,20 @@ def _bash_runs_python() -> bool:
 
 
 class TestCodebuildCiScript(unittest.TestCase):
+    @unittest.skipUnless(BASH, "bash is not on PATH; capture summary requires bash")
+    def test_capture_summary_exception_names_type_and_preserves_verdict(self):
+        source = CI_PATH.read_text(encoding="utf-8")
+        summary = source.split("<<'LEAF_CAPTURE_SUMMARY'", 1)[1].split("\n", 1)[1].split(
+            "\nLEAF_CAPTURE_SUMMARY\n", 1)[0]
+        with tempfile.TemporaryDirectory() as temporary:
+            for gate_status in (0, 7):
+                command = (f'{shlex.quote(sys.executable)} -I -B - "$1" invalid "$1" '
+                           "<<'SUMMARY'\n" + summary + "\nSUMMARY\nexit " + str(gate_status))
+                result = subprocess.run([BASH, "-c", command, "summary", temporary],
+                                        capture_output=True, text=True)
+                self.assertEqual(result.returncode, gate_status, result.stderr)
+                self.assertEqual(result.stdout, "LEAF_CAPTURE package_error summary_failed:ValueError\n")
+
     def test_tracer_helpers_are_not_run_as_isolated_scripts(self):
         # python -I implies -P: a helper run as a script cannot import its siblings, so capture 1
         # (build 0779b89d, 2026-11-01) refused with epoch_unavailable. Helpers that import

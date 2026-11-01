@@ -53,7 +53,9 @@ def capture_fixture(tmp_path):
                      process_tree_sha256=MANIFEST.hashlib.sha256(MANIFEST.canonical(certificate)).hexdigest(),
                      outcomes_ref=str(outcomes))
         (shards / "tree-process.json").write_bytes(MANIFEST.canonical(shard))
-        (directory / "capture-suites.json").write_text("[]", encoding="utf-8")
+        (directory / "capture-suites.json").write_text(json.dumps([
+            {"suite_id": "sample", "attempt": attempt, "worker": "tree",
+             "test_ids": ["sample::test_ok"], "outcomes_ref": str(outcomes)}]), encoding="utf-8")
     MANIFEST.stage_process_capture(output, readsets, selection)
     shards = [json.loads(path.read_text()) for path in readsets.rglob("*.json")]
     manifest = MANIFEST.build_manifest(inputs, catalog, shards, certificates=certificates)
@@ -75,11 +77,26 @@ def test_multiple_certificates_are_bound_and_flattened(tmp_path):
     assert manifest["full_run_complete"] is True
     assert (readsets.parent / "diagnostics/startup.json").is_file()
     assert not (readsets / "startup.json").exists()
+    assert not any(name.startswith("diagnostics/") for name in members)
     MANIFEST.validate_package(members)
     for path in readsets.rglob("*.json"):
         shard = json.loads(path.read_text())
         assert shard["outcomes_ref"] in members
         assert shard["process_tree_ref"] in members
+
+
+def test_root_capture_suites_matches_fetcher_contract(tmp_path):
+    *_, members, _, selection = capture_fixture(tmp_path)
+    rows = json.loads((selection / "capture-suites.json").read_text())
+    # fetch_readsets.read_evidence requires a list with suite_id and attempt;
+    # it derives {schema: leaf.ci.capture-suites.v1, rows: len(rows), sha256: ...}.
+    assert isinstance(rows, list)
+    assert len(rows) == 2
+    assert [row["attempt"] for row in rows] == [1, 2]
+    assert all(row["suite_id"] == "sample" for row in rows)
+    assert all(row["outcomes_ref"] in members for row in rows)
+    assert all(row["test_ids"] == ["sample::test_ok"] for row in rows)
+    assert len(list((selection / "capture").glob("*/*/capture-suites.json"))) == 2
 
 
 @pytest.mark.parametrize("missing", ["certificate", "outcome", "epoch"])

@@ -48,6 +48,7 @@ def stage_process_capture(output, readsets, selection):
     readsets.mkdir(parents=True, exist_ok=True)
     reports = selection / "reports"
     reports.mkdir(parents=True, exist_ok=True)
+    capture_suites = []
     for directory in sorted(output.glob("*/*")):
         if not directory.is_dir():
             continue
@@ -61,10 +62,16 @@ def stage_process_capture(output, readsets, selection):
             shutil.copyfile(path, destination)
             references["reports/" + path.name] = "reports/" + destination.name
         suites = directory / "capture-suites.json"
+        suite_rows = []
         if suites.is_file():
+            suite_rows = json.loads(suites.read_text(encoding="utf-8"))
+            if not isinstance(suite_rows, list) or not all(
+                    isinstance(row, dict) and "suite_id" in row and "attempt" in row for row in suite_rows):
+                raise ValueError("invalid_capture_suites")
             destination = selection / "capture" / directory.relative_to(output) / suites.name
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copyfile(suites, destination)
+        outcomes = {}
         for path in sorted((directory / "readsets").rglob("*.json")):
             shard = json.loads(path.read_text(encoding="utf-8"))
             for key in ("process_tree_ref", "union_ref"):
@@ -80,7 +87,23 @@ def stage_process_capture(output, readsets, selection):
             outcome = destination.parent / source.name
             shutil.copyfile(source, outcome)
             shard["outcomes_ref"] = outcome.relative_to(readsets.parent).as_posix()
+            outcomes[str(source.resolve())] = shard["outcomes_ref"]
             destination.write_bytes(canonical(shard) + b"\n")
+        for path in sorted(directory.glob("attempts*.jsonl")):
+            if str(path.resolve()) not in outcomes:
+                destination = readsets / directory.relative_to(output) / path.name
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(path, destination)
+                outcomes[str(path.resolve())] = destination.relative_to(readsets.parent).as_posix()
+        for row in suite_rows:
+            row = dict(row)
+            if "outcomes_ref" in row:
+                source = Path(row["outcomes_ref"])
+                source = source if source.is_absolute() else directory / source
+                row["outcomes_ref"] = outcomes[str(source.resolve())]
+            capture_suites.append(row)
+    # fetch_readsets.read_evidence accepts a root list and derives schema/rows/sha256.
+    (selection / "capture-suites.json").write_bytes(canonical(capture_suites) + b"\n")
     capture = selection / "capture"
     capture.mkdir(exist_ok=True)
     for name in ("context.json", "capture-epoch.json"):

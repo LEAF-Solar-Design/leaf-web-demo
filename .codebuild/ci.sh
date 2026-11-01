@@ -1243,6 +1243,12 @@ if [[ "$tracing_ready" == 1 ]]; then
     if [[ "${process_capture_active:-0}" == 1 ]]; then
       readsets_error="capture manifest failed"
       [[ "$manifest_failed" == 0 && -f "$selection_dir/full-run.json" ]] || return 1
+      selection_members+=(capture-suites.json)
+      # Test reports remain available in ordinary archives; capture packs only map evidence.
+      report_members=()
+      while IFS= read -r -d '' member; do
+        report_members+=("${member#"$selection_dir/"}")
+      done < <(find "$selection_dir/reports" -type f \( -name 'collection-*.json' -o -name 'completion-*.json' \) -print0 | sort -z)
       while IFS= read -r -d '' member; do
         capture_members+=("${member#"$selection_dir/"}")
       done < <(find "$selection_dir/capture" -type f -name '*.json' -print0 | sort -z)
@@ -1255,7 +1261,8 @@ if [[ "$tracing_ready" == 1 ]]; then
         done < <(find /tmp/gate-logs/diagnostics -type f -print0 | sort -z)
       fi
       readsets_error="capture reference validation failed"
-      python -I -B - "$selection_dir" /tmp/gate-logs "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -- "${shard_members[@]}" "${attempt_members[@]}" "${diagnostic_members[@]}" <<'LEAF_CAPTURE_REFERENCES' || return 1
+      python -I -B - "$selection_dir" /tmp/gate-logs "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -- "${shard_members[@]}" "${attempt_members[@]}" <<'LEAF_CAPTURE_REFERENCES' || return 1
+import json
 import sys
 from pathlib import Path
 sys.path.insert(0, sys.argv[1])
@@ -1264,19 +1271,30 @@ boundary = sys.argv.index("--", 3)
 members = {name: Path(sys.argv[1]) / name for name in sys.argv[3:boundary]}
 members.update({name: Path(sys.argv[2]) / name for name in sys.argv[boundary + 1:]})
 full_run_manifest.validate_package({name: path for name, path in members.items() if path.is_file()})
+inventory = {"readsets": 0}
+for name, path in members.items():
+    if path.is_file():
+        top = name.split("/", 1)[0]
+        inventory[top] = inventory.get(top, 0) + path.stat().st_size
+print("LEAF_CAPTURE inventory " + json.dumps(inventory, sort_keys=True))
 LEAF_CAPTURE_REFERENCES
     fi
-    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" "${diagnostic_members[@]}" 2>/dev/null || return 1
+    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
     readsets_archive_members="readsets ${selection_members[*]} ${report_members[*]} ${attempt_members[*]}"
     if [[ "${process_capture_active:-0}" == 1 ]]; then
-      readsets_archive_members+=" ${capture_members[*]} ${diagnostic_members[*]}"
+      readsets_archive_members+=" ${capture_members[*]}"
     fi
     readsets_error="archive measurement failed"
     readsets_bytes="$(wc -c < "$archive")" || return 1
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
     digest="$(sha256sum "$archive")" || return 1
     readsets_sha256="${digest%% *}"
-    if (( readsets_bytes > 200 * 1024 * 1024 )); then
+    local archive_cap=209715200
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      archive_cap=1073741824
+      echo "LEAF_CAPTURE archive_bytes $readsets_bytes"
+    fi
+    if (( readsets_bytes > archive_cap )); then
       readsets_status=too_large
       if [[ "${process_capture_active:-0}" == 1 ]]; then
         echo "LEAF_CAPTURE package_error archive_too_large"
@@ -1293,6 +1311,24 @@ LEAF_CAPTURE_REFERENCES
       >/dev/null 2>&1 || { readsets_error="put-object exit $?"; return 1; }
     readsets_object="s3://leaf-mq-transport-807034087062-us-east-1/$key"
     readsets_status=uploaded
+    if [[ "${process_capture_active:-0}" == 1 && ${#diagnostic_members[@]} -gt 0 ]]; then
+      local diagnostics_archive="$selection_dir/capture-diagnostics.tar.gz" diagnostics_bytes
+      if tar -czf "$diagnostics_archive" --no-recursion -C /tmp/gate-logs "${diagnostic_members[@]}" 2>/dev/null; then
+        diagnostics_bytes="$(wc -c < "$diagnostics_archive")"
+        diagnostics_bytes="${diagnostics_bytes//[[:space:]]/}"
+        if (( diagnostics_bytes > 209715200 )); then
+          echo "LEAF_CAPTURE diagnostics_skipped too_large $diagnostics_bytes"
+        else
+          aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
+            --key "mq/leaf-web-demo/selection/${build_uuid}.capture-diagnostics.tar.gz" \
+            --body "$diagnostics_archive" --if-none-match '*' --checksum-algorithm SHA256 \
+            --metadata "build_id=${CODEBUILD_BUILD_ID},head_sha=${HEAD_SHA},trusted_sha=${TRUSTED_SHA},trusted_sha_override=${trusted_sha_override}" \
+            >/dev/null 2>&1 || echo 'LEAF_CAPTURE diagnostics_skipped upload_failed'
+        fi
+      else
+        echo 'LEAF_CAPTURE diagnostics_skipped archive_failed'
+      fi
+    fi
   }
   if ! publish_readsets; then
     readsets_status=upload_failed
@@ -1379,31 +1415,36 @@ if [[ "${process_capture_active:-0}" == 1 ]]; then
   if [[ "$manifest_failed" == 1 ]]; then
     echo 'LEAF_CAPTURE package_error manifest_failed'
   fi
-  python -I -B - /tmp/process-capture/out "${readsets_bytes:-0}" /tmp/gate-logs/attempts <<'LEAF_CAPTURE_SUMMARY' || echo 'LEAF_CAPTURE package_error summary_failed'
+  python -I -B - /tmp/process-capture/out "${readsets_bytes:-0}" /tmp/gate-logs/attempts <<'LEAF_CAPTURE_SUMMARY' || true
 import json
 from pathlib import Path
 import sys
-receipts, certificates, errors, wrapped = [], 0, 0, 0
-for path in Path(sys.argv[1]).glob("*/*/reports/trace-receipt-*.json"):
-    try:
-        receipts.append(json.loads(path.read_text(encoding="utf-8")))
-    except (OSError, ValueError):
-        errors += 1
-certificates = sum(1 for _ in Path(sys.argv[1]).glob("*/*/reports/process-tree-*.json"))
-for path in Path(sys.argv[3]).glob("*.jsonl"):
-    for line in path.read_text(encoding="utf-8").splitlines():
+def summarize():
+    receipts, certificates, errors, wrapped = [], 0, 0, 0
+    for path in Path(sys.argv[1]).glob("*/*/reports/trace-receipt-*.json"):
         try:
-            row = json.loads(line)
-            if "process_capture_exit_status" in row or row.get("process_capture_errors"):
-                wrapped += 1
-                if not row.get("process_capture_receipt"):
-                    errors += len(row.get("process_capture_errors") or [])
-        except ValueError:
+            receipts.append(json.loads(path.read_text(encoding="utf-8")))
+        except (OSError, ValueError):
             errors += 1
-print("LEAF_CAPTURE summary " + json.dumps(dict(mode="process", suites_wrapped=wrapped,
-      receipts=len(receipts), certificates=certificates,
-      capture_errors=errors + sum(len(receipt.get("capture_errors") or []) for receipt in receipts),
-      archive_bytes=int(sys.argv[2])), separators=(",", ":")))
+    certificates = sum(1 for _ in Path(sys.argv[1]).glob("*/*/reports/process-tree-*.json"))
+    for path in Path(sys.argv[3]).glob("*.jsonl"):
+        for line in path.read_text(encoding="utf-8").splitlines():
+            try:
+                row = json.loads(line)
+                if "process_capture_exit_status" in row or row.get("process_capture_errors"):
+                    wrapped += 1
+                    if not row.get("process_capture_receipt"):
+                        errors += len(row.get("process_capture_errors") or [])
+            except ValueError:
+                errors += 1
+    print("LEAF_CAPTURE summary " + json.dumps(dict(mode="process", suites_wrapped=wrapped,
+          receipts=len(receipts), certificates=certificates,
+          capture_errors=errors + sum(len(receipt.get("capture_errors") or []) for receipt in receipts),
+          archive_bytes=int(sys.argv[2])), separators=(",", ":")))
+try:
+    summarize()
+except Exception as exc:
+    print("LEAF_CAPTURE package_error summary_failed:" + type(exc).__name__)
 LEAF_CAPTURE_SUMMARY
 fi
 # LEAF_PROCESS_CAPTURE_SUMMARY_END
