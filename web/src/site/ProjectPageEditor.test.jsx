@@ -83,6 +83,128 @@ const ask = () => {
   fireEvent.click(button('Generate proposal'))
 }
 
+const incoming = (result = proposalResult()) => ({ result, accountScope: 'account-a', activeScope: 'account-a',
+  isCurrent: () => true, consumed: vi.fn() })
+
+describe('conversation proposal intake', () => {
+  it('loads an unopened saved portfolio, then reviews and uses only a private draft', async () => {
+    const request = incoming(), onPreview = vi.fn()
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+    setup({ incomingProposal: request, onPreview })
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(request.consumed).toHaveBeenCalledExactlyOnceWith(true)
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    fireEvent.click(button('Use proposed changes'))
+    expect(screen.getByLabelText('Headline').value).toBe('Selected baking work')
+    expect(onPreview.mock.lastCall[0].document).toEqual(proposalResult().proposed_document)
+    expect(screen.getByText('Unsaved changes')).toBeTruthy()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+    expect(proposeProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('discards incoming review and preserves the saved original and preview', async () => {
+    const onPreview = vi.fn(), view = setup({ onPreview })
+    await openPortfolio()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={incoming()} />)
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    fireEvent.click(button('Discard proposal'))
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(onPreview).toHaveBeenCalledTimes(1)
+    expect(button('Save page').disabled).toBe(true)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['stale revision', value => { value.source.revision++ }],
+    ['stale digest', value => { value.source.digest = 'e'.repeat(64) }],
+    ['foreign project', value => { value.source.project_id = OTHER }],
+    ['photo identity', value => { value.proposed_document.categories[0].images[0].sha256 = 'e'.repeat(64) }],
+    ['photo order', value => { value.proposed_document.categories[0].images.reverse() }],
+    ['navigation', value => { value.proposed_document.categories[0].slug = 'other' }],
+    ['layout', value => { value.proposed_document.galleryLayout = 'single' }],
+    ['outer wrapper', value => { value.extra = true }],
+    ['model control character', value => { value.model = 'bad\u0000model' }],
+    ['duplicate edit', value => { value.edits.push(value.edits[0]) }],
+    ['usage key', value => { value.usage.untrusted = 1 }],
+    ['UTF-8 byte limit', value => {
+      value.proposed_document.about = '😀'.repeat(8000)
+      value.edits = Array.from({ length: 32 }, (_, index) => ({ id: String(index), value: '😀'.repeat(8000) }))
+    }],
+  ])('rejects %s without replacing a good draft or review', async (_label, corrupt) => {
+    const view = setup()
+    await openPortfolio(); ask()
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    // Drop the good review first so this rejection exercises the validator.
+    fireEvent.click(button('Discard proposal'))
+    const result = proposalResult(); corrupt(result)
+    const request = incoming(result)
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={request} />)
+    expect(request.consumed).toHaveBeenCalledExactlyOnceWith(false)
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(screen.getByLabelText('Headline').value).toBe('Selected work')
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('keeps an existing review when another incoming proposal arrives', async () => {
+    const view = setup()
+    await openPortfolio(); ask()
+    await screen.findByRole('region', { name: 'Review proposed text' })
+    const request = incoming(proposalResult({ headline: 'Replacement' }))
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={request} />)
+    expect(request.consumed).toHaveBeenCalledWith(false)
+    expect(screen.getByText('Selected baking work', { exact: true })).toBeTruthy()
+  })
+
+  it.each(['dirty', 'invalid', 'busy', 'native', 'conflict', 'scope'])('refuses intake while %s', async mode => {
+    const view = setup()
+    await openPortfolio()
+    if (mode === 'dirty' || mode === 'conflict') fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'My draft' } })
+    if (mode === 'invalid') fireEvent.change(screen.getByLabelText('Name'), { target: { value: '' } })
+    if (mode === 'busy') {
+      proposeProjectPage.mockReturnValueOnce(deferred().promise)
+      ask()
+    }
+    if (mode === 'native') {
+      submitProjectNativePreview.mockReturnValueOnce(deferred().promise)
+      fireEvent.click(button('Build iOS preview'))
+    }
+    if (mode === 'conflict') {
+      saveProjectPage.mockRejectedValueOnce(Object.assign(new Error('Conflict'), { status: 409 }))
+      fireEvent.click(button('Save page')); await screen.findByRole('alert')
+    }
+    const request = incoming()
+    if (mode === 'scope') request.activeScope = 'other-org'
+    const original = screen.getByLabelText('Headline').value
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={request} />)
+    expect(request.consumed).toHaveBeenCalledWith(false)
+    expect(screen.getByLabelText('Headline').value).toBe(original)
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+  })
+
+  it('reports zero changes without a review or saving', async () => {
+    const view = setup(); await openPortfolio()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={incoming(proposalResult({}))} />)
+    expect(screen.getByText('No text changes proposed.')).toBeTruthy()
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('rejects a request whose stream ended while the initial load was pending', async () => {
+    const load = deferred(), request = incoming()
+    let current = true
+    request.isCurrent = () => current
+    loadProjectPage.mockReturnValueOnce(load.promise)
+    setup({ incomingProposal: request })
+    current = false
+    await act(async () => load.resolve({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() }))
+    expect(request.consumed).toHaveBeenCalledWith(false)
+    expect(screen.queryByRole('region', { name: 'Review proposed text' })).toBeNull()
+  })
+})
+
 describe('portfolio text proposal review', () => {
   it('keeps generation separate from preview and save, then uses the proposal as an unsaved draft', async () => {
     const previews = vi.fn()

@@ -5,6 +5,7 @@ import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
 import { authConfigured, isSignedIn, login, subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
+import { subscribeProjectPageProposals } from './projectPageProposalDelivery.js'
 import './browserAssetGround.css'
 
 // Only ReleaseOutputs supplies decoded HTML after the trusted artifact retrieval.
@@ -22,6 +23,8 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
   const [asset, setAsset] = useState(null)
   const [activation, setActivation] = useState(0)
   const [selectedField, setSelectedField] = useState(null)
+  const [incomingProposal, setIncomingProposal] = useState(null)
+  const pendingProposal = useRef(null)
   if (scope.current?.key !== scopeKey) scope.current = { key: scopeKey }
   const currentScope = scope.current
   if (asset && asset.scope !== currentScope) setAsset(null)
@@ -32,7 +35,10 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
   useEffect(() => {
     live.current = true
     // Auth notifications also fence an in-flight callback before App rerenders.
-    const invalidate = () => { scope.current = null; setAsset(null); setAuthEpoch(value => value + 1) }
+    const invalidate = () => {
+      scope.current = null; pendingProposal.current = null; setIncomingProposal(null)
+      setAsset(null); setAuthEpoch(value => value + 1)
+    }
     const logout = subscribeBeforeLogout(invalidate)
     const checkAccount = () => {
       if (composerDraftAccountScope() !== accountRef.current) invalidate()
@@ -50,6 +56,35 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
     window.addEventListener('storage', storage)
     return () => { logout(); token(); activeScope(); window.removeEventListener('storage', storage); live.current = false }
   }, [])
+  useEffect(() => {
+    pendingProposal.current = null
+    setIncomingProposal(null)
+    const activeScope = readActiveScope()
+    if (!signedIn || !accountScope || accountScope === 'guest' || !projectId || !activeScope) return
+    const seen = new Set()
+    return subscribeProjectPageProposals(request => {
+      const current = () => live.current && scope.current === currentScope && request.isCurrent()
+        && request.accountScope === accountScope && composerDraftAccountScope() === accountScope
+        && request.activeScope === activeScope && readActiveScope() === activeScope
+      if (!current() || request.result?.source?.project_id !== projectId || seen.has(request.key) || pendingProposal.current) return false
+      const incoming = { ...request, scope: currentScope, isCurrent: current, consumed: accepted => {
+        if (pendingProposal.current !== incoming) return
+        pendingProposal.current = null
+        setIncomingProposal(value => value === incoming ? null : value)
+        if (accepted === true && current()) {
+          seen.add(request.key)
+          if (seen.size > 128) seen.delete(seen.values().next().value)
+        }
+      } }
+      pendingProposal.current = incoming
+      setIncomingProposal(incoming)
+      onEnterWorkspace?.()
+      setActivation(value => value + 1)
+      onSelect?.('browser')
+      onBrowserPanel('project')
+      return true
+    })
+  }, [currentScope]) // callbacks are captured with this editor lifetime
   const acceptArtifact = ({ html, name }) => {
     if (!live.current || scope.current !== currentScope || !signedIn || !accountScope || accountScope === 'guest' || !projectId
       || typeof html !== 'string' || typeof name !== 'string' || !/\.html$/i.test(name)) return false
@@ -96,7 +131,8 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
       hasContent={profile === 'browser' ? Boolean(shown) : Boolean(boardProps.drawing
         || boardProps.workspace?.drawing_versions?.length || boardProps.workspace?.jobs?.length || boardProps.workspace?.built_tools?.length)}>
       {signedIn && projectId && <ProjectPageEditor key={scopeKey} projectId={projectId} accountScope={accountScope}
-        selectedField={selectedField} onPreview={previewPage} />}
+        selectedField={selectedField} onPreview={previewPage}
+        incomingProposal={incomingProposal?.scope === currentScope ? incomingProposal : null} />}
       <ProjectBoardGround {...boardProps} active={browserPanel === 'project'} occluders={undefined} />
     </WorkspaceEnvironment>
   </BrowserArtifactContext.Provider>

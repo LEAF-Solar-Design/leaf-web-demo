@@ -399,7 +399,7 @@ def main():
     for row in events:
         matching=[v for v in strings(row) if v.startswith(prefix)]
         if row.get('event') in ('submit','grant') and matching:
-            assert all(re.fullmatch(re.escape(prefix)+r'[0-9a-f]{32}',v) for v in matching)
+            assert all(re.fullmatch(re.escape(prefix)+r'(?:[0-9a-f]{32}|<redacted>)',v) for v in matching)
             ticket=row.get('ticket')
             assert type(ticket) is str and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',ticket)
             associated.append(ticket)
@@ -412,6 +412,14 @@ def main():
     for row in events:
         matching=[v for v in strings(row) if v.startswith(prefix)]
         if matching:
+            # History.append redacts random suffixes and records census sightings
+            # without a ticket. A historical sighting is not a ticket association.
+            if row.get('event')=='legacy_seen':
+                assert set(row)=={'event','marker','ts','redactions'}
+                assert row['marker'] in markers
+                assert type(row['ts']) in (int,float) and math.isfinite(row['ts'])
+                assert type(row['redactions']) is int and row['redactions']>=0
+                continue
             assert row.get('ticket')==ticket and all(v in markers for v in matching)
         if row.get('ticket')!=ticket: continue
         names=[v for v in strings(row) if v.startswith('preview-')]
@@ -440,8 +448,10 @@ def main():
         event=row.get('event')
         if event not in ('grant','release','confirm_dead','free'): continue
         keys=[key for key in ('ts','at','time') if key in row]
-        assert len(keys)==1
-        stamp=row[keys[0]]
+        # Canonical History.append stamps ts. The free producer also retains
+        # its identical at field; divergent clocks remain ambiguous.
+        assert keys==['ts'] or (keys==['ts','at'] and event=='free' and row['ts']==row['at'])
+        stamp=row['ts']
         assert type(stamp) in (int,float) and math.isfinite(stamp)
         assert event not in times
         times[event]=stamp; ordered.append(event)

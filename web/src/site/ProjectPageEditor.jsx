@@ -1,7 +1,7 @@
 import { useEffect, useId, useRef, useState } from 'react'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { composerDraftAccountScope } from '../lib/composerDraft.js'
-import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges } from './projectPageClient.js'
+import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePageDocument, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, validateNativePreview, proposeProjectPage, portfolioTextChanges, validateProjectPageProposal } from './projectPageClient.js'
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
 import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
@@ -32,7 +32,7 @@ export default function ProjectPageEditor(props) {
   return <ScopedPageEditor key={JSON.stringify([props.projectId || null, props.accountScope || null])} {...props} />
 }
 
-function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField }) {
+function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, incomingProposal }) {
   const [draft, setDraft] = useState(null)
   const [saved, setSaved] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -44,6 +44,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   const [instruction, setInstruction] = useState('')
   const [proposal, setProposal] = useState(null)
   const sourceSnapshot = useRef(null)
+  const intake = useRef(null)
   const actionRow = useRef(null)
   const editor = useRef(null)
   const nativeSession = useRef(null)
@@ -215,6 +216,39 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
   }
   const changePortfolio = document => { setProposal(null); setDraft(document); setNotice(''); show(document) }
   const proposalBlocked = !enabled || Boolean(busy) || dirty || Boolean(validation) || !saved || Boolean(error?.conflict) || Boolean(native?.active)
+  useEffect(() => {
+    if (!incomingProposal) return
+    if (intake.current?.request !== incomingProposal) intake.current = { request: incomingProposal, opened: false, done: false }
+    const pending = intake.current
+    if (pending.done) return
+    const finish = accepted => {
+      pending.done = true
+      try { incomingProposal.consumed(accepted) } catch { /* intake remains private and non-fatal */ }
+    }
+    try {
+      if (!live.current || !enabled || composerDraftAccountScope() !== accountScope
+        || incomingProposal.accountScope !== accountScope || incomingProposal.activeScope !== readActiveScope()
+        || !incomingProposal.isCurrent()) { finish(false); return }
+      // A load started by this request must settle before reviewing its snapshot.
+      if (pending.opened && busy === 'loading') return
+      if (busy || operation.current || dirty || validation || error?.conflict || nativeSession.current?.active || native?.active) {
+        finish(false); return
+      }
+      if (!draft && !saved && !pending.opened) {
+        if (proposal) { finish(false); return }
+        pending.opened = true
+        void open()
+        return
+      }
+      if (proposalBlocked || !draft || draft.schema !== 'leaf.portfolio.v1' || proposal) { finish(false); return }
+      const value = validateProjectPageProposal(projectId, saved, incomingProposal.result)
+      const document = JSON.parse(JSON.stringify(value.proposed_document))
+      const changes = portfolioTextChanges(saved.document, document)
+      if (!changes.length) setNotice('No text changes proposed.')
+      else setProposal({ snapshot: { ...sourceSnapshot.current, isCurrent: incomingProposal.isCurrent }, document, changes })
+      finish(true)
+    } catch { finish(false) }
+  }, [incomingProposal, saved, draft, busy, enabled, dirty, validation, error, native]) // existing fenced operations own loading
   const generateProposal = () => {
     if (!live.current || proposalBlocked || operation.current || !instruction.trim() || Array.from(instruction).length > 4000
       || draft?.schema !== 'leaf.portfolio.v1') return
@@ -235,8 +269,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField })
     setBusy(null); setProposal(null); setNotice('Proposal generation cancelled.')
   }
   const useProposal = () => {
-    if (!live.current || !proposal || proposalBlocked || operation.current || sourceSnapshot.current.saved !== proposal.snapshot.saved
-      || sourceSnapshot.current.draft !== proposal.snapshot.draft) { setProposal(null); return }
+    if (!live.current || !proposal || proposalBlocked || operation.current || nativeSession.current?.active || sourceSnapshot.current.saved !== proposal.snapshot.saved
+      || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
     const document = proposal.document
     portfolioTextChanges(saved.document, document)
     setProposal(null); setDraft(document); show(document)
