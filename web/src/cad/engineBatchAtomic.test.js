@@ -451,7 +451,7 @@ describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
     expect(Array.from(result.current.entities)).toEqual(expected)
     expect(result.current.selectedIds).toEqual(ids)
     expect(result.current.undoDepth).toBe(1)
-    expect(worker.writes.filter((entry) => entry.op === 'batch')).toEqual([{ type: 'applyEdit', op: 'batch', count: 1 }])
+    expect(worker.posted.filter((message) => message.type === 'applyEdit').map((message) => message.op)).toEqual(['batch'])
     expect(diffPlan(before, result.current.entities)).toEqual({
       mutations: { set_layer: [{ handle: '10', layer: 'PanelsReviewed' }, { handle: '11', layer: 'PanelsReviewed' }] },
       count: 2, reason: null,
