@@ -12,6 +12,7 @@ import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 import types
 import zipfile
@@ -470,7 +471,8 @@ def test_generic_compile_keeps_granted_simulator_custody(source, tmp_path, capsy
                      zipfile=zipfile, time=types.SimpleNamespace(sleep=lambda _: None),
                      sys=types.SimpleNamespace(stdin=io.StringIO(json.dumps(payload))),
                      roots=lambda _: (owned, derived, internal),
-                     permitted=lambda path: None, checked=checked)
+                     permitted=lambda path: None, checked=checked,
+                     application_inventory=plistlib.loads)
     exec(mac.DRIVER, namespace)
     result = json.loads(capsys.readouterr().out)
     assert result['simulator_udid'] == UDID and result['simulator_runtime'] == runtime
@@ -478,6 +480,34 @@ def test_generic_compile_keeps_granted_simulator_custody(source, tmp_path, capsy
     assert [c[2] for c in commands if c[0] == '/usr/bin/xcrun'] == [
         'list', 'bootstatus', 'listapps', 'install', 'launch', 'io']
     assert (owned / 'install-owned').read_text() == mac.BUNDLE
+
+
+@pytest.mark.parametrize('exit_code,converted,accept', [
+    (0, plistlib.dumps({'com.example.existing': {'CFBundleIdentifier': 'com.example.existing'}}), True),
+    (1, b'', False), (0, b'not-a-plist', False), (0, plistlib.dumps([]), False),
+    (0, b'x' * (2 * 1024 * 1024 + 1), False),
+])
+def test_app_inventory_converts_openstep_and_refuses_unusable_readback(exit_code, converted, accept):
+    raw = b'{ "com.example.existing" = { CFBundleIdentifier = "com.example.existing"; }; }'
+    calls = []
+    def run(argv, **kwargs):
+        assert argv == ['/usr/bin/plutil', '-convert', 'xml1', '-o', '-', '--', '-']
+        assert kwargs['input'] == raw and kwargs['timeout'] == 30
+        assert kwargs['stderr'] is subprocess.DEVNULL
+        kwargs['stdout'].write(converted)
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=exit_code)
+    node = next(n for n in ast.parse(mac.REMOTE_COMMON).body
+                if isinstance(n, ast.FunctionDef) and n.name == 'application_inventory')
+    namespace = dict(tempfile=tempfile, plistlib=plistlib,
+                     subprocess=types.SimpleNamespace(run=run, DEVNULL=subprocess.DEVNULL))
+    exec(compile(ast.Module(body=[node], type_ignores=[]), '<inventory>', 'exec'), namespace)
+    if accept:
+        assert 'com.example.existing' in namespace['application_inventory'](raw)
+    else:
+        with pytest.raises((AssertionError, plistlib.InvalidFileException)):
+            namespace['application_inventory'](raw)
+    assert len(calls) == 1
 
 
 def remote_clock_process(tmp_path, program, payload, *, kernel, local_origin):

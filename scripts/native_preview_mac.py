@@ -130,6 +130,20 @@ def checked(argv, timeout=30, cwd=None):
         result=log.read(2*1024*1024+1)
         assert len(result)<=2*1024*1024
         return result
+def application_inventory(raw):
+    # simctl emits an OpenStep plist; plistlib accepts only XML or binary.
+    assert type(raw) is bytes and len(raw)<=2*1024*1024
+    with tempfile.TemporaryFile() as log:
+        result=subprocess.run(['/usr/bin/plutil','-convert','xml1','-o','-','--','-'],
+                              input=raw,stdout=log,stderr=subprocess.DEVNULL,timeout=30)
+        assert result.returncode==0
+        log.seek(0)
+        converted=log.read(2*1024*1024+1)
+        assert len(converted)<=2*1024*1024
+    value=plistlib.loads(converted)
+    assert type(value) is dict
+    return value
+
 def roots(p):
     ticket=os.environ['MINI_ALLOC_TICKET']
     assert ticket == p['ticket'] and re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9_.-]{0,127}',ticket)
@@ -230,7 +244,7 @@ assert len(matches)==1 and matches[0][1].get('isAvailable') is True
 runtime=matches[0][0]
 assert matches[0][1]['deviceTypeIdentifier']=='com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max'
 sim('bootstatus',udid,'-b')
-assert bundle not in plistlib.loads(sim('listapps',udid))
+assert bundle not in application_inventory(sim('listapps',udid))
 # Record custody before install, including an interrupted/uncertain install.
 (source/'install-owned').write_text(bundle)
 sim('install',udid,str(copy))
@@ -289,9 +303,9 @@ if rows[0]['state']=='Booted':
         assert (source/'install-owned').read_text()==bundle
         # Terminate may report not running; uninstall and readback establish absence.
         sim('terminate',udid,bundle)
-        apps=plistlib.loads(checked(['/usr/bin/xcrun','simctl','listapps',udid]))
+        apps=application_inventory(checked(['/usr/bin/xcrun','simctl','listapps',udid]))
         if bundle in apps: assert sim('uninstall',udid,bundle).returncode==0
-        apps=plistlib.loads(checked(['/usr/bin/xcrun','simctl','listapps',udid]))
+        apps=application_inventory(checked(['/usr/bin/xcrun','simctl','listapps',udid]))
         assert bundle not in apps
     assert sim('shutdown',udid).returncode==0
 devices=json.loads(checked(['/usr/bin/xcrun','simctl','list','devices','--json']))['devices']
