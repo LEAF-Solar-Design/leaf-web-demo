@@ -1,11 +1,11 @@
 import { execFile, spawn } from 'node:child_process'
 import { createReadStream } from 'node:fs'
-import { readFile, readdir, stat, writeFile } from 'node:fs/promises'
+import { readFile, readdir, rm, stat, writeFile } from 'node:fs/promises'
 import http from 'node:http'
 import { dirname, extname, join, resolve, sep } from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { promisify } from 'node:util'
-import { shippedViteFlags, productionBundleCacheKey, PRODUCTION_BUNDLE_INPUTS, productionBundleMarker } from './buildFlags.mjs'
+import { shippedViteFlags, productionBundleCacheKey, PRODUCTION_BUNDLE_INPUTS, PRODUCTION_BUILD_COLD_DIRS, productionBundleMarker } from './buildFlags.mjs'
 import { ensureEngineArtifacts } from './engineArtifacts.mjs'
 
 const web = resolve(dirname(fileURLToPath(import.meta.url)), '..')
@@ -63,6 +63,9 @@ export async function prepareProductionBundle() {
       return dist
     }
     if (!await exists(join(web, 'node_modules'))) throw new Error('Production bundle needs web/node_modules; install the web prerequisites first')
+    for (const path of PRODUCTION_BUILD_COLD_DIRS) {
+      await rm(join(web, path), { recursive: true, force: true })
+    }
     // npm's Windows shim needs cmd.exe; no user-controlled command is interpolated.
     const command = process.platform === 'win32' ? (process.env.ComSpec || 'cmd.exe') : 'npm'
     const args = process.platform === 'win32' ? ['/d', '/s', '/c', 'npm run build'] : ['run', 'build']

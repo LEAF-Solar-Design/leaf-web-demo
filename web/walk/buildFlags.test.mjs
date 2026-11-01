@@ -1,9 +1,33 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFile } from 'node:fs/promises'
-import { shippedViteFlags, productionBundleCacheKey, PRODUCTION_BUNDLE_INPUTS, productionBundleMarker } from './buildFlags.mjs'
+import { shippedViteFlags, productionBundleCacheKey, PRODUCTION_BUNDLE_INPUTS, PRODUCTION_BUILD_COLD_DIRS, productionBundleMarker } from './buildFlags.mjs'
 
 const dockerfile = await readFile(new URL('../../deploy/Dockerfile.web', import.meta.url), 'utf8')
+
+test('production builds require a cold Next compiler directory', () => {
+  assert.deepEqual(PRODUCTION_BUILD_COLD_DIRS, ['.next'])
+  assert.ok(Object.isFrozen(PRODUCTION_BUILD_COLD_DIRS))
+})
+
+test('production compiler state is removed only after reuse and prerequisite checks and before spawn', async () => {
+  const source = await readFile(new URL('./sameOriginProxy.mjs', import.meta.url), 'utf8')
+  const start = source.indexOf('export async function prepareProductionBundle')
+  assert.ok(start >= 0)
+  const end = source.indexOf('\nfunction ', start)
+  assert.ok(end > start)
+  const body = source.slice(start, end)
+  const reuse = body.indexOf('return dist')
+  const prerequisites = body.indexOf('Production bundle needs web/node_modules')
+  const coldDirs = body.indexOf('for (const path of PRODUCTION_BUILD_COLD_DIRS)')
+  const removal = body.indexOf('await rm(join(web, path), { recursive: true, force: true })')
+  const spawn = body.indexOf('spawn(command')
+  assert.ok(reuse >= 0)
+  assert.ok(prerequisites > reuse)
+  assert.ok(coldDirs > prerequisites)
+  assert.ok(removal > coldDirs)
+  assert.ok(spawn > removal)
+})
 
 test('production bundle inputs retain the previous inputs and track Next build inputs', () => {
   for (const path of ['src', 'public', 'vite-plugins', 'vite.config.js', 'index.html', 'package.json', 'package-lock.json', 'next.config.mjs', 'webpack', 'scripts']) {

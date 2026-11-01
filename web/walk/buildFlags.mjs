@@ -24,6 +24,9 @@ export function productionBundleMarker({ sourceMtime, cacheKey, flags, engine_un
   }
 }
 
+// A warm Next cache can restore a flag fold compiled under different flags.
+export const PRODUCTION_BUILD_COLD_DIRS = Object.freeze(['.next'])
+
 export const PRODUCTION_BUNDLE_INPUTS = Object.freeze([
   'src', 'public', 'vite-plugins', 'vite.config.js', 'index.html', 'package.json', 'package-lock.json',
   'next.config.mjs', 'webpack', 'scripts',
