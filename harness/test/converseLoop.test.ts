@@ -38,6 +38,131 @@ const PACKET = {
 /** A confirmation id only the (fake) app gate can produce. */
 const APP_MINTED_CID = "app-minted-confirmation-1";
 
+describe("private portfolio proposal projection", () => {
+  const org = "11111111-1111-4111-8111-111111111111";
+  const project = "22222222-2222-4222-8222-222222222222";
+  const body = { instruction: "Shorten the headline", expected_revision: 7, expected_digest: "a".repeat(64) };
+  const proposal = () => ({
+    source: { project_id: project, revision: 7, digest: body.expected_digest },
+    proposed_document: {
+      schema: "leaf.portfolio.v1", name: "Jessica", headline: "Cakes", introduction: "", about: "",
+      contact: { email: "", location: "" }, resume: [], theme: "light",
+      categories: [{ slug: "cakes", title: "Cakes", description: "", hero: 0,
+        images: Array.from({ length: 94 }, (_, index) => ({
+          material_id: `33333333-3333-4333-8333-${String(index).padStart(12, "0")}`,
+          sha256: "b".repeat(64), preview_sha256: "c".repeat(64), title: "", alt: "Cake",
+        })) }],
+    },
+    proposed_digest: "d".repeat(64), edits: [{ id: "f0002", value: "Cakes" }],
+    model: "claude-haiku-5-5", usage: { input_tokens: 10 },
+  });
+
+  async function runProposal(options: {
+    args?: Record<string, unknown>; value?: Record<string, unknown>;
+    deny?: boolean; noContext?: boolean; noAuthority?: boolean; tool?: string;
+  } = {}) {
+    const appRun = new FakeAppRunClient();
+    appRun.pageProposalResult = options.value ?? proposal();
+    const gate = new FakeGateClient();
+    const check = vi.spyOn(gate, "check").mockResolvedValue({ decision: options.deny ? "deny" : "allow" });
+    const store = new FakeSessionStore();
+    const results: SpineToolResult[] = [];
+    const runner: SpineConverseRunner = {
+      async *run(input) {
+        expect(await input.canUseTool("mcp__spine__propose_project_page", body)).toMatchObject({ behavior: "allow" });
+        if (options.tool === "mcp__services__propose_project_page") {
+          expect(await input.canUseTool(options.tool, body)).toMatchObject({ behavior: "deny" });
+        }
+        results.push(await input.tools.execute(options.tool ?? "propose_project_page", options.args ?? body));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession(org, "portfolio");
+    const turn = await loop.handleMessage({
+      sessionId: session.session_id, tenantId: org, text: "Shorten my portfolio headline",
+      contextPacket: options.noContext ? PACKET : { ...PACKET, project_material_context: {
+        schema: "leaf.project-material-context.v1", org_id: org, project_id: project,
+        page: { revision: 7, digest: body.expected_digest },
+      } }, ...(options.noAuthority ? {} : { authoritySessionId: "app-session", authorityTurnId: "app-turn" }),
+    });
+    await turn.done;
+    return { appRun, check, results, events: await store.eventsAfter(session.session_id, 0) };
+  }
+
+  it("emits the complete 94-photo UI result and short model text after the normal gate", async () => {
+    const { appRun, check, results, events } = await runProposal();
+    expect(check).toHaveBeenCalledWith("propose_project_page", body, expect.objectContaining({
+      authoritySessionId: "app-session", authorityTurnId: "app-turn",
+    }));
+    expect(appRun.pageProposalCalls).toEqual([{
+      tenantId: org, sessionId: "app-session", body,
+      authority: { sessionId: "app-session", turnId: "app-turn" },
+    }]);
+    expect(results[0]?.isError).toBeUndefined();
+    expect(results[0]?.content.length).toBeLessThan(200);
+    expect(results[0]?.content).toContain("revision 7");
+    expect(results[0]?.content).not.toContain("material_id");
+    expect(ofType(events, "tool_result")[0]?.data).toMatchObject({
+      tool: "propose_project_page", ok: true, result: proposal(),
+    });
+  });
+
+  it.each([
+    { ...body, session_id: "model-selected" }, { ...body, expected_revision: true },
+    { ...body, expected_revision: "7" }, { ...body, instruction: " " },
+    { ...body, expected_digest: "A".repeat(64) }, { ...body, instruction: "x".repeat(4001) },
+  ])("rejects closed typed args before policy or HTTP: %j", async args => {
+    const { appRun, check, results, events } = await runProposal({ args });
+    expect(check).not.toHaveBeenCalled();
+    expect(appRun.pageProposalCalls).toHaveLength(0);
+    expect(results[0]?.isError).toBe(true);
+    expect(ofType(events, "tool_result")[0]?.data).not.toHaveProperty("result");
+  });
+
+  it.each(["deny", "context", "authority", "project", "revision", "digest", "extra", "document", "usage", "edits", "oversize"])(
+    "never projects a failed or foreign proposal: %s", async failure => {
+      const value: Record<string, unknown> = proposal();
+      if (failure === "project") value.source = { ...proposal().source, project_id: org };
+      if (failure === "revision") value.source = { ...proposal().source, revision: 8 };
+      if (failure === "digest") value.source = { ...proposal().source, digest: "b".repeat(64) };
+      if (failure === "extra") value.authority = "foreign";
+      if (failure === "document") value.proposed_document = { schema: "leaf.portfolio.v1" };
+      if (failure === "usage") value.usage = { input_tokens: -1 };
+      if (failure === "edits") value.edits = [{ id: "f0002", value: "a" }, { id: "f0002", value: "b" }];
+      if (failure === "oversize") value.proposed_document = { text: "x".repeat(1024 * 1024) };
+      const { appRun, results, events } = await runProposal({
+        value, deny: failure === "deny", noContext: failure === "context", noAuthority: failure === "authority",
+      });
+      expect(results[0]?.isError).toBe(true);
+      expect(ofType(events, "tool_result")[0]?.data).not.toHaveProperty("result");
+      if (["deny", "context", "authority"].includes(failure)) expect(appRun.pageProposalCalls).toHaveLength(0);
+    },
+  );
+
+  it("never projects arbitrary other tool output", async () => {
+    const { appRun, events } = await runProposal({ tool: "propose_overlay", args: { tokens: { surface: "dense" } } });
+    expect(appRun.pageProposalCalls).toHaveLength(0);
+    expect(ofType(events, "tool_result")[0]?.data).not.toHaveProperty("result");
+  });
+
+  it("refuses a proposal tool under another MCP server name before policy or HTTP", async () => {
+    const { appRun, check, results, events } = await runProposal({ tool: "mcp__services__propose_project_page" });
+    expect(check).not.toHaveBeenCalled();
+    expect(appRun.pageProposalCalls).toHaveLength(0);
+    expect(results[0]?.isError).toBe(true);
+    expect(ofType(events, "tool_result")).toHaveLength(0);
+  });
+
+  it("dispatches the exact private MCP name through the normal gate", async () => {
+    const { appRun, check, results, events } = await runProposal({ tool: "mcp__spine__propose_project_page" });
+    expect(check).toHaveBeenCalledWith("propose_project_page", body, expect.any(Object));
+    expect(appRun.pageProposalCalls).toHaveLength(1);
+    expect(results[0]?.isError).toBeUndefined();
+    expect(ofType(events, "tool_result")[0]?.data).toMatchObject({ tool: "propose_project_page", ok: true, result: proposal() });
+  });
+});
+
 function makeLoop() {
   const runner = new FakeConverseRunner();
   const appRun = new FakeAppRunClient();

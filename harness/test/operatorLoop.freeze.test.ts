@@ -15,6 +15,7 @@ import {
   type OperatorTurnInput,
 } from "../src/agent/operatorWire.js";
 import { SPINE_TOOL_NAMES } from "../src/ports/index.js";
+import { SPINE_TOOL_NAMES as VENDOR_SPINE_TOOL_NAMES } from "../src/vendor/mushy-author/ports/index.js";
 
 const FROZEN_READONLY_NAMES = [
   "operator_read_fleet_state",
@@ -61,7 +62,7 @@ describe("operator wire vocabulary is pinned", () => {
   });
 
   it("tenant spine includes integration tools and stays separate from the operator loop", () => {
-    expect(SPINE_TOOL_NAMES).toHaveLength(16);
+    expect([...SPINE_TOOL_NAMES]).toEqual([...VENDOR_SPINE_TOOL_NAMES, "propose_project_page"]);
     for (const name of SPINE_TOOL_NAMES) {
       expect(name.startsWith("operator")).toBe(false);
     }

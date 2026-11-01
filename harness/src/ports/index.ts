@@ -4,6 +4,22 @@
 // is synced by scripts/sync-mushy-code.py (pin: harness/src/vendor/VENDOR-PIN.json).
 export * from "../vendor/mushy-author/ports/index.js";
 
+// Host additions do not change the immutable vendor catalog.
+export const SPINE_TOOL_NAMES = [
+  "catalog_search", "drawing_state", "ask_user", "run_capability", "job_status",
+  "author_tool", "request_publication", "request_confirmation", "propose_overlay",
+  "customize_platform", "finish_project", "project_completion_status",
+  "integration_datasets", "integration_action_catalog", "integration_query",
+  "integration_save_element", "propose_project_page",
+] as const;
+export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
+
+export interface ProjectPageProposalInput {
+  instruction: string;
+  expected_revision: number;
+  expected_digest: string;
+}
+
 import type {
   AppRunClient as VendoredAppRunClient,
   TenantMutationFence,
@@ -12,6 +28,12 @@ import type {
 
 /** Host-only overlay authority handoff; the app resolves the active turn's actor. */
 export interface AppRunClient extends VendoredAppRunClient {
+  proposeProjectPage(
+    tenantId: string,
+    sessionId: string,
+    body: ProjectPageProposalInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>>;
   proposeOverlay(
     tenantId: string,
     sessionId: string,

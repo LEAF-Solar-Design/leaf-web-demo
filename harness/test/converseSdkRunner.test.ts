@@ -130,6 +130,98 @@ function makeMockSdk(script: ScriptEntry[] | ScriptEntry[][]) {
 
 const SDK_SESSION = "sdk-session-0001";
 
+describe("host portfolio SDK facade", () => {
+  it("uses the provided real Zod loader as a raw shape and retains the permission hook", async () => {
+    const mock = makeMockSdk([resultSuccess()]);
+    const executor = makeExecutor(async () => ({ content: "Proposed revision 7 for private review." }));
+    const permission = vi.fn<ConverseRunInput["canUseTool"]>().mockResolvedValue({ behavior: "deny", message: "policy" });
+    await collect(runnerWith(mock, { zodImport: () => import("zod") }), makeInput({ tools: executor, canUseTool: permission }));
+    const tool = mock.tools.find(tool => tool.name === "propose_project_page")!;
+    expect(Object.keys(tool.schema)).toEqual(["instruction", "expected_revision", "expected_digest"]);
+    const { z } = await import("zod");
+    const args = { instruction: "Shorten", expected_revision: 7, expected_digest: "a".repeat(64) };
+    expect(z.strictObject(tool.schema as import("zod").ZodRawShape).parse(args)).toEqual(args);
+    expect(await tool.handler(args, {})).toEqual({ content: [{ type: "text", text: "Proposed revision 7 for private review." }] });
+    expect(executor.calls).toEqual([{ tool: "propose_project_page", args }]);
+    const hook = mock.queries[0]!.options.canUseTool as ConverseRunInput["canUseTool"];
+    expect(await hook("mcp__spine__propose_project_page", args)).toMatchObject({ behavior: "deny" });
+    expect(permission).toHaveBeenCalledWith("mcp__spine__propose_project_page", args);
+  });
+
+  it("captures each concurrent run separately and omits the tool when unlisted", async () => {
+    const mock = makeMockSdk([resultSuccess()]);
+    const runner = runnerWith(mock);
+    const first = makeExecutor(async () => ({ content: "first", isError: true }));
+    const second = makeExecutor(async () => ({ content: "second" }));
+    await Promise.all([collect(runner, makeInput({ tools: first })), collect(runner, makeInput({ tools: second }))]);
+    const mounted = mock.tools.filter(tool => tool.name === "propose_project_page");
+    expect(mounted).toHaveLength(2);
+    const results = await Promise.all(mounted.map(tool => tool.handler({}, {})));
+    expect(results.map(result => result.content[0]?.text).sort()).toEqual(["first", "second"]);
+    expect(first.calls).toHaveLength(1);
+    expect(second.calls).toHaveLength(1);
+    expect(results.find(result => result.content[0]?.text === "first")?.isError).toBe(true);
+    const absent = makeMockSdk([resultSuccess()]);
+    await collect(runnerWith(absent), makeInput({ tools: { ...makeExecutor(), list: () => [] } }));
+    expect(absent.tools.some(tool => tool.name === "propose_project_page")).toBe(false);
+  });
+
+  it("refuses duplicate host tools without mutating the SDK", async () => {
+    const mock = makeMockSdk([resultSuccess()]);
+    const sdk = await mock.sdkImport();
+    const original = sdk.createSdkMcpServer;
+    const tool = sdk.tool;
+    const duplicateSdk = { ...sdk, tool: (...args: Parameters<typeof tool>) => {
+      const result = tool(...args);
+      return { ...result, name: "propose_project_page" };
+    } };
+    await expect(collect(runnerWith(mock, { sdkImport: async () => duplicateSdk }), makeInput()))
+      .rejects.toThrow("Duplicate private proposal tool");
+    expect(sdk.createSdkMcpServer).toBe(original);
+    expect(mock.queries).toHaveLength(0);
+  });
+
+  it("keeps a mounted standard service separate from the private proposal permission hook", async () => {
+    const mock = makeMockSdk([resultSuccess()]);
+    const permission = vi.fn<ConverseRunInput["canUseTool"]>().mockResolvedValue({ behavior: "deny", message: "policy" });
+    const unused = async (): Promise<never> => { throw new Error("unexpected service dispatch"); };
+    const context = {
+      tenant_id: "tenant-a", session_id: "session-a", subscription_mount_id: "mount-a",
+      authority_session_id: "app-session-a", authority_turn_id: "app-turn-a",
+    };
+    const events = await collect(runnerWith(mock, {
+      standardServicesResolver: {
+        resolve: async () => ({
+          identity: { tenant_id: context.tenant_id, session_id: context.session_id,
+            subscription_mount_id: context.subscription_mount_id, authority_turn_id: context.authority_turn_id,
+            subject_id: "subject-a", runner_profile_id: "spine" },
+          environment: "local",
+          provider: { catalog: unused, read: unused, request: unused, confirm: unused,
+            visualInspect: unused, status: unused },
+        }),
+      },
+    }), makeInput({ standardServicesContext: context, canUseTool: permission }));
+    expect(doneOf(events).stopReason).toBe("end_turn");
+    expect(mock.servers.map(server => server.name)).toEqual(["spine", "services"]);
+    expect(Object.keys(mock.queries[0]!.options.mcpServers as AnyRec)).toEqual(["spine", "services"]);
+    expect((mock.servers[1]!.tools as CapturedTool[]).some(tool => tool.name === "propose_project_page")).toBe(false);
+    const hook = mock.queries[0]!.options.canUseTool as ConverseRunInput["canUseTool"];
+    expect(await hook("mcp__services__services_status", {})).toMatchObject({ behavior: "allow" });
+    expect(permission).not.toHaveBeenCalled();
+    expect(await hook("mcp__spine__propose_project_page", {})).toMatchObject({ behavior: "deny" });
+    expect(permission).toHaveBeenCalledExactlyOnceWith("mcp__spine__propose_project_page", {});
+  });
+
+  it("bounds executor content and hides thrown details", async () => {
+    for (const impl of [async () => ({ content: "x".repeat(4097) }), async (): Promise<SpineToolResult> => { throw new Error("private detail"); }]) {
+      const mock = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(mock), makeInput({ tools: makeExecutor(impl) }));
+      const result = await mock.tools.find(tool => tool.name === "propose_project_page")!.handler({}, {});
+      expect(result).toEqual({ content: [{ type: "text", text: "Portfolio proposal failed." }], isError: true });
+    }
+  });
+});
+
 function streamDelta(text: string): AnyRec {
   return {
     type: "stream_event",

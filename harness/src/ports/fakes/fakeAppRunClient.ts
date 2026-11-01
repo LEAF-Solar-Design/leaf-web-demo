@@ -14,6 +14,7 @@ import type {
   ResultEnvelope,
   SubmitRunRequest,
   SubmitRunResponse,
+  ProjectPageProposalInput,
 } from "../index.js";
 
 export const FAKE_CATALOG: CapabilityEntry[] = [
@@ -72,6 +73,20 @@ function envelopeFor(tool: string): ResultEnvelope {
 }
 
 export class FakeAppRunClient implements AppRunClient {
+  readonly pageProposalCalls: Array<{
+    tenantId: string; sessionId: string; body: ProjectPageProposalInput;
+    authority: { sessionId: string; turnId: string };
+  }> = [];
+  pageProposalResult: Record<string, unknown> = {};
+
+  async proposeProjectPage(
+    tenantId: string, sessionId: string, body: ProjectPageProposalInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    this.methodLog.push("proposeProjectPage");
+    this.pageProposalCalls.push({ tenantId, sessionId, body, authority });
+    return this.pageProposalResult;
+  }
   /** Every submitRun payload, verbatim (the invariant spy inspects these). */
   readonly submitCalls: SubmitRunRequest[] = [];
   readonly authorCalls: Array<{

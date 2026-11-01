@@ -1,9 +1,106 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import {
   AppRunClientError,
   HttpAppRunClient,
 } from "../src/ports/impl/appRunClient.js";
+
+describe("bounded project portfolio proposal reader", () => {
+  const body = { instruction: "Shorten", expected_revision: 7, expected_digest: "a".repeat(64) };
+  const authority = { sessionId: "app-session", turnId: "app-turn" };
+  const client = (fetchImpl: typeof fetch) => new HttpAppRunClient({
+    baseUrl: "https://app.invalid", dispatchSecret: "private-dispatch-value", fetchImpl,
+  });
+
+  it("uses the fixed session route, authority headers, and a bounded JSON stream", async () => {
+    const response = new Response('{"source":{}}', {
+      headers: { "content-type": "application/json; charset=utf-8", "content-length": "13" },
+    });
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(response);
+    expect(await client(fetcher).proposeProjectPage("tenant", "app-session", body, authority)).toEqual({ source: {} });
+    expect(response.body?.locked).toBe(false);
+    expect(fetcher).toHaveBeenCalledWith("https://app.invalid/api/sessions/app-session/page/proposals", expect.objectContaining({
+      method: "POST", redirect: "error", body: JSON.stringify(body), headers: {
+        "content-type": "application/json", "x-tenant-id": "tenant",
+        "x-dispatch-secret": "private-dispatch-value",
+        "x-authority-session-id": "app-session", "x-authority-turn-id": "app-turn",
+      },
+    }));
+  });
+
+  it.each(["declared", "actual", "redirect", "redirected", "origin", "status", "mime", "utf8", "json", "secret"])(
+    "rejects %s responses with fixed errors and disposes the reader", async failure => {
+      let cancelled = false;
+      const bytes = failure === "actual" ? new Uint8Array(1024 * 1024 + 1)
+        : failure === "utf8" ? new Uint8Array([0xff])
+        : new TextEncoder().encode(failure === "json" ? "{" : failure === "secret"
+          ? '{"text":"private-dispatch-value"}' : "{}");
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) { controller.enqueue(bytes); },
+        cancel() { cancelled = true; },
+      });
+      const response = new Response(stream, { status: failure === "status" ? 201 : failure === "redirect" ? 302 : 200,
+        headers: { "content-type": failure === "mime" ? "text/plain" : "application/json",
+          ...(failure === "declared" ? { "content-length": String(1024 * 1024 + 1) } : {}) } });
+      if (failure === "redirected") Object.defineProperty(response, "redirected", { value: true });
+      if (failure === "origin") Object.defineProperty(response, "url", { value: "https://foreign.invalid/page" });
+      // Valid small streams need an end to reach decode/parse checks.
+      if (["utf8", "json", "secret"].includes(failure)) {
+        const finite = new Response(bytes, { headers: { "content-type": "application/json" } });
+        await expect(client(async () => finite).proposeProjectPage("tenant", "app-session", body, authority))
+          .rejects.toMatchObject({ message: "Portfolio proposal request failed." });
+        expect(finite.body?.locked).toBe(false);
+        await response.body?.cancel();
+      } else {
+        await expect(client(async () => response).proposeProjectPage("tenant", "app-session", body, authority))
+          .rejects.toMatchObject({ message: "Portfolio proposal request failed." });
+        expect(cancelled).toBe(true);
+        expect(response.body?.locked).toBe(false);
+      }
+    },
+  );
+
+  it("enforces a 45-second total deadline during a stalled body and disposes it", async () => {
+    vi.useFakeTimers();
+    try {
+      let cancelled = false;
+      const response = new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }), {
+        headers: { "content-type": "application/json" },
+      });
+      const pending = client(async () => response).proposeProjectPage("tenant", "app-session", body, authority);
+      const assertion = expect(pending).rejects.toMatchObject({ message: "Portfolio proposal request failed." });
+      await vi.advanceTimersByTimeAsync(45_000);
+      await assertion;
+      expect(cancelled).toBe(true);
+      expect(response.body?.locked).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("cancels a late response from a fetch that ignores abort", async () => {
+    vi.useFakeTimers();
+    try {
+      let resolveFetch!: (response: Response) => void;
+      const fetcher: typeof fetch = () => new Promise(resolve => { resolveFetch = resolve; });
+      const pending = client(fetcher).proposeProjectPage("tenant", "app-session", body, authority);
+      const assertion = expect(pending).rejects.toBeInstanceOf(AppRunClientError);
+      await vi.advanceTimersByTimeAsync(45_000);
+      await assertion;
+      let cancelled = false;
+      resolveFetch(new Response(new ReadableStream({ cancel() { cancelled = true; } })));
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(cancelled).toBe(true);
+    } finally { vi.useRealTimers(); }
+  });
+
+  it("rejects caller-selected authority and extra fields before fetching", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(client(fetcher).proposeProjectPage("tenant", "foreign", body, authority)).rejects.toBeInstanceOf(AppRunClientError);
+    await expect(client(fetcher).proposeProjectPage("tenant", "app-session", { ...body, subject: "other" } as typeof body, authority))
+      .rejects.toBeInstanceOf(AppRunClientError);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+});
 
 
 describe("HttpAppRunClient authoring errors", () => {

@@ -890,6 +890,23 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "high", "timeout_s": 600,
             "audit_extra": ["title", "change_id"],
         },
+        "propose_project_page": {
+            "description": "Propose saved portfolio text for private review in the active project conversation. Does not save or publish.",
+            "rung": 2, "required_capability": "converse",
+            "policy": "auto", "tenant_tightenable": True,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/proposals"]},
+            "args_schema": {
+                "type": "object",
+                "properties": {
+                    "instruction": {"type": "string", "minLength": 1, "maxLength": 4000},
+                    "expected_revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+                    "expected_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+                },
+                "required": ["instruction", "expected_revision", "expected_digest"],
+                "additionalProperties": False,
+            },
+            "rate_limit_category": "medium", "timeout_s": 60, "audit_extra": [],
+        },
         "propose_overlay": {
             "description": "T1 runtime overlay: open a PENDING colour/copy preview for THIS session (server/overlay_propose.py). Writes one session-scoped row, changes nothing another user can see, and expires by lease. Deliberately `auto`: the proposal is the cheap half, and the irreversible half is the operator tap that applies it to the tenant, which carries its own CAS witness and audit row. Requiring a confirmation here would buy nothing and cost the immediacy the tier exists for.",
             "rung": 2, "required_capability": "converse",

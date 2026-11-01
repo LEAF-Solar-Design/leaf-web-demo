@@ -26,12 +26,20 @@ import type {
   IntegrationSaveElementInput,
   IntegrationSaveElementResult,
   IntegrationToolResult,
+  ProjectPageProposalInput,
 } from "../index.js";
 import { INTEGRATION_TOOL_INPUTS } from "../index.js";
 import { z } from "zod";
 import {
   DatasetReadV1, IntegrationActionCatalogV1, IntegrationElementV1, IntegrationRefV1,
 } from "../../vendor/mushy-author/contracts/integration.js";
+
+export const ProjectPageProposalRequest = z.strictObject({
+  instruction: z.string().refine(value => value.trim().length > 0 &&
+    Array.from(value).length <= 4000 && !/[\p{Cs}]/u.test(value)),
+  expected_revision: z.number().int().positive().refine(Number.isSafeInteger),
+  expected_digest: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
+});
 
 export type IntegrationTool = keyof typeof INTEGRATION_TOOL_INPUTS;
 type IntegrationInputs = {
@@ -201,6 +209,78 @@ export class HttpAppRunClient implements AppRunClient {
       "x-tenant-id": tenantId,
       "x-dispatch-secret": this.secret,
     };
+  }
+
+  async proposeProjectPage(
+    tenantId: string, sessionId: string, input: ProjectPageProposalInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    const fail = () => new AppRunClientError("Portfolio proposal request failed.", 502);
+    const parsed = ProjectPageProposalRequest.safeParse(input);
+    const validId = (value: unknown): value is string => typeof value === "string" &&
+      value.length > 0 && value.length <= 200 && value.trim() === value &&
+      !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+    if (!parsed.success || !this.secret || !validId(sessionId) ||
+        authority?.sessionId !== sessionId || !validId(authority?.turnId)) throw fail();
+    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/page/proposals`;
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const cancel = () => {
+      controller.abort();
+      void reader?.cancel().catch(() => {});
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => { cancel(); reject(fail()); }, 45_000);
+    });
+    const work = async () => {
+      const response = await this.fetchImpl(url, {
+        method: "POST", redirect: "error", signal: controller.signal,
+        headers: { ...this.headers(tenantId),
+          "x-authority-session-id": authority.sessionId,
+          "x-authority-turn-id": authority.turnId },
+        body: JSON.stringify(parsed.data),
+      });
+      if (controller.signal.aborted) {
+        void response.body?.cancel().catch(() => {});
+        throw fail();
+      }
+      try {
+        if (response.body) reader = response.body.getReader();
+        const length = response.headers.get("content-length");
+        if (response.status !== 200 || response.redirected || !reader ||
+            (response.url && new URL(response.url).origin !== new URL(url).origin) ||
+            !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get("content-type") ?? "") ||
+            (length !== null && (!/^[0-9]+$/.test(length) || Number(length) > 1024 * 1024))) throw fail();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        while (true) {
+          const next = await reader.read();
+          if (controller.signal.aborted) throw fail();
+          if (next.done) break;
+          size += next.value.byteLength;
+          if (size > 1024 * 1024) throw fail();
+          chunks.push(next.value);
+        }
+        const raw = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+        const result: unknown = JSON.parse(raw);
+        if (!result || typeof result !== "object" || Array.isArray(result) ||
+            reflectsSecret(result, this.secret)) throw fail();
+        return result as Record<string, unknown>;
+      } finally {
+        void reader?.cancel().catch(() => {});
+        try { reader?.releaseLock(); } catch { /* cancelled pending read */ }
+      }
+    };
+    try {
+      return await Promise.race([work(), deadline]);
+    } catch {
+      throw fail();
+    } finally {
+      clearTimeout(timer);
+      cancel();
+      try { reader?.releaseLock(); } catch { /* work disposes a pending read */ }
+    }
   }
 
   integrationDatasets(tenantId: string, input: IntegrationDatasetsInput, authority: IntegrationAuthority) {

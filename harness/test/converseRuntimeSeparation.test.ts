@@ -58,12 +58,14 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
     });
   }
 
-  it("converseLoop imports only the spine prompt, ports, integration client validation, and redactor", () => {
+  it("converseLoop imports only the spine prompt, ports, schema validation, and redactor", () => {
     const source = readFileSync(join(SRC, "agent/converseLoop.ts"), "utf8");
     const specifiers = [...source.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
     for (const spec of specifiers) {
       expect(
         spec === "node:crypto" ||
+          // Schema validation of the private proposal result adds no SDK path.
+          spec === "zod" ||
           spec === "./spineSystemPrompt.js" ||
           spec === "../ports/index.js" ||
           // Canonical integration validation and fixed errors, with the same
