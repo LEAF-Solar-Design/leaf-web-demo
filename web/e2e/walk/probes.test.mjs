@@ -6,12 +6,54 @@ import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCens
   SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
 import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { assertCountControlIdentity } from './fixtures.mjs'
+import { activeToolbarProfile } from './controlCensus.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+function profilePage({ values = [], selectedName = null } = {}) {
+  return { getByRole: (role, options) => {
+    if (role === 'navigation') {
+      assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+      return { getByRole: (role, options) => {
+        assert.equal(role, 'combobox')
+        assert.deepEqual(options, { name: 'Workspace profile', exact: true })
+        return { count: async () => values.length, inputValue: async () => {
+          assert.equal(values.length, 1)
+          return values[0]
+        } }
+      } }
+    }
+    assert.equal(role, 'tablist')
+    assert.deepEqual(options, { name: 'Workspace profile', exact: true })
+    return { getByRole: (role, options) => {
+      assert.equal(role, 'tab')
+      assert.deepEqual(options, { selected: true })
+      return { count: async () => selectedName === null ? 0 : 1, getAttribute: async name => {
+        assert.equal(name, 'aria-label')
+        return selectedName
+      } }
+    } }
+  } }
+}
+
+test('WL61 census reads the studio profile select by surface id before selected tabs', async () => {
+  assert.equal(await activeToolbarProfile(profilePage({ values: ['cad'], selectedName: 'Browser' })), 'drafting')
+  assert.equal(await activeToolbarProfile(profilePage({ values: ['unknown-surface'], selectedName: 'CAD' })), undefined)
+})
+
+test('WL61 census falls back to the selected profile tab aria-label', async () => {
+  assert.equal(await activeToolbarProfile(profilePage({ selectedName: 'CAD' })), 'drafting')
+  assert.equal(await activeToolbarProfile(profilePage({ selectedName: 'Solar CAD' })), 'solar')
+})
+
+test('WL61 census leaves ambiguous or absent profile controls undefined without a selected tab', async () => {
+  assert.equal(await activeToolbarProfile(profilePage({ values: ['cad', 'cad'] })), undefined)
+  assert.equal(await activeToolbarProfile(profilePage()), undefined)
+})
 
 test('WL48 substituted monitor launcher records Studio identity and requires the inventoried spine absent', async () => {
   const entry = map.entries.find(row => row.id === 'control:job-monitor-expand')

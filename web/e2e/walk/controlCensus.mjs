@@ -80,13 +80,23 @@ function recipeLocator(page, recipe) {
   return scope.getByRole(recipe.role, { name: recipe.name, exact: recipe.exact !== false })
 }
 
+export async function activeToolbarProfile(page) {
+  const select = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('combobox', { name: 'Workspace profile', exact: true })
+  if (await select.count() === 1) {
+    const value = await select.inputValue()
+    return PRODUCT_SURFACES.find((surface) => surface.id === value)?.contract.toolbar?.profile
+  }
+  const selected = page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab', { selected: true })
+  const selectedName = await selected.count() === 1 ? await selected.getAttribute('aria-label') : null
+  return PRODUCT_SURFACES.find((surface) => surface.label === selectedName)?.contract.toolbar?.profile
+}
+
 export async function censusControls(page, map, { state = 'ready', viewport = 'desktop', inventory = readControlInventory(map) } = {}) {
   // Enumerate first, independently of coverage, so missing registry entries
   // cannot remove controls from the census.
   const controls = await enumerateControls(page)
-  const selected = page.getByRole('tablist', { name: 'Workspace profile', exact: true }).getByRole('tab', { selected: true })
-  const selectedName = await selected.count() === 1 ? await selected.getAttribute('aria-label') : null
-  const profile = PRODUCT_SURFACES.find((surface) => surface.label === selectedName)?.contract.toolbar?.profile
+  const profile = await activeToolbarProfile(page)
   const derived = registryCensusMappings(controls, map, { profile, viewport })
   for (const entry of map.entries) {
     if (!entry.viewports.includes(viewport)) continue
