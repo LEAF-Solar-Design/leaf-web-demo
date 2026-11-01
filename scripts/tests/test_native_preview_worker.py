@@ -5,12 +5,16 @@ from contextlib import contextmanager
 import hashlib
 import io
 import json
+import plistlib
 from pathlib import Path
+import shutil
 import signal
 import struct
 import subprocess
 import sys
+import tempfile
 import time
+import types
 import zipfile
 import zlib
 
@@ -428,6 +432,82 @@ def test_remote_permit_expiry_kills_only_owned_child(tmp_path):
 def test_remote_supervisor_requires_initial_permit(tmp_path):
     with pytest.raises(RuntimeError, match='permit-expired'):
         mac.supervise(['never-start'], tmp_path / 'missing', popen=lambda *a, **k: pytest.fail('spawned'))
+
+
+def test_generic_compile_keeps_granted_simulator_custody(source, tmp_path, capsys):
+    owned = tmp_path / 'owned'
+    owned.mkdir()
+    derived, internal = tmp_path / 'derived', tmp_path / 'internal'
+    commands = []
+    runtime = 'com.apple.CoreSimulator.SimRuntime.iOS-26-0'
+    def checked(argv, timeout=30, cwd=None):
+        commands.append(argv)
+        if argv[0] == '/usr/bin/xcodebuild':
+            # A dynamically granted device need not be an Xcode build destination.
+            assert argv[argv.index('-destination') + 1] == 'generic/platform=iOS Simulator'
+            assert UDID not in str(argv)
+            assert argv[argv.index('-sdk') + 1] == 'iphonesimulator'
+            assert cwd == owned / 'source'
+            app = derived / 'Build/Products/Debug-iphonesimulator/Portfolio.app'
+            app.mkdir(parents=True)
+            (app / 'Info.plist').write_bytes(plistlib.dumps({'CFBundleIdentifier': mac.BUNDLE}))
+        elif argv[0] == '/usr/bin/ditto':
+            shutil.copytree(argv[1], argv[2])
+        else:
+            assert argv[:2] == ['/usr/bin/xcrun', 'simctl']
+            if argv[2] == 'list':
+                return json.dumps({'devices': {runtime: [dict(udid=UDID, isAvailable=True,
+                    deviceTypeIdentifier='com.apple.CoreSimulator.SimDeviceType.iPhone-17-Pro-Max')]}}).encode()
+            assert argv[3] == UDID
+            if argv[2] == 'listapps':
+                return plistlib.dumps({})
+            if argv[2] == 'io':
+                Path(argv[-1]).write_bytes(png())
+        return b''
+    payload = dict(archive=base64.b64encode(source[0]).decode(), byte_size=len(source[0]),
+                   sha256=hashlib.sha256(source[0]).hexdigest(), budget=500, udid=UDID,
+                   ticket='fixture-ticket', name='fixture-owned')
+    namespace = dict(base64=base64, hashlib=hashlib, io=io, json=json, plistlib=plistlib,
+                     zipfile=zipfile, time=types.SimpleNamespace(sleep=lambda _: None),
+                     sys=types.SimpleNamespace(stdin=io.StringIO(json.dumps(payload))),
+                     roots=lambda _: (owned, derived, internal),
+                     permitted=lambda path: None, checked=checked,
+                     application_inventory=plistlib.loads)
+    exec(mac.DRIVER, namespace)
+    result = json.loads(capsys.readouterr().out)
+    assert result['simulator_udid'] == UDID and result['simulator_runtime'] == runtime
+    assert result['screenshot_sha256'] == hashlib.sha256(png()).hexdigest()
+    assert [c[2] for c in commands if c[0] == '/usr/bin/xcrun'] == [
+        'list', 'bootstatus', 'listapps', 'install', 'launch', 'io']
+    assert (owned / 'install-owned').read_text() == mac.BUNDLE
+
+
+@pytest.mark.parametrize('exit_code,converted,accept', [
+    (0, plistlib.dumps({'com.example.existing': {'CFBundleIdentifier': 'com.example.existing'}}), True),
+    (1, b'', False), (0, b'not-a-plist', False), (0, plistlib.dumps([]), False),
+    (0, b'x' * (2 * 1024 * 1024 + 1), False),
+])
+def test_app_inventory_converts_openstep_and_refuses_unusable_readback(exit_code, converted, accept):
+    raw = b'{ "com.example.existing" = { CFBundleIdentifier = "com.example.existing"; }; }'
+    calls = []
+    def run(argv, **kwargs):
+        assert argv == ['/usr/bin/plutil', '-convert', 'xml1', '-o', '-', '--', '-']
+        assert kwargs['input'] == raw and kwargs['timeout'] == 30
+        assert kwargs['stderr'] is subprocess.DEVNULL
+        kwargs['stdout'].write(converted)
+        calls.append(argv)
+        return types.SimpleNamespace(returncode=exit_code)
+    node = next(n for n in ast.parse(mac.REMOTE_COMMON).body
+                if isinstance(n, ast.FunctionDef) and n.name == 'application_inventory')
+    namespace = dict(tempfile=tempfile, plistlib=plistlib,
+                     subprocess=types.SimpleNamespace(run=run, DEVNULL=subprocess.DEVNULL))
+    exec(compile(ast.Module(body=[node], type_ignores=[]), '<inventory>', 'exec'), namespace)
+    if accept:
+        assert 'com.example.existing' in namespace['application_inventory'](raw)
+    else:
+        with pytest.raises((AssertionError, plistlib.InvalidFileException)):
+            namespace['application_inventory'](raw)
+    assert len(calls) == 1
 
 
 def remote_clock_process(tmp_path, program, payload, *, kernel, local_origin):
