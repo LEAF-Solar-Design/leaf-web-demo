@@ -1839,7 +1839,7 @@ test('each declared dialog capture receives its initial focus target and emits i
   for (const [featureId, name, role, focusName, key, expectedModal = false] of [
     ['control:linked-services', 'Linked services', 'button', 'Close linked services panel', 'close-linked-services'],
     ['control:claude-accounts', 'Claude accounts', 'button', 'Close Claude account panel', 'close-claude-accounts'],
-    ['control:session-details', 'Session details', 'button', 'Close details', 'close-session-details', true],
+    ['control:session-details', 'Session details', 'button', 'Close details', 'close-session-details'],
     ['control:version-history', 'Version history', null, null, 'control:version-history'],
     ['action:bar-shortcuts', 'Keyboard shortcuts', 'switch', 'Single-key shortcuts', 'single-key-shortcuts', true],
   ]) for (const state of ACCESSIBILITY_DIALOG_SCOPE[featureId].states) {
@@ -1881,11 +1881,11 @@ test('each declared dialog capture receives its initial focus target and emits i
 
 test('session-details desktop traces pass the real lens only when Escape closes the dialog', async () => {
   for (const state of ['ready', 'failed-load']) for (const escapeClosed of [true, false]) {
-    const fake = accessibilityWalkFixture({ featureId: 'control:session-details', state, modal: true, escapeClosed })
+    const fake = accessibilityWalkFixture({ featureId: 'control:session-details', state, modal: false, escapeClosed })
     const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
     await followAccessibilityCapture({ ...fake, capture })
     const { overlay, focus } = fake.evidence.measurements
-    assert.deepEqual(overlay, { role: 'dialog', name: 'Session details', modal: true, expectedModal: true })
+    assert.deepEqual(overlay, { role: 'dialog', name: 'Session details', modal: false, expectedModal: false })
     assert.equal(focus.openTarget, 'close-session-details')
     assert.equal(focus.actualOpenTarget, 'close-session-details')
     assert.equal(focus.tabRemainsInside, true)
@@ -1894,6 +1894,18 @@ test('session-details desktop traces pass the real lens only when Escape closes 
     assert.equal(focus.actualReturnTarget, 'control:session-details')
     assert.equal(accessibility.evaluate(fake.evidence).status, escapeClosed ? 'pass' : 'finding')
     assert.equal(fake.evidence.result.result, 'passed')
+    for (const dispose of fake.cleanup) await dispose()
+  }
+})
+
+test('session-details desktop reports a finding when the Details dialog is modal', async () => {
+  for (const state of ['ready', 'failed-load']) {
+    const fake = accessibilityWalkFixture({ featureId: 'control:session-details', state, modal: true, escapeClosed: true })
+    const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+    await followAccessibilityCapture({ ...fake, capture })
+    assert.equal(fake.evidence.measurements.overlay.modal, true)
+    assert.equal(fake.evidence.measurements.overlay.expectedModal, false)
+    assert.equal(accessibility.evaluate(fake.evidence).status, 'finding')
     for (const dispose of fake.cleanup) await dispose()
   }
 })
