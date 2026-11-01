@@ -144,7 +144,8 @@ export default function Toast({ toast, onDone }) {
   return (
     <div
       ref={rootRef}
-      className={`toast leaf-toast ${exiting ? 'exit' : 'enter'}`}
+      className={`toast ${exiting ? 'exit' : 'enter'}`}
+      data-dp-case="toast"
       data-has-action={toast.action ? 'true' : undefined}
       role="status"
       tabIndex={-1}

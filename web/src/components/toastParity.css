@@ -1,2 +1,2 @@
 /* leaf-dp-v1 */
-.toast.leaf-toast{width:min(var(--leaf-metric-toast),calc(100vw - 32px));padding:var(--leaf-space-3) var(--leaf-space-4);border-radius:var(--leaf-radius-control);background:var(--leaf-raised);color:var(--leaf-ink);border:1px solid var(--leaf-line);box-shadow:var(--leaf-shadow-popover);font-size:var(--leaf-size-dense);line-height:var(--leaf-leading-dense)}
+.toast[data-dp-case="toast"]{width:min(var(--leaf-metric-toast),calc(100vw - 32px));padding:var(--leaf-space-3) var(--leaf-space-4);border-radius:var(--leaf-radius-control);background:var(--leaf-raised);color:var(--leaf-ink);border:1px solid var(--leaf-line);box-shadow:var(--leaf-shadow-popover);font-size:var(--leaf-size-dense);line-height:var(--leaf-leading-dense)}
