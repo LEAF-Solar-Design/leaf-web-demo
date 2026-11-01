@@ -1,6 +1,7 @@
 import { authHeaders, config, getStoredOrgId, noteUnauthorized } from '../api.js'
 import { getStoredActorBindingId } from '../projects/api.js'
 import { validatePortfolioDocument } from './portfolioDocument.js'
+import { DESIGN_FIELDS, validateNodeDesign } from './pageDesign.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
@@ -8,7 +9,8 @@ const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
 export function validatePageDocument(document) {
   if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
   if (!document || typeof document !== 'object' || Array.isArray(document)
-    || Object.keys(document).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+    || Object.keys(document).filter(key => !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+  validateNodeDesign(document, 'page')
   for (const [field, limit] of Object.entries(LIMITS)) {
     const value = document[field]
     if (typeof value !== 'string' || Array.from(value).length > limit || /[<>]/.test(value)
@@ -21,6 +23,7 @@ export function validatePageDocument(document) {
   if (!['cream', 'light', 'dark'].includes(document.theme) || !['center', 'left'].includes(document.alignment)) {
     throw new Error('Choose one of the available page layouts.')
   }
+  if (new TextEncoder().encode(JSON.stringify(document)).length > 8192) throw new Error('Page exceeds 8192 bytes.')
   return document
 }
 

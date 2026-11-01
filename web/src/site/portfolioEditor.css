@@ -31,3 +31,17 @@
 .browser-asset-viewport .portfolio-viewer img { height: 100%; max-height: 100%; }
 .browser-asset-viewport .portfolio-viewer p { flex-shrink: 0; }
 @media(max-width:600px) { .portfolio-grid { grid-template-columns: minmax(0,1fr); } .portfolio nav { margin-bottom: 24px; } }
+.portfolio { font-size: calc(16px * var(--design-scale, 1)); }
+.portfolio h1 { font-family: var(--design-font, Georgia, serif); font-weight: var(--design-weight, 400); font-size: calc(clamp(32px,5vw,64px) * var(--design-scale, 1)); }
+.portfolio > :not(nav):not(.portfolio-viewer) { max-width: var(--design-width, none); }
+.portfolio .portfolio-grid { grid-template-columns: repeat(var(--design-columns, 2), minmax(0,1fr)); gap: var(--design-spacing, 32px); }
+.portfolio .portfolio-grid[data-gallery-layout="single"] { grid-template-columns: repeat(var(--design-columns, 1), minmax(0,1fr)); }
+.design-container { display: grid; grid-template-columns: repeat(var(--design-columns, 1), minmax(0,1fr)); }
+.portfolio nav { color: var(--design-accent, inherit); }
+.portfolio p { color: var(--page-muted, inherit); }
+.portfolio h2, .portfolio h3 { font-family: var(--design-font, inherit); font-weight: var(--design-weight, bold); }
+.portfolio .portfolio-grid, .design-container { gap: var(--design-gap, var(--design-spacing, 32px)); }
+.portfolio-grid > * { min-width: 0; }
+.portfolio nav button, .portfolio nav a { color: inherit; }
+.portfolio-grid button, .portfolio-grid a { text-align: inherit; }
+@media(max-width:600px) { .portfolio .portfolio-grid, .portfolio .portfolio-grid[data-gallery-layout="single"], .design-container { grid-template-columns: repeat(var(--design-mobile-columns, 1), minmax(0,1fr)); } .portfolio figure { grid-column: span var(--design-mobile-span, 1) !important; } }

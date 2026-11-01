@@ -25,6 +25,24 @@ const INVALID = 'The text proposal could not be verified. Try again.'
 beforeEach(() => { vi.stubGlobal('fetch', vi.fn()); unauthorized.mockClear() })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 
+it('allows text changes while preserving configuration and rejects design changes in proposals', () => {
+  const source = document()
+  source.appearance = { font: 'mono', palette: { text: '#aBCdEf' } }
+  source.textStyles = { headline: { size: 48 } }
+  source.nav = { order: ['resume', 'home'], hideAbout: true }
+  source.categories[0].hidden = true
+  source.categories[0].images[0].display = { fit: 'cover', focal: 'top-left' }
+  source.resume[0].entries[0].layout = { padding: 24 }
+  const proposed = structuredClone(source)
+  proposed.headline = 'New headline'
+  expect(portfolioTextChanges(source, proposed)).toEqual([{ label: 'Headline', before: source.headline, after: 'New headline' }])
+  for (const change of [value => { value.appearance.font = 'serif' }, value => { delete value.categories[0].hidden },
+    value => { value.categories[0].images[0].display.focal = 'bottom' }, value => { value.resume[0].entries[0].layout.padding = 0 }]) {
+    const changed = structuredClone(proposed); change(changed)
+    expect(() => portfolioTextChanges(source, changed)).toThrow()
+  }
+})
+
 describe('source-bound portfolio proposal transport', () => {
   it('posts only instruction and saved source with existing authenticated no-store headers', async () => {
     const source = saved(), original = JSON.stringify(source), output = result()

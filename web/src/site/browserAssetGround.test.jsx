@@ -1,9 +1,12 @@
 import { useContext } from 'react'
-import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, within, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
 import { parse } from '@babel/parser'
 import { BrowserArtifactContext, BrowserAssetGround } from './BrowserAssetGround.jsx'
+import { loadProjectPage, saveProjectPage } from './projectPageClient.js'
+
+vi.mock('./projectPageClient.js', async importOriginal => ({ ...await importOriginal(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn() }))
 
 vi.mock('./ProjectBoardGround.jsx', () => ({ ProjectBoardGround: ({ panel, active }) => <div hidden={!active}>{panel}</div> }))
 const auth = vi.hoisted(() => ({ configured: true, signedIn: true, listeners: new Set(), login: vi.fn() }))
@@ -22,8 +25,39 @@ beforeEach(() => {
   auth.signedIn = true
   auth.listeners.clear()
   auth.login.mockReset()
+  loadProjectPage.mockReset(); saveProjectPage.mockReset()
 })
 afterEach(cleanup)
+
+it('switches personal editing styles around one dirty owner without loading or saving', async () => {
+  const key = 'leaf.editingStyle.v1:' + encodeURIComponent(props.accountScope)
+  localStorage.setItem(key, 'environment')
+  const page = { label: 'Saved page', headline: 'Before editing', description: '', status: '', theme: 'cream', alignment: 'center' }
+  loadProjectPage.mockResolvedValueOnce({ revision: 4, digest: 'a'.repeat(64), document: page })
+  try {
+    const { container } = render(<BrowserAssetGround {...props} />)
+    const canvas = within(container.querySelector('.browser-asset-viewport'))
+    fireEvent.click(canvas.getByRole('button', { name: 'Open page' }))
+    await canvas.findByText('Before editing')
+    fireEvent.click(canvas.getByRole('button', { name: 'Edit', exact: true }))
+    fireEvent.change(canvas.getByLabelText('headline'), { target: { value: 'Unsaved in environment' } })
+    fireEvent.click(canvas.getByRole('button', { name: 'Settings', exact: true }))
+    fireEvent.change(canvas.getByLabelText('Editing style'), { target: { value: 'sidebar' } })
+    expect(localStorage.getItem(key)).toBe('sidebar')
+    await waitFor(() => expect(container.querySelector('.project-page-editor input[value="Unsaved in environment"]')).toBeTruthy())
+    const owner = container.querySelector('.project-page-editor')
+    fireEvent.change(canvas.getByLabelText('Editing style'), { target: { value: 'environment' } })
+    expect(container.querySelector('.project-page-editor')).toBe(owner)
+    expect(canvas.getByLabelText('headline').value).toBe('Unsaved in environment')
+    fireEvent.click(canvas.getByRole('button', { name: 'Undo', exact: true }))
+    expect(canvas.getByLabelText('headline').value).toBe('Before editing')
+    fireEvent.click(canvas.getByRole('button', { name: 'Redo', exact: true }))
+    expect(canvas.getByLabelText('headline').value).toBe('Unsaved in environment')
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  } finally { localStorage.removeItem(key) }
+})
+
 
 let handoff
 function Output() {
@@ -167,7 +201,8 @@ it('drops chooser sign-in on token storage even when the account scope stays the
 
 it('starts empty with closed overlays and retains the existing panel input across toggles', () => {
   const { container } = render(<BrowserAssetGround {...props} />)
-  expect(screen.getByText('No app to show yet')).toBeTruthy()
+  expect(screen.getByText('No page open')).toBeTruthy()
+  expect(screen.getByText('Open page loads your saved page or portfolio.')).toBeTruthy()
   expect(screen.getByText('Pastry shop')).toBeTruthy()
   expect(container.querySelector('iframe')).toBeNull()
   const toggle = screen.getByRole('button', { name: 'Project' })

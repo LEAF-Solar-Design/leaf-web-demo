@@ -9,6 +9,17 @@ import re
 import unicodedata
 import zipfile
 
+if __package__:
+    from .page_design import FIELDS as DESIGN_FIELDS, validate_node, DESIGN_JS, DESIGN_CSS
+else:
+    import importlib.util
+    from pathlib import Path
+    _design_spec = importlib.util.spec_from_file_location('page_design', Path(__file__).with_name('page_design.py'))
+    _design = importlib.util.module_from_spec(_design_spec)
+    _design_spec.loader.exec_module(_design)
+    DESIGN_FIELDS, validate_node = _design.FIELDS, _design.validate_node
+    DESIGN_JS, DESIGN_CSS = _design.DESIGN_JS, _design.DESIGN_CSS
+
 
 _TEXT_LIMITS = {"label": (1, 120), "headline": (1, 240),
                 "description": (0, 1200), "status": (0, 80)}
@@ -80,15 +91,16 @@ PAGE_CSS = """.project-page {
 """
 
 _PAGE_JSX = """import page from '../page.json';
+import {appearanceStyle,textStyle} from './design';
 
 export default function Page() {
   return (
-    <main className="project-page" data-theme={page.theme} data-alignment={page.alignment}>
+    <main className="project-page" data-theme={page.theme} data-alignment={page.alignment} style={appearanceStyle(page.appearance)}>
       <div className="project-page__content">
-        <p className="project-page__label">{page.label}</p>
-        <h1 className="project-page__headline">{page.headline}</h1>
-        {page.description && <p className="project-page__description">{page.description}</p>}
-        {page.status && <p className="project-page__status">{page.status}</p>}
+        <p className="project-page__label" style={textStyle(page.textStyles?.label)}>{page.label}</p>
+        <h1 className="project-page__headline" style={textStyle(page.textStyles?.headline)}>{page.headline}</h1>
+        {page.description && <p className="project-page__description" style={textStyle(page.textStyles?.description)}>{page.description}</p>}
+        {page.status && <p className="project-page__status" style={textStyle(page.textStyles?.status)}>{page.status}</p>}
       </div>
     </main>
   );
@@ -163,8 +175,9 @@ def validate_document(document: dict) -> dict:
     """
     if type(document) is dict and 'schema' in document:
         return _portfolio_template().validate_document(document)
-    if type(document) is not dict or set(document) != set(_TEXT_LIMITS) | set(_ENUMS):
+    if type(document) is not dict or set(document) - set(DESIGN_FIELDS['page']) != set(_TEXT_LIMITS) | set(_ENUMS):
         raise ValueError("Page must contain exactly the six supported fields")
+    validate_node(document, 'page')
     for field, (minimum, maximum) in _TEXT_LIMITS.items():
         value = document[field]
         if type(value) is not str or not minimum <= len(value) <= maximum:
@@ -181,7 +194,7 @@ def validate_document(document: dict) -> dict:
     result = {key: document[key] for key in sorted(document)}
     if len(_canonical_json(result)) > MAX_DOCUMENT_BYTES:
         raise ValueError("Page document is too large")
-    return result
+    return json.loads(_canonical_json(result))
 
 
 def document_digest(document: dict) -> str:
@@ -217,8 +230,9 @@ def source_archive(document: dict, revision: int, previews=None) -> bytes:
         "page.json": _canonical_json(page) + b"\n",
         "app/page.jsx": _PAGE_JSX.encode("utf-8"),
         "app/layout.jsx": _LAYOUT_JSX.encode("utf-8"),
+        "app/design.js": DESIGN_JS.encode("utf-8"),
         "app/globals.css": ("html, body { margin: 0; min-height: 100%; }\n"
-                            "body > .project-page { min-height: 100vh; min-height: 100dvh; }\n" + PAGE_CSS).encode("utf-8"),
+                            "body > .project-page { min-height: 100vh; min-height: 100dvh; }\n" + PAGE_CSS + DESIGN_CSS).encode("utf-8"),
         "next.config.mjs": b"export default {};\n",
         ".gitignore": b"node_modules/\n.next/\nout/\n.env*\nnpm-debug.log*\n",
         "README.md": _README.encode("utf-8"),
