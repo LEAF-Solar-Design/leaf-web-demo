@@ -70,6 +70,7 @@ def _load_usage():
 @pytest.fixture(autouse=True)
 def clean_counter_state(monkeypatch):
     monkeypatch.delenv("LEAF_DAILY_AUTHOR_QUOTA", raising=False)
+    monkeypatch.delenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", raising=False)
     monkeypatch.delenv("LEAF_AUTHOR_QUOTA_STORE", raising=False)
     monkeypatch.delenv("LEAF_RUNTIME_ENV", raising=False)
     author_quota.reset_memory_state()
@@ -809,3 +810,50 @@ def test_both_web_author_error_paths_tag_the_quota():
     panel = (PROJECT_ROOT / "web" / "src" / "components" /
              "AuthorPanel.jsx").read_text(encoding="utf-8")
     assert "e.quotaExceeded" in panel and "<QuotaGate" in panel
+
+
+def test_exempt_tenant_is_never_charged_or_refused(monkeypatch, allow_memory):
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", "t-exempt")
+
+    def explode(*_a, **_k):
+        raise AssertionError("exempt tenants must bypass quota policy and stores")
+
+    for name in ("durability_required", "usage_policy", "lookup_attempt", "charge"):
+        monkeypatch.setattr(author_quota, name, explode)
+    for attempt in range(3):
+        assert author_quota.enforce(
+            "t-exempt", "hosted_starter", now_ts=1785283200.0,
+            idempotency_key=f"attempt-{attempt}",
+        ) is None
+    assert "2026-07-29:t-exempt" not in author_quota._MEMORY_STATE
+    assert author_quota._MEMORY_STATE == {}
+    assert author_quota._MEMORY_ATTEMPTS == {}
+
+
+def test_non_exempt_tenant_still_capped_when_list_set(monkeypatch, allow_memory):
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", "t-exempt")
+    assert author_quota.enforce("t-other", "hosted_starter") is None
+    with pytest.raises(author_quota.AuthorQuotaExceeded):
+        author_quota.enforce("t-other", "hosted_starter")
+
+
+def test_exemption_list_parsing_is_bounded(monkeypatch):
+    for raw in ("", "   "):
+        monkeypatch.setenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", raw)
+        assert author_quota.exempt_tenants() == frozenset()
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", " a , ,b ")
+    assert author_quota.exempt_tenants() == frozenset({"a", "b"})
+    tenants = [f"tenant-{index}" for index in range(40)]
+    monkeypatch.setenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", ",".join(tenants))
+    assert author_quota.exempt_tenants() == frozenset(tenants[:32])
+
+
+def test_exemption_absent_keeps_prior_behavior(monkeypatch, allow_memory):
+    monkeypatch.delenv("LEAF_AUTHOR_QUOTA_EXEMPT_TENANTS", raising=False)
+    monkeypatch.setenv("LEAF_DAILY_AUTHOR_QUOTA", "1")
+    assert author_quota.exempt_tenants() == frozenset()
+    assert author_quota.enforce("t-exempt", "hosted_starter") is None
+    with pytest.raises(author_quota.AuthorQuotaExceeded):
+        author_quota.enforce("t-exempt", "hosted_starter")
