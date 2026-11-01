@@ -5,6 +5,7 @@ The caller must hold the consumer OS lock through collection and commit.
 """
 from __future__ import annotations
 
+import ast
 import hashlib
 import math
 import os
@@ -22,6 +23,13 @@ JOURNAL_SCHEMA = 'leaf.native-preview-consumer-journal.v1'
 CANDIDATE_SCHEMA = 'leaf.native-preview-reconciliation-candidate.v1'
 RECEIPT_SCHEMA = 'leaf.native-preview-reconciliation-receipt.v1'
 MAX_LOCAL = 16384
+
+# Reviewed ea666682 producer ordering. Bind content, never a mutable ref or
+# this whole module: a separate recovery must not change the Journal witness.
+PRE_EXECUTION_WORKER_SHA256 = 'd0fa9e9778490278988382f573555538a2fe204160f8d57da44958858b2cd89d'
+PRE_EXECUTION_JOURNAL_SOURCE_SHA256 = 'a8f668f0f84866ebf342229c7b707f6b985a66ad256d71f71e0431fde1a5a599'
+# Same ordering, with writable-descriptor receipt replay for Windows fsync.
+PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256 = '3375d56dcc1609b6b160e5af39365a8afc1b60d9d05c4360a88971931aea6ac0'
 
 
 class Unavailable(Exception):
@@ -87,7 +95,9 @@ def immutable(path, raw):
             os.fsync(stream.fileno())
     except FileExistsError:
         need(read(path) == raw)
-        with path.open('rb') as stream:
+        # Windows requires a writable descriptor for fsync; r+b never truncates.
+        with path.open('r+b') as stream:
+            need(stream.read(MAX_LOCAL + 1) == raw)
             os.fsync(stream.fileno())
     sync_directory(path.parent)
 
@@ -369,4 +379,118 @@ class LocalProof:
         immutable(receipt_path(self.directory, self.claim['job_id']), worker.encode(receipt))
         self.recheck(scope)
         need(read(self.checkpoint) == self.files[self.checkpoint])
+        clean_writer(self.checkpoint, self.scope_digest, 'clean')
+
+
+def journal_source_sha(raw):
+    names = {'Journal', 'need', 'sha', 'digest', 'source', 'identity', 'finite',
+             'sync_directory', 'read', 'immutable', 'runtime_commit',
+             'validate_events', 'receipt_path', 'MAX_LOCAL', 'JOURNAL_SCHEMA'}
+    text = raw.decode('utf-8').replace('\r\n', '\n')
+    tree = ast.parse(text)
+    nodes = [node for node in tree.body if getattr(node, 'name', None) in names or
+             isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and
+             target.id in names for target in node.targets)]
+    # AST selects reviewed definitions; interpreter-specific AST serialization
+    # is not a source identity (its empty-field representation changes).
+    segments = [ast.get_source_segment(text, node) for node in nodes]
+    need(all(type(segment) is str for segment in segments))
+    return sha(b'leaf.native-preview-journal-source.v1\0' +
+               '\n\n'.join(segments).encode('utf-8'))
+
+
+def runtime_source(revision, path):
+    # revision is already a full, verified commit. No network or ref fallback.
+    result = subprocess.run(['git', 'show', revision + ':' + path],
+                            cwd=Path(__file__).resolve().parents[1],
+                            stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=10)
+    need(result.returncode == 0 and len(result.stdout) <= 262144)
+    return result.stdout
+
+
+def pre_execution_source(revision):
+    paths = ('scripts/native_preview_worker.py', 'scripts/native_preview_reconciliation.py')
+    root = Path(__file__).resolve().parents[1]
+    original = [runtime_source(revision, path) for path in paths]
+    current = [read(root / path, 262144) for path in paths]
+    for producer, journal in (original, current):
+        need(sha(producer) == PRE_EXECUTION_WORKER_SHA256)
+        need(journal_source_sha(journal) in (PRE_EXECUTION_JOURNAL_SOURCE_SHA256,
+                                        PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256))
+    return journal_source_sha(original[1])
+
+
+class PreExecutionProof:
+    """No durable claim event means no heartbeat/source/native in reviewed code.
+
+    A claim POST may still have committed. This proof carries no job identity
+    and grants no backend settlement, allocator release or preview completion.
+    """
+    def __init__(self, directory, checkpoint, scope_digest):
+        self.directory, self.checkpoint = directory, checkpoint
+        self.scope_digest = scope_digest
+        self.files, self.stats = {}, {}
+        need(not directory.is_symlink())
+        value = worker.parse(self.capture(checkpoint))
+        need(type(value) is dict and set(value) == {'schema', 'scope_sha256', 'phase', 'cycle'})
+        need(value['schema'] == CHECKPOINT_SCHEMA and value['scope_sha256'] == scope_digest
+             and value['phase'] == 'reconciliation-required')
+        self.cycle = cycle_path(directory, value['cycle'])
+        self.cycle_stat = (self.cycle.stat().st_dev, self.cycle.stat().st_ino)
+        self.names = ['journal.json']
+        need(sorted(p.name for p in self.cycle.iterdir()) == self.names)
+        self.journal_path = self.cycle / 'journal.json'
+        journal = worker.parse(self.capture(self.journal_path))
+        need(type(journal) is dict and set(journal) ==
+             {'schema', 'scope_sha256', 'cycle', 'runtime_commit', 'claim_state', 'events'})
+        need(journal['schema'] == JOURNAL_SCHEMA and journal['scope_sha256'] == scope_digest
+             and journal['cycle'] == self.cycle.name and journal['claim_state'] == 'unknown'
+             and type(journal['events']) is list and journal['events'] == [])
+        need(type(journal['runtime_commit']) is str and
+             re.fullmatch('[0-9a-f]{40}', journal['runtime_commit']) is not None)
+        self.runtime = runtime_commit(journal['runtime_commit'])
+        self.journal_source_sha256 = pre_execution_source(self.runtime)
+
+    @staticmethod
+    def file_stat(path):
+        value = path.lstat()
+        need(stat.S_ISREG(value.st_mode))
+        return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns, value.st_ctime_ns)
+
+    def capture(self, path):
+        before = self.file_stat(path)
+        raw = read(path)
+        need(self.file_stat(path) == before)
+        self.files[path] = raw
+        self.stats[path] = before
+        return raw
+
+    def recheck(self, scope):
+        need(not self.directory.is_symlink())
+        need(sha(worker.encode(worker.binding(scope))) == self.scope_digest)
+        need(cycle_path(self.directory, self.cycle.name) == self.cycle)
+        need((self.cycle.stat().st_dev, self.cycle.stat().st_ino) == self.cycle_stat)
+        need(sorted(p.name for p in self.cycle.iterdir()) == self.names)
+        for path, raw in self.files.items():
+            need(read(path) == raw)
+        for path, expected in self.stats.items():
+            need(self.file_stat(path) == expected)
+        need(pre_execution_source(self.runtime) == self.journal_source_sha256)
+
+    def commit(self, scope, clean_writer):
+        self.recheck(scope)
+        receipt = {'schema': RECEIPT_SCHEMA, 'scope_sha256': self.scope_digest,
+                   'cycle': self.cycle.name, 'original_runtime_commit': self.runtime,
+                   'original_checkpoint': self.files[self.checkpoint].decode('utf-8'),
+                   'checkpoint_sha256': sha(self.files[self.checkpoint]),
+                   'journal_sha256': sha(self.files[self.journal_path]),
+                   'local_evidence_sha256': sha(worker.encode(
+                       {p.name: sha(raw) for p, raw in self.files.items()})),
+                   'worker_sha256': PRE_EXECUTION_WORKER_SHA256,
+                   'journal_source_sha256': self.journal_source_sha256,
+                   'outcome': 'claim-unconfirmed-pre-execution',
+                   'backend_settlement': 'unconfirmed'}
+        path = self.directory / ('reconciliation-' + self.cycle.name + '.json')
+        immutable(path, worker.encode(receipt))
+        self.recheck(scope)
         clean_writer(self.checkpoint, self.scope_digest, 'clean')
