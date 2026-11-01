@@ -99,8 +99,9 @@ import time
 import uuid
 from typing import Any, Dict, List, Optional
 
-from fastapi import APIRouter, Depends, Request
+from fastapi import APIRouter, Depends, Header, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
+from starlette.concurrency import run_in_threadpool
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 import deps
@@ -119,6 +120,104 @@ from envelopes import (ErrorCode, err_envelope, error_obj, error_response,
                        with_envelope_fields)
 
 router = APIRouter()
+
+
+def _page_proposal_tenant(request: Request):
+    """Register dispatch trust only for this fixed host route, not all sessions."""
+    headers = request.headers
+    private = {"Cache-Control": "private, no-store"}
+    try:
+        if (deps.auth_live() and headers.get("x-tenant-id")
+                and deps._dispatch_secret_ok(headers.get("x-dispatch-secret"))):
+            if headers.get("x-demo-session") or headers.get("x-guest-session"):
+                raise HTTPException(403, "Portfolio proposal access denied.")
+            return deps.backedge_tenant(headers["x-tenant-id"])
+        return deps.require_tenant(
+            request, x_tenant_id=headers.get("x-tenant-id"),
+            authorization=headers.get("authorization"),
+            x_dispatch_secret=headers.get("x-dispatch-secret"),
+            x_guest_session=headers.get("x-guest-session"),
+            x_demo_session=headers.get("x-demo-session"),
+        )
+    except HTTPException as exc:
+        exc.headers = {**(exc.headers or {}), **private}
+        raise
+    except Exception:  # noqa: BLE001 - identity stores cannot expose diagnostics
+        raise HTTPException(503, "Portfolio proposal service is unavailable.", headers=private) from None
+
+
+@router.post("/api/sessions/{session_id}/page/proposals")
+async def propose_project_page(
+    session_id: str, request: Request,
+    tenant=Depends(_page_proposal_tenant),
+    authority_session_id: Optional[str] = Header(default=None, alias="X-Authority-Session-Id"),
+    authority_turn_id: Optional[str] = Header(default=None, alias="X-Authority-Turn-Id"),
+):
+    """A bounded, review-only adapter to the saved-source proposal service."""
+    headers = {"Cache-Control": "private, no-store"}
+
+    def fail(status, message):
+        return JSONResponse({"detail": message}, status_code=status, headers=headers)
+
+    def authority():
+        if (authority_session_id != session_id
+                or not isinstance(authority_turn_id, str) or not authority_turn_id):
+            raise LookupError()
+        actor = deps.stage_author_identity(tenant, session_id, authority_turn_id)
+        if actor is None:
+            raise LookupError()
+        session = platform_link.require_project_session_access(
+            session_store.get_session(session_id), actor, write=True)
+        if session is None or not session.get("org_id") or not session.get("project_id"):
+            raise LookupError()
+        org = uuid.UUID(str(session["org_id"]))
+        project = uuid.UUID(str(session["project_id"]))
+        if (not org.int or not project.int or str(org) != str(session["org_id"])
+                or str(project) != str(session["project_id"]) or str(org) != str(actor)):
+            raise LookupError()
+        binding = platform_link.resolve_caller_binding(actor)
+        if binding is None or str(binding.platform_tenant_id) != str(org):
+            raise platform_link.ProjectSessionForbidden()
+        binding_id = uuid.UUID(str(binding.binding_id))
+        if not binding_id.int:
+            raise platform_link.ProjectSessionForbidden()
+        return org, project, binding_id
+
+    try:
+        platform_link._ensure_platform_package()
+        from leaf_platform import project_page_proposal as proposals, project_lifecycle as lifecycle
+    except Exception:  # noqa: BLE001 - package/store setup also fails closed
+        return fail(503, "Portfolio proposal service is unavailable.")
+
+    try:
+        scope = await run_in_threadpool(authority)
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > proposals.MAX_INPUT_BYTES:
+                return fail(413, "Portfolio proposal request is too large.")
+            raw.extend(chunk)
+        body = proposals.parse_request(bytes(raw))
+        # Recheck after reading input, then let the service retain all its own
+        # before/after role and source checks around synchronous inference.
+        if await run_in_threadpool(authority) != scope:
+            raise LookupError()
+        result = await run_in_threadpool(lambda: proposals.propose(*scope, **body))
+        if await run_in_threadpool(authority) != scope:
+            raise LookupError()
+        response = JSONResponse(result, headers=headers)
+        if len(response.body) > 1024 * 1024:
+            return fail(502, "Invalid portfolio proposal response.")
+        return response
+    except proposals.ProposalError as exc:
+        return fail(exc.status, str(exc))
+    except (platform_link.ProjectSessionForbidden, lifecycle.LifecycleForbidden):
+        return fail(403, "Portfolio proposal access denied.")
+    except lifecycle.LifecycleConflict:
+        return fail(409, "Portfolio proposal source changed.")
+    except (LookupError, lifecycle.LifecycleUnavailable):
+        return fail(404, "Portfolio proposal session is unavailable.")
+    except Exception:  # noqa: BLE001 - never expose provider/store exceptions
+        return fail(503, "Portfolio proposal service is unavailable.")
 
 
 # --------------------------------------------------------------------------- #

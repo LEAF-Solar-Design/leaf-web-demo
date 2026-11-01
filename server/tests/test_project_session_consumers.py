@@ -273,3 +273,145 @@ def test_non_verified_project_principals_get_no_grounding(material_source, flags
     values = {"subject": "auth0|editor", "authority_resolved": True, **flags}
     principal = deps.TenantContext(ORG_ID, **values)
     assert platform_link.read_turn_project_materials(principal, "s", "t", 300) is None
+
+
+@pytest.fixture
+def page_proposal_http(monkeypatch, material_source):
+    from types import SimpleNamespace
+    from uuid import UUID
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    from routers import sessions
+    from leaf_platform import project_page_proposal as proposals, project_web_page, project_lifecycle
+
+    session, page, _, _, _ = material_source
+    state = {"active": True, "revoked": False, "calls": 0, "late": False}
+    binding = SimpleNamespace(platform_tenant_id=UUID(ORG_ID),
+                              binding_id=UUID("44444444-4444-4444-8444-444444444444"))
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "proposal-test-secret")
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(deps, "backedge_tier", lambda tenant: "pro")
+    monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", lambda subject: (ORG_ID, "pro"))
+    monkeypatch.setattr(sessions.session_store, "active_turn_subject", lambda sid, tid, tenant, age:
+                        "auth0|editor" if state["active"] and (sid, tid, tenant) == ("s", "t", ORG_ID) else None)
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: binding)
+
+    def access(tenant, project_id, *, write, binding=None):
+        assert write is True
+        if state["revoked"]:
+            raise platform_link.ProjectSessionForbidden()
+        return ORG_ID
+
+    monkeypatch.setattr(platform_link, "require_project_access", access)
+    monkeypatch.setattr(project_lifecycle, "require_project_role", lambda *args, **kwargs: None)
+    monkeypatch.setattr(project_web_page, "read", lambda *args: page)
+    monkeypatch.setattr(project_web_page, "save", lambda *args, **kwargs: pytest.fail("proposal saved a page"))
+
+    def transport(payload):
+        state["calls"] += 1
+        assert payload["tenant_id"] == ORG_ID
+        if state["late"]:
+            state["active"] = False
+        return json.dumps({"source": payload["source"], "edits": [{"id": "f0002", "value": "New headline"}],
+                           "model": "claude-haiku-5-5", "usage": {"input_tokens": 12}}).encode()
+
+    monkeypatch.setattr(proposals, "_transport", transport)
+    app = FastAPI()
+    app.include_router(sessions.router)
+    with TestClient(app) as client:
+        yield client, session, page, state
+
+
+def _page_proposal_post(fixture, *, body=None, route="s", authority="s", turn="t"):
+    client, _, page, _ = fixture
+    return client.post(f"/api/sessions/{route}/page/proposals", headers={
+        "X-Tenant-Id": ORG_ID, "X-Dispatch-Secret": "proposal-test-secret",
+        "X-Authority-Session-Id": authority, "X-Authority-Turn-Id": turn,
+    }, json=body if body is not None else {
+        "instruction": "Shorten the headline", "expected_revision": page["revision"],
+        "expected_digest": page["digest"],
+    })
+
+
+def test_page_proposal_http_active_editor_exact_private_result(page_proposal_http):
+    response = _page_proposal_post(page_proposal_http)
+    _, session, page, state = page_proposal_http
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "private, no-store"
+    result = response.json()
+    assert set(result) == {"source", "proposed_document", "proposed_digest", "edits", "model", "usage"}
+    assert result["source"] == {"project_id": session["project_id"], "revision": 7, "digest": page["digest"]}
+    assert result["proposed_document"]["headline"] == "New headline"
+    assert page["document"]["headline"] == "Selected work"
+    assert state["calls"] == 1
+
+
+@pytest.mark.parametrize("failure", ["revoked", "foreign", "stale", "non_project", "late", "outage", "tenant"])
+def test_page_proposal_http_authority_refuses(page_proposal_http, monkeypatch, failure):
+    _, session, _, state = page_proposal_http
+    options = {}
+    if failure == "revoked":
+        state["revoked"] = True
+    elif failure == "foreign":
+        options["authority"] = "foreign"
+    elif failure == "stale":
+        options["turn"] = "old-turn"
+    elif failure == "non_project":
+        session.pop("org_id")
+        session.pop("project_id")
+    elif failure == "late":
+        state["late"] = True
+    elif failure == "tenant":
+        session["org_id"] = "55555555-5555-4555-8555-555555555555"
+    else:
+        def unavailable(*args, **kwargs):
+            raise RuntimeError("private store exception")
+        monkeypatch.setattr(platform_link, "resolve_caller_binding", unavailable)
+    response = _page_proposal_post(page_proposal_http, **options)
+    assert response.status_code in (403, 404, 503)
+    assert state["calls"] == (1 if failure == "late" else 0)
+    assert "private store exception" not in response.text
+    assert "proposed_document" not in response.json()
+
+
+@pytest.mark.parametrize("patch", [
+    {"subject": "auth0|other"}, {"instruction": " "}, {"instruction": 7},
+    {"expected_revision": True}, {"expected_revision": "7"},
+    {"expected_digest": "A" * 64}, {"expected_revision": 8},
+])
+def test_page_proposal_http_closed_types_and_saved_source(page_proposal_http, patch):
+    _, _, page, state = page_proposal_http
+    body = {"instruction": "Shorten", "expected_revision": page["revision"], "expected_digest": page["digest"], **patch}
+    response = _page_proposal_post(page_proposal_http, body=body)
+    assert response.status_code == (409 if patch == {"expected_revision": 8} else 422)
+    assert state["calls"] == 0
+
+
+def test_page_proposal_http_assembled_response_limit(page_proposal_http, monkeypatch):
+    from leaf_platform import project_page_proposal as proposals
+    monkeypatch.setattr(proposals, "propose", lambda *args, **kwargs: {"document": "x" * (1024 * 1024)})
+    response = _page_proposal_post(page_proposal_http)
+    assert response.status_code == 502
+    assert len(response.content) < 200
+
+
+def test_page_proposal_http_dispatch_identity_outage_is_private(page_proposal_http, monkeypatch):
+    def unavailable(*args):
+        raise RuntimeError("private identity diagnostic")
+    monkeypatch.setattr(deps, "backedge_tier", unavailable)
+    response = _page_proposal_post(page_proposal_http)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json() == {"detail": "Portfolio proposal service is unavailable."}
+    assert page_proposal_http[3]["calls"] == 0
+
+
+def test_page_proposal_http_package_outage_is_private(page_proposal_http, monkeypatch):
+    def unavailable():
+        raise RuntimeError("private package diagnostic")
+    monkeypatch.setattr(platform_link, "_ensure_platform_package", unavailable)
+    response = _page_proposal_post(page_proposal_http)
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "private, no-store"
+    assert response.json() == {"detail": "Portfolio proposal service is unavailable."}
+    assert page_proposal_http[3]["calls"] == 0

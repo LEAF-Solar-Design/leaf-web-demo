@@ -14,10 +14,12 @@
  */
 
 import { createHash, randomUUID } from "node:crypto";
+import { z } from "zod";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
 import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES } from "../ports/index.js";
 import {
   IntegrationClientError, integrationErrorMessage, validateIntegrationResponse,
+  ProjectPageProposalRequest,
 } from "../ports/impl/appRunClient.js";
 import type { IntegrationTool } from "../ports/impl/appRunClient.js";
 import type {
@@ -513,6 +515,7 @@ export class ConverseLoop {
         instantDrawingContext: input.instantDrawingContext,
         authoritySessionId: input.authoritySessionId,
         authorityTurnId: input.authorityTurnId,
+        pageProposalSource: pageProposalSource(input.contextPacket, session.tenant_id),
       });
       const canUseTool: CanUseTool = async (toolName, toolInput) => {
         if (isSpineTool(baseToolName(toolName))) {
@@ -541,7 +544,7 @@ export class ConverseLoop {
             : packet, intent);
       }
       const run = this.ports.runner.run({
-        systemPrompt: SPINE_SYSTEM_PROMPT,
+        systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text.",
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
         ...(resumeSdkSessionId
@@ -680,6 +683,7 @@ export class ConverseLoop {
       instantDrawingContext?: InstantDrawingContext;
       authoritySessionId?: string;
       authorityTurnId?: string;
+      pageProposalSource?: PageProposalSource;
     },
   ): ToolExecutor {
     const { appRun, gate, store } = this.ports;
@@ -825,6 +829,8 @@ export class ConverseLoop {
             action: "request_publication",
             args: { change_set_id: String(args.change_set_id ?? "") },
           };
+        case "propose_project_page":
+          return { action: "propose_project_page", args: ProjectPageProposalRequest.parse(args) };
         case "propose_overlay":
           return {
             action: "propose_overlay",
@@ -934,7 +940,14 @@ export class ConverseLoop {
       await emit("tool_call", { tool, args_summary: argsSummary(tool, args) });
 
       let result: SpineToolResult;
+      let pageProposalResult: Record<string, unknown> | undefined;
       try {
+        if (tool === "propose_project_page") {
+          const parsed = ProjectPageProposalRequest.safeParse(args);
+          if (!parsed.success) throw new Error("Invalid portfolio proposal request.");
+          if (!instant.authoritySessionId || !instant.authorityTurnId) throw new Error("Portfolio proposal authority is unavailable.");
+          args = parsed.data;
+        }
         // Integrations execute behind the host's sole gate and already return
         // their result. All other tools retain consult/check/dispatch.
         let hosted: IntegrationToolResult<unknown> | undefined;
@@ -973,7 +986,12 @@ export class ConverseLoop {
           consult = { action: tool, args };
         } else {
           consult = await gateConsultFor(tool, args);
-          verdict = await gate.check(consult.action, consult.args, { tenantId, sessionId, turnId });
+          verdict = await gate.check(consult.action, consult.args, {
+            tenantId, sessionId, turnId,
+            ...(tool === "propose_project_page" ? {
+              authoritySessionId: instant.authoritySessionId, authorityTurnId: instant.authorityTurnId,
+            } : {}),
+          });
         }
 
         // A deny is a RELAYABLE result, not a crash: the model explains it calmly.
@@ -1066,11 +1084,14 @@ export class ConverseLoop {
               },
               turnState: state,
               ...instant,
+              capturePageProposal: value => { pageProposalResult = value; },
             },
           );
         }
       } catch (e) {
-        result = isIntegrationTool(tool)
+        result = tool === "propose_project_page"
+          ? err("Portfolio proposal failed.")
+          : isIntegrationTool(tool)
           ? err(e instanceof IntegrationClientError ? integrationErrorMessage(e.code) : integrationErrorMessage("unavailable"))
           : err(`tool error: ${(e as Error).message}`);
       }
@@ -1083,6 +1104,8 @@ export class ConverseLoop {
         ok: !result.isError,
         summary: resultSummary(tool, result),
         ...(publicationResult ? { result: publicationResult } : {}),
+        ...(tool === "propose_project_page" && !result.isError && pageProposalResult
+          ? { result: pageProposalResult } : {}),
       });
       return result;
     };
@@ -1106,12 +1129,27 @@ export class ConverseLoop {
       instantDrawingContext?: InstantDrawingContext;
       authoritySessionId?: string;
       authorityTurnId?: string;
+      pageProposalSource?: PageProposalSource;
+      capturePageProposal?: (value: Record<string, unknown>) => void;
     },
   ): Promise<SpineToolResult> {
     const { appRun, instantExecutor } = this.ports;
     const tenantId = ctx.session.tenant_id;
 
     switch (tool) {
+      case "propose_project_page": {
+        const body = ProjectPageProposalRequest.parse(args);
+        const source = ctx.pageProposalSource;
+        if (!source || source.revision !== body.expected_revision || source.digest !== body.expected_digest ||
+            !ctx.authoritySessionId || !ctx.authorityTurnId) return err("Portfolio proposal source or authority is unavailable.");
+        const value = await appRun.proposeProjectPage(tenantId, ctx.authoritySessionId, body, {
+          sessionId: ctx.authoritySessionId, turnId: ctx.authorityTurnId,
+        });
+        const checked = validatePageProposal(value, source);
+        if (!checked) return err("Invalid portfolio proposal response.");
+        ctx.capturePageProposal?.(checked);
+        return ok(`Portfolio text proposed from revision ${source.revision}; private review only. Nothing saved or published.`);
+      }
       case "integration_datasets":
       case "integration_action_catalog":
       case "integration_query":
@@ -1535,6 +1573,10 @@ function err(content: string): SpineToolResult {
 
 /** Strip an MCP server prefix (mcp__spine__catalog_search -> catalog_search). */
 function baseToolName(name: string): string {
+  // The host-only tool belongs solely to the private spine server. Preserve
+  // legacy normalization for the vendored tools without accepting an alias
+  // from another MCP server for this authority-bearing action.
+  if (name.endsWith("__propose_project_page") && name !== "mcp__spine__propose_project_page") return name;
   return name.replace(/^mcp__.+?__/, "");
 }
 
@@ -1668,6 +1710,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `mode=${String(args.mode ?? "build")}`;
     case "request_publication":
       return `change_set_id=${String(args.change_set_id ?? "?")}`;
+    case "propose_project_page":
+      return "portfolio text proposal for private review";
     case "request_confirmation":
       return `kind=${String(args.kind ?? "confirm")}`;
     case "customize_platform":
@@ -1749,6 +1793,100 @@ function sanitizeCustomizeEdits(
     });
   }
   return out;
+}
+
+interface PageProposalSource { project_id: string; revision: number; digest: string }
+const proposalUuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/)
+  .refine(value => value !== "00000000-0000-0000-0000-000000000000");
+const proposalDigest = z.string().regex(/^[0-9a-f]{64}(?![\s\S])/);
+const proposalCount = z.number().int().nonnegative().refine(Number.isSafeInteger);
+const proposalSourceSchema = z.strictObject({
+  project_id: proposalUuid, revision: proposalCount.refine(value => value > 0), digest: proposalDigest,
+});
+function pageProposalSource(packet: Record<string, unknown>, tenantId: string): PageProposalSource | undefined {
+  const section = asRecord(packet.project_material_context);
+  if (section.schema !== "leaf.project-material-context.v1" || section.org_id !== tenantId) return undefined;
+  const page = asRecord(section.page);
+  const parsed = proposalSourceSchema.safeParse({
+    project_id: section.project_id, revision: page.revision, digest: page.digest,
+  });
+  return parsed.success ? parsed.data : undefined;
+}
+
+function proposalText(low: number, high: number) {
+  return z.string().refine(value => Array.from(value).length >= low && Array.from(value).length <= high &&
+    (!low || value.trim().length > 0) && !/[<>]/.test(value) &&
+    !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.replaceAll("\n", "")) &&
+    !/(?:[a-z][a-z0-9+.-]*:\/\/|\b(?:https?|ftp|file|data|javascript):|\bwww\.)/i.test(value));
+}
+const proposalDocumentSchema = z.strictObject({
+  schema: z.literal("leaf.portfolio.v1"), theme: z.literal("light"),
+  galleryLayout: z.enum(["grid", "single"]).optional(),
+  name: proposalText(1, 120), headline: proposalText(1, 240),
+  introduction: proposalText(0, 2400), about: proposalText(0, 8000),
+  contact: z.strictObject({
+    email: z.string().max(254).refine(value => !value ||
+      /^[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+(?![\s\S])/.test(value)),
+    location: proposalText(0, 160),
+  }),
+  resume: z.array(z.strictObject({
+    heading: proposalText(1, 120), entries: z.array(z.strictObject({
+      title: proposalText(0, 200), subtitle: proposalText(0, 240),
+      dates: proposalText(0, 120), description: proposalText(0, 2400),
+    })).max(20),
+  })).max(8),
+  categories: z.array(z.strictObject({
+    slug: z.string().regex(/^[a-z][a-z0-9-]{0,47}(?![\s\S])/)
+      .refine(value => !["home", "about", "resume"].includes(value)),
+    title: proposalText(1, 120), description: proposalText(0, 1200), hero: proposalCount,
+    images: z.array(z.strictObject({
+      material_id: proposalUuid, sha256: proposalDigest, preview_sha256: proposalDigest,
+      title: proposalText(0, 200), alt: proposalText(1, 400),
+    })).min(1).max(200),
+  })).min(1).max(12),
+});
+const pageProposalSchema = z.strictObject({
+  source: proposalSourceSchema, proposed_document: proposalDocumentSchema,
+  proposed_digest: proposalDigest,
+  model: z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._:/-]{0,127}(?![\s\S])/),
+  edits: z.array(z.strictObject({
+    id: z.string().regex(/^f[0-9]{4}(?![\s\S])/)
+      .refine(value => Number(value.slice(1)) >= 1 && Number(value.slice(1)) <= 1024),
+    value: z.string().refine(value => Array.from(value).length <= 8000 && !/[\p{Cs}]/u.test(value)),
+  })).max(32),
+  usage: z.strictObject({
+    input_tokens: proposalCount.optional(), output_tokens: proposalCount.optional(),
+    cache_creation_tokens: proposalCount.optional(), cache_read_tokens: proposalCount.optional(),
+    cost_tokens: proposalCount.optional(),
+  }),
+});
+
+/** Closed UI-only projection; full photo/source comparison remains in the browser. */
+function validatePageProposal(value: unknown, source: PageProposalSource): Record<string, unknown> | undefined {
+  try {
+    if (Buffer.byteLength(JSON.stringify(value), "utf8") > 1024 * 1024) return undefined;
+    const parsed = pageProposalSchema.safeParse(value);
+    if (!parsed.success) return undefined;
+    const result = parsed.data;
+    if (result.source.project_id !== source.project_id || result.source.revision !== source.revision ||
+        result.source.digest !== source.digest || new Set(result.edits.map(edit => edit.id)).size !== result.edits.length) return undefined;
+    const document = result.proposed_document;
+    if (Buffer.byteLength(JSON.stringify(document), "utf8") > 512 * 1024 ||
+        new Set(document.categories.map(category => category.slug)).size !== document.categories.length) return undefined;
+    let count = 0;
+    const references = new Map<string, string>();
+    for (const category of document.categories) {
+      count += category.images.length;
+      if (count > 200 || category.hero >= category.images.length ||
+          new Set(category.images.map(image => image.material_id)).size !== category.images.length) return undefined;
+      for (const image of category.images) {
+        const digest = `${image.sha256}:${image.preview_sha256}`;
+        if (references.has(image.material_id) && references.get(image.material_id) !== digest) return undefined;
+        references.set(image.material_id, digest);
+      }
+    }
+    return result;
+  } catch { return undefined; }
 }
 
 /** Project only the validated service fields, never the human-facing summary. */
