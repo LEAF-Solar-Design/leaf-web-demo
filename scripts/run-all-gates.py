@@ -3259,6 +3259,15 @@ def build_suites() -> List[Suite]:
         Suite("ci-process-capture-runner", "process capture runner", "pytest",
               REPO, [sys.executable, "-P", "-m", "pytest", "tests/test_process_capture_runner.py", "-q",
                      "--color=no", "-r", "s", "-p", "no:cacheprovider"], None),
+        # Capture packaging (slice P3): the multiple-certificate manifest runs everywhere; the
+        # strace smoke tests run only where strace exists (dedicated capture builds install it).
+        Suite("ci-full-run-manifest-certificates", "process capture manifest certificates", "pytest",
+              REPO, [sys.executable, "-P", "-m", "pytest", "tests/test_full_run_manifest_certificates.py", "-q",
+                     "--color=no", "-r", "s", "-p", "no:cacheprovider"], None),
+        Suite("ci-trace-smoke-linux", "process capture strace smoke", "pytest",
+              REPO, [sys.executable, "-P", "-m", "pytest", "tests/test_trace_smoke_linux.py", "-q",
+                     "--color=no", "-r", "s", "-p", "no:cacheprovider"], None,
+              allowed_skip_reasons=(r"strace or Linux unavailable",)),
         Suite("public-host-contract", "scripts public host contract probe", "pytest",
               SCRIPTS_DIR, _py_pytest("test_public_host_probe.py"), 11),
         # W14 expand-contract migration gate: the pytest suite validates the

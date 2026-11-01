@@ -687,6 +687,186 @@ else
   unset LEAF_TRUSTED_CI_DIR
 fi
 export PYTHONPATH="$selection_dir"
+# LEAF_PROCESS_CAPTURE_BEGIN
+process_capture_active=0
+if [[ "${LEAF_PROCESS_CAPTURE:-}" == 1 ]]; then
+  # Explicit requests cannot inherit an ambient context around the manual-event guard.
+  unset LEAF_PROCESS_CAPTURE_CONTEXT LEAF_PROCESS_CAPTURE_OUT
+  process_capture_reason=""
+  if [[ -n "${CODEBUILD_WEBHOOK_EVENT:-}" || -n "${CODEBUILD_WEBHOOK_HEAD_REF:-}" \
+        || -n "${CODEBUILD_WEBHOOK_BASE_REF:-}" || -n "${CODEBUILD_WEBHOOK_TRIGGER:-}" \
+        || "${CODEBUILD_INITIATOR:-}" == states/leaf-forge-ci-relay \
+        || -n "${FORGE_CI_OPERATION:-}" || -n "${LEAF_RELAY_MANIFEST:-}" \
+        || "${CODEBUILD_SOURCE_VERSION:-}" == pr/* || "${CODEBUILD_SOURCE_VERSION:-}" == refs/pull/* ]]; then
+    process_capture_reason=non_manual_event
+  elif [[ -n "${CI_SHARD_TOTAL:-}" && "${CI_SHARD_TOTAL}" != 1 ]]; then
+    process_capture_reason=sharded_build
+  fi
+  if [[ -z "$process_capture_reason" ]]; then
+    if ! { command -v strace >/dev/null 2>&1 && strace --version 2>/dev/null | head -1 | grep -q '^strace -- version 5\.16'; }; then
+      if ! { timeout 120 apt-get update -qq >&2 \
+          && DEBIAN_FRONTEND=noninteractive timeout 120 apt-get install -y 'strace=5.16*' >&2 \
+          && command -v strace >/dev/null 2>&1 \
+          && strace --version 2>/dev/null | head -1 | grep -q '^strace -- version 5\.16'; }; then
+        process_capture_reason=strace_unavailable
+      fi
+    fi
+  fi
+  if [[ -z "$process_capture_reason" ]]; then
+    capture_helpers_ready=1
+    for helper in trace_process_tree.py trace_supervisor.py external_inventory.py epoch_probe.py; do
+      if git --no-replace-objects show "$TRUSTED_SHA:scripts/ci/$helper" > "$selection_dir/$helper" \
+          && chmod 400 "$selection_dir/$helper"; then
+        :
+      else
+        capture_helpers_ready=0
+      fi
+    done
+    if [[ "$capture_helpers_ready" != 1 || "$tracing_helpers_ready" != 1 || "$reporters_ready" != 1 ]]; then
+      process_capture_reason=helpers_unavailable
+    elif mkdir -p /tmp/process-capture/out \
+      && python -I -B - "$selection_dir" "$CODEBUILD_SRC_DIR" "$HEAD_SHA" "${CODEBUILD_BUILD_ID:-}" \
+        "$(git --no-replace-objects rev-parse "$HEAD_SHA^{tree}")" \
+        "$(git --no-replace-objects rev-parse "$TRUSTED_SHA:scripts/ci/trace_reads.py")" \
+        "$(python -I -B -c 'import json,sys; print(json.load(open(sys.argv[1]))["catalog_sha256"])' "$selection_dir/catalog.json")" \
+        "${CODEBUILD_BUILD_IMAGE:-}" <<'LEAF_CAPTURE_BASE' >&2
+import hashlib
+import importlib.metadata
+import json
+import os
+from pathlib import Path
+import shutil
+import subprocess
+import sys
+
+out, repo, head, run_id, source_tree, capture_sha, catalog_sha, image = sys.argv[1:]
+sys.path.insert(0, out)
+import external_inventory
+import full_run_manifest
+import trace_process_tree as tree
+
+
+def file_sha256(path):
+    hasher = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for chunk in iter(lambda: stream.read(1048576), b""):
+            hasher.update(chunk)
+    return hasher.hexdigest()
+
+
+def git(*args, data=None):
+    env = {k: v for k, v in os.environ.items() if not k.upper().startswith("GIT_")}
+    return subprocess.run(["git", "--no-replace-objects", "-C", repo, *args], input=data, env=env,
+                          stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True, timeout=120).stdout
+
+
+# Inventory: every tracked name, and each symlink's target text from one batched read.
+files, links = [], []
+for record in git("ls-tree", "-r", "-z", "--full-tree", head).split(b"\0"):
+    if not record:
+        continue
+    meta, _, name = record.partition(b"\t")
+    fields = meta.split(b" ")
+    files.append(name.decode("utf-8", "strict"))
+    if fields[0] == b"120000":
+        links.append((files[-1], fields[2].decode("ascii")))
+symlinks = {}
+if links:
+    batch = git("cat-file", "--batch", data=b"".join(sha.encode("ascii") + b"\n" for _, sha in links))
+    position = 0
+    for name, sha in links:
+        end = batch.index(b"\n", position)
+        header = batch[position:end].split(b" ")
+        if len(header) != 3 or header[0] != sha.encode("ascii") or header[1] != b"blob":
+            raise SystemExit("symlink_target_unreadable")
+        start = end + 1
+        symlinks[name] = batch[start:start + int(header[2])].decode("utf-8", "strict")
+        position = start + int(header[2]) + 1
+os_image = {"class": "os-image", "origin_category": "os-image"}
+supervisor = {"class": "supervisor", "origin_category": "supervisor"}
+roots = external_inventory.resolve_default_roots(os.environ)
+# Harness-owned: the trusted dir, the gate log directory and the result directory (Amendment 3).
+for root in (out, "/tmp/gate-logs", "/tmp/gate-results", "/tmp/process-capture"):
+    roots[root.rstrip("/")] = supervisor
+# Installed dependencies are os-image, pinned by their lockfiles and bound by the root digest.
+for path in sorted({Path(repo, "web", "node_modules"), *Path(repo).glob("node_modules"),
+                    *Path(repo).glob("*/node_modules")}):
+    if path.is_dir():
+        roots[str(path)] = os_image
+browsers = Path(os.environ.get("PLAYWRIGHT_BROWSERS_PATH") or Path.home() / ".cache" / "ms-playwright")
+if browsers.is_absolute() and browsers.is_dir():
+    roots[str(browsers)] = os_image
+strace_package = None
+try:
+    probe = subprocess.run(["dpkg-query", "-W", "-f", "${Version}", "strace"], stdin=subprocess.DEVNULL,
+                           stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, timeout=30)
+    if probe.returncode == 0 and probe.stdout.strip():
+        strace_package = probe.stdout.decode("ascii", "strict").strip()
+except (OSError, UnicodeError, subprocess.SubprocessError):
+    pass
+node_identity = None
+node = shutil.which("node")
+if node:
+    try:
+        version = subprocess.run([node, "--version"], stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+                                 stderr=subprocess.DEVNULL, timeout=30, check=True).stdout.decode("ascii").strip()
+        node_identity = {"executable": node, "version": version,
+                         "executable_sha256": file_sha256(os.path.realpath(node))}
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        node_identity = None
+distributions = sorted({(str(d.metadata["Name"] or ""), str(d.version or ""))
+                        for d in importlib.metadata.distributions()})
+helpers = {name: file_sha256(Path(out) / name)
+           for name in ("pytest_selection.py", "full_run_manifest.py", "select_tests.py", "sitecustomize.py",
+                        "vitest-leaf.mjs", "playwright-leaf.mjs", "trace_supervisor.py",
+                        "trace_process_tree.py", "external_inventory.py", "epoch_probe.py") if (Path(out) / name).is_file()}
+context = {
+    "run_id": run_id, "source_sha": head, "source_tree": source_tree,
+    "capture_sha": capture_sha, "catalog_sha256": catalog_sha,
+    "source_root": repo, "initial_cwd": repo,
+    "inventory": {"files": files, "symlinks": symlinks}, "external_roots": roots,
+    "toolchain_fingerprint": full_run_manifest.toolchain_fingerprint(image, capture_sha),
+    "helper_blobs": {"trace_reads_sha256": file_sha256(Path(out) / "trace_reads.py"),
+                     "reporting_helper_sha256s": helpers},
+    "strace_package": strace_package,
+    # The provider exposes only the image label, never a manifest digest.
+    "image_manifest_digest": None, "image_manifest_digest_reason": "os_image_identity_unavailable",
+    "distribution_list_digest": tree.digest([list(row) for row in distributions]),
+    "interpreter_identity": {"executable": sys.executable, "version": sys.version,
+                             "executable_sha256": file_sha256(os.path.realpath(sys.executable))},
+    "node_identity": node_identity,
+}
+# The supervisor's own check with the runner's per-suite fields; a context it would refuse is never written.
+tree._validate(dict(context, capture_group="base", suites=[], suites_deferred=True,
+                    seed_fds={"1": {"kind": "supervisor"}, "2": {"kind": "supervisor"}}))
+context.update(capture_group="base", suites=[], suites_deferred=True,
+               seed_fds={"0": {"kind": "devnull"}, "1": {"kind": "supervisor"}, "2": {"kind": "supervisor"}})
+tree._atomic(Path("/tmp/process-capture/context.json"), context)
+print("TRACING capture_base_context files={} symlinks={} roots={} strace_package={} node={} image_manifest_digest=null "
+      "reason=os_image_identity_unavailable".format(len(files), len(symlinks), len(roots), strace_package,
+                                                    (node_identity or {}).get("version")))
+LEAF_CAPTURE_BASE
+    then
+      if python -I -B "$selection_dir/epoch_probe.py" --context /tmp/process-capture/context.json \
+          --out /tmp/process-capture/capture-epoch.json --sink file; then
+        process_capture_active=1
+        export LEAF_PROCESS_CAPTURE_CONTEXT=/tmp/process-capture/context.json
+        export LEAF_PROCESS_CAPTURE_OUT=/tmp/process-capture/out
+        # Reuse the advisory readset publication path; LEAF_PROOF_TRACING stays independent.
+        tracing_ready=1
+      else
+        process_capture_reason=epoch_unavailable
+      fi
+    else
+      process_capture_reason=context_unavailable
+    fi
+  fi
+  if [[ -n "$process_capture_reason" ]]; then
+    echo "LEAF_CAPTURE refused $process_capture_reason"
+  fi
+  export process_capture_active
+fi
+# LEAF_PROCESS_CAPTURE_END
 if [[ "$tracing_ready" == 1 ]]; then
   export LEAF_READSET_DIR=/tmp/gate-logs/readsets
   export LEAF_READSET_RUN="${CODEBUILD_BUILD_ID:-}"
@@ -845,6 +1025,7 @@ if ! python -I -B - "$selection_dir" "$gate_status" "$tracing_ready" "$reporters
 import datetime
 import hashlib
 import json
+import os
 from pathlib import Path
 import shutil
 import subprocess
@@ -931,6 +1112,8 @@ rejected_shards = 0
 if sys.argv[3] == "1":
     sys.path.insert(0, str(out))
     import full_run_manifest
+    if os.environ.get("process_capture_active") == "1":
+        full_run_manifest.stage_process_capture("/tmp/process-capture/out", Path("/tmp/gate-logs/readsets"), out)
     packed_catalog = json.loads((out / "catalog.json").read_text(encoding="utf-8"))
     rejected_shards = full_run_manifest.partition_readsets(
         Path("/tmp/gate-logs/readsets"), out / "readsets-rejected", packed_catalog, sys.argv[7])
@@ -1004,11 +1187,13 @@ if sys.argv[3] == "1":
               "execution_mode": detail["execution_mode"],
               "full_run_complete": detail["full_run_complete"],
               "test_id_reporting_complete": detail["test_id_reporting_complete"]}
+    capture_args = (["--reports", str(out / "reports")]
+                    if os.environ.get("process_capture_active") == "1" else [])
     result = subprocess.run([sys.executable, "-I", "-B", str(helper),
                              "--catalog", str(out / "catalog.json"),
                              "--readsets", "/tmp/gate-logs/readsets",
                              "--collection", str(out / "collection-ids.json"),
-                             "--output", str(out / "full-run.json")],
+                             "--output", str(out / "full-run.json")] + capture_args,
                             input=canonical(inputs), text=True)
     if result.returncode == 0 and not (out / "full-run.json").is_file():
         raise ValueError("manifest_output_missing")
@@ -1033,7 +1218,7 @@ if [[ "$tracing_ready" == 1 ]]; then
     [[ -d /tmp/gate-logs/readsets ]] || return 0
     readsets_error="directory scan failed"
     entry="$(find /tmp/gate-logs/readsets -type f -print -quit)" || return 1
-    [[ -n "$entry" ]] || return 0
+    [[ -n "$entry" || "${process_capture_active:-0}" == 1 ]] || return 0
     readsets_error="archive creation failed"
     for member in catalog.json decision.json full-run.json; do
       [[ ! -f "$selection_dir/$member" ]] || selection_members+=("$member")
@@ -1052,8 +1237,38 @@ if [[ "$tracing_ready" == 1 ]]; then
         report_members+=("${member#"$selection_dir/"}")
       done < <(find "$selection_dir/reports" -type f \( -name 'collection-*.json' -o -name 'completion-*.json' -o -name 'tests-*.json' \) -print0 | sort -z)
     fi
-    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" 2>/dev/null || return 1
+    local -a capture_members=() diagnostic_members=()
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      readsets_error="capture manifest failed"
+      [[ "$manifest_failed" == 0 && -f "$selection_dir/full-run.json" ]] || return 1
+      while IFS= read -r -d '' member; do
+        capture_members+=("${member#"$selection_dir/"}")
+      done < <(find "$selection_dir/capture" -type f -name '*.json' -print0 | sort -z)
+      while IFS= read -r -d '' member; do
+        report_members+=("${member#"$selection_dir/"}")
+      done < <(find "$selection_dir/reports" -maxdepth 1 -type f \( -name 'process-tree-*.json' -o -name 'trace-receipt-*.json' \) -print0 | sort -z)
+      if [[ -d /tmp/gate-logs/diagnostics ]]; then
+        while IFS= read -r -d '' member; do
+          diagnostic_members+=("${member#/tmp/gate-logs/}")
+        done < <(find /tmp/gate-logs/diagnostics -type f -print0 | sort -z)
+      fi
+      readsets_error="capture reference validation failed"
+      python -I -B - "$selection_dir" /tmp/gate-logs "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -- "${shard_members[@]}" "${attempt_members[@]}" "${diagnostic_members[@]}" <<'LEAF_CAPTURE_REFERENCES' || return 1
+import sys
+from pathlib import Path
+sys.path.insert(0, sys.argv[1])
+import full_run_manifest
+boundary = sys.argv.index("--", 3)
+members = {name: Path(sys.argv[1]) / name for name in sys.argv[3:boundary]}
+members.update({name: Path(sys.argv[2]) / name for name in sys.argv[boundary + 1:]})
+full_run_manifest.validate_package({name: path for name, path in members.items() if path.is_file()})
+LEAF_CAPTURE_REFERENCES
+    fi
+    tar -czf "$archive" --no-recursion -C /tmp/gate-logs readsets -C "$selection_dir" "${selection_members[@]}" "${report_members[@]}" "${capture_members[@]}" -C /tmp/gate-logs "${shard_members[@]}" "${attempt_members[@]}" "${diagnostic_members[@]}" 2>/dev/null || return 1
     readsets_archive_members="readsets ${selection_members[*]} ${report_members[*]} ${attempt_members[*]}"
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      readsets_archive_members+=" ${capture_members[*]} ${diagnostic_members[*]}"
+    fi
     readsets_error="archive measurement failed"
     readsets_bytes="$(wc -c < "$archive")" || return 1
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
@@ -1061,6 +1276,9 @@ if [[ "$tracing_ready" == 1 ]]; then
     readsets_sha256="${digest%% *}"
     if (( readsets_bytes > 200 * 1024 * 1024 )); then
       readsets_status=too_large
+      if [[ "${process_capture_active:-0}" == 1 ]]; then
+        echo "LEAF_CAPTURE package_error archive_too_large"
+      fi
       return 0
     fi
     readsets_error="missing build id"
@@ -1077,6 +1295,9 @@ if [[ "$tracing_ready" == 1 ]]; then
   if ! publish_readsets; then
     readsets_status=upload_failed
     echo "WARNING: readsets upload failed ($readsets_error)" >&2
+    if [[ "${process_capture_active:-0}" == 1 ]]; then
+      echo "LEAF_CAPTURE package_error $readsets_error"
+    fi
   fi
 fi
 if [[ "$tracing_ready" == 1 && "$manifest_failed" == 1 ]]; then
@@ -1151,5 +1372,38 @@ then
   fi
 fi
 fi
+# LEAF_PROCESS_CAPTURE_SUMMARY_BEGIN
+if [[ "${process_capture_active:-0}" == 1 ]]; then
+  if [[ "$manifest_failed" == 1 ]]; then
+    echo 'LEAF_CAPTURE package_error manifest_failed'
+  fi
+  python -I -B - /tmp/process-capture/out "${readsets_bytes:-0}" /tmp/gate-logs/attempts <<'LEAF_CAPTURE_SUMMARY' || echo 'LEAF_CAPTURE package_error summary_failed'
+import json
+from pathlib import Path
+import sys
+receipts, certificates, errors, wrapped = [], 0, 0, 0
+for path in Path(sys.argv[1]).glob("*/*/reports/trace-receipt-*.json"):
+    try:
+        receipts.append(json.loads(path.read_text(encoding="utf-8")))
+    except (OSError, ValueError):
+        errors += 1
+certificates = sum(1 for _ in Path(sys.argv[1]).glob("*/*/reports/process-tree-*.json"))
+for path in Path(sys.argv[3]).glob("*.jsonl"):
+    for line in path.read_text(encoding="utf-8").splitlines():
+        try:
+            row = json.loads(line)
+            if "process_capture_exit_status" in row or row.get("process_capture_errors"):
+                wrapped += 1
+                if not row.get("process_capture_receipt"):
+                    errors += len(row.get("process_capture_errors") or [])
+        except ValueError:
+            errors += 1
+print("LEAF_CAPTURE summary " + json.dumps(dict(mode="process", suites_wrapped=wrapped,
+      receipts=len(receipts), certificates=certificates,
+      capture_errors=errors + sum(len(receipt.get("capture_errors") or []) for receipt in receipts),
+      archive_bytes=int(sys.argv[2])), separators=(",", ":")))
+LEAF_CAPTURE_SUMMARY
+fi
+# LEAF_PROCESS_CAPTURE_SUMMARY_END
 # LEAF_GATE_PROOF_END
 exit "$gate_status"
