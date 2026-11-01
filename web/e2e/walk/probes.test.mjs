@@ -6,7 +6,8 @@ import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCens
   SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
 import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { assertCountControlIdentity } from './fixtures.mjs'
-import { activeToolbarProfile } from './controlCensus.mjs'
+import { activeToolbarProfile, enumerateControls, SHELL_WRAPPER_SCOPES, resolveCensus } from './controlCensus.mjs'
+import { readControlInventory } from '../../walk/controlInventory.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } from './fixtures.mjs'
@@ -53,6 +54,63 @@ test('WL61 census falls back to the selected profile tab aria-label', async () =
 test('WL61 census leaves ambiguous or absent profile controls undefined without a selected tab', async () => {
   assert.equal(await activeToolbarProfile(profilePage({ values: ['cad', 'cad'] })), undefined)
   assert.equal(await activeToolbarProfile(profilePage()), undefined)
+})
+
+function enumerationPage(rows) {
+  const node = (tagName, attributes, parentElement = null) => ({
+    tagName, parentElement,
+    getAttribute: name => attributes[name] ?? null,
+    hasAttribute: name => Object.hasOwn(attributes, name),
+    getClientRects: () => [{}],
+    matches: () => false,
+  })
+  const elements = rows.map(({ name, ancestors = [] }) => {
+    const parent = ancestors.reduce((parent, { role, name }) =>
+      node('DIV', { role, 'aria-label': name }, parent), null)
+    return node('BUTTON', { 'aria-label': name }, parent)
+  })
+  return { locator: () => ({
+    evaluateAll: async (read, options) => new Function('elements', 'options', 'getComputedStyle',
+      `return (${read})(elements, options)`)(elements, options, () => ({ display: 'block', visibility: 'visible' })),
+    nth: index => ({ ariaSnapshot: async () => `- button ${JSON.stringify(rows[index].name)}` }),
+  }) }
+}
+
+test('WL68 shell wrapper scopes are frozen and limited to the Studio sidebar region', () => {
+  assert.ok(Object.isFrozen(SHELL_WRAPPER_SCOPES))
+  assert.deepEqual(SHELL_WRAPPER_SCOPES, ['region:"Studio sidebar"'])
+})
+
+test('WL68 enumeration skips the Studio wrapper and preserves other and nested landmarks', async () => {
+  const wrapper = { role: 'region', name: 'Studio sidebar' }
+  const drawing = { role: 'region', name: 'Drawing' }
+  const controls = await enumerateControls(enumerationPage([
+    { name: 'Collapse the notification inbox', ancestors: [wrapper] },
+    { name: 'Drawing control', ancestors: [drawing] },
+    { name: 'Nested control', ancestors: [wrapper, drawing] },
+    { name: 'Outer control', ancestors: [drawing, wrapper] },
+    { name: 'Same name in another landmark', ancestors: [{ role: 'group', name: 'Studio sidebar' }] },
+  ]))
+  assert.deepEqual(controls.map(({ scope }) => scope), ['document', 'region:"Drawing"',
+    'region:"Drawing"', 'region:"Drawing"', 'group:"Studio sidebar"'])
+  assert.equal(controls[0].name, 'Collapse the notification inbox')
+})
+
+test('WL68 Studio rail controls resolve against the existing document batch rows', async () => {
+  const controls = await enumerateControls(enumerationPage([
+    { name: 'Collapse the notification inbox', ancestors: [{ role: 'region', name: 'Studio sidebar' }] },
+    { name: 'Linked services 0 linked', ancestors: [{ role: 'region', name: 'Studio sidebar' }] },
+  ]))
+  const ids = ['control:notification-collapse', 'control:linked-services']
+  for (const state of ['ready', 'failed-load']) {
+    const census = resolveCensus(controls, [], map, readControlInventory(map), { state })
+    assert.deepEqual(census.resolved.map(({ feature_id }) => feature_id), ids)
+    assert.ok(census.resolved.every(({ scope }) => scope === 'document'))
+    const resolved = CONTROL_CENSUS_BATCH.filter(row => row.states.includes(state)
+      && row.feature_id !== 'control:job-monitor-expand' && !ids.includes(row.feature_id))
+    assert.equal(requireControlCensusBatch({ resolved: [...resolved, ...census.resolved] },
+      { state, studioShell: true }), true)
+  }
 })
 
 test('WL48 substituted monitor launcher records Studio identity and requires the inventoried spine absent', async () => {
