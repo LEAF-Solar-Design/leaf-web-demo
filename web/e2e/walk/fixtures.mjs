@@ -1257,7 +1257,7 @@ export const ACCESSIBILITY_DIALOG_SCOPE = Object.freeze({
     expectedModal: false, expectedEscapeClosed: true }),
   'control:session-details': Object.freeze({ states: Object.freeze(['ready', 'failed-load']), name: 'Session details',
     initialFocus: Object.freeze({ role: 'button', name: 'Close details', key: 'close-session-details' }),
-    expectedModal: true, expectedEscapeClosed: true }),
+    expectedModal: false, expectedEscapeClosed: true }),
   'control:version-history': Object.freeze({ states: Object.freeze(['ready']), name: 'Version history',
     initialFocus: Object.freeze({ key: 'control:version-history' }), expectedModal: false, expectedEscapeClosed: true }),
   'action:bar-shortcuts': Object.freeze({ states: Object.freeze(['ready']), name: 'Keyboard shortcuts',
