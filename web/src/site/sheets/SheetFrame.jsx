@@ -13,7 +13,8 @@ export function scrollToSheet(code) {
   const el = document.getElementById(code);
   if (!el) return;
   navigate(`${window.location.pathname}#${code}`);
-  el.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  const behavior = (typeof window !== 'undefined' && window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches) ? 'auto' : 'smooth';
+  el.scrollIntoView({ behavior, block: 'start' });
 }
 
 /** Route a nav/CTA target: '#code' → in-page anchor scroll, '/path' → router. */
