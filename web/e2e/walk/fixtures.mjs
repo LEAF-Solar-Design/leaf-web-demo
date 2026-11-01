@@ -86,6 +86,54 @@ export async function withCensusStudioRail(page, inventory, assertions = expect)
   }
 }
 
+export async function assertFirstRunCadProfile(page, assertions = expect) {
+  const profile = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('combobox', { name: 'Workspace profile', exact: true })
+  if (await profile.count() > 0) await assertions(profile).toHaveValue('cad')
+  else await assertions(page.getByRole('tab', { name: 'CAD', exact: true })).toHaveAttribute('aria-selected', 'true')
+}
+
+export function mergeCensusCaptures(closed, studio) {
+  for (const capture of [closed, studio]) {
+    if (!capture || typeof capture !== 'object'
+      || !['resolved', 'baselined', 'unmapped', 'stale', 'controls'].every(key => Array.isArray(capture[key]))) {
+      throw new TypeError('Expected a control census capture')
+    }
+  }
+  const seen = new Set(), resolved = [], additions = []
+  for (const [capture, extra] of [[closed, false], [studio, true]]) {
+    for (const row of capture.resolved) {
+      if (!row || typeof row.feature_id !== 'string') throw new TypeError('Expected a census feature_id string')
+      if (seen.has(row.feature_id)) continue
+      seen.add(row.feature_id)
+      resolved.push(row)
+      if (extra) additions.push(row)
+    }
+  }
+  return { ...closed, resolved, controls: [...closed.controls, ...additions],
+    total: resolved.length + closed.baselined.length + closed.unmapped.length,
+    ok: closed.unmapped.length === 0 && closed.stale.length === 0 }
+}
+
+export async function captureClosedAndStudioCensus(page, inventory, assertions = expect) {
+  const button = studioRailButton(page)
+  const wasOpen = await button.isVisible() && await button.getAttribute('aria-expanded') === 'true'
+  if (wasOpen) {
+    await button.click()
+    await assertions(button).toHaveAttribute('aria-expanded', 'false')
+  }
+  try {
+    const closed = await inventory()
+    const studio = await withCensusStudioRail(page, async () => {
+      await assertions(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
+      return inventory()
+    }, assertions)
+    return mergeCensusCaptures(closed, studio)
+  } finally {
+    if (wasOpen) await revealStudioRail(page, assertions)
+  }
+}
+
 export async function assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions = expect) {
   if (targetRecipe.normalizedName) {
     const snapshot = await locator.ariaSnapshot()
@@ -4665,8 +4713,16 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       const body = await reply.json()
       const jobs = Array.isArray(body) ? body : body.jobs
       expect(jobs.some((job) => job.job_id === runtime.evidence.pendingRun.jobId)).toBe(true)
-      await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions, false)
-      await expect(page.locator('aside.rail').getByText('count-by-layer', { exact: true }).first()).toBeVisible()
+      if (await studioRailButton(page).isVisible()) {
+        await withCensusStudioRail(page, async () => {
+          await expect(page.getByRole('region', { name: 'Studio sidebar', exact: true })
+            .getByRole('heading', { name: /^Job monitor/ })).toBeVisible()
+          await expect(studioJobMonitorContent(page).getByText('count-by-layer', { exact: true })).toBeVisible()
+        }, assertions)
+      } else {
+        await setJobRail(page, true, runtime.testInfo.project.name === 'phone', assertions, false)
+        await expect(page.locator('aside.rail').getByText('count-by-layer', { exact: true }).first()).toBeVisible()
+      }
       runtime.evidence.pendingRun.detached = true
     }
     else if (rung === 'project') {

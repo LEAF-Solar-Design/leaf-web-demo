@@ -1,5 +1,5 @@
 import AxeBuilder from '@axe-core/playwright'
-import { test, expect, COACH_STORAGE_KEY } from '../fixtures.mjs'
+import { test, expect, COACH_STORAGE_KEY, assertFirstRunCadProfile } from '../fixtures.mjs'
 
 test.use({ firstRun: true })
 
@@ -50,8 +50,7 @@ test('first-run-open @desktop', { tag: ['@smoke', '@journey'] }, async ({ page, 
       const polylines = properties.getByText('Polylines', { exact: true }).locator('+ dd')
       await expect(polylines).toBeVisible()
       await expect(polylines).toHaveText(/^[1-9][\d,]*$/)
-      const drawing = page.getByRole('tab', { name: 'CAD', exact: true })
-      await expect(drawing).toHaveAttribute('aria-selected', 'true')
+      await assertFirstRunCadProfile(page)
       await expect(page.getByRole('combobox', { name: 'Command bar', exact: true })).toBeVisible()
     })
     walkEvidence.timeToTaskMs = performance.now() - started

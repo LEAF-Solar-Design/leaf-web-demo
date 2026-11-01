@@ -18,7 +18,81 @@ import { activateWithMobileTouchMeasurements } from './mobileTouchMeasurements.m
 import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { prepareStudioJobMonitor, assertStudioJobMonitor } from './fixtures.mjs'
 import { collectPromptRunDiagnostic } from './fixtures.mjs'
-import { withCensusStudioRail } from './fixtures.mjs'
+import { withCensusStudioRail, mergeCensusCaptures, captureClosedAndStudioCensus, assertFirstRunCadProfile } from './fixtures.mjs'
+
+test('WL57 U1 merge preserves closed rows, adds unique Studio features and recomputes census totals', () => {
+  const capture = resolved => ({ ok: false, total: 999, resolved,
+    baselined: [{ name: 'baseline' }], unmapped: [], stale: [], controls: [...resolved] })
+  const cad = { feature_id: 'tab:drafting:draw', name: 'closed Draw' }
+  const linked = { feature_id: 'control:linked-services', name: 'Linked services' }
+  const closed = capture([cad]), studio = capture([{ ...cad, name: 'Studio Draw' }, linked, linked])
+  const before = JSON.stringify([closed, studio])
+  const merged = mergeCensusCaptures(closed, studio)
+  assert.deepEqual(merged.resolved, [cad, linked])
+  assert.equal(merged.resolved[0], cad)
+  assert.equal(merged.total, 3)
+  assert.equal(merged.ok, true)
+  assert.deepEqual(merged.controls, [cad, linked])
+  assert.equal(JSON.stringify([closed, studio]), before)
+  assert.deepEqual(mergeCensusCaptures(closed, studio), merged)
+  for (const field of ['unmapped', 'stale']) {
+    const failed = mergeCensusCaptures({ ...closed, [field]: [{ name: 'problem' }] }, studio)
+    assert.equal(failed.ok, false)
+    assert.equal(failed.total, field === 'unmapped' ? 4 : 3)
+  }
+  assert.throws(() => mergeCensusCaptures(null, studio), TypeError)
+  assert.throws(() => mergeCensusCaptures(closed, capture([{ feature_id: 42 }])), TypeError)
+})
+
+test('WL57 census captures closed then Studio and restores the initial state even on failure', async () => {
+  for (const expanded of ['false', 'true']) for (const failAt of [0, 1, 2]) {
+    const fake = studioRailFake({ expanded })
+    const getByRole = fake.page.getByRole
+    fake.page.getByRole = (role, options) => role === 'button'
+      ? { getAttribute: async () => {
+        assert.equal(fake.expanded(), 'true')
+        return 'false'
+      } } : getByRole(role, options)
+    let calls = 0
+    const operation = () => captureClosedAndStudioCensus(fake.page, async () => {
+      assert.equal(fake.expanded(), calls++ === 0 ? 'false' : 'true')
+      if (calls === failAt) throw new Error('capture failed')
+      return { resolved: [], baselined: [], unmapped: [], stale: [], controls: [], total: 0, ok: true }
+    }, wl53Assertions)
+    if (failAt) await assert.rejects(operation(), /capture failed/)
+    else await operation()
+    assert.equal(fake.expanded(), expanded)
+    assert.equal(calls, failAt === 1 ? 1 : 2)
+  }
+})
+
+test('WL57 U3 first-run requires the CAD combobox value and falls back only when absent', async () => {
+  for (const present of [true, false]) for (const value of ['cad', 'solar']) {
+    const events = []
+    const profile = { count: async () => Number(present), inputValue: async () => value }
+    const page = { getByRole: (role, options) => {
+      if (role === 'navigation') {
+        assert.equal(options.name, 'Workspace controls')
+        return { getByRole: (role, options) => {
+          assert.equal(role, 'combobox'); assert.equal(options.name, 'Workspace profile')
+          return profile
+        } }
+      }
+      assert.equal(role, 'tab'); assert.equal(options.name, 'CAD')
+      events.push('legacy tab')
+      return { getAttribute: async () => 'true' }
+    } }
+    const assertions = locator => ({
+      toHaveValue: async expected => { events.push('profile value'); assert.equal(await locator.inputValue(), expected) },
+      toHaveAttribute: async (name, expected) => {
+        assert.equal(name, 'aria-selected'); assert.equal(await locator.getAttribute(name), expected)
+      },
+    })
+    if (present && value !== 'cad') await assert.rejects(assertFirstRunCadProfile(page, assertions))
+    else await assertFirstRunCadProfile(page, assertions)
+    assert.deepEqual(events, [present ? 'profile value' : 'legacy tab'])
+  }
+})
 
 const wl53Assertions = value => ({
   toBe: expected => assert.equal(value, expected),
@@ -6857,10 +6931,91 @@ test('submission setup failure still drains routes through runProbe finally', as
   assert.equal(unroute, 1)
 })
 
+test('WL57 U2 running Escape checks detach evidence and uses Studio or the legacy spine', async () => {
+  for (const studio of [true, false]) for (const initialOpen of [false, true]) for (const missingJob of [false, true]) {
+    let open = initialOpen
+    const events = []
+    const node = label => ({ get visible() {
+      events.push(label)
+      return label !== 'monitor job' || (open && !missingJob)
+    } })
+    const button = { isVisible: async () => studio,
+      getAttribute: async () => String(open),
+      click: async () => { events.push(open ? 'close Studio' : 'open Studio'); open = !open } }
+    const page = {
+      request: { get: async url => {
+        assert.equal(url, '/api/jobs'); events.push('jobs')
+        return { ok: () => true, json: async () => ({ jobs: [{ job_id: 'pending-id' }] }) }
+      } },
+      getByRole: (role, options) => {
+        if (role === 'navigation') return { getByRole: (role, options) => {
+          assert.equal(role, 'button'); assert.equal(options.name, 'Studio'); return button
+        } }
+        if (role === 'region') {
+          assert.equal(options.name, 'Studio sidebar')
+          return { getByRole: (role, options) => {
+            assert.equal(role, 'heading'); assert.ok(options.name.test('Job monitor (1 live)'))
+            return node('monitor heading')
+          } }
+        }
+        if (role === 'heading') {
+          assert.ok(options.name.test('Job monitor'))
+          return node('heading filter')
+        }
+        assert.equal(studio, false, 'Studio must never query a spine control')
+        assert.equal(role, 'button')
+        if (typeof options.name !== 'string') return { isVisible: async () => true,
+          click: async () => { events.push('expand spine') } }
+        assert.equal(options.name, 'Collapse the job monitor to a spine')
+        return node('spine wait')
+      },
+      locator: selector => {
+        if (selector === '.toast[role="status"]') return { getByText: (text, options) => {
+          assert.equal(text, 'Stopped following count-by-layer. It keeps running; find it in Jobs.')
+          assert.equal(options.exact, true); return node('toast')
+        } }
+        if (selector === '.strip-running') return { get countValue() { events.push('strip'); return 0 } }
+        if (selector === '#project-workspace-activity') return node('Studio visible')
+        if (selector === 'aside.rail .rail-ledger') return { countValue: 1 }
+        assert.equal(selector, 'aside.rail')
+        const job = { getByText: (text, options) => {
+          assert.equal(text, 'count-by-layer'); assert.equal(options.exact, true)
+          return node('monitor job')
+        } }
+        return studio ? { filter: () => ({ locator: selector => {
+          assert.equal(selector, '.rail-ske, .rail-empty, .rail-ledger > *')
+          return { first: () => job }
+        } }) } : { getByText: () => ({ first: () => node('legacy job') }) }
+      },
+    }
+    const assertions = value => ({ ...expect(value),
+      toHaveAttribute: async (name, expected) => assert.equal(await value.getAttribute(name), expected),
+    })
+    const runtime = { page, evidence: { pendingRun: { jobId: 'pending-id' } }, testInfo: { project: { name: 'desktop' } } }
+    const operation = () => assertEffect({ assertion: { target: 'escape:running' } }, runtime, {}, {}, assertions)
+    if (studio && missingJob) await assert.rejects(operation())
+    else {
+      await operation()
+      assert.equal(runtime.evidence.pendingRun.detached, true)
+    }
+    assert.deepEqual(events.slice(0, 3), ['toast', 'strip', 'jobs'])
+    assert.equal(open, initialOpen)
+    if (studio) {
+      assert.ok(events.includes('monitor heading'))
+      assert.ok(events.includes('monitor job'))
+      assert.equal(events.filter(event => event === 'open Studio').length, initialOpen ? 0 : 1)
+      assert.equal(events.filter(event => event === 'close Studio').length, initialOpen ? 0 : 1)
+      assert.equal(events.includes('spine wait'), false)
+    } else assert.ok(events.includes('expand spine') && events.includes('spine wait') && events.includes('legacy job'))
+  }
+})
+
 test('running Escape requires the detach message and removal of the running strip', async () => {
   const runtime = { evidence: { pendingRun: { jobId: 'pending-id' } }, testInfo: { project: { name: 'desktop' } }, page: {
     request: { get: async () => ({ ok: () => true, json: async () => ({ jobs: [{ job_id: 'pending-id' }] }) }) },
-    getByRole: () => ({ isVisible: async () => false, visible: true }),
+    getByRole: role => role === 'navigation'
+      ? { getByRole: () => ({ isVisible: async () => false }) }
+      : { isVisible: async () => false, visible: true },
     locator: (selector) => {
       if (selector === '.strip-running') return { countValue: 0 }
       if (selector === 'aside.rail .rail-ledger') return { countValue: 1 }
