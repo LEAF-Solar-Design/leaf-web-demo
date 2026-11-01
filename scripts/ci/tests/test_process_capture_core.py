@@ -72,6 +72,21 @@ def test_inventory_has_no_terraform_roots_or_classes(modules):
     assert "terraform" not in repr(modules["trace_supervisor"].ADMISSION_POLICY).lower()
 
 
+@pytest.mark.parametrize("path", [
+    "/usr/share/zoneinfo", "/etc/timezone", "/usr/local/bin",
+    "/usr/lib/git-core/git", "/usr/lib/git-core/git-upload-pack",
+    "/usr/lib/git-core/git-receive-pack", "/etc/mime.types", "/etc/gai.conf",
+    "/etc/os-release", "/usr/lib/os-release", "/etc/python3.12", "/etc/fonts",
+    "/usr/share/fonts", "/usr/local/share/fonts", "/var/cache/fontconfig",
+    "/usr/lib/node_modules", "/usr/lib/postgresql", "/root/.npm",
+])
+def test_inventory_has_capture_2_image_roots(modules, path):
+    expected_class = "generated" if path == "/root/.npm" else "os-image"
+    assert modules["external_inventory"].DEFAULT_ROOTS[path] == {
+        "class": expected_class, "origin_category": expected_class,
+    }
+
+
 # Documented strace -f -ttt -x line formats: a normal call and its split equivalent.
 @pytest.mark.parametrize("transcript,kinds", [
     (b'123 1700000000.000001 openat(AT_FDCWD, "config.json", O_RDONLY|O_CLOEXEC) = 3\n',
@@ -89,7 +104,34 @@ def test_decoder_parses_openat_fixtures(modules, transcript, kinds):
     assert events[0]["paths"] == {1: "config.json"}
     assert "O_RDONLY" in events[0]["flags"]
     assert events[-1]["return_value"] == 3
-    assert decoder.PARSER_VERSION == "s15b-6"
+    assert decoder.PARSER_VERSION == "s15b-6-wd1"
+
+
+@pytest.mark.parametrize("transcript,expected_size", [
+    (b'123 1700000000.000001 newfstatat(AT_FDCWD, "/usr/local/bin/python", '
+     b'{st_mode=S_IFLNK|0777, st_size=18, ...}, AT_SYMLINK_NOFOLLOW) = 0\n', None),
+    (b'123 1700000000.000001 newfstatat(AT_FDCWD, "/usr/local/bin/python", '
+     b'{st_mode=S_IFREG|0755, st_size=6000, ...}, AT_SYMLINK_NOFOLLOW) = 0\n', 6000),
+    (b'123 1700000000.000001 newfstatat(AT_FDCWD, "/usr/local/bin/python", '
+     b'{st_mode=S_IFDIR|0755, st_size=4096, ...}, AT_SYMLINK_NOFOLLOW) = 0\n', 4096),
+    (b'123 1700000000.000001 statx(AT_FDCWD, "/usr/local/bin/python", '
+     b'AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, '
+     b'{stx_mode=S_IFLNK|0777, stx_size=18, ...}) = 0\n', None),
+    (b'123 1700000000.000001 statx(AT_FDCWD, "/usr/local/bin/python", '
+     b'AT_SYMLINK_NOFOLLOW, STATX_BASIC_STATS, '
+     b'{stx_mode=S_IFREG|0755, stx_size=6000, ...}) = 0\n', 6000),
+])
+def test_decoder_stat_size_excludes_symlinks(modules, transcript, expected_size):
+    events, reasons = modules["trace_process_tree"].parse_stream(transcript)
+    assert reasons == []
+    assert len(events) == 1
+    event = events[0]
+    assert event["paths"] == {1: "/usr/local/bin/python"}
+    assert event["return_value"] == 0
+    if expected_size is None:
+        assert "observed_size" not in event
+    else:
+        assert event["observed_size"] == expected_size
 
 
 def test_supervisor_help_exits_zero(modules, capsys):

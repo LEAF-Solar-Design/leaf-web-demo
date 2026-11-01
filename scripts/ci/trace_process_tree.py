@@ -39,7 +39,7 @@ except ImportError:  # Windows: the live-state counter stands in for measured RS
 
 
 BINDINGS = ("run_id", "source_sha", "source_tree", "capture_sha", "catalog_sha256")
-PARSER_VERSION = "s15b-6"
+PARSER_VERSION = "s15b-6-wd1"
 # A child left by a killed parent calls within this window of the parent's end, or it is not that child.
 ORPHAN_FORK_WINDOW_S = 2.0
 # max_state_bytes: 2 GiB, compared against measured peak RSS (Amendment 5); the counter it
@@ -138,6 +138,7 @@ RX_ABBREVIATED_STRING = re.compile(r'"\s*\.\.\.$')
 RX_FD_TOKEN = re.compile(r"(-?\d+)(?:<(.*)>)?")
 RX_DIRENT = re.compile(r'\{d_ino=(\d+), d_off=(-?\d+), d_reclen=(\d+), d_type=(DT_[A-Z]+), d_name=("(?:\\.|[^"\\])*")\}')
 RX_STAT_SIZE = re.compile(r"\b(?:st_size|stx_size)=(\d+)(?:,|\})")
+RX_STAT_SYMLINK = re.compile(r"\b(?:st_mode|stx_mode)=S_IFLNK\b")
 RX_AT_FLAGS = re.compile(r"AT_[A-Z_]+(?:\|AT_[A-Z_]+)*")
 RX_FD_PAIR = re.compile(r"\[\s*\d+(?:<[^>]*>)?\s*,\s*\d+(?:<[^>]*>)?\s*\]")
 RX_FLAGS = re.compile(r"[A-Z][A-Z0-9_]*(?:\|[A-Z][A-Z0-9_]*)*")
@@ -379,7 +380,8 @@ def _args(event, raw, resumed=False):
         return
     if name in {"fstat", "newfstatat", "fstatat", "statx"}:
         size = RX_STAT_SIZE.search(raw)
-        if size:
+        # A symlink's own size is never its content's size.
+        if size and not RX_STAT_SYMLINK.search(raw):
             event["observed_size"] = int(size[1])
     # Retain only an argument index, never an unfinished output buffer.
     if not resumed and event["kind"] == "unfinished" and name in {"newfstatat", "fstatat", "statx", "fstat"}:
