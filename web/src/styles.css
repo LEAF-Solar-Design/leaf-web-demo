@@ -581,7 +581,7 @@ h1.home-q em {
   color: var(--cv-text); box-shadow: 0 8px 24px rgba(0, 0, 0, .4);
 }
 .selection-readout.empty { color: var(--cv-dim); }
-.sel-hint { font-size: var(--leaf-size-caption); color: var(--cv-dim); opacity: .5; transition: opacity 180ms ease; }
+.sel-hint { font-size: var(--leaf-size-caption); color: var(--leaf-cad-ink-dim); opacity: 1; transition: opacity 180ms ease; }
 .selection-readout:focus-within .sel-hint { opacity: 1; }
 @media (hover: hover) and (pointer: fine) { .sel-hint:hover, .selection-readout:hover .sel-hint { opacity: 1; } }
 .sel-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 8px; }
