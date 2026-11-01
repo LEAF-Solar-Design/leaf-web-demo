@@ -11,6 +11,11 @@ import sys
 
 
 def _install():
+    if os.environ.get("LEAF_PROCESS_CAPTURE_DIR"):
+        # The outer supervisor owns this process tree. Descendants must not
+        # start supervisors of their own, even when launched outside the gate.
+        os.environ.pop("LEAF_PROCESS_CAPTURE_CONTEXT", None)
+        os.environ.pop("LEAF_PROCESS_CAPTURE_OUT", None)
     root = os.environ.get("LEAF_READSET_ROOT")
     suite = os.environ.get("LEAF_READSET_SUITE")
     output = os.environ.get("LEAF_READSET_DIR")
