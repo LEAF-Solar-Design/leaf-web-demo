@@ -862,20 +862,23 @@ def test_pre_execution_receipt_crash_idempotence_and_conflict(tmp_path):
     assert journal.read_bytes() == old and receipt.read_bytes() == original
 
 
-def test_pre_execution_source_binding_uses_actual_git_history():
+def test_pre_execution_source_binding_requires_reviewed_git_history():
     r = service.recovery
     revision = 'ea6666829719f014dd955f5d61db14f24836177d'
     try:
         r.runtime_commit(revision)
     except service.worker.WorkerError:
-        pytest.skip('reviewed historical object unavailable in managed snapshot')
+        # Shallow CI must prove refusal, not skip a required source boundary.
+        with pytest.raises(service.worker.WorkerError):
+            r.pre_execution_source(revision)
+        return
     r.pre_execution_source(revision)
     producer = r.runtime_source(revision, 'scripts/native_preview_worker.py')
     journal = r.runtime_source(revision, 'scripts/native_preview_reconciliation.py')
     assert r.sha(producer) == r.PRE_EXECUTION_WORKER_SHA256
-    assert r.journal_ast_sha(journal) == r.PRE_EXECUTION_JOURNAL_AST_SHA256
+    assert r.journal_source_sha(journal) == r.PRE_EXECUTION_JOURNAL_SOURCE_SHA256
     current = r.read(Path(r.__file__), 262144)
-    assert r.journal_ast_sha(current) == r.PRE_EXECUTION_CORRECTED_JOURNAL_AST_SHA256
+    assert r.journal_source_sha(current) == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
 
 
 def test_pre_execution_receipt_records_the_actual_corrected_source(tmp_path, monkeypatch):
@@ -888,7 +891,7 @@ def test_pre_execution_receipt_records_the_actual_corrected_source(tmp_path, mon
     monkeypatch.setattr(r, 'runtime_source', original)
     proof = r.PreExecutionProof(directory(tmp_path), marker(tmp_path), directory(tmp_path).name)
     proof.commit(SCOPE, service._checkpoint)
-    assert json.loads(receipt.read_bytes())['journal_ast_sha256'] == r.PRE_EXECUTION_CORRECTED_JOURNAL_AST_SHA256
+    assert json.loads(receipt.read_bytes())['journal_source_sha256'] == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
 
 
 @pytest.mark.parametrize('which', ['original-worker', 'original-journal', 'current-worker', 'current-journal'])

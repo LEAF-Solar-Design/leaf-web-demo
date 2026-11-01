@@ -27,9 +27,9 @@ MAX_LOCAL = 16384
 # Reviewed ea666682 producer ordering. Bind content, never a mutable ref or
 # this whole module: a separate recovery must not change the Journal witness.
 PRE_EXECUTION_WORKER_SHA256 = 'd0fa9e9778490278988382f573555538a2fe204160f8d57da44958858b2cd89d'
-PRE_EXECUTION_JOURNAL_AST_SHA256 = '046409fcdf36a8bade9ff9437a170ac9c50d71fac0f1eef1b2cdc11634e2e714'
+PRE_EXECUTION_JOURNAL_SOURCE_SHA256 = 'a8f668f0f84866ebf342229c7b707f6b985a66ad256d71f71e0431fde1a5a599'
 # Same ordering, with writable-descriptor receipt replay for Windows fsync.
-PRE_EXECUTION_CORRECTED_JOURNAL_AST_SHA256 = '640540728e969657901c1372ce06f31e8bc5f6f25065e2ee373de10b88ee4d8b'
+PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256 = '3375d56dcc1609b6b160e5af39365a8afc1b60d9d05c4360a88971931aea6ac0'
 
 
 class Unavailable(Exception):
@@ -382,16 +382,21 @@ class LocalProof:
         clean_writer(self.checkpoint, self.scope_digest, 'clean')
 
 
-def journal_ast_sha(raw):
+def journal_source_sha(raw):
     names = {'Journal', 'need', 'sha', 'digest', 'source', 'identity', 'finite',
              'sync_directory', 'read', 'immutable', 'runtime_commit',
              'validate_events', 'receipt_path', 'MAX_LOCAL', 'JOURNAL_SCHEMA'}
-    tree = ast.parse(raw)
+    text = raw.decode('utf-8').replace('\r\n', '\n')
+    tree = ast.parse(text)
     nodes = [node for node in tree.body if getattr(node, 'name', None) in names or
              isinstance(node, ast.Assign) and any(isinstance(target, ast.Name) and
              target.id in names for target in node.targets)]
-    return sha(ast.dump(ast.Module(body=nodes, type_ignores=[]),
-                        include_attributes=False).encode('utf-8'))
+    # AST selects reviewed definitions; interpreter-specific AST serialization
+    # is not a source identity (its empty-field representation changes).
+    segments = [ast.get_source_segment(text, node) for node in nodes]
+    need(all(type(segment) is str for segment in segments))
+    return sha(b'leaf.native-preview-journal-source.v1\0' +
+               '\n\n'.join(segments).encode('utf-8'))
 
 
 def runtime_source(revision, path):
@@ -410,9 +415,9 @@ def pre_execution_source(revision):
     current = [read(root / path, 262144) for path in paths]
     for producer, journal in (original, current):
         need(sha(producer) == PRE_EXECUTION_WORKER_SHA256)
-        need(journal_ast_sha(journal) in (PRE_EXECUTION_JOURNAL_AST_SHA256,
-                                        PRE_EXECUTION_CORRECTED_JOURNAL_AST_SHA256))
-    return journal_ast_sha(original[1])
+        need(journal_source_sha(journal) in (PRE_EXECUTION_JOURNAL_SOURCE_SHA256,
+                                        PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256))
+    return journal_source_sha(original[1])
 
 
 class PreExecutionProof:
@@ -444,7 +449,7 @@ class PreExecutionProof:
         need(type(journal['runtime_commit']) is str and
              re.fullmatch('[0-9a-f]{40}', journal['runtime_commit']) is not None)
         self.runtime = runtime_commit(journal['runtime_commit'])
-        self.journal_ast_sha256 = pre_execution_source(self.runtime)
+        self.journal_source_sha256 = pre_execution_source(self.runtime)
 
     @staticmethod
     def file_stat(path):
@@ -470,7 +475,7 @@ class PreExecutionProof:
             need(read(path) == raw)
         for path, expected in self.stats.items():
             need(self.file_stat(path) == expected)
-        need(pre_execution_source(self.runtime) == self.journal_ast_sha256)
+        need(pre_execution_source(self.runtime) == self.journal_source_sha256)
 
     def commit(self, scope, clean_writer):
         self.recheck(scope)
@@ -482,7 +487,7 @@ class PreExecutionProof:
                    'local_evidence_sha256': sha(worker.encode(
                        {p.name: sha(raw) for p, raw in self.files.items()})),
                    'worker_sha256': PRE_EXECUTION_WORKER_SHA256,
-                   'journal_ast_sha256': self.journal_ast_sha256,
+                   'journal_source_sha256': self.journal_source_sha256,
                    'outcome': 'claim-unconfirmed-pre-execution',
                    'backend_settlement': 'unconfirmed'}
         path = self.directory / ('reconciliation-' + self.cycle.name + '.json')
