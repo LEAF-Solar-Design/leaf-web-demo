@@ -33,6 +33,7 @@ import { ToolHistoryProvider } from '../components/ToolHistory.jsx'
 import { useLoadingPhase } from '../lib/loadingTiming.js'
 
 import { surfaceContract } from './productSurfaces.js'
+import CatalogStatus from './CatalogStatus.jsx'
 
 // Collapsible left-rail section (keeps the classic catalog reachable but
 // secondary to the prompt box — the primary path). Moved here from App.jsx:190
@@ -103,8 +104,13 @@ export default function NavRail({
   // as App.jsx:2721 spelled `studioGround && drafting`.
   const cockpit = !!studio && surfaceContract(activeSurface).chrome.cockpit
   const families = openFamilies || {}
-  const loadingPhase = useLoadingPhase(!catalogErr && catalogFamilyCount === 0)
+  const loadingPhase = useLoadingPhase(!catalogErr && catalogFamilyCount === 0 && catalogSource == null)
   const showSkeleton = !catalogErr && (loadingPhase === 'shown' || loadingPhase === 'long')
+  const catalogState = catalogErr && !signedOut ? 'failed'
+    : showSkeleton ? 'loading'
+    : !catalogErr && catalogFamilyCount === 0 && catalogSource != null ? 'empty'
+    : !catalogErr && catalogFamilyCount > 0 && railFamilies.length === 0 ? 'no-match'
+    : 'ready'
   return (
     <ToolHistoryProvider enabled={catalogSource === 'endpoint' || catalogSource === 'flat-fallback'}>
     {(controls) => (
@@ -119,8 +125,8 @@ export default function NavRail({
       {navSpine ? null : (
       <>
       <div className="fam-title">
-        Catalog · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · {studio ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} caps
-        {catalogSource === 'flat-fallback' ? ' · flat' : ''}
+        Catalog · {railFamilies.length} famil{railFamilies.length === 1 ? 'y' : 'ies'} · {studio ? railFamilies.reduce((n, f) => n + f.capabilities.length, 0) : capCount} tools
+        {catalogSource === 'flat-fallback' ? ' · tool list' : ''}
         {cockpit && (
           <button
             type="button"
@@ -133,14 +139,10 @@ export default function NavRail({
           </button>
         )}
       </div>
-      {catalogErr && !signedOut && (
+      <CatalogStatus state={catalogState} onRetry={onRetryCatalog} />
+      {catalogState === 'failed' && (
         <>
-          <div className="inline-error" style={{ margin: '0 4px 4px' }}>
-            Couldn’t load families: {catalogErr}
-            <button type="button" className="chip-act" onClick={onRetryCatalog}>Retry</button>
-            {retryTarget === 'catalog' && <span className="key" aria-hidden="true">R</span>}
-          </div>
-          <div className="dim" style={{ margin: '0 4px 8px', fontSize: 'var(--leaf-size-caption)' }}>Showing the flat tool list instead.</div>
+          {retryTarget === 'catalog' && <span className="key" aria-hidden="true" style={{ fontSize: 'var(--leaf-size-caption)' }}>R</span>}
           <Section title="Tools" count={tools.length} open={toolsOpen} onToggle={onToggleTools}>
             <ToolsPanel
               tools={tools}
@@ -161,19 +163,7 @@ export default function NavRail({
           </Section>
         </>
       )}
-      {/* The skeleton reads the WHOLE catalog, not the surface-filtered rail:
-          a surface whose familyIds match nothing is honestly empty, not
-          loading. App.jsx spelled this `catalog.families.length === 0`. */}
-      {showSkeleton && (
-        // Loading = static content-shaped skeleton rows (no spinner, no text note).
-        // Match a collapsed family row: 44px header plus its two 1px borders.
-        <div className="skeleton-stack" aria-hidden="true" style={{ '--skeleton-h': '46px' }}>
-          <div className="skeleton-row" />
-          <div className="skeleton-row" />
-          <div className="skeleton-row" />
-        </div>
-      )}
-      {!showSkeleton && railFamilies.map((fam) => (
+      {catalogState === 'ready' && railFamilies.map((fam) => (
         <Section
           key={fam.family_id}
           title={fam.label}
