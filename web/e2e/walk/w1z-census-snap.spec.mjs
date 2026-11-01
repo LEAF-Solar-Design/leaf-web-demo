@@ -43,7 +43,9 @@ if (process.env.LEAF_WALK_PROOF === '1') {
         () => censusControls(page, buildFeatureMap(), { state: 'ready', viewport: 'desktop' }))
       walkEvidence.censuses = [census]
       expect(census.total).toBeGreaterThan(0)
-      expect(requireControlCensusBatch(census, { state: 'ready', viewport: 'desktop' })).toBe(true)
+      const studioShell = await page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+        .getByRole('button', { name: 'Studio', exact: true }).count() > 0
+      expect(requireControlCensusBatch(census, { state: 'ready', viewport: 'desktop', studioShell })).toBe(true)
       expect(census.resolved.some((row) => row.feature_id === entry.id
         && row.scope === 'toolbar:"Drafting settings"')).toBe(true)
       const assertionId = 'control-census:studio/ready/renders'
