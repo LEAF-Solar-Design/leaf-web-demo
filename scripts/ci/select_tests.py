@@ -1,6 +1,7 @@
 """Trusted, offline test selection. Inputs are supplied by the trusted loader."""
 
 import argparse
+import copy
 import datetime as dt
 import fnmatch
 import hashlib
@@ -32,6 +33,45 @@ def canonical(value):
 
 def digest(value):
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def normalize_root_name(path):
+    """Replace only the three approved mktemp segment shapes."""
+    return "/".join(re.sub(r"^(tmp\.)[A-Za-z0-9]{10}$|^(leaf-selection\.)[A-Za-z0-9]{8}$|^(relay-src\.)[A-Za-z0-9]{6}$",
+                           lambda match: next(group for group in match.groups() if group) + "*", segment)
+                    for segment in path.split("/"))
+
+
+def _normalize_epoch_manifest(manifest):
+    if not isinstance(manifest, dict):
+        raise ValueError("invalid_capture_epoch_manifest")
+    result = copy.deepcopy(manifest)
+    tables, conflicts = {}, set()
+    for field in ("external_root_table", "external_root_digests"):
+        if not isinstance(manifest.get(field), dict):
+            continue
+        groups = {}
+        for raw, value in manifest[field].items():
+            groups.setdefault(normalize_root_name(raw), []).append((raw, value))
+        tables[field] = {key: rows[0][1] for key, rows in groups.items()}
+        for rows in groups.values():
+            if any(value != rows[0][1] for _, value in rows[1:]):
+                conflicts.update(raw for raw, _ in rows)
+    if conflicts:
+        # Preserve both raw tables when either table has an ambiguous identity.
+        result["external_root_conflicts"] = sorted(conflicts | set(result.get("external_root_conflicts", [])))
+    else:
+        result.update(tables)
+    # The selector decides; it never shapes what a traced run reads, so its bytes leave the epoch.
+    if isinstance(result.get("reporting_helper_sha256s"), dict):
+        result["reporting_helper_sha256s"].pop("select_tests.py", None)
+    result["root_name_normalization"] = "s15b-4"
+    return result
+
+
+def normalized_epoch(manifest):
+    # Same canonical sha256 as trace_process_tree.digest, defined locally so this file imports alone.
+    return digest(_normalize_epoch_manifest(manifest))
 
 
 def _pairs(pairs):
