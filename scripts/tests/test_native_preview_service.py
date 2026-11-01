@@ -446,6 +446,336 @@ def recovery_session(root, status, witness, events, *, close_error=False, hook=N
     return factory
 
 
+def settled_producer_fixture(root):
+    claim, status, witness, failure = recovery_fixture(root, legacy=False)
+    journal_path = failure.parent / 'journal.json'
+    journal = json.loads(journal_path.read_bytes())
+    journal['events'].insert(2, dict(event='producer', producer_may_have_started=True))
+    journal_path.write_bytes(service.worker.encode(journal))
+    value = json.loads(failure.read_bytes())
+    value.update(execution_stage='mac-producer', error_code='mac-transport-failed',
+                 authority_failure='none', failure_settlement='accepted')
+    failure.write_bytes(service.worker.encode(value))
+    del status['failure_disposition']
+    return claim, status, witness, failure
+
+
+def assert_settled_local_hold(root):
+    calls = []
+    original = marker(root).read_bytes()
+    def unexpected(*args):
+        calls.append('session')
+        forbidden()
+    assert service.serve(SCOPE, unexpected, root, Stop())['state'] == 'reconciliation-required'
+    assert calls == [] and marker(root).read_bytes() == original
+    assert not service.recovery.receipt_path(directory(root), COMPLETE['job_id']).exists()
+
+
+def test_settled_producer_recovers_once_preserves_evidence_and_resumes_polling(tmp_path):
+    r = service.recovery
+    claim, status, witness, failure = settled_producer_fixture(tmp_path)
+    journal = failure.parent / 'journal.json'
+    originals = {path: path.read_bytes() for path in (marker(tmp_path), journal, failure)}
+    events = []
+    recovery = recovery_session(tmp_path, status, witness, events)
+    receipt = r.receipt_path(directory(tmp_path), claim['job_id'])
+    class NextHttp:
+        def request(self, method, suffix, body):
+            assert (method, suffix, body) == ('POST', 'claim', {})
+            assert receipt.exists() and phase(tmp_path) == 'reconciliation-required'
+            events.append('poll')
+            return b'{"job":null}'
+    @contextmanager
+    def factory(scope):
+        if not events:
+            with recovery(scope) as pair:
+                yield pair
+        else:
+            assert phase(tmp_path) == 'clean'
+            yield NextHttp(), forbidden
+    assert service.serve(SCOPE, factory, tmp_path, Stop()) == dict(state='stopped', completed=0)
+    assert events == ['enter', 'status', 'allocator', 'close', 'poll']
+    raw = receipt.read_bytes()
+    value = json.loads(raw)
+    assert value['outcome'] == 'failed-producer-settled-reconciled'
+    assert value['attempt_binding'] == 'local-accepted-failure-settlement'
+    assert value['backend_status_sha256'] == r.sha(service.worker.encode(status))
+    assert value['allocator_witness_sha256'] == witness['witness_sha256']
+    assert value['original_checkpoint'] == originals[marker(tmp_path)].decode()
+    assert value['checkpoint_sha256'] == r.sha(originals[marker(tmp_path)])
+    assert value['failure_sha256'] == r.sha(originals[failure])
+    assert value['local_evidence_sha256'] == r.sha(service.worker.encode(
+        {path.name: r.sha(data) for path, data in originals.items()}))
+    assert value['worker_sha256'] == r.PRE_EXECUTION_WORKER_SHA256
+    assert value['journal_source_sha256'] == r.PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256
+    assert value['scope_sha256'] == directory(tmp_path).name
+    assert value['cycle'] == failure.parent.name
+    assert value['original_runtime_commit'] == json.loads(originals[journal])['runtime_commit']
+    assert all(value[k] == claim[k] for k in ('job_id', 'attempt', 'source'))
+    assert 'disposition_sha256' not in value
+    assert service.serve(SCOPE, factory, tmp_path, Stop()) == dict(state='stopped', completed=0)
+    assert events.count('status') == 1 and events.count('poll') == 2
+    assert receipt.read_bytes() == raw
+    assert journal.read_bytes() == originals[journal] and failure.read_bytes() == originals[failure]
+    cycle = directory(tmp_path) / 'cycle-replay'
+    cycle.mkdir()
+    replay = r.Journal(cycle, directory(tmp_path).name, directory(tmp_path))
+    with pytest.raises(service.worker.WorkerError, match='journal-failed'):
+        replay(dict(event='claim', **claim, deadline=1000))
+
+
+@pytest.mark.parametrize('event', ['claim', 'allocator', 'producer', 'cleanup', 'release'])
+def test_settled_producer_requires_every_event(tmp_path, event):
+    _, _, _, failure = settled_producer_fixture(tmp_path)
+    path = failure.parent / 'journal.json'
+    value = json.loads(path.read_bytes())
+    value['events'] = [item for item in value['events'] if item['event'] != event]
+    path.write_bytes(service.worker.encode(value))
+    assert_settled_local_hold(tmp_path)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('stage', 'completion'), ('result', 'unknown'), ('job_id', SCOPE['actor_id']),
+    ('archive_sha256', '0' * 64), ('execution_stage', 'mac-permit-refresh'),
+    ('error_code', 'completion-unknown'), ('error_code', 'authority-lost'),
+    ('error_code', 'journal-failed'), ('authority_failure', 'permit-refresh'),
+    ('failure_settlement', 'response-unconfirmed'), ('failure_settlement', 'request-failed'),
+    ('failure_settlement', 'not-attempted-authority-lost'), ('failure_settlement', None),
+    ('cleanup_complete', False), ('cleanup_complete', 1),
+    ('allocator_release_confirmed', False), ('allocator_release_confirmed', 1),
+])
+def test_settled_producer_failure_mismatch_refuses_before_session(tmp_path, field, value):
+    _, _, _, failure = settled_producer_fixture(tmp_path)
+    report = json.loads(failure.read_bytes())
+    if value is None:
+        del report[field]
+    else:
+        report[field] = value
+    failure.write_bytes(service.worker.encode(report))
+    assert_settled_local_hold(tmp_path)
+
+
+@pytest.mark.parametrize('mutation', ['schema', 'scope', 'cycle', 'runtime', 'claim-state',
+                                      'job', 'source', 'attempt', 'filename', 'extra-file',
+                                      'producer-false', 'producer-integer', 'cleanup-false',
+                                      'release-false', 'checkpoint-scope', 'checkpoint-schema',
+                                      'checkpoint-cycle', 'failure-symlink', 'journal-symlink',
+                                      'checkpoint-symlink', 'cycle-symlink'])
+def test_settled_producer_local_identity_and_flags_refuse(tmp_path, mutation):
+    _, _, _, failure = settled_producer_fixture(tmp_path)
+    path = failure.parent / 'journal.json'
+    value = json.loads(path.read_bytes())
+    if mutation in ('schema', 'scope', 'cycle', 'runtime', 'claim-state'):
+        field, replacement = {'schema': ('schema', 'unknown'), 'scope': ('scope_sha256', '0' * 64),
+                              'cycle': ('cycle', 'cycle-other'), 'runtime': ('runtime_commit', '0' * 40),
+                              'claim-state': ('claim_state', 'unknown')}[mutation]
+        value[field] = replacement
+    elif mutation == 'job':
+        value['events'][0]['job_id'] = SCOPE['actor_id']
+    elif mutation == 'source':
+        value['events'][0]['source']['archive_sha256'] = '0' * 64
+    elif mutation == 'attempt':
+        value['events'][0]['attempt'] = 8
+    elif mutation.startswith('producer-'):
+        value['events'][2]['producer_may_have_started'] = False if mutation.endswith('false') else 1
+    elif mutation == 'cleanup-false':
+        value['events'][3]['cleanup_complete'] = False
+    elif mutation == 'release-false':
+        value['events'][4]['allocator_release_confirmed'] = False
+    path.write_bytes(service.worker.encode(value))
+    if mutation == 'filename':
+        failure.rename(failure.with_name(failure.name.replace('-7-', '-8-')))
+    elif mutation == 'extra-file':
+        (failure.parent / 'unexpected').write_bytes(b'')
+    elif mutation in ('checkpoint-scope', 'checkpoint-schema', 'checkpoint-cycle'):
+        checkpoint = json.loads(marker(tmp_path).read_bytes())
+        field, replacement = {'checkpoint-scope': ('scope_sha256', '0' * 64),
+                              'checkpoint-schema': ('schema', 'unknown'),
+                              'checkpoint-cycle': ('cycle', '../cycle-explicit')}[mutation]
+        checkpoint[field] = replacement
+        marker(tmp_path).write_bytes(service.worker.encode(checkpoint))
+    elif mutation.endswith('-symlink'):
+        target = {'failure-symlink': failure, 'journal-symlink': path,
+                  'checkpoint-symlink': marker(tmp_path), 'cycle-symlink': failure.parent}[mutation]
+        moved = directory(tmp_path) / 'moved-evidence'
+        target.rename(moved)
+        target.symlink_to(moved, target_is_directory=mutation == 'cycle-symlink')
+    assert_settled_local_hold(tmp_path)
+
+
+@pytest.mark.parametrize('state', ['queued', 'running'])
+def test_settled_producer_current_pending_status_waits_then_recovers(tmp_path, state):
+    _, status, witness, failure = settled_producer_fixture(tmp_path)
+    events = []
+    recovery = recovery_session(tmp_path, status, witness, events)
+    pending = recovery_session(tmp_path, {**status, 'status': state}, witness, events)
+    class NextHttp:
+        def request(self, method, suffix, body):
+            assert (method, suffix, body) == ('POST', 'claim', {})
+            return b'{"job":null}'
+    @contextmanager
+    def factory(scope):
+        if events.count('status') < 2:
+            with (pending if not events else recovery)(scope) as pair:
+                yield pair
+        else:
+            yield NextHttp(), forbidden
+    stop = Stop(after=2)
+    assert service.serve(SCOPE, factory, tmp_path, stop, error_seconds=9)['state'] == 'stopped'
+    assert stop.waits == [9.0, 5.0] and events.count('allocator') == 1
+    assert phase(tmp_path) == 'clean' and failure.exists()
+
+
+@pytest.mark.parametrize('mutation', ['cancelled', 'complete', 'unknown', 'non-string',
+                                      'job', 'revision', 'document', 'archive', 'extra', 'missing'])
+def test_settled_producer_current_status_refuses_before_allocator(tmp_path, mutation):
+    _, status, witness, _ = settled_producer_fixture(tmp_path)
+    if mutation in ('cancelled', 'complete', 'unknown', 'non-string'):
+        status['status'] = 1 if mutation == 'non-string' else mutation
+    elif mutation == 'job':
+        status['job_id'] = SCOPE['actor_id']
+    elif mutation == 'revision':
+        status['revision'] += 1
+    elif mutation in ('document', 'archive'):
+        status[mutation + '_sha256'] = '0' * 64
+    elif mutation == 'extra':
+        status['failure_disposition'] = {}
+    else:
+        del status['status']
+    events = []
+    factory = recovery_session(tmp_path, status, witness, events)
+    assert service.serve(SCOPE, factory, tmp_path, Stop())['state'] == 'reconciliation-required'
+    assert 'allocator' not in events
+
+
+@pytest.mark.parametrize('raw', [b'{broken', b'null', b'[]',
+                                b'{"job_id":"first","job_id":"second"}'])
+def test_settled_producer_malformed_status_refuses(tmp_path, raw):
+    claim, _, _, _ = settled_producer_fixture(tmp_path)
+    with pytest.raises(service.worker.WorkerError):
+        service.recovery.settled_failure_status(raw, claim)
+
+
+@pytest.mark.parametrize('field,value', [
+    ('ticket', 'foreign-full-ticket'), ('attempt', 8), ('job_id', SCOPE['actor_id']),
+    ('prefix', 'preview-foreign-7-'), ('active_match_counts', [1, 0]),
+    ('active_match_counts', [0, 1]), ('history_complete', False),
+    ('event_times', dict(grant=10, release=20, confirm_dead=15, free=40)),
+    ('event_times', dict(grant=10, release=20, confirm_dead=30)),
+])
+def test_settled_producer_allocator_extinction_and_full_ticket_bind(tmp_path, field, value):
+    _, status, witness, _ = settled_producer_fixture(tmp_path)
+    witness[field] = value
+    witness['witness_sha256'] = service.recovery.sha(service.worker.encode(
+        {k: v for k, v in witness.items() if k != 'witness_sha256'}))
+    factory = recovery_session(tmp_path, status, witness, [])
+    assert service.serve(SCOPE, factory, tmp_path, Stop())['state'] == 'reconciliation-required'
+    assert not service.recovery.receipt_path(directory(tmp_path), COMPLETE['job_id']).exists()
+
+
+@pytest.mark.parametrize('which', ['checkpoint', 'journal', 'failure', 'extra-file',
+                                  'cycle', 'same-bytes-new-inode', 'close', 'extinction-refused'])
+def test_settled_producer_races_and_unclosed_evidence_stay_held(tmp_path, which):
+    _, status, witness, failure = settled_producer_fixture(tmp_path)
+    r = service.recovery
+    def drift():
+        paths = dict(checkpoint=marker(tmp_path), journal=failure.parent / 'journal.json', failure=failure)
+        if which in paths:
+            paths[which].write_bytes(paths[which].read_bytes() + b' ')
+        elif which == 'extra-file':
+            (failure.parent / 'unexpected').write_bytes(b'')
+        elif which == 'same-bytes-new-inode':
+            replacement = failure.parent / 'replacement'
+            replacement.write_bytes(failure.read_bytes())
+            replacement.replace(failure)
+        elif which == 'cycle':
+            moved = failure.parent.with_name('cycle-moved')
+            failure.parent.rename(moved)
+            failure.parent.mkdir()
+            for path in moved.iterdir():
+                (failure.parent / path.name).write_bytes(path.read_bytes())
+    if which == 'extinction-refused':
+        witness = service.worker.WorkerError('invalid-protocol')
+    factory = recovery_session(tmp_path, status, witness, [], hook=drift, close_error=which == 'close')
+    stop = Stop()
+    result = service.serve(SCOPE, factory, tmp_path, stop)
+    # A transport/session-close failure waits for evidence, then honors stop.
+    # The persisted hold must remain, regardless of the loop's stop reason.
+    assert result['state'] == ('stopped' if which == 'close' else 'reconciliation-required')
+    assert phase(tmp_path) == 'reconciliation-required'
+    if which == 'close':
+        assert stop.waits == [30.0]
+    assert not r.receipt_path(directory(tmp_path), COMPLETE['job_id']).exists()
+
+
+def test_settled_producer_crash_reconstructs_identical_receipt_and_refuses_conflict(tmp_path):
+    claim, status, witness, failure = settled_producer_fixture(tmp_path)
+    r = service.recovery
+    backend = r.settled_failure_status(service.worker.encode(status), claim)
+    def proof():
+        return r.LocalProof(directory(tmp_path), marker(tmp_path), directory(tmp_path).name)
+    def crash(*args):
+        raise OSError('synthetic-crash')
+    with pytest.raises(OSError, match='synthetic-crash'):
+        proof().commit(SCOPE, backend, witness, crash)
+    receipt = r.receipt_path(directory(tmp_path), claim['job_id'])
+    original, evidence = receipt.read_bytes(), failure.read_bytes()
+    with pytest.raises(OSError, match='synthetic-crash'):
+        proof().commit(SCOPE, backend, witness, crash)
+    assert receipt.read_bytes() == original and phase(tmp_path) == 'reconciliation-required'
+    receipt.write_bytes(b'{}')
+    with pytest.raises(service.worker.WorkerError):
+        proof().commit(SCOPE, backend, witness, service._checkpoint)
+    assert phase(tmp_path) == 'reconciliation-required'
+    receipt.write_bytes(original)
+    proof().commit(SCOPE, backend, witness, service._checkpoint)
+    assert phase(tmp_path) == 'clean' and receipt.read_bytes() == original
+    assert failure.read_bytes() == evidence
+
+
+@pytest.mark.parametrize('which', ['original-worker', 'original-journal', 'current-worker', 'current-journal'])
+def test_settled_producer_altered_runtime_source_refuses(tmp_path, monkeypatch, which):
+    settled_producer_fixture(tmp_path)
+    r = service.recovery
+    load, read = r.runtime_source, r.read
+    def altered(raw, path):
+        if which.endswith('worker') and path.endswith('native_preview_worker.py'):
+            return raw.replace(b"failure_settlement = 'accepted'", b"failure_settlement = 'unconfirmed'")
+        if which.endswith('journal') and path.endswith('native_preview_reconciliation.py'):
+            return raw.replace(b'self.failed = True', b'self.failed = False')
+        return raw
+    def original(revision, path):
+        return altered(load(revision, path), path)
+    def current(path, limit=r.MAX_LOCAL):
+        return altered(read(path, limit), str(path))
+    if which.startswith('original'):
+        monkeypatch.setattr(r, 'runtime_source', original)
+    else:
+        monkeypatch.setattr(r, 'read', current)
+    assert_settled_local_hold(tmp_path)
+
+
+@pytest.mark.parametrize('which', ['worker', 'journal'])
+def test_settled_producer_source_changed_after_collection_prevents_receipt(tmp_path, monkeypatch, which):
+    _, status, witness, _ = settled_producer_fixture(tmp_path)
+    r = service.recovery
+    proof = r.LocalProof(directory(tmp_path), marker(tmp_path), directory(tmp_path).name)
+    backend, allocator = proof.collect(SCOPE, recovery_session(tmp_path, status, witness, []))
+    read = r.read
+    def changed(path, limit=r.MAX_LOCAL):
+        raw = read(path, limit)
+        if which == 'worker' and str(path).endswith('native_preview_worker.py'):
+            return raw.replace(b"failure_settlement = 'accepted'", b"failure_settlement = 'unconfirmed'")
+        if which == 'journal' and str(path).endswith('native_preview_reconciliation.py'):
+            return raw.replace(b'self.failed = True', b'self.failed = False')
+        return raw
+    monkeypatch.setattr(r, 'read', changed)
+    with pytest.raises(service.worker.WorkerError):
+        proof.commit(SCOPE, backend, allocator, forbidden)
+    assert not r.receipt_path(directory(tmp_path), COMPLETE['job_id']).exists()
+    assert phase(tmp_path) == 'reconciliation-required'
+
+
 def test_exact_legacy_receipt_before_clean_and_next_claim(tmp_path, monkeypatch):
     claim, status, witness, failure = recovery_fixture(tmp_path)
     old_failure = failure.read_bytes()

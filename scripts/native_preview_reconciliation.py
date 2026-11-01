@@ -256,10 +256,27 @@ def receipt_path(directory, job_id):
     return directory / ('reconciliation-' + job_id + '.json')
 
 
+def settled_failure_status(raw, claim):
+    # Attempt authority is the source-proven local accepted callback, not a
+    # synthetic server disposition. GET only corroborates current job/source.
+    need(type(raw) is bytes and len(raw) <= MAX_LOCAL)
+    value = worker.parse(raw)
+    need(type(value) is dict and set(value) ==
+         {'job_id', 'status', 'revision', 'document_sha256', 'archive_sha256'})
+    need(value['job_id'] == claim['job_id'])
+    need(source({k: value[k] for k in claim['source']}) == claim['source'])
+    need(type(value['status']) is str)
+    if value['status'] in ('queued', 'running'):
+        raise Unavailable()
+    need(value['status'] == 'failed')
+    return {'backend_status_sha256': sha(raw)}
+
+
 class LocalProof:
     def __init__(self, directory, checkpoint, scope_digest):
         self.directory, self.checkpoint = directory, checkpoint
         self.files = {}
+        self.settled_producer = False
         self.scope_digest = scope_digest
         old = self.capture(checkpoint)
         value = worker.parse(old)
@@ -280,6 +297,7 @@ class LocalProof:
             need(value['schema'] == CHECKPOINT_SCHEMA and value['scope_sha256'] == scope_digest
                  and value['phase'] == 'reconciliation-required')
             self.cycle = cycle_path(directory, value['cycle'])
+            cycle_stat = (self.cycle.stat().st_dev, self.cycle.stat().st_ino)
             journal = worker.parse(self.capture(self.cycle / 'journal.json'))
             need(type(journal) is dict and set(journal) ==
                  {'schema', 'scope_sha256', 'cycle', 'runtime_commit', 'claim_state', 'events'})
@@ -288,9 +306,11 @@ class LocalProof:
             need(type(journal['runtime_commit']) is str and
                  re.fullmatch('[0-9a-f]{40}', journal['runtime_commit']) is not None)
             self.runtime = runtime_commit(journal['runtime_commit'])
-            need(validate_events(journal['events']) == ['claim', 'allocator', 'cleanup', 'release'])
-            need(journal['events'][2]['cleanup_complete'] is True and
-                 journal['events'][3]['allocator_release_confirmed'] is True)
+            events = validate_events(journal['events'])
+            self.settled_producer = events == ['claim', 'allocator', 'producer', 'cleanup', 'release']
+            need(self.settled_producer or events == ['claim', 'allocator', 'cleanup', 'release'])
+            need(journal['events'][-2]['cleanup_complete'] is True and
+                 journal['events'][-1]['allocator_release_confirmed'] is True)
             self.claim = journal['events'][0]
             self.ticket = journal['events'][1]['ticket']
         self.cycle_stat = (self.cycle.stat().st_dev, self.cycle.stat().st_ino)
@@ -305,15 +325,26 @@ class LocalProof:
         need(failure['stage'] == 'execution' and failure['result'] == 'failed'
              and failure['job_id'] == self.claim['job_id'] and
              failure['archive_sha256'] == self.claim['source']['archive_sha256'])
-        need(failure['execution_stage'] == 'mac-permit-refresh' if self.legacy else
-             failure['execution_stage'] in ('mac-bootstrap', 'mac-permit-refresh'))
+        if self.settled_producer:
+            need(failure['execution_stage'] == 'mac-producer')
+        else:
+            need(failure['execution_stage'] == 'mac-permit-refresh' if self.legacy else
+                 failure['execution_stage'] in ('mac-bootstrap', 'mac-permit-refresh'))
         need(type(failure['error_code']) is str and failure['error_code'] in
              worker.ERROR_CODES | {'unexpected'})
         if self.legacy:
             need(failure['error_code'] != 'journal-failed')
         need(type(failure['authority_failure']) is str and failure['authority_failure'] in worker.AUTHORITY_FAILURES)
-        need(failure['failure_settlement'] == 'not-attempted-authority-lost'
-             and failure['cleanup_complete'] is True and failure['allocator_release_confirmed'] is True)
+        if self.settled_producer:
+            need(failure['authority_failure'] == 'none' and failure['failure_settlement'] == 'accepted')
+            need(failure['error_code'] not in ('completion-unknown', 'authority-lost', 'journal-failed'))
+            need(not directory.is_symlink() and self.cycle_stat == cycle_stat)
+            self.journal_source_sha256 = pre_execution_source(self.runtime)
+            self.stats = {path: PreExecutionProof.file_stat(path) for path in self.files}
+            need(all(read(path) == raw for path, raw in self.files.items()))
+        else:
+            need(failure['failure_settlement'] == 'not-attempted-authority-lost')
+        need(failure['cleanup_complete'] is True and failure['allocator_release_confirmed'] is True)
 
     def capture(self, path):
         raw = read(path)
@@ -327,6 +358,11 @@ class LocalProof:
         need(sorted(p.name for p in self.cycle.iterdir()) == self.names)
         for path, raw in self.files.items():
             need(read(path) == raw)
+        if self.settled_producer:
+            need(not self.directory.is_symlink())
+            for path, expected in self.stats.items():
+                need(PreExecutionProof.file_stat(path) == expected)
+            need(pre_execution_source(self.runtime) == self.journal_source_sha256)
 
     def collect(self, scope, session_factory):
         try:
@@ -346,7 +382,8 @@ class LocalProof:
                 raw = http.status(self.claim['job_id'])
             except Exception:
                 raise Unavailable() from None
-            backend = disposition(raw, scope, self.claim)
+            backend = (settled_failure_status(raw, self.claim) if self.settled_producer else
+                       disposition(raw, scope, self.claim))
             try:
                 observed = native.read_reconciliation_allocator(self.claim['job_id'], self.claim['attempt'])
             except worker.WorkerError as error:
@@ -373,9 +410,16 @@ class LocalProof:
                    'failure_sha256': sha(self.files[self.failure_path]),
                    'local_evidence_sha256': sha(worker.encode(
                        {p.name: sha(raw) for p, raw in self.files.items()})),
-                   'disposition_sha256': backend['disposition_sha256'],
                    'allocator_witness_sha256': allocator['witness_sha256'],
                    'outcome': 'failed-pre-producer-reconciled'}
+        if self.settled_producer:
+            receipt.update(outcome='failed-producer-settled-reconciled',
+                           backend_status_sha256=backend['backend_status_sha256'],
+                           attempt_binding='local-accepted-failure-settlement',
+                           worker_sha256=PRE_EXECUTION_WORKER_SHA256,
+                           journal_source_sha256=self.journal_source_sha256)
+        else:
+            receipt['disposition_sha256'] = backend['disposition_sha256']
         immutable(receipt_path(self.directory, self.claim['job_id']), worker.encode(receipt))
         self.recheck(scope)
         need(read(self.checkpoint) == self.files[self.checkpoint])
