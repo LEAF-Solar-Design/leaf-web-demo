@@ -1,13 +1,14 @@
 // NT2 toast (crib §2): a completed event surfaces as ONE quiet bottom-center
 // toast above the docked bar — newest replaces (App holds a single toast slot),
-// auto-fades after ~5 s (8 s for Undo, 180 ms exit per M1), one quiet action.
+// auto-fades after ~5 s (8 s with an action, 180 ms exit per M1), one quiet action.
 // Anatomy/colors come from styles.css (.toast, .toast .action, .enter/.exit).
 
 import { useEffect, useRef, useState } from 'react'
 import { isCompositionKey } from '../lib/keyComposition.js'
+import './toastParity.css'
 
-const TOAST_MS = 5000 // visible window before the exit fade
-const UNDO_MS = 8000
+// C3 A: design-parity-forks-20261101/receipts/operator-forks-all-a-20261101.json
+export const TOAST_MS = { info: 5000, action: 8000 }
 const EXIT_MS = 180   // M1 exit fade
 
 export default function Toast({ toast, onDone }) {
@@ -44,7 +45,7 @@ export default function Toast({ toast, onDone }) {
     focusedRef.current = rootRef.current?.contains(document.activeElement) || false
     dragRef.current = null
     suppressClickRef.current = false
-    let remaining = toast.action?.undo === true ? UNDO_MS : TOAST_MS
+    let remaining = toast.action ? TOAST_MS.action : TOAST_MS.info
     let startedAt = null
     let timer = null
     let fading = false
@@ -143,7 +144,8 @@ export default function Toast({ toast, onDone }) {
   return (
     <div
       ref={rootRef}
-      className={`toast ${exiting ? 'exit' : 'enter'}`}
+      className={`toast leaf-toast ${exiting ? 'exit' : 'enter'}`}
+      data-has-action={toast.action ? 'true' : undefined}
       role="status"
       tabIndex={-1}
       style={{ touchAction: 'pan-y' }}
