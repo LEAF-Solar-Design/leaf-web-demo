@@ -2,6 +2,7 @@ import { useContext } from 'react'
 import { act, cleanup, fireEvent, render, screen } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import { readFileSync } from 'node:fs'
+import { parse } from '@babel/parser'
 import { BrowserArtifactContext, BrowserAssetGround } from './BrowserAssetGround.jsx'
 
 vi.mock('./ProjectBoardGround.jsx', () => ({ ProjectBoardGround: ({ panel, active }) => <div hidden={!active}>{panel}</div> }))
@@ -31,6 +32,110 @@ function Output() {
 }
 const props = { browserActive: true, signedIn: true, accountScope: 'account:one', projectId: 'project-one',
   workspaceProject: { kind: 'project', label: 'Pastry shop' }, panel: <Output /> }
+
+// Exercise App's actual fenced loader without mounting unrelated App services.
+function sampleLoader({ search = '?demo=1', source = 'rooftop_demo', profile = 'cad', current = true } = {}) {
+  const app = readFileSync(`${process.cwd()}/src/App.jsx`, 'utf8').replace(/\r\n/g, '\n')
+  const tree = parse(app, { sourceType: 'module', plugins: ['jsx'] })
+  let loader, pending
+  const walk = node => {
+    if (!node || typeof node.type !== 'string') return
+    if (node.type === 'VariableDeclarator' && node.id.name === 'sampleEntryPending') pending = node.init.arguments[0]
+    if (node.type === 'CallExpression' && node.callee.name === 'useEffect'
+      && app.slice(node.arguments[0]?.start, node.arguments[0]?.end).includes('getSession(mock, DRAWING_SOURCE)')) loader = node.arguments[0]
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(walk)
+      else if (value && typeof value.type === 'string') walk(value)
+    }
+  }
+  walk(tree)
+  expect(loader).toBeTruthy()
+  expect(pending).toBeTruthy()
+  const bindings = {
+    REQUESTED_DRAWING_ID: 'demo', DRAWING_SOURCE: source,
+    requestedDrawingIdRef: { current: 'demo' }, isScopeCurrent: () => current,
+    sessionProof: { current: () => true, activate: vi.fn() }, knownGuest: false,
+    resetDrawing: vi.fn(), setLoadErr: vi.fn(), setDrawingLoad: vi.fn(),
+    hasDrawingSelection: () => true, resetCatalogTransient: vi.fn(), clearToast: vi.fn(),
+    setDrawer: vi.fn(), clearAgentSession: vi.fn(), mockVersions: { reset: vi.fn(), seedBase: vi.fn() },
+    seatIntake: vi.fn(), mock: true, isEditFixture: false,
+    getSession: vi.fn(), getDrawingVersions: vi.fn(),
+    session: { controller: { getSnapshot: () => ({ status: 'active' }) } },
+    classifyDrawingLoadFailure: () => 'network', humanizeError: error => error.message,
+    sampleEntryPending: { current: Function('window', `return (${app.slice(pending.start, pending.end)})`)({ location: { search } }) },
+    setSampleEntry: vi.fn(), committedSurfaceRef: { current: profile },
+  }
+  const load = Function('bindings', `const { ${Object.keys(bindings).join(', ')} } = bindings; return (${app.slice(loader.start, loader.end)})()`)
+  return { ...bindings, load: () => load(bindings) }
+}
+
+it('sends one profile-aware request only after App successfully seats the explicit sample', async () => {
+  const loader = sampleLoader()
+  const drawing = { dwg: '/samples/rooftop_demo.dwg' }
+  loader.getSession.mockResolvedValue({ intake: drawing })
+  await act(async () => { loader.load() })
+  expect(loader.seatIntake).toHaveBeenCalledWith(drawing, { drawingId: 'demo' })
+  expect(loader.setSampleEntry).toHaveBeenCalledExactlyOnceWith({ request: 1, profile: 'cad' })
+  const request = loader.setSampleEntry.mock.calls[0][0]
+  const { container, rerender } = render(<BrowserAssetGround {...props} profile="cad" browserActive={false} sampleEntry={request} drawing={drawing} />)
+  expect(container.querySelector('.workspace-environment').dataset.entered).toBe('true')
+  expect(container.querySelector('.environment-chooser').hasAttribute('inert')).toBe(true)
+  expect(screen.getByRole('button', { name: 'Project' }).getAttribute('aria-expanded')).toBe('false')
+  const field = screen.getByLabelText('Campaign input')
+  await act(async () => { loader.load() })
+  expect(loader.setSampleEntry).toHaveBeenCalledOnce()
+  rerender(<BrowserAssetGround {...props} profile="solar" browserActive={false} sampleEntry={request} drawing={drawing} />)
+  expect(container.querySelector('.workspace-environment').dataset.entered).toBe('false')
+  expect(screen.getByLabelText('Campaign input')).toBe(field)
+  rerender(<BrowserAssetGround {...props} profile="cad" browserActive={false} sampleEntry={request} drawing={drawing} />)
+  expect(container.querySelector('.workspace-environment').dataset.entered).toBe('true')
+})
+
+it('keeps the chooser, error and retry available after a failed sample load and enters on successful retry', async () => {
+  const loader = sampleLoader()
+  loader.getSession.mockRejectedValue(new Error('Sample could not load'))
+  await act(async () => { loader.load() })
+  expect(loader.setSampleEntry).not.toHaveBeenCalled()
+  expect(loader.sampleEntryPending.current).toBe(true)
+  expect(loader.setDrawingLoad).toHaveBeenLastCalledWith({ drawingId: 'demo', state: 'failed', failure: 'network' })
+  const error = loader.setLoadErr.mock.calls.at(-1)[0]
+  const view = sampleEntry => <>
+    <BrowserAssetGround {...props} profile="cad" browserActive={false} sampleEntry={sampleEntry} />
+    {!sampleEntry && <div role="alert">{error}<button onClick={loader.load}>Retry</button></div>}
+  </>
+  const { container, rerender } = render(view())
+  expect(screen.getByRole('alert').textContent).toContain('Sample could not load')
+  expect(screen.getByRole('button', { name: 'Open project or material' })).toBeTruthy()
+  expect(container.querySelector('.environment-chooser').hasAttribute('inert')).toBe(false)
+  loader.getSession.mockResolvedValue({ intake: { dwg: '/samples/rooftop_demo.dwg' } })
+  await act(async () => { fireEvent.click(screen.getByRole('button', { name: 'Retry' })) })
+  expect(loader.setSampleEntry).toHaveBeenCalledOnce()
+  rerender(view(loader.setSampleEntry.mock.calls[0][0]))
+  expect(container.querySelector('.workspace-environment').dataset.entered).toBe('true')
+})
+
+it.each([
+  { search: '' }, { search: '?demo=tour' }, { source: 'uploaded' }, { current: false },
+])('does not request sample entry for an ordinary mount, other drawing or stale load: %j', async options => {
+  const loader = sampleLoader(options)
+  loader.getSession.mockResolvedValue({ intake: { dwg: '/samples/rooftop_demo.dwg' } })
+  await act(async () => { loader.load() })
+  expect(loader.setSampleEntry).not.toHaveBeenCalled()
+})
+
+it('does not request sample entry for an absent intake', async () => {
+  const loader = sampleLoader()
+  loader.getSession.mockResolvedValue({ intake: null })
+  await act(async () => { loader.load() })
+  expect(loader.setSampleEntry).not.toHaveBeenCalled()
+})
+
+it('forwards the sample request through the mounted App, surface and browser ground owners', () => {
+  const source = file => readFileSync(`${process.cwd()}/src/${file}`, 'utf8').replace(/\r\n/g, '\n')
+  expect(source('App.jsx')).toMatch(/<SurfaceGrounds\b[\s\S]*?sampleEntry=\{sampleEntry\}/)
+  expect(source('site/SurfaceGrounds.jsx')).toMatch(/profile: surface, profiles: environmentProfiles, onSelect: onSelectSurface, onDescribe, onEnterWorkspace, sampleEntry/)
+  expect(source('site/BrowserAssetGround.jsx')).toMatch(/<WorkspaceEnvironment\b[\s\S]*?sampleEntry=\{sampleEntry\}/)
+})
 
 it('wires the signed-out chooser sign-in click to live auth login', () => {
   auth.signedIn = false

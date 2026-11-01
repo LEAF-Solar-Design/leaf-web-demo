@@ -60,6 +60,8 @@
   "mandatory_suite_ids": [
     "ci-process-capture-core",
     "ci-process-capture-runner",
+    "ci-full-run-manifest-certificates",
+    "ci-trace-smoke-linux",
     "platform-native-service-binding",
     "platform-org-invitations",
     "server-lab-activation",

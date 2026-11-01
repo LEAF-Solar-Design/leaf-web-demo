@@ -65,13 +65,25 @@ export const STUDIO_RAIL_FEATURES = Object.freeze(new Set([
 const studioRailButton = page => page.getByRole('navigation', { name: 'Workspace controls', exact: true })
   .getByRole('button', { name: 'Studio', exact: true })
 
-export async function revealStudioRail(page) {
+export async function revealStudioRail(page, assertions = expect) {
   const button = studioRailButton(page)
   if (!await button.isVisible() || await button.getAttribute('aria-expanded') === 'true') return false
   await button.click()
-  await expect(button).toHaveAttribute('aria-expanded', 'true')
-  await expect(page.locator('#project-workspace-activity')).toBeVisible()
+  await assertions(button).toHaveAttribute('aria-expanded', 'true')
+  await assertions(page.locator('#project-workspace-activity')).toBeVisible()
   return true
+}
+
+export async function withCensusStudioRail(page, inventory, assertions = expect) {
+  const opened = await revealStudioRail(page, assertions)
+  try { return await inventory() }
+  finally {
+    if (opened) {
+      const button = studioRailButton(page)
+      await button.click()
+      await assertions(button).toHaveAttribute('aria-expanded', 'false')
+    }
+  }
 }
 
 export async function assertCountControlIdentity(page, probe, targetRecipe, locator, evidence, assertions = expect) {
@@ -1206,7 +1218,7 @@ export function absenceNamePattern(locator) {
   return new RegExp('^' + label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + '(?: \\(unavailable: .+\\))?$')
 }
 
-export async function resolveSurfaceControl(page, probe) {
+export async function resolveSurfaceControl(page, probe, evidence = {}) {
   const profile = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
     .getByRole('combobox', { name: 'Workspace profile', exact: true })
   const modern = await profile.isVisible()
@@ -1217,7 +1229,15 @@ export async function resolveSurfaceControl(page, probe) {
   return {
     locator: modern ? profile : legacy, legacy, modern,
     activate: async () => {
-      if (modern) await profile.selectOption(probe.sourceId)
+      if (modern) {
+        const offered = await profile.locator('option').evaluateAll(options => options.map(option => option.value))
+        if (!offered.includes(probe.sourceId)) {
+          evidence.surfacePrecondition = { surface: probe.sourceId, reason: 'profile not enabled on this target',
+            offered, source: 'web/src/site/productSurfaces.js:716' }
+          throw new Error(`surface precondition: ${probe.sourceId} is not an enabled workspace profile on this target`)
+        }
+        await profile.selectOption(probe.sourceId)
+      }
       else await legacy.click()
     },
     assertSelected: async (assertions = expect) => {
@@ -1231,6 +1251,24 @@ export async function resolveSurfaceControl(page, probe) {
 
 export async function assertSurfaceState(locator, state, assertions = expect) {
   await assertions(locator.locator('[data-state]')).toHaveAttribute('data-state', state)
+}
+
+export async function assertBrowserAssetGround(page, assertions = expect) {
+  const asset = page.getByRole('region', { name: 'Browser asset', exact: true })
+  await assertions(asset).toBeVisible()
+  await assertions(asset.getByRole('heading', { name: 'No app to show yet', exact: true })
+    .or(asset.locator('iframe, .project-page, .portfolio')).first()).toBeVisible()
+  const project = page.getByRole('navigation', { name: 'Workspace controls', exact: true })
+    .getByRole('button', { name: 'Project', exact: true })
+  await assertions(project).toBeVisible()
+  await project.click()
+  try {
+    await assertions(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
+  } finally {
+    const close = page.getByRole('button', { name: 'Close Project', exact: true })
+    await assertions(close).toBeVisible()
+    await close.click()
+  }
 }
 
 const panelButton = (page, name) => page.getByRole('group', { name: 'Workspace panels', exact: true })
@@ -3796,7 +3834,7 @@ export async function setupStep(probe, runtime, recipe, assertions = runtime.rec
         y: map.y + map.height * (center.y < map.y + map.height / 2 ? 0.65 : 0.35) }
       expect(Math.abs(point.x - center.x)).toBeGreaterThan(0.2)
       expect(Math.abs(point.y - center.y)).toBeGreaterThan(0.2)
-      runtime.overviewPan = { map, point, before: viewport }
+      runtime.overviewPan = { map, point, before: viewport, scale: await page.locator('.cockpit-scale b').innerText() }
       evidence.overviewPan = runtime.overviewPan
       return
     }
@@ -4135,7 +4173,7 @@ async function activate(probe, runtime, locator) {
   const { page } = runtime
   const recipe = probe.locator
   if (probe.kind === 'surface' && recipe.role === 'tab') {
-    await (await resolveSurfaceControl(page, probe)).activate()
+    await (await resolveSurfaceControl(page, probe, runtime.evidence)).activate()
     return
   }
   if (recipe?.keyboardAction === 'engine:repeat' && typeof activateEngineRepeat === 'function') {
@@ -4432,8 +4470,12 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       return current.x !== before.viewport.x || current.y !== before.viewport.y
     }, { message: 'overview click must move the visible viewport rectangle' }).toBe(true)
     const after = await viewportBounds(page)
-    expect(Math.abs(after.width - before.viewport.width)).toBeLessThanOrEqual(0.2)
-    expect(Math.abs(after.height - before.viewport.height)).toBeLessThanOrEqual(0.2)
+    expect(await page.locator('.cockpit-scale b').innerText()).toBe(runtime.overviewPan.scale)
+    const { map } = runtime.overviewPan
+    expect(after.x).toBeGreaterThanOrEqual(map.x)
+    expect(after.y).toBeGreaterThanOrEqual(map.y)
+    expect(after.x + after.width).toBeLessThanOrEqual(map.x + map.width)
+    expect(after.y + after.height).toBeLessThanOrEqual(map.y + map.height)
     await expect(locator.locator('[data-overview-viewport]')).toBeVisible()
     runtime.evidence.overviewPan.after = after
     await requireWorkspace(runtime)
@@ -4710,7 +4752,11 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
       await assertSurfaceState(statusLocator, effect.state, assertions)
     }
     if (effect.ground === 'drawing' && effect.state !== 'setup' && effect.state !== 'sign-in') await expect(canvas(page)).toBeVisible()
-    else if (effect.ground === 'board') await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
+    else if (effect.ground === 'board') {
+      if (probe.sourceId === 'browser' && await page.locator('section.workspace-environment').count()) {
+        await assertBrowserAssetGround(page, assertions)
+      } else await expect(page.getByRole('region', { name: 'Project workspace', exact: true })).toBeVisible()
+    }
     else if (effect.ground === 'sheet') { await expect(page).toHaveURL(/\/sheets$/); await expect(page.getByRole('main')).toBeVisible() }
     await completeSolarReadiness(probe, runtime, statusLocator, assertions)
     return

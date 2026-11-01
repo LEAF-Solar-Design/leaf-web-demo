@@ -96,6 +96,94 @@ def load_json(path):
         raise InvalidInput("unreadable_input") from exc
 
 
+def directory_trie(paths):
+    """Self-contained copy of the builder's deterministic three-level trie."""
+    root = {"paths": [], "children": {}}
+    for path in sorted(set(paths)):
+        node = root
+        for component in path.split("/")[:-1][:3]:
+            node = node["children"].setdefault(component, {"paths": [], "children": {}})
+        node["paths"].append(path)
+    return root
+
+
+def expand_map(mapping):
+    """Validate the compact wire format before exposing any selection edges."""
+    try:
+        if mapping.get("schema") != "leaf.ci.test-selection-map.v2":
+            raise ValueError()
+        paths, session = mapping["paths"], mapping["session"]
+        if (not isinstance(paths, list) or any(not isinstance(p, str) for p in paths)
+                or paths != sorted(set(paths)) or not isinstance(session, dict)
+                or mapping.get("format") not in (
+                    {"paths": "interned", "session": "intersection"},
+                    {"paths": "interned", "session": "intersection",
+                     "collection": "session catalog reads excluded from suite reads"})):
+            raise ValueError()
+        for path in paths:
+            if path != ".":
+                repo_path(path)
+
+        def indices(value):
+            if (not isinstance(value, list) or any(type(i) is not int or not 0 <= i < len(paths) for i in value)
+                    or value != sorted(set(value))):
+                raise ValueError()
+            return set(value)
+
+        reads = indices(session["read_idx"])
+        collection = indices(session.get("collection_idx", []))
+        negative = indices(session["negative_idx"])
+        dirs = indices(session["directory_reads"])
+        member_rows = session.get("directory_members", [[] for _ in dirs])
+        if not isinstance(member_rows, list) or len(member_rows) != len(dirs):
+            raise ValueError()
+        members = {i: indices(row) for i, row in zip(sorted(dirs), member_rows)}
+        if not isinstance(mapping["suites"], dict):
+            raise ValueError()
+        expanded = dict(mapping, suites={})
+        expanded["session"] = dict(session, collection_paths=[paths[i] for i in sorted(collection)])
+        for sid, compact in mapping["suites"].items():
+            if not isinstance(compact, dict):
+                raise ValueError()
+            row = dict(compact)
+            for field, shared, prefix in (("read_paths", reads, "read"),
+                                          ("negative_lookup_paths", negative, "negative")):
+                extra = indices(row.pop(prefix + "_extra_idx"))
+                missing = indices(row.pop(prefix + "_missing_idx", []))
+                if extra & shared or not missing <= shared:
+                    raise ValueError()
+                row[field] = [paths[i] for i in sorted((shared - missing) | extra)]
+                if "." in row[field]:
+                    raise ValueError()
+            absent = indices(row.pop("directory_missing_idx", []))
+            if not absent <= dirs:
+                raise ValueError()
+            own = {i: set(values) for i, values in members.items() if i not in absent}
+            additions = row.pop("directory_extra")
+            if not isinstance(additions, list):
+                raise ValueError()
+            previous = -1
+            for entry in additions:
+                i = entry["path_idx"]
+                indices([i])
+                if i <= previous or i in absent:
+                    raise ValueError()
+                previous = i
+                extra = indices(entry["member_idx"])
+                missing = indices(entry.get("member_missing_idx", []))
+                base = own.get(i, set())
+                if extra & base or not missing <= base:
+                    raise ValueError()
+                own[i] = (base - missing) | extra
+            row["directory_reads"] = [{"path": paths[i], "members": [paths[j] for j in sorted(values)]}
+                                      for i, values in sorted(own.items())]
+            row["directory_trie"] = directory_trie(row["read_paths"])
+            expanded["suites"][sid] = row
+        return expanded
+    except (KeyError, TypeError, ValueError, AttributeError) as exc:
+        raise InvalidInput("invalid_map") from exc
+
+
 def atomic_write(path, data):
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
@@ -370,9 +458,34 @@ def _eligible_suite(row):
             not row.get("capture_errors") and not row.get("incomplete_reasons"))
 
 
+PROCESS_TRACE_KIND = "linux-process-tree"
+
+
+def _process_entry(entry):
+    return entry.get("trace_kind") == PROCESS_TRACE_KIND and entry.get("python_only") is False
+
+
+def verify_capture_epoch(mapping, manifest_path):
+    """The selecting build's epoch and external-root digests must equal the map's."""
+    if manifest_path is None:
+        raise InvalidInput("epoch_unavailable")
+    try:
+        manifest, _ = load_json(manifest_path)
+    except InvalidInput as exc:
+        raise InvalidInput("epoch_unavailable") from exc
+    if (manifest.get("schema") != "leaf.ci.capture-epoch.v1" or
+            not isinstance(mapping.get("capture_epoch"), str) or
+            normalized_epoch(manifest) != mapping["capture_epoch"] or
+            not isinstance(manifest.get("external_root_digests"), dict) or
+            _normalize_epoch_manifest(manifest)["external_root_digests"] !=
+            _normalize_epoch_manifest({"external_root_digests": mapping.get("external_root_digests")}).get("external_root_digests")):
+        raise InvalidInput("epoch_mismatch")
+    return manifest
+
+
 def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_path=None,
            catalog_path=None, repo_slug=None, pr_number=None, window_path=None,
-           environ=None, now=None):
+           environ=None, now=None, capture_epoch_manifest=None):
     decision = {
         "schema": DECISION_SCHEMA, "selection_mode": "full", "execution_mode": "full",
         "assigned_arm": None, "assignment_bucket": None, "assignment_rule": "sha256-pr-v1",
@@ -397,7 +510,10 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         mapping, map_raw = load_json(map_path)
         bind_blob(map_raw, trusted_tree, MAP_PATH)
         decision["map_sha"] = trusted_tree[MAP_PATH][2]
-        if mapping.get("schema") != "leaf.ci.test-selection-map.v1" or mapping.get("repo") != slug:
+        if mapping.get("schema") == "leaf.ci.test-selection-map.v2":
+            mapping = expand_map(mapping)
+        if (mapping.get("schema") not in ("leaf.ci.test-selection-map.v1", "leaf.ci.test-selection-map.v2") or
+                mapping.get("repo") != slug):
             raise InvalidInput("invalid_map")
         policy = mapping
         if policy_path is not None:
@@ -510,8 +626,15 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         required.intersection_update(entries)
         decision["mandatory_suite_ids"] = sorted(mandatory)
         decision["known_read_paths"] = {}
+        decision["known_read_prefixes"] = {}
         edges = {}
+        lookups = {}
+        prefix_edges = {}
+        prefix_known = {}
         shared = {}
+        process_map = mapping.get("trace_kind") == PROCESS_TRACE_KIND
+        if process_map and any(_process_entry(entry) for entry in entries.values()):
+            verify_capture_epoch(mapping, capture_epoch_manifest)
         for sid, entry in entries.items():
             row = suites.get(sid, {})
             if sid in new or sid in changed:
@@ -519,14 +642,16 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                 row = {}
             if not isinstance(row, dict):
                 raise InvalidInput("invalid_map")
-            if (not _eligible_suite(row) or entry.get("trace_kind") != "python" or
-                    entry.get("python_only") is not True or
+            python_entry = entry.get("trace_kind") == "python" and entry.get("python_only") is True
+            if (not _eligible_suite(row) or
+                    not (python_entry or (process_map and _process_entry(entry))) or
                     entry.get("classification") not in ("mapped", "mandatory") or
                     entry.get("classification") == "mandatory" or entry.get("contract_assertions")):
                 required.add(sid)
             if row.get("test_ids") is not None and sorted(strings(row["test_ids"])) != sorted(entry["test_ids"]):
                 raise InvalidInput("collection_drift")
             reads = set(repo_path(p) for p in strings(row.get("read_paths", [])))
+            prefixes = set()
             generated = row.get("generated_rules", [])
             if not isinstance(generated, list):
                 raise InvalidInput("generated_closure_incomplete")
@@ -537,7 +662,36 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                 inputs = strings(rule.get("inputs"), "generated_closure_incomplete")
                 if not inputs:
                     raise InvalidInput("generated_closure_incomplete")
-                reads.update(repo_path(p) for p in inputs)
+                for value in inputs:
+                    if value.endswith("/"):
+                        prefixes.add(repo_path(value.rstrip("/")))
+                    else:
+                        reads.add(repo_path(value))
+            for prefix in prefixes:
+                if prefix not in prefix_known:
+                    prefix_known[prefix] = any(path.startswith(prefix + "/") and item[1] == "blob"
+                                               for tree in (base_tree, head_tree)
+                                               for path, item in tree.items())
+                if not prefix_known[prefix]:
+                    raise InvalidInput("unresolved_read_path")
+                prefix_edges.setdefault(prefix, set()).add(sid)
+            if prefixes:
+                decision["known_read_prefixes"][sid] = sorted(prefixes)
+            directories = row.get("directory_reads", [])
+            if not isinstance(directories, list):
+                raise InvalidInput("invalid_map")
+            for directory in directories:
+                if not isinstance(directory, dict):
+                    raise InvalidInput("invalid_map")
+                path = directory.get("path")
+                if path != ".":
+                    repo_path(path)
+                for member in strings(directory.get("members"), "invalid_map"):
+                    repo_path(member)
+                    start = "" if path == "." else path + "/"
+                    if not member.startswith(start) or "/" in member[len(start):]:
+                        raise InvalidInput("invalid_map")
+                prefix_edges.setdefault(path, set()).add(sid)
             for path in reads:
                 if path not in base_tree and path not in head_tree:
                     raise InvalidInput("unresolved_read_path")
@@ -546,13 +700,19 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                     raise InvalidInput("ambiguous_read_path")
                 edges.setdefault(path, set()).add(sid)
             decision["known_read_paths"][sid] = sorted(reads)
+            for path in strings(row.get("negative_lookup_paths", []), "invalid_map"):
+                lookups.setdefault(repo_path(path), set()).add(sid)
             shared[sid] = set(strings(row.get("shared_state_dependencies", []))) - removed
             if not shared[sid] <= set(entries):
                 raise InvalidInput("shared_closure_incomplete")
         for path in paths:
-            if path not in edges:
+            hits = edges.get(path, set()) | lookups.get(path, set()) | prefix_edges.get(".", set())
+            parts = path.split("/")
+            for depth in range(1, len(parts) + 1):
+                hits = hits | prefix_edges.get("/".join(parts[:depth]), set())
+            if not hits:
                 raise InvalidInput("unknown_path")
-            required.update(edges[path])
+            required.update(hits)
         # Shared state is conservatively undirected: either endpoint requires both.
         while True:
             previous = set(required)
@@ -659,6 +819,7 @@ def main(argv=None):
         choose.add_argument(option, required=True)
     for name in ("event-evidence", "policy", "catalog", "repo-slug", "pr-number", "window"):
         choose.add_argument("--" + name)
+    choose.add_argument("--capture-epoch-manifest")
     emit = commands.add_parser("emit-web-args")
     for name in ("decision", "catalog", "out"):
         emit.add_argument("--" + name, required=True)
@@ -671,7 +832,7 @@ def main(argv=None):
         atomic_write(out / "only-args.nul", b"")
         decision = decide(args.repo, args.trusted_sha, args.head_sha, args.map,
                           args.event_evidence, args.policy, args.catalog, args.repo_slug,
-                          args.pr_number, args.window)
+                          args.pr_number, args.window, capture_epoch_manifest=args.capture_epoch_manifest)
         if decision.get("catalog_kind") == "web" and decision["apply_filter"]:
             catalog, _ = load_json(args.catalog)
             atomic_write(out / "only-args.nul", validated_web_args(decision, catalog))

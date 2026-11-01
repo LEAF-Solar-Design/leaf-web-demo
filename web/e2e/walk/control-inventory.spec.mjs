@@ -1,4 +1,4 @@
-import { test, expect, runProbe } from './fixtures.mjs'
+import { test, expect, runProbe, withCensusStudioRail } from './fixtures.mjs'
 import { CONTROL_CENSUS_BATCH, requireControlCensusBatch, resolveProbe } from './probes.mjs'
 import { censusControls, enumerateControls } from './controlCensus.mjs'
 import { buildFeatureMap } from '../../walk/featureMap.mjs'
@@ -31,8 +31,10 @@ test.describe('rendered control census', () => {
       }
       // Account and service discovery must settle before their exact identities are censused.
       await expect(page.getByRole('button', { name: 'Claude accounts not linked', exact: true })).toHaveAttribute('aria-expanded', 'false')
-      await expect(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
-      const census = await censusControls(page, map, { state, viewport: 'desktop' })
+      const census = await withCensusStudioRail(page, async () => {
+        await expect(page.getByRole('button', { name: /^Linked services [0-9]+ linked$/ })).toHaveAttribute('aria-expanded', 'false')
+        return censusControls(page, map, { state, viewport: 'desktop' })
+      })
       walkEvidence.censuses = [census]
       expect(census.total, 'a real workspace must render interactive controls').toBeGreaterThan(0)
       const ribbonPresent = await page.getByRole('tablist', { name: 'Ribbon', exact: true }).count() > 0
