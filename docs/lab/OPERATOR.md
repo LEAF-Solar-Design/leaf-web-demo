@@ -386,7 +386,7 @@ The same tenant transaction serializes enqueueing and the activation pointer.
 **Stop:** Set `LEAF_LAB_SURFACE_ENABLED=0` on the app and worker task
 environments and roll them through the existing staging delivery rail. On
 staging, these are the `LEAF_LAB_SURFACE_ENABLED` entries in
-leaf-automation-aws-terraform's
+`leaf-automation-aws-terraform`'s
 `terraform/environments/staging/us-east-1/leaf_platform.tf`.
 
 **Check:** Confirm every endpoint behind the Lab rail (the routers
