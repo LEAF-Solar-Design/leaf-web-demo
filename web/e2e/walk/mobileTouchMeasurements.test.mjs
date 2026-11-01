@@ -16,7 +16,7 @@ const mobileResult = (measurements) => evaluateLenses(evidenceFor(measurements))
 // Execute the real browser callback against a small DOM fake, without changing globals.
 function phone({ box = { x: 10, y: 20, width: 44, height: 44 }, connected = true,
   coarsePointer = true, touchPoints = 1, hit, evaluateError = false, diagnosticError = false,
-  radii = ['8px', '9px', '10px', '11px'], labels = {} } = {}) {
+  radii = ['0px', '0px', '0px', '0px'], style = {}, labels = {} } = {}) {
   const descendant = {}
   const handle = { isConnected: connected, contains: (node) => node === descendant,
     tagName: 'BUTTON', getAttribute: () => null, textContent: 'Open drawing',
@@ -31,7 +31,7 @@ function phone({ box = { x: 10, y: 20, width: 44, height: 44 }, connected = true
         getComputedStyle: () => {
           if (diagnosticError) throw new Error('style unavailable')
           return { borderTopLeftRadius: radii[0], borderTopRightRadius: radii[1],
-            borderBottomLeftRadius: radii[2], borderBottomRightRadius: radii[3] }
+            borderBottomLeftRadius: radii[2], borderBottomRightRadius: radii[3], ...style }
         },
         matchMedia: (query) => {
           assert.equal(query, '(pointer: coarse)')
@@ -56,9 +56,92 @@ const element = (tag, attributes = {}, textContent = '') => ({ tagName: tag.toUp
   id: attributes.id || '', classList: attributes.class?.trim().split(/\s+/).filter(Boolean) || [],
   getAttribute: name => attributes[name] ?? null })
 
+test('U1: 8px rounded corners sample the painted Close Studio shape instead of its parent', async () => {
+  const parent = element('div', { class: 'browser-panel-heading' })
+  const fake = phone({ box: { x: 10, y: 20, width: 106, height: 44 }, radii: Array(4).fill('8px'),
+    hit: (x, y, target) => {
+      const dx = Math.max(18 - x, x - 108, 0)
+      const dy = Math.max(28 - y, y - 56, 0)
+      return Math.hypot(dx, dy) <= 8 ? target : parent
+    } })
+  const sample = await collectSample(fake)
+  assert.equal(sample.measurements.control.reachable, true)
+  assert.equal(sample.measurements.control.clipped, false)
+  assert.equal(Object.hasOwn(sample, 'diagnostic'), false)
+  assert.deepEqual(fake.calls.slice(1), [[63, 42], [15, 25], [111, 25], [15, 59], [111, 59]])
+  assert.equal(mobileResult(sample.measurements).status, 'pass')
+})
+
+test('U2/U3: a sibling or ancestor covering a painted rounded sample still fails', async () => {
+  for (const ancestor of [false, true]) {
+    const cover = element('div', { id: ancestor ? 'ancestor-cover' : 'sibling-cover' })
+    const fake = phone({ radii: Array(4).fill('8px'),
+      hit: (x, y, target) => x === 49 && y === 59 ? cover : target })
+    if (ancestor) {
+      cover.contains = node => node === fake.handle
+      fake.handle.parentElement = cover
+    }
+    const { measurements, diagnostic } = await collectSample(fake)
+    assert.equal(measurements.control.reachable, true)
+    assert.equal(measurements.control.clipped, true)
+    assert.equal(mobileResult(measurements).status, 'finding')
+    assert.deepEqual(diagnostic.corners[3], { position: 'bottom-right',
+      hit: { tag: 'div', id: cover.id, classes: [], role: '', name: '' },
+      parentPath: [], insideTarget: false, offscreen: false })
+    assert.deepEqual(diagnostic.geometry, { mode: 'rounded',
+      insets: ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map(position => ({ position, x: 5, y: 5 })),
+      radiiPx: { topLeft: 8, topRight: 8, bottomLeft: 8, bottomRight: 8 } })
+  }
+})
+
+test('U4: unsupported geometry keeps rectangular samples and explains clipped diagnostics', async () => {
+  for (const [options, reason] of [
+    [{ radii: Array(4).fill('8px 12px') }, 'elliptical-radius'],
+    [{ radii: Array(4).fill('50%') }, 'percentage-radius'],
+    [{ style: { clipPath: 'circle(40%)' } }, 'clip-path'],
+    [{ style: { transform: 'matrix(1, 0, 0, 1, 2, 0)' } }, 'transform'],
+    [{ style: { translate: '2px' } }, 'transform'],
+    [{ style: { maskImage: 'url(mask.svg)' } }, 'mask'],
+  ]) {
+    const cover = element('aside')
+    const fake = phone({ radii: Array(4).fill('8px'), ...options,
+      hit: (x, y, target) => x === 12 && y === 22 ? cover : target })
+    const { measurements, diagnostic } = await collectSample(fake)
+    assert.equal(measurements.control.clipped, true)
+    assert.equal(diagnostic.geometry.mode, `unresolved:${reason}`)
+    assert.deepEqual(diagnostic.geometry.insets,
+      ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map(position => ({ position, x: 2, y: 2 })))
+    assert.equal(diagnostic.corners[0].hit.tag, 'aside')
+    assert.deepEqual(fake.calls.slice(1), [[32, 42], [12, 22], [52, 22], [12, 62], [52, 62]])
+  }
+})
+
+test('U5: zero radii preserve rectangular sample coordinates and measurement bytes', async () => {
+  const fake = phone({ radii: Array(4).fill('0px') })
+  const { measurements } = await collectSample(fake)
+  const rect = { x: 10, y: 20, width: 44, height: 44 }
+  assert.equal(JSON.stringify(measurements), JSON.stringify({ reference,
+    input: { touch: true, coarsePointer: true }, viewport: { width: 390, height: 844, deviceScaleFactor: 3 },
+    target: { role: 'button', name: 'Open drawing', box: rect }, control: { reachable: true, clipped: false, rect } }))
+  assert.deepEqual(fake.calls.slice(1), [[32, 42], [12, 22], [52, 22], [12, 62], [52, 62]])
+  const { diagnostic } = await collectSample(phone({ hit: () => null }))
+  assert.equal(diagnostic.geometry.mode, 'rectangular')
+  assert.deepEqual(diagnostic.geometry.radiiPx, { topLeft: 0, topRight: 0, bottomLeft: 0, bottomRight: 0 })
+})
+
+test('circular radius pairs resolve to px, clamp per corner and accept identity transforms', async () => {
+  const fake = phone({ radii: ['100px', '8px 8px', '0px', '4px'],
+    style: { transform: 'matrix(1, 0, 0, 1, 0, 0)' }, hit: () => null })
+  const { diagnostic } = await collectSample(fake)
+  assert.equal(diagnostic.geometry.mode, 'rounded')
+  assert.deepEqual(diagnostic.geometry.radiiPx, { topLeft: 22, topRight: 8, bottomLeft: 0, bottomRight: 4 })
+  assert.deepEqual(diagnostic.geometry.insets.map(({ x, y }) => [x, y]), [[9, 9], [5, 5], [2, 2], [4, 4]])
+})
+
 test('rounded corners report the parent and target radii separately from the unchanged measurement', async () => {
   const parent = element('div')
-  const fake = phone({ hit: (x, y, target) => x === 32 && y === 42 ? target : parent })
+  const fake = phone({ radii: ['8px', '9px', '10px', '11px'],
+    hit: (x, y, target) => x === 32 && y === 42 ? target : parent })
   const { measurements, diagnostic } = await collectSample(fake)
   const rect = { x: 10, y: 20, width: 44, height: 44 }
   assert.equal(JSON.stringify(measurements), JSON.stringify({ reference,
@@ -68,6 +151,10 @@ test('rounded corners report the parent and target radii separately from the unc
     corners: ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map(position => ({ position,
       hit: { tag: 'div', id: '', classes: [], role: '', name: '' }, parentPath: [], insideTarget: false, offscreen: false })),
     borderRadiusPx: { topLeft: 8, topRight: 9, bottomLeft: 10, bottomRight: 11 },
+    geometry: { mode: 'rounded',
+      insets: ['top-left', 'top-right', 'bottom-left', 'bottom-right'].map((position, index) =>
+        ({ position, x: index === 3 ? 6 : 5, y: index === 3 ? 6 : 5 })),
+      radiiPx: { topLeft: 8, topRight: 9, bottomLeft: 10, bottomRight: 11 } },
   })
   assert.equal(mobileResult(measurements).status, 'finding')
 })
@@ -135,7 +222,7 @@ test('offscreen and empty corner hits are distinguished', async () => {
   assert.deepEqual(diagnostic.corners[1], { position: 'top-right', hit: null, parentPath: [], insideTarget: false, offscreen: false })
 })
 
-test('unclipped targets skip diagnostic reads and failed diagnostic reads preserve measurements', async () => {
+test('unclipped targets omit diagnostics and failed style reads preserve rectangular measurements', async () => {
   assert.equal(Object.hasOwn(await collectSample(phone({ diagnosticError: true })), 'diagnostic'), false)
   const parent = element('div')
   const hit = (x, y, target) => x === 12 && y === 22 ? parent : target

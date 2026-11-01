@@ -20,11 +20,44 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
       }
       const cx = box.x + box.width / 2
       const cy = box.y + box.height / 2
+      const positions = ['top-left', 'top-right', 'bottom-left', 'bottom-right']
+      const radiusKeys = ['topLeft', 'topRight', 'bottomLeft', 'bottomRight']
+      let style
+      let mode = 'rectangular'
+      const radiiPx = Object.fromEntries(radiusKeys.map(key => [key, null]))
+      try {
+        style = window.getComputedStyle(target)
+        const unsupported = (reason) => { if (!mode.startsWith('unresolved:')) mode = `unresolved:${reason}` }
+        if (style.clipPath && style.clipPath !== 'none') unsupported('clip-path')
+        if ([style.maskImage, style.webkitMaskImage, style.maskBorderSource, style.webkitMaskBoxImageSource]
+          .some(value => value && value !== 'none')) unsupported('mask')
+        if (style.transform && !['none', 'matrix(1, 0, 0, 1, 0, 0)',
+          'matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)'].includes(style.transform)) unsupported('transform')
+        if ((style.translate && !['none', '0px', '0px 0px', '0px 0px 0px'].includes(style.translate))
+          || (style.rotate && !['none', '0deg'].includes(style.rotate))
+          || (style.scale && !['none', '1', '1 1', '1 1 1'].includes(style.scale))) unsupported('transform')
+        for (const [index, value] of [style.borderTopLeftRadius, style.borderTopRightRadius,
+          style.borderBottomLeftRadius, style.borderBottomRightRadius].entries()) {
+          const parts = (value || '').trim().split(/\s+/)
+          if (parts.some(part => part.includes('%'))) { unsupported('percentage-radius'); continue }
+          if (parts.length > 2 || parts.some(part => !/^(?:\d+(?:\.\d+)?|\.\d+)px$|^0$/.test(part))) {
+            unsupported('radius'); continue
+          }
+          const [horizontal, vertical = horizontal] = parts.map(Number.parseFloat)
+          if (horizontal !== vertical) { unsupported('elliptical-radius'); continue }
+          radiiPx[radiusKeys[index]] = Math.min(horizontal, box.width / 2, box.height / 2)
+        }
+        if (mode === 'rectangular' && Object.values(radiiPx).some(radius => radius > 0)) mode = 'rounded'
+      } catch { mode = 'unresolved:style-unavailable' }
+      const insets = radiusKeys.map((key, index) => {
+        const inset = mode === 'rounded' ? Math.max(2, Math.ceil(radiiPx[key] * (1 - 1 / Math.sqrt(2))) + 2) : 2
+        return { position: positions[index], x: inset, y: inset }
+      })
       const corners = [
-        [box.x + 2, box.y + 2],
-        [box.x + box.width - 2, box.y + 2],
-        [box.x + 2, box.y + box.height - 2],
-        [box.x + box.width - 2, box.y + box.height - 2],
+        [box.x + insets[0].x, box.y + insets[0].y],
+        [box.x + box.width - insets[1].x, box.y + insets[1].y],
+        [box.x + insets[2].x, box.y + box.height - insets[2].y],
+        [box.x + box.width - insets[3].x, box.y + box.height - insets[3].y],
       ]
       const measurements = {
         input: { touch: navigator.maxTouchPoints > 0, coarsePointer: window.matchMedia('(pointer: coarse)').matches },
@@ -38,7 +71,7 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
       let diagnostic
       if (measurements.control.clipped) {
         try {
-          const style = window.getComputedStyle(target)
+          if (!style) throw new Error('style unavailable')
           const identityOf = (element) => ({ tag: element.tagName.toLowerCase(),
             id: (element.id || '').slice(0, 60),
             classes: Array.from(element.classList || []).slice(0, 3).map(name => name.slice(0, 40)) })
@@ -81,6 +114,7 @@ export async function collectMobileTouchMeasurements({ page, handle, viewport, r
             }),
             borderRadiusPx: { topLeft: parseFloat(style.borderTopLeftRadius), topRight: parseFloat(style.borderTopRightRadius),
               bottomLeft: parseFloat(style.borderBottomLeftRadius), bottomRight: parseFloat(style.borderBottomRightRadius) },
+            geometry: { mode, insets, radiiPx },
           }
         } catch { /* A diagnostic read must not discard a valid measurement. */ }
       }
