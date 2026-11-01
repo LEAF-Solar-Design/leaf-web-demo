@@ -10,6 +10,7 @@ import EscCap from './EscCap.jsx'
 import useExit from '../useExit.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import './detailsDrawerSheet.css'
+import './detailsTopLayer.css'
 
 const PHONE_QUERY = '(max-width: 599px)'
 
@@ -29,11 +30,12 @@ export default function DetailsDrawer({ data, onClose }) {
   const drawerRef = useRef(null)
   const closeRef = useRef(null)
   const restoreRef = useRef(null)
+  const regionRef = useRef(null)
   const open = !!data
   const [phone, setPhone] = useState(() => window.matchMedia?.(PHONE_QUERY).matches ?? false)
   const [detent, setDetent] = useState('medium')
   const dragRef = useRef(null)
-  const modal = !phone || detent === 'large'
+  const modal = phone && detent === 'large'
   const [copyLabel, setCopyLabel] = useState('Copy diagnostics')
   const copyTimer = useRef(null)
   const copyGeneration = useRef(0)
@@ -112,12 +114,35 @@ export default function DetailsDrawer({ data, onClose }) {
   useEffect(() => {
     if (!open) return undefined
     restoreRef.current = document.activeElement
-    closeRef.current?.focus()
+    regionRef.current = restoreRef.current?.closest?.('[role="region"], section, main')
+    const dialog = drawerRef.current
     return () => {
+      if (dialog?.open) {
+        if (typeof dialog.close === 'function') dialog.close()
+        else dialog.removeAttribute('open')
+      }
       const target = restoreRef.current
       if (target?.isConnected && typeof target.focus === 'function') target.focus()
+      else if (regionRef.current?.isConnected) {
+        const heading = regionRef.current.querySelector('h1, h2, h3')
+        if (heading) { heading.tabIndex = -1; heading.focus() }
+      }
     }
   }, [open])
+
+  useEffect(() => {
+    const dialog = drawerRef.current
+    if (!open || !dialog) return undefined
+    if (modal && typeof dialog.showModal === 'function') dialog.showModal()
+    else if (!modal && typeof dialog.show === 'function') dialog.show()
+    else dialog.setAttribute('open', '')
+    closeRef.current?.focus()
+    return () => {
+      if (!dialog.open) return
+      if (typeof dialog.close === 'function') dialog.close()
+      else dialog.removeAttribute('open')
+    }
+  }, [open, modal])
 
   // S27: Escape is the owner stack's (drawer layer), from anywhere on the
   // page, not only from focus inside the drawer; a sheet or menu above it
@@ -143,7 +168,7 @@ export default function DetailsDrawer({ data, onClose }) {
   const { title, rows = [], action, foot, diagnostics } = shown
   return (
     <div className={`drawer-layer${phone ? ' drawer-sheet-layer' : ''}`}>
-      <aside ref={drawerRef} className={`drawer ${exiting ? 'exit' : 'enter'}${phone ? ' drawer-sheet' : ''}`} data-detent={phone ? detent : undefined} role="dialog" aria-modal={modal ? 'true' : 'false'} aria-label={title} onKeyDown={ownKeyboard}>
+      <dialog ref={drawerRef} className={`drawer ${exiting ? 'exit' : 'enter'}${phone ? ' drawer-sheet' : ''} details-dialog`} data-detent={phone ? detent : undefined} aria-modal={modal ? 'true' : undefined} aria-label={title} onKeyDown={ownKeyboard} onCancel={event => event.preventDefault()}>
         <div className="drawer-head" onPointerDown={startDrag} onPointerUp={endDrag} onPointerCancel={() => { dragRef.current = null }}>
           {phone && <button type="button" className="drawer-sheet-handle" aria-label={detent === 'medium' ? 'Expand details' : 'Condense details'} aria-expanded={detent === 'large'} onClick={() => changeDetent(detent === 'medium' ? 'large' : 'medium')}><span aria-hidden="true" /></button>}
           <span className="drawer-title">{title}</span>
@@ -165,7 +190,7 @@ export default function DetailsDrawer({ data, onClose }) {
           )}
         </div>
         {foot && <div className="drawer-foot">{foot}</div>}
-      </aside>
+      </dialog>
     </div>
   )
 }
