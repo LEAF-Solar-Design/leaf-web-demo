@@ -2,6 +2,7 @@ import test from 'node:test'
 import assert from 'node:assert/strict'
 import { readFileSync, readdirSync } from 'node:fs'
 import { EventEmitter } from 'node:events'
+import { runInNewContext } from 'node:vm'
 import { ACTIONS, accessibleName } from '../../src/lib/actionRegistry.js'
 import { holdJobRoutes, openHistory, previewVersion, startPendingRun, runProbe, assertEffect, setupStep, requireNoDrawing, VERSIONLESS_DRAWING_REASON, solarCalibrationFailure,
   assertEngineMode, setJobRail, solarBrowserCatalogRequired, barNoRung, captureBarNoRung, assertBarNoRung, installGeometryObserver,
@@ -960,7 +961,6 @@ import { qcDev, uiUxDev } from './lenses/index.mjs'
 import { PANEL_PERFORMANCE_BUDGETS, PANEL_PERFORMANCE_BUDGET_SOURCE, PANEL_PERFORMANCE_VIEWPORTS,
   preparePanelPerformanceCapture } from './fixtures.mjs'
 import { createPerformanceMeasurementCapture } from './performanceMeasurements.mjs'
-import { runInNewContext } from 'node:vm'
 import { unfamiliar } from './lenses/index.mjs'
 
 function chooserOpenFixture({ chooser = false, label = true, opens = true, focus = true, expanded = true,
@@ -1607,7 +1607,8 @@ test('late observer exceptions drop only that persona after other facts were col
 function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal = false,
   featureId = 'control:linked-services', state = 'ready', escapeClosed = true } = {}) {
   const sessionDetails = featureId === 'control:session-details'
-  const name = sessionDetails ? 'Session details' : 'Linked services'
+  const shortcuts = featureId === 'action:bar-shortcuts'
+  const name = shortcuts ? 'Keyboard shortcuts' : sessionDetails ? 'Session details' : 'Linked services'
   const calls = [], cleanup = [], child = {}, outside = {}
   const opener = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
   const initial = { isConnected: true, disposed: 0, async dispose() { this.disposed++ } }
@@ -1624,6 +1625,14 @@ function accessibilityWalkFixture({ tabOutside = false, tabThrows = false, modal
   const locator = locatorFor(opener), dialog = locatorFor(root)
   const page = {
     getByRole(role, options) {
+      if (shortcuts && role === 'navigation') {
+        assert.deepEqual(options, { name: 'Workspace controls', exact: true })
+        return { getByRole: () => locator }
+      }
+      if (shortcuts && role === 'switch') {
+        assert.deepEqual(options, { name: 'Single-key shortcuts', exact: true })
+        return locatorFor(initial)
+      }
       if (role === 'button') {
         assert.deepEqual(options, { name: sessionDetails ? 'Close details' : 'Close linked services panel', exact: true })
         return locatorFor(initial)
@@ -1832,7 +1841,7 @@ test('each declared dialog capture receives its initial focus target and emits i
     ['control:claude-accounts', 'Claude accounts', 'button', 'Close Claude account panel', 'close-claude-accounts'],
     ['control:session-details', 'Session details', 'button', 'Close details', 'close-session-details', true],
     ['control:version-history', 'Version history', null, null, 'control:version-history'],
-    ['action:bar-shortcuts', 'Keyboard shortcuts', 'switch', 'Single-key shortcuts', 'single-key-shortcuts'],
+    ['action:bar-shortcuts', 'Keyboard shortcuts', 'switch', 'Single-key shortcuts', 'single-key-shortcuts', true],
   ]) for (const state of ACCESSIBILITY_DIALOG_SCOPE[featureId].states) {
     const opener = { isVisible: async () => true }, initial = {}, dialog = {}, cleanup = []
     const page = { getByRole(actualRole, options) {
@@ -1885,6 +1894,20 @@ test('session-details desktop traces pass the real lens only when Escape closes 
     assert.equal(focus.actualReturnTarget, 'control:session-details')
     assert.equal(accessibility.evaluate(fake.evidence).status, escapeClosed ? 'pass' : 'finding')
     assert.equal(fake.evidence.result.result, 'passed')
+    for (const dispose of fake.cleanup) await dispose()
+  }
+})
+
+test('WL60 U3 shortcut modal measurements agree with the scope and pass the real lens', async () => {
+  assert.equal(ACCESSIBILITY_DIALOG_SCOPE['action:bar-shortcuts'].expectedModal, true)
+  for (const modal of [true, false]) {
+    const fake = accessibilityWalkFixture({ featureId: 'action:bar-shortcuts', modal })
+    const capture = await prepareAccessibilityCapture({ ...fake, viewport: 'desktop' })
+    await followAccessibilityCapture({ ...fake, capture })
+    assert.deepEqual(fake.evidence.measurements.overlay, {
+      role: 'dialog', name: 'Keyboard shortcuts', modal, expectedModal: true,
+    })
+    assert.equal(accessibility.evaluate(fake.evidence).status, modal ? 'pass' : 'finding')
     for (const dispose of fake.cleanup) await dispose()
   }
 })
@@ -5583,7 +5606,8 @@ test('WL58 U1 DXF collapse requires a mounted control before accepting hidden', 
   }
 })
 
-function cadBundleFake({ marker = true, fail = false, cap = false, computed = false, oversized = false } = {}) {
+function cadBundleFake({ marker = true, fail = false, cap = false, computed = false, oversized = false,
+  resources = [], scripts = [], preloads = [] } = {}) {
   const requests = [], disposed = []
   const bodies = {
     '/.leaf-walk-build.json': JSON.stringify({ flags: { VITE_CAD_EDIT: '1', secret: 'PRIVATE_ENV' } }),
@@ -5595,6 +5619,15 @@ function cadBundleFake({ marker = true, fail = false, cap = false, computed = fa
   }
   const page = {
     url: () => 'https://walk.example/workspace?secret=PRIVATE_URL',
+    evaluate: async callback => runInNewContext(`(${callback.toString()})()`, {
+      URL, location: { origin: 'https://walk.example' },
+      performance: { getEntriesByType: type => { assert.equal(type, 'resource'); return resources } },
+      document: { baseURI: 'https://walk.example/workspace', scripts: scripts.map(src => ({ src })),
+        querySelectorAll: selector => {
+          assert.equal(selector, 'link[rel~="modulepreload"]')
+          return preloads.map(href => ({ href }))
+        } },
+    }),
     locator: selector => ({ count: async () => selector === '#cockpit-import-pane' ? 1 : 0 }),
     request: { get: async (href, options) => {
       assert.ok(options.timeout > 0 && options.timeout <= 10_000)
@@ -5618,7 +5651,9 @@ function assertCadBundleWhitelist(probe) {
   keys(probe, ['manifestFlag', 'dom', 'servedJs', 'consoleErrorCount', 'binding'])
   keys(probe.dom, ['workbench', 'objectsPanel', 'importPane'])
   keys(probe.binding, ['worker', 'pageUrlPathSha256'])
-  keys(probe.servedJs, ['indexSha256', 'assets', 'markerFound', 'coverage'])
+  keys(probe.servedJs, ['indexSha256', 'assets', 'markerFound', 'coverage', 'source', 'pageAssetCount'])
+  assert.ok(['page-loaded', 'index-fallback'].includes(probe.servedJs.source))
+  assert.ok(Number.isInteger(probe.servedJs.pageAssetCount) && probe.servedJs.pageAssetCount <= 40)
   for (const value of Object.values(probe.dom)) assert.ok(value === null || Number.isInteger(value))
   assert.ok(probe.consoleErrorCount === null || Number.isInteger(probe.consoleErrorCount))
   for (const asset of probe.servedJs.assets) {
@@ -5640,12 +5675,63 @@ test('WL58 U2 bundle correlation follows one level of static and dynamic imports
     assert.equal(probe.binding.worker, 3)
     assert.match(probe.binding.pageUrlPathSha256, /^[a-f0-9]{64}$/)
     assert.match(probe.servedJs.indexSha256, /^[a-f0-9]{64}$/)
+    assert.equal(probe.servedJs.source, 'index-fallback')
+    assert.equal(probe.servedJs.pageAssetCount, 0)
     assert.equal(probe.servedJs.markerFound, marker)
     assert.equal(probe.servedJs.coverage, 'complete')
     assert.equal(probe.servedJs.assets.length, 3)
     assert.deepEqual(fake.requests, fake.disposed)
     assertCadBundleWhitelist(probe)
   }
+})
+
+test('WL60 U2 loaded scripts take precedence, with complete or UNKNOWN negative marker evidence', async () => {
+  for (const options of [{}, { marker: false }, { fail: true }]) {
+    const fake = cadBundleFake({ ...options, resources: [
+      { name: 'https://walk.example/assets/main.js', initiatorType: 'script' },
+      { name: 'https://walk.example/assets/chunk.js', initiatorType: 'script' },
+    ] })
+    const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+    assert.equal(probe.servedJs.source, 'page-loaded')
+    assert.equal(probe.servedJs.pageAssetCount, 2)
+    assert.equal(probe.servedJs.indexSha256, null)
+    assert.equal(probe.servedJs.coverage, options.fail ? 'partial' : 'loaded-complete')
+    assert.equal(probe.servedJs.markerFound, options.fail ? 'UNKNOWN' : options.marker !== false)
+    assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', '/assets/main.js', '/assets/chunk.js'])
+    assert.equal(probe.servedJs.assets.length, 2)
+    assertCadBundleWhitelist(probe)
+  }
+  const fallback = cadBundleFake()
+  const probe = await collectCadEditBundleProbe(fallback.page, fallback.runtime)
+  assert.equal(probe.servedJs.source, 'index-fallback')
+  assert.equal(probe.servedJs.pageAssetCount, 0)
+  assert.ok(fallback.requests.includes('/'))
+  assertCadBundleWhitelist(probe)
+})
+
+test('WL60 U2 page collection merges resource, script and preload URLs, deduplicates and caps at 40', async () => {
+  const fake = cadBundleFake({ marker: false, resources: [
+    { name: 'https://walk.example/assets/resource', initiatorType: 'script' },
+    { name: 'https://walk.example/assets/link', initiatorType: 'link' },
+    { name: 'https://walk.example/assets/worker.mjs?private=PRIVATE_URL', initiatorType: 'other' },
+    { name: 'https://walk.example/assets/chunk.js', initiatorType: 'fetch' },
+    { name: 'https://elsewhere.example/external.js', initiatorType: 'script' },
+    { name: 'https://walk.example/api/jobs', initiatorType: 'fetch' },
+  ], scripts: ['', '/assets/resource#duplicate', '/assets/document.js'],
+  preloads: ['/assets/document.js', '/assets/preload.js'] })
+  const probe = await collectCadEditBundleProbe(fake.page, fake.runtime)
+  assert.equal(probe.servedJs.pageAssetCount, 6)
+  assert.equal(probe.servedJs.coverage, 'loaded-complete')
+  assert.equal(probe.servedJs.markerFound, false)
+  assert.deepEqual(fake.requests, ['/.leaf-walk-build.json', '/assets/resource', '/assets/link',
+    '/assets/worker.mjs', '/assets/chunk.js', '/assets/document.js', '/assets/preload.js'])
+  assertCadBundleWhitelist(probe)
+  const capped = cadBundleFake({ scripts: Array.from({ length: 45 }, (_, i) => `/assets/loaded${i}.js`) })
+  const cappedProbe = await collectCadEditBundleProbe(capped.page, capped.runtime)
+  assert.equal(cappedProbe.servedJs.pageAssetCount, 40)
+  assert.equal(cappedProbe.servedJs.assets.length, 40)
+  assert.equal(capped.requests.length, 41)
+  assertCadBundleWhitelist(cappedProbe)
 })
 
 test('WL58 U2 failed fetches, computed imports, byte budgets and asset caps leave negative coverage UNKNOWN', async () => {
@@ -7084,7 +7170,7 @@ test('submission setup failure still drains routes through runProbe finally', as
   assert.equal(unroute, 1)
 })
 
-test('WL57 U2 running Escape checks detach evidence and uses Studio or the legacy spine', async () => {
+test('WL57 U2 running Escape checks detach evidence and uses Studio or the legacy spine; WL60 U1 finds the second child', async () => {
   for (const studio of [true, false]) for (const initialOpen of [false, true]) for (const missingJob of [false, true]) {
     let open = initialOpen
     const events = []
@@ -7095,6 +7181,15 @@ test('WL57 U2 running Escape checks detach evidence and uses Studio or the legac
     const button = { isVisible: async () => studio,
       getAttribute: async () => String(open),
       click: async () => { events.push(open ? 'close Studio' : 'open Studio'); open = !open } }
+    const monitorChildren = ['another-tool', ...(missingJob ? [] : ['count-by-layer'])]
+    const monitor = { filter: ({ has }) => {
+      assert.ok(has)
+      return { getByText: (text, options) => {
+        assert.equal(text, 'count-by-layer'); assert.equal(options.exact, true)
+        assert.equal(monitorChildren.indexOf(text), missingJob ? -1 : 1)
+        return { first: () => node('monitor job') }
+      } }
+    } }
     const page = {
       request: { get: async url => {
         assert.equal(url, '/api/jobs'); events.push('jobs')
@@ -7106,7 +7201,10 @@ test('WL57 U2 running Escape checks detach evidence and uses Studio or the legac
         } }
         if (role === 'region') {
           assert.equal(options.name, 'Studio sidebar')
-          return { getByRole: (role, options) => {
+          return { locator: selector => {
+            assert.equal(selector, 'aside.rail')
+            return monitor
+          }, getByRole: (role, options) => {
             assert.equal(role, 'heading'); assert.ok(options.name.test('Job monitor (1 live)'))
             return node('monitor heading')
           } }
@@ -7131,14 +7229,8 @@ test('WL57 U2 running Escape checks detach evidence and uses Studio or the legac
         if (selector === '#project-workspace-activity') return node('Studio visible')
         if (selector === 'aside.rail .rail-ledger') return { countValue: 1 }
         assert.equal(selector, 'aside.rail')
-        const job = { getByText: (text, options) => {
-          assert.equal(text, 'count-by-layer'); assert.equal(options.exact, true)
-          return node('monitor job')
-        } }
-        return studio ? { filter: () => ({ locator: selector => {
-          assert.equal(selector, '.rail-ske, .rail-empty, .rail-ledger > *')
-          return { first: () => job }
-        } }) } : { getByText: () => ({ first: () => node('legacy job') }) }
+        assert.equal(studio, false, 'Studio must search inside its sidebar region')
+        return { getByText: () => ({ first: () => node('legacy job') }) }
       },
     }
     const assertions = value => ({ ...expect(value),
