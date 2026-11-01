@@ -1,0 +1,16 @@
+[data-leaf-profile="studio"] .lab-workbench {
+  --leaf-color-background: var(--leaf-ground);
+  --leaf-color-surface: var(--leaf-surface);
+  --leaf-color-border: var(--leaf-line);
+  --leaf-color-foreground: var(--leaf-ink);
+  --leaf-color-primary: var(--leaf-accent);
+  --leaf-font-sans: var(--leaf-font-text);
+  --leaf-font-mono: var(--leaf-font-data);
+  --leaf-radius-panel: var(--leaf-radius-card);
+  --leaf-spacing-panel-padding: var(--leaf-space-3);
+}
+
+[data-leaf-profile="studio"] .lab-workbench :is(button,[role="button"],a):focus-visible {
+  outline: var(--leaf-metric-focus-width) solid var(--leaf-focus);
+  outline-offset: var(--leaf-metric-focus-offset);
+}

@@ -1,4 +1,5 @@
 @import './contract/sources/leaf-tokens.css' layer(leaf-lab-tokens);
+@import './studioParityAdapter.css';
 
 .lab-workbench {
   min-width: 0;
