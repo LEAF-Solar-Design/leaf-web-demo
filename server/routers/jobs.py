@@ -842,9 +842,11 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
 
     selected_binding = None
     delegated_checkout = None
-    if session_id is not None and any(
+    selected_solve = (capability_catalog.capability_adapter(tool.get("name"))
+                      == capability_catalog.CLOUD_PROPOSAL_ADAPTER)
+    if session_id is not None and (selected_solve or any(
         cap in ("drawing.read", "drawing.write") for cap in tool.get("capabilities", [])
-    ):
+    )):
         import project_execution_context
         try:
             selected_binding = project_execution_context.resolve_turn_binding(
@@ -859,8 +861,9 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
         if selected_binding is not None:
             if binding is not None:
                 return scoped_project_refusal()
-            selected_write = not _is_project_read_tool(tool)
-            if selected_write and ("drawing.write" not in tool.get("capabilities", [])
+            selected_custodied = not _is_project_read_tool(tool)
+            if selected_custodied and ((not selected_solve
+                    and "drawing.write" not in tool.get("capabilities", []))
                     or solar_project_admission._trusted(tool)[1] is not None):
                 return error_response(ErrorCode.BAD_PARAMS,
                     "selected project execution requires a trusted canonical Solar tool",
@@ -872,7 +875,7 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
                         and x_org_id != selected_binding["organization_id"])):
                 return error_response(ErrorCode.BAD_PARAMS, "selected project drawing conflicts with request",
                                       retryable=False, status_code=409)
-            if selected_write:
+            if selected_custodied:
                 if not solar_project_admission.project_runs_enabled():
                     return JSONResponse(status_code=409, content=solar_project_admission._refusal(
                         "project_execution_disabled")["content"])
@@ -883,7 +886,7 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
                 try:
                     if not all((req.catalog_commit, req.effective_catalog_digest,
                                 req.tool_manifest_sha256)):
-                        raise ValueError("write approval is missing exact catalog generation pins")
+                        raise ValueError("execution approval is missing exact catalog generation pins")
                     if not text_matches(req.tool_manifest_sha256, current_catalog_digest):
                         raise ValueError("tool manifest changed after approval; refresh tools and confirm again")
                     current_pin = (customization_service.effective_catalog_pin(str(tenant_id))
