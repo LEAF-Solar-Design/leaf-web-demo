@@ -116,6 +116,13 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
   const style = async value => {
     await toolbar.getByRole('button', { name: 'Settings', exact: true }).click()
     await selectControl(page.getByRole('region', { name: 'Settings', exact: true }), 'Editing style').selectOption(value)
+    // Sidebar selection opens the Project drawer over the canvas. Dismiss it
+    // through its normal control before returning to Settings and canvas Edit.
+    // Selecting the preview headline below opens the same Sidebar for editing.
+    if (value === 'sidebar') {
+      await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+      await expect(page.getByRole('region', { name: 'Project sidebar', exact: true })).toBeHidden()
+    }
     await page.getByRole('button', { name: 'Close settings', exact: true }).click()
     await toolbar.getByRole('button', { name: 'Edit', exact: true }).click()
     await expect(toolbar.getByRole('button', { name: 'Edit', exact: true })).toHaveAttribute('aria-pressed', 'true')
