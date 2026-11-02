@@ -2617,9 +2617,10 @@ export default function App() {
     }
     return armed
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
-  const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn })
+  const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn,
+    sourceContext: activeSurface === 'ios' ? 'native' : 'browser' })
   catalogUiRef.current = { armDecision, startAgentTurn, running,
-    openProjectSource: (text, options) => activeSurface === 'browser' ? projectSource.open(text, options) : false }
+    openProjectSource: (text, options) => ['browser', 'ios'].includes(activeSurface) ? projectSource.open(text, options) : false }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
     if (!tool) return

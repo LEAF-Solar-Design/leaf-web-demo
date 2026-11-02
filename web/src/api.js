@@ -74,9 +74,15 @@ function sourceTimestamp(value) {
   const day = value.slice(0, 10)
   return new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day
 }
-export function validateProjectSource(value, projectId, requestId) {
+function sourceProfile(sourceContext = 'browser') {
+  if (sourceContext === 'browser') return { route: 'browser', schema: 'leaf.browser-project-source.v1' }
+  if (sourceContext === 'native') return { route: 'native', schema: 'leaf.native-project-source.v1' }
+  throw sourceUnavailable()
+}
+export function validateProjectSource(value, projectId, requestId, sourceContext = 'browser') {
+  const profile = sourceProfile(sourceContext)
   if (!value || Object.keys(value).length !== SOURCE_FIELDS.length || SOURCE_FIELDS.some((key) => !Object.hasOwn(value, key))
-    || value.schema !== 'leaf.browser-project-source.v1' || value.project_id !== projectId
+    || value.schema !== profile.schema || value.project_id !== projectId
     || !isSourceUuid(value.project_id) || !isSourceUuid(value.source_request_id)
     || (requestId && value.source_request_id !== requestId) || !SOURCE_STATES.includes(value.state)
     || !Number.isInteger(value.version) || value.version < 1 || value.version > 2147483647
@@ -90,7 +96,7 @@ export function validateProjectSource(value, projectId, requestId) {
     || Date.parse(value.updated_at) < Date.parse(value.created_at)) throw sourceUnavailable()
   return value
 }
-function sourceBody(action, body) {
+function sourceBody(action, body, sourceContext) {
   const fields = action === 'request'
     ? ['source_request_id', 'requirements', 'source_operation', 'material_refs']
     : ['receipt_digest', 'expected_version', ...(action === 'confirm' ? ['confirmation_id'] : [])]
@@ -98,6 +104,8 @@ function sourceBody(action, body) {
     || Object.keys(body).some((key) => !fields.includes(key) && !(action === 'request' && key === 'expected_base_commit'))) throw sourceUnavailable()
   if (action === 'request') {
     sourceId(body.source_request_id)
+    if (sourceContext === 'native' && (body.source_operation !== 'create' || !body.material_refs?.length
+      || Object.hasOwn(body, 'expected_base_commit'))) throw sourceUnavailable()
     if (typeof body.requirements !== 'string' || !body.requirements.trim() || body.requirements.includes('\0')
       || new TextEncoder().encode(body.requirements).length > 16384
       || !['create', 'edit'].includes(body.source_operation)
@@ -111,11 +119,24 @@ function sourceBody(action, body) {
     || body.expected_version < 1 || body.expected_version > 2147483647
     || (action === 'confirm' && !isSourceUuid(body.confirmation_id))) throw sourceUnavailable()
 }
-async function projectSourceRequest(projectId, requestId, action, body, { expectedScope, signal, authority, allowSecretOnce = false } = {}) {
+async function projectSourceRequest(projectId, requestId, action, body, { expectedScope, signal, authority, allowSecretOnce = false,
+  sourceContext = 'browser', materialMetadata } = {}) {
+  const profile = sourceProfile(sourceContext)
   sourceId(projectId)
   if (requestId !== null) sourceId(requestId)
   if (action) {
-    sourceBody(action, body)
+    sourceBody(action, body, sourceContext)
+    if (sourceContext === 'native' && action === 'request' && materialMetadata !== undefined) {
+      if (!Array.isArray(materialMetadata) || materialMetadata.length !== body.material_refs.length
+        || body.material_refs.some((ref) => {
+          const rows = materialMetadata.filter((row) => row?.material_id === ref.material_id)
+          const row = rows[0]
+          return rows.length !== 1 || row.project_id !== projectId || !isSourceUuid(row.org_id)
+            || !isSourceUuid(row.actor_binding_id) || row.sha256 !== ref.sha256 || typeof row.name !== 'string' || !row.name.trim()
+            || !['text/plain', 'application/json'].includes(row.media_type)
+            || !Number.isInteger(row.byte_size) || row.byte_size < 1 || row.byte_size > 1048576
+        }) || materialMetadata.reduce((total, row) => total + row.byte_size, 0) > 4194304) throw sourceUnavailable()
+    }
     if (action === 'request') {
       const verdict = guardedText(body.requirements, { allowSecretOnce })
       if (!verdict.ok) throw new SecretRefusedError(verdict.refusal)
@@ -124,7 +145,7 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
   }
   const current = () => expectedScope && !signal?.aborted && readActiveScope() === expectedScope && !!authHeaders().Authorization && !isMockConversation()
   if (!current()) throw new Error('Sign in to the current account and open this project again.')
-  const path = `/api/projects/${projectId}/browser/source/requests${requestId ? `/${requestId}` : ''}${action && action !== 'request' ? `/${action}` : ''}`
+  const path = `/api/projects/${projectId}/${profile.route}/source/requests${requestId ? `/${requestId}` : ''}${action && action !== 'request' ? `/${action}` : ''}`
   const headers = { ...authHeaders(), ...(body ? { 'Content-Type': 'application/json',
     'X-Authority-Session-Id': authority.session_id, 'X-Authority-Turn-Id': authority.turn_id } : {}) }
   const response = await apiFetch(`${API_BASE}${path}`, { method: body ? 'POST' : 'GET', cache: 'no-store',
@@ -142,9 +163,9 @@ async function projectSourceRequest(projectId, requestId, action, body, { expect
   try { value = JSON.parse(raw) } catch { throw sourceUnavailable() }
   if (!body && !requestId) {
     if (!Array.isArray(value) || value.length > 20 || new Set(value.map((row) => row?.source_request_id)).size !== value.length) throw sourceUnavailable()
-    return value.map((row) => validateProjectSource(row, projectId))
+    return value.map((row) => validateProjectSource(row, projectId, undefined, sourceContext))
   }
-  return validateProjectSource(value, projectId, requestId || body.source_request_id)
+  return validateProjectSource(value, projectId, requestId || body.source_request_id, sourceContext)
 }
 export const listProjectSourceRequests = (projectId, options) => projectSourceRequest(projectId, null, null, null, options)
 export const readProjectSourceRequest = (projectId, requestId, options) => projectSourceRequest(projectId, requestId, null, null, options)
@@ -153,7 +174,8 @@ export const confirmProjectSource = (projectId, requestId, body, options) => pro
 export const recoverProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'recover', body, options)
 export const rejectProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'reject', body, options)
 
-export async function exportProjectSourceBundle(projectId, candidate, { expectedScope, signal } = {}) {
+export async function exportProjectSourceBundle(projectId, candidate, { expectedScope, signal, sourceContext = 'browser' } = {}) {
+  if (sourceProfile(sourceContext).route !== 'browser') throw sourceUnavailable()
   sourceId(projectId)
   // Freeze caller witnesses before the first await; they never select a newer version.
   const row = { ...validateProjectSource(candidate, projectId) }

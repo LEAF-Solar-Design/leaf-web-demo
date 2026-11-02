@@ -39,6 +39,7 @@ function setup({ materials = [], saved = [], mint, props: extra = {}, fetcher } 
       const body = JSON.parse(init.body)
       const previous = durable.find((item) => item.source_request_id === body.source_request_id) || durable[0]
       const next = row({ source_request_id: body.source_request_id || previous?.source_request_id,
+        ...(String(url).includes('/native/source/') ? { schema: 'leaf.native-project-source.v1', changed_paths: ['Sources/ContentView.swift'] } : {}),
         ...(String(url).endsWith('/confirm') || String(url).endsWith('/recover') ? { state: 'published', version: 2 } : {}),
         ...(String(url).endsWith('/reject') ? { state: 'rejected', version: 2 } : {}) })
       durable = [next]; return reply(next)
@@ -264,6 +265,212 @@ describe('Verified source bundle download through the real API', () => {
     if (change === 'project') h.rerender({ ...h.props, projectId: OTHER })
     if (change === 'unmount') h.unmount()
     expect(revoke).toHaveBeenCalledWith('blob:verified-source')
+  })
+})
+
+describe('Native source through the real API', () => {
+  const nativeRow = (overrides = {}) => row({ schema: 'leaf.native-project-source.v1', changed_paths: ['Sources/ContentView.swift'], ...overrides })
+  const transcript = (overrides = {}) => material({ byte_size: 1048576, name: 'Authentic transcript.txt', ...overrides })
+  const nativeSetup = (options = {}) => setup({ ...options, props: { sourceContext: 'native', ...options.props } })
+
+  it('creates from the selected transcript and confirms once with exact Native shared-turn hints', async () => {
+    const h = nativeSetup({ materials: [transcript(), material({ material_id: REQUEST, name: 'Teacher.mov', media_type: 'video/quicktime', byte_size: 55000000 })] })
+    await open(h)
+    expect(h.result.current.selected).toEqual([OTHER])
+    expect(h.result.current.materials).toHaveLength(2)
+    await act(async () => { await Promise.all([h.result.current.stage(), h.result.current.stage()]) })
+    const post = h.calls.find((call) => call.method === 'POST')
+    const body = JSON.parse(post.body)
+    expect(post.url).toBe(`/api/projects/${PROJECT}/native/source/requests`)
+    expect(body).toEqual({ source_request_id: expect.any(String), requirements: brief, source_operation: 'create',
+      material_refs: [{ material_id: OTHER, sha256: 'e'.repeat(64) }] })
+    expect(h.startAgentTurn.mock.calls[0]).toEqual([brief, { source: 'author_panel', purpose: 'stage_authority',
+      browser_action: 'create', source_request_id: body.source_request_id, material_refs: body.material_refs,
+      source_profile: 'ios-swiftui-xcodegen-v1' }, { allowSecretOnce: false, requireImmediateTurn: true }])
+    const witness = h.result.current.candidate
+    await act(async () => { await Promise.all([h.result.current.confirm(witness), h.result.current.confirm(witness)]) })
+    const confirmation = JSON.parse(h.calls.find((call) => call.url.endsWith('/confirm')).body)
+    expect(confirmation).toEqual({ receipt_digest: witness.receipt_digest, expected_version: witness.version, confirmation_id: expect.any(String) })
+    expect(h.startAgentTurn.mock.calls[1][1]).toEqual({ source: 'author_panel', purpose: 'stage_authority', browser_action: 'confirm',
+      source_request_id: witness.source_request_id, ...confirmation, source_profile: 'ios-swiftui-xcodegen-v1' })
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(2)
+    expect(h.calls.filter((call) => call.url.includes('/source/')).every((call) => call.url.includes('/native/source/'))).toBe(true)
+    expect(h.result.current.candidate.state).toBe('published')
+    await act(async () => { await h.result.current.confirm(witness); await h.result.current.prepareDownload(h.result.current.candidate) })
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(2)
+    expect(h.calls.some((call) => call.url.includes('/export'))).toBe(false)
+  })
+
+  it.each([['recover', 'publishing', 'published'], ['reject', 'awaiting_confirmation', 'rejected']])('uses the exact Native %s hint and durable readback', async (action, state, finalState) => {
+    const h = nativeSetup({ saved: [nativeRow({ state })] })
+    await open(h)
+    const witness = h.result.current.candidate
+    await act(async () => { await h.result.current[action](witness) })
+    const post = h.calls.find((call) => call.method === 'POST')
+    expect(post.url).toBe(`/api/projects/${PROJECT}/native/source/requests/${REQUEST}/${action}`)
+    expect(JSON.parse(post.body)).toEqual({ receipt_digest: witness.receipt_digest, expected_version: witness.version })
+    expect(h.startAgentTurn.mock.calls[0][1]).toEqual({ source: 'author_panel', purpose: 'stage_authority', browser_action: action,
+      source_request_id: REQUEST, receipt_digest: witness.receipt_digest, expected_version: witness.version, source_profile: 'ios-swiftui-xcodegen-v1' })
+    expect(h.result.current.candidate.state).toBe(finalState)
+  })
+
+  it.each([{ materials: [] }, { materials: [transcript({ byte_size: 1048577 })] }, { materials: [transcript({ byte_size: 0 })] },
+    { materials: [transcript({ sha256: 'bad' })] }, { materials: [transcript({ media_type: 'video/quicktime', byte_size: 55000000 })] }])('requires a nonempty supported selection and complete metadata: %j', async ({ materials }) => {
+    const h = nativeSetup({ materials })
+    await open(h)
+    act(() => h.result.current.reviewSelection())
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+    expect(h.result.current.error).toMatch(/Choose|Review/)
+  })
+
+  it('rejects aggregate overflow and nine references, then accepts exactly 4 MiB', async () => {
+    const materials = Array.from({ length: 9 }, (_, index) => transcript({ material_id: `55555555-5555-4555-8555-${String(index + 1).padStart(12, '0')}` }))
+    const h = nativeSetup({ materials })
+    await open(h)
+    expect(h.result.current.selected).toEqual([])
+    for (const item of materials) act(() => h.result.current.toggleMaterial(item.material_id))
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.error).toMatch(/eight/)
+    for (const item of materials.slice(5)) act(() => h.result.current.toggleMaterial(item.material_id))
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.error).toMatch(/4 MiB/)
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    act(() => h.result.current.toggleMaterial(materials[4].material_id))
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).toHaveBeenCalledOnce()
+    expect(JSON.parse(h.calls.find((call) => call.method === 'POST').body).material_refs).toHaveLength(4)
+  })
+
+  it('refuses published Native edits before minting a turn or creating a request', async () => {
+    const h = nativeSetup({ saved: [nativeRow({ state: 'published' })], materials: [transcript()] })
+    await open(h)
+    expect(h.result.current.createOnlyBlocked).toBe(true)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.error).toMatch(/creation only/)
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+  })
+
+  it('reads the original Native ID after an unknown outcome without another model turn', async () => {
+    let id
+    const h = nativeSetup({ materials: [transcript()], fetcher: (url, init) => {
+      if (init.method === 'POST') { id = JSON.parse(init.body).source_request_id; throw new TypeError('timeout') }
+      if (url.includes('/requests/')) return reply({}, 404)
+      return undefined
+    } })
+    await open(h)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.unknown).toBe(true)
+    expect(h.result.current.intent.source_request_id).toBe(id)
+    await act(async () => { await h.result.current.stage(); await h.result.current.refresh() })
+    expect(h.startAgentTurn).toHaveBeenCalledOnce()
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(h.calls.filter((call) => call.url.endsWith(`/native/source/requests/${id}`)).length).toBeGreaterThanOrEqual(2)
+  })
+
+  it('aborts and fences Browser -> Native -> Browser late reads and re-reads original durable candidates', async () => {
+    const browserGate = deferred(), nativeGate = deferred()
+    let hold = true
+    const h = setup({ saved: [row()], fetcher: (url) => {
+      if (!hold || !url.endsWith('/requests')) return undefined
+      return url.includes('/native/') ? nativeGate.promise : browserGate.promise
+    } })
+    act(() => h.result.current.open(brief))
+    const browserSignal = h.calls.find((call) => call.url.endsWith('/requests')).signal
+    h.rerender({ ...h.props, sourceContext: 'native' })
+    expect(browserSignal.aborted).toBe(true)
+    act(() => h.result.current.open(brief))
+    const nativeSignal = h.calls.find((call) => call.url.includes('/native/')).signal
+    h.rerender(h.props)
+    expect(nativeSignal.aborted).toBe(true)
+    await act(async () => { browserGate.resolve(reply([row()])); nativeGate.resolve(reply([nativeRow()])) })
+    expect(h.result.current.candidate).toBeNull()
+    expect(h.result.current.materials).toEqual([])
+    hold = false
+    await open(h)
+    expect(h.result.current.candidate).toEqual(row())
+    expect(h.result.current.sourceContext).toBe('browser')
+  })
+
+  it('revokes a Browser download on Native switch and never carries it back', async () => {
+    const { revoke } = downloadEnvironment()
+    const h = setup({ saved: [row({ state: 'published' })], fetcher: (url) => url.includes('/export?') ? bundleReply() : undefined })
+    await open(h)
+    await act(async () => { await h.result.current.prepareDownload(h.result.current.candidate) })
+    expect(h.result.current.download.url).toBe('blob:verified-source')
+    h.rerender({ ...h.props, sourceContext: 'native' })
+    expect(revoke).toHaveBeenCalledWith('blob:verified-source')
+    expect(h.result.current.download).toBeNull()
+    expect(h.result.current.candidate).toBeNull()
+    h.rerender(h.props)
+    expect(h.result.current.download).toBeNull()
+  })
+
+  it('fences a Browser export still in flight when Native opens', async () => {
+    const { create } = downloadEnvironment(), gate = deferred()
+    const h = setup({ saved: [row({ state: 'published' })], fetcher: (url) => url.includes('/export?') ? gate.promise : undefined })
+    await open(h)
+    let preparing
+    act(() => { preparing = h.result.current.prepareDownload(h.result.current.candidate) })
+    h.rerender({ ...h.props, sourceContext: 'native' })
+    await act(async () => { gate.resolve(bundleReply()); await preparing })
+    expect(create).not.toHaveBeenCalled()
+    expect(h.result.current.download).toBeNull()
+  })
+
+  it('does not POST if the context switches during shared-turn minting', async () => {
+    const gate = deferred(), h = nativeSetup({ materials: [transcript()], mint: () => gate.promise })
+    await open(h)
+    let staging
+    act(() => { staging = h.result.current.stage() })
+    h.rerender({ ...h.props, sourceContext: 'browser' })
+    await act(async () => { gate.resolve(AUTHORITY); await staging })
+    expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+    expect(h.result.current.intent).toBeNull()
+  })
+
+  it('rejects stale Native confirmation witnesses without minting authority', async () => {
+    const h = nativeSetup({ saved: [nativeRow()] })
+    await open(h)
+    const witness = h.result.current.candidate
+    await act(async () => { await h.result.current.confirm({ ...witness, version: 2 }); await h.result.current.reject({ ...witness, receipt_digest: 'f'.repeat(64) }) })
+    expect(h.result.current.error).toMatch(/displayed source changed/)
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+  })
+
+  it('rejects unknown controller contexts without network or authority', async () => {
+    const h = setup({ props: { sourceContext: 'ios' } })
+    await open(h)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.error).toMatch(/context is unavailable/)
+    expect(h.fetch).not.toHaveBeenCalled()
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+  })
+
+  it('discards a late Native mutation after returning through Browser to Native', async () => {
+    const gate = deferred()
+    let id
+    const h = nativeSetup({ materials: [transcript()], fetcher: (url, init) => {
+      if (init.method === 'POST') { id = JSON.parse(init.body).source_request_id; return gate.promise }
+      return undefined
+    } })
+    await open(h)
+    let staging
+    act(() => { staging = h.result.current.stage() })
+    await waitFor(() => expect(id).toBeTruthy())
+    h.rerender({ ...h.props, sourceContext: 'browser' })
+    h.rerender(h.props)
+    await act(async () => { gate.resolve(reply(nativeRow({ source_request_id: id }))); await staging })
+    expect(h.result.current.candidate).toBeNull()
+    expect(h.result.current.intent).toBeNull()
+    expect(h.result.current.isOpen).toBe(false)
+    expect(h.calls.some((call) => call.url.includes('/requests/'))).toBe(false)
+    h.setDurable([nativeRow({ source_request_id: id })])
+    await open(h)
+    expect(h.result.current.candidate.source_request_id).toBe(id)
   })
 })
 
@@ -591,8 +798,8 @@ describe('real catalog optional source adapter', () => {
       adapters: { startAgentTurn, openProjectSource, openAuthor, dismissDecision: vi.fn(), commitDecision: vi.fn() } })
     return { controller, startAgentTurn, openAuthor }
   }
-  it('hands only classified builds to the hook and leaves source mutations to explicit review', async () => {
-    const h = setup()
+  it.each(['browser', 'native'])('hands classified %s builds to the hook and leaves source mutations to explicit review', async (sourceContext) => {
+    const h = setup({ props: { sourceContext } })
     const adapter = vi.fn((text) => h.result.current.open(text))
     const c = catalog({ lane: 'build', confidence: 0.9 }, adapter)
     await act(async () => { await c.controller.actions.dispatch(brief, { allowSecretOnce: true }) })
