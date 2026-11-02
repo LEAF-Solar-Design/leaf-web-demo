@@ -27,7 +27,8 @@ MAX_LOCAL = 16384
 # Reviewed ea666682 producer ordering. Bind content, never a mutable ref or
 # this whole module: a separate recovery must not change the Journal witness.
 PRE_EXECUTION_WORKER_SHA256 = 'd0fa9e9778490278988382f573555538a2fe204160f8d57da44958858b2cd89d'
-REVIEWED_WORKER_SHA256 = frozenset({PRE_EXECUTION_WORKER_SHA256,
+# Current connected Native producer; hash derived after the frozen source change.
+REVIEWED_WORKER_SHA256 = frozenset({'acc9c1219ee4246f6b39da6a3c439add24f6573c0e54626eca8b3752b790ee37', PRE_EXECUTION_WORKER_SHA256,
     '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197'})
 PRE_EXECUTION_JOURNAL_SOURCE_SHA256 = 'a8f668f0f84866ebf342229c7b707f6b985a66ad256d71f71e0431fde1a5a599'
 # Same ordering, with writable-descriptor receipt replay for Windows fsync.
@@ -52,6 +53,8 @@ def digest(value):
 
 
 def source(value):
+    if type(value) is dict and value.get('schema') == worker.NATIVE_SCHEMA:
+        return worker.validate_native_identity(value)
     need(type(value) is dict and set(value) == {'revision', 'document_sha256', 'archive_sha256'})
     need(type(value['revision']) is int and 1 <= value['revision'] <= 2147483647)
     digest(value['document_sha256'])
@@ -224,7 +227,7 @@ def allocator_witness(value, job_id, attempt):
 def disposition(raw, scope, claim):
     need(type(raw) is bytes and len(raw) <= MAX_LOCAL)
     value = worker.parse(raw)
-    base = {'job_id', 'status', 'revision', 'document_sha256', 'archive_sha256'}
+    base = {'job_id', 'status'} | set(claim['source'])
     need(type(value) is dict and set(value) in (base, base | {'failure_disposition'}))
     need(value['job_id'] == claim['job_id'])
     need(source({k: value[k] for k in claim['source']}) == claim['source'])
@@ -264,7 +267,7 @@ def settled_failure_status(raw, claim):
     need(type(raw) is bytes and len(raw) <= MAX_LOCAL)
     value = worker.parse(raw)
     need(type(value) is dict and set(value) ==
-         {'job_id', 'status', 'revision', 'document_sha256', 'archive_sha256'})
+         ({'job_id', 'status'} | set(claim['source'])))
     need(value['job_id'] == claim['job_id'])
     need(source({k: value[k] for k in claim['source']}) == claim['source'])
     need(type(value['status']) is str)
@@ -321,9 +324,15 @@ class LocalProof:
         self.names = sorted(p.name for p in self.cycle.iterdir())
         need(self.names == sorted([name] + ([] if self.legacy else ['journal.json'])))
         failure = worker.parse(self.capture(self.failure_path))
-        need(type(failure) is dict and set(failure) == {'stage', 'result', 'job_id',
-             'archive_sha256', 'execution_stage', 'error_code', 'authority_failure',
-             'failure_settlement', 'cleanup_complete', 'allocator_release_confirmed'})
+        fields = {'stage', 'result', 'job_id', 'archive_sha256', 'execution_stage',
+                  'error_code', 'authority_failure', 'failure_settlement', 'cleanup_complete',
+                  'allocator_release_confirmed'}
+        self.build_artifact = None
+        if self.claim['source'].get('schema') == worker.NATIVE_SCHEMA and 'build_artifact' in failure:
+            fields.add('build_artifact')
+            self.build_artifact = failure['build_artifact']
+            need(type(self.build_artifact) is dict and self.build_artifact.get('source') == self.claim['source'])
+        need(type(failure) is dict and set(failure) == fields)
         need(failure['stage'] == 'execution' and failure['result'] == 'failed'
              and failure['job_id'] == self.claim['job_id'] and
              failure['archive_sha256'] == self.claim['source']['archive_sha256'])
@@ -368,6 +377,8 @@ class LocalProof:
             need(pre_execution_source(self.runtime) == self.journal_source_sha256)
 
     def collect(self, scope, session_factory):
+        if self.build_artifact is not None:
+            worker.validate_native_artifact(self.build_artifact, dict(self.claim['source'], project_id=scope['project_id']))
         try:
             return self._collect(scope, session_factory)
         except (worker.WorkerError, Unavailable):
