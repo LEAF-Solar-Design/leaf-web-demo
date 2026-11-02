@@ -35,6 +35,8 @@ afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.u
 const init = (fetchImpl) => fetchImpl.mock.calls.at(-1)[1]
 const url = (fetchImpl) => fetchImpl.mock.calls.at(-1)[0]
 const refusal = (reason) => ({ error: { reason_code: reason, error_code: 'BAD_PARAMS', retryable: false }, detail: { preserved: true } })
+const custody = () => ({ delegated: true, delegation_id: J, fence: lease.fence, expires_at: lease.expires })
+const approveRequest = { confirmationId: 'confirmation-1', sessionId: 'assistant-1', inputVersionId: V }
 const edgeCounts = { pdf_matrices: 1, pdf_panels: 2, matchable_grids: 1, bridge_grids: 0, frames: 1,
   matched_frames: 1, group_strings: 1, bridge_strings: 0, strings: 1, assigned_panels: 2,
   unassigned_panels: 0, partial_strings: 0 }
@@ -55,6 +57,110 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  it('delegates only private possession to one approved run without acquiring or renewing', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(custody()))
+    const before = client.getSnapshot()
+    expect(await client.delegateApprovedRun(approveRequest)).toMatchObject({ ok: true, data: custody() })
+    expect(url(fetchImpl)).toBe('https://api.test/api/agent/approvals/confirmation-1/checkout-custody')
+    expect(init(fetchImpl)).toMatchObject({ method: 'POST', headers: { 'X-Checkout-Capability': token(), Authorization: 'Bearer synthetic' } })
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ session_id: 'assistant-1', input_version_id: V })
+    expect(client.getSnapshot()).toBe(before)
+    expect(JSON.stringify(client.getSnapshot())).not.toContain(token())
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  it('refuses missing checkout possession and wrong immutable versions before transport', async () => {
+    const { client, fetchImpl } = setup()
+    expect((await client.delegateApprovedRun(approveRequest)).reason).toBe('SIP_R7_CHECKOUT_REQUIRED')
+    expect((await client.delegateApprovedRun({ ...approveRequest, inputVersionId: J })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it.each(['scope', 'auth', 'release', 'fence', 'expiry', 'dispose'])('revokes exactly the issued grant on %s', async (change) => {
+    vi.useFakeTimers()
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(custody()))
+    await client.delegateApprovedRun(approveRequest)
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    if (change === 'scope') client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    if (change === 'auth') client.setScope(binding, 'session-2')
+    if (change === 'release') {
+      fetchImpl.mockImplementation(async (path, options) => response(options.body ? { revoked: true } : { ...identity, released: true, checkout: null }))
+      await client.releaseCheckout()
+    }
+    if (change === 'fence') {
+      fetchImpl.mockImplementation(async (path, options) => response(options.method === 'GET' ? { ...identity, checkout: { ...lease, fence: '2' } } : { revoked: true }))
+      await client.readCheckout()
+    }
+    if (change === 'expiry') await vi.advanceTimersByTimeAsync(Date.parse(lease.expires) - Date.now())
+    if (change === 'dispose') client.dispose()
+    const cleanup = fetchImpl.mock.calls.filter(([path, options]) => path.endsWith('/checkout-custody') && options.method === 'DELETE')
+    expect(cleanup).toHaveLength(1)
+    expect(JSON.parse(cleanup[0][1].body)).toEqual({ session_id: 'assistant-1', delegation_id: J })
+    expect(cleanup[0][1].headers).not.toHaveProperty('X-Checkout-Capability')
+    expect(cleanup[0][1].headers.Authorization).toBe('Bearer synthetic')
+  })
+
+  it('cleans up late issuance with original subject headers after stale response discard', async () => {
+    let subject = 'original'
+    const { client, fetchImpl } = setup(acquired(), 200, { authHeaders: () => ({ Authorization: `Bearer ${subject}` }) })
+    await client.acquireCheckout()
+    const late = deferred()
+    fetchImpl.mockReturnValueOnce(late.promise)
+    const pending = client.delegateApprovedRun(approveRequest)
+    subject = 'replacement'
+    client.setScope(binding, 'session-2')
+    expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    late.resolve(response(custody()))
+    await vi.waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(3))
+    expect(init(fetchImpl).headers.Authorization).toBe('Bearer original')
+    expect(init(fetchImpl).headers).not.toHaveProperty('X-Checkout-Capability')
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ session_id: 'assistant-1', delegation_id: J })
+  })
+
+  it('never cleans a foreign grant through the public cleanup method', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response(custody()))
+    await client.delegateApprovedRun(approveRequest)
+    await client.revokeApprovedRun({ ...approveRequest, sessionId: 'foreign', delegationId: J })
+    await client.revokeApprovedRun({ ...approveRequest, delegationId: V })
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    await client.revokeApprovedRun({ ...approveRequest, delegationId: J })
+    expect(fetchImpl).toHaveBeenCalledTimes(3)
+  })
+
+  it('revokes custody at its own expiry even when the checkout remains owned', async () => {
+    vi.useFakeTimers()
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    fetchImpl.mockResolvedValueOnce(response({ ...custody(), expires_at: new Date(Date.now() + 1000).toISOString() }))
+    await client.delegateApprovedRun(approveRequest)
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    await vi.advanceTimersByTimeAsync(1000)
+    expect(init(fetchImpl).method).toBe('DELETE')
+    expect(client.getSnapshot().ownsCheckout).toBe(true)
+  })
+
+  it('never returns usable custody after a release starts while issuance is pending', async () => {
+    const { client, fetchImpl } = setup(acquired())
+    await client.acquireCheckout()
+    const issue = deferred(), release = deferred()
+    fetchImpl.mockReturnValueOnce(issue.promise).mockReturnValueOnce(release.promise)
+    const pending = client.delegateApprovedRun(approveRequest)
+    const releasing = client.releaseCheckout()
+    fetchImpl.mockResolvedValue(response({ revoked: true }))
+    issue.resolve(response(custody()))
+    expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    expect(JSON.parse(init(fetchImpl).body).delegation_id).toBe(J)
+    release.resolve(response({ ...identity, released: true, checkout: null }))
+    await releasing
+  })
   it('uploads immutable PDF bytes to the captured canonical version without creating a run', async () => {
     const data = edgeData(), { client, fetchImpl } = setup(data)
     const file = new File(['%PDF-1.7'], 'layout.pdf', { type: 'application/pdf' })

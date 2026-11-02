@@ -153,6 +153,29 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
   let mutation = null
   const listeners = new Set()
   const operations = new Set()
+  const delegations = new Map()
+  let custodyGeneration = 0
+  const custodyPath = (confirmationId) => `/api/agent/approvals/${confirmationId}/checkout-custody`
+  async function revokeDelegation(entry) {
+    clearTimeout(entry.timer)
+    if (delegations.get(entry.delegationId) === entry) delegations.delete(entry.delegationId)
+    const controller = new AbortController()
+    const timer = setTimeout(() => controller.abort(), timeoutMs)
+    try {
+      // Captured issuance headers preserve the original subject on an auth change.
+      // A new identity must never be borrowed to clean up an old grant.
+      await fetchImpl(`${apiBase}${custodyPath(entry.confirmationId)}`, {
+        method: 'DELETE', cache: 'no-store', signal: controller.signal,
+        headers: entry.headers,
+        body: JSON.stringify({ session_id: entry.sessionId, delegation_id: entry.delegationId }),
+      })
+    } catch { /* Server expiry remains the final bound if transport is unavailable. */ }
+    finally { clearTimeout(timer) }
+  }
+  const revokeDelegations = () => {
+    custodyGeneration += 1
+    for (const entry of delegations.values()) void revokeDelegation(entry)
+  }
   let snapshot
   const publish = () => {
     snapshot = Object.freeze({ binding, authorityKey, checkout, ownsCheckout: !!capability,
@@ -163,6 +186,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     for (const operation of operations) if (predicate(operation)) operation.controller.abort()
   }
   const rotate = (token, lease = checkout) => {
+    revokeDelegations()
     clearTimeout(expiryTimer)
     expiryTimer = null
     capability = token
@@ -188,7 +212,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     (!scope.preview || scope.revision === leaseRevision)
 
   async function request(path, { method = 'GET', body, headers = {}, signal,
-    scope = capture(), validate, consume } = {}) {
+    scope = capture(), validate, consume, observeResponse } = {}) {
     if (!scope.binding) return local('SIP_R7_BINDING_INVALID')
     if (!current(scope)) return local('SIP_R7_SCOPE_STALE')
     if (signal !== undefined && (!signal || typeof signal.aborted !== 'boolean' ||
@@ -217,8 +241,13 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       const sentHeaders = { ...authHeaders(), 'X-Org-Id': b.organization_id,
         'X-Project-Id': b.project_id, 'X-Tenant-Id': b.organization_id,
         ...(body !== undefined ? { 'Content-Type': 'application/json' } : {}), ...headers }
-      const response = await wait(fetchImpl(`${apiBase}${path}`, { method, headers: sentHeaders,
+      const response = await wait(Promise.resolve(fetchImpl(`${apiBase}${path}`, { method, headers: sentHeaders,
         cache: 'no-store', signal: controller.signal, ...(body !== undefined ? { body } : {}) }))
+        .then(async (response) => {
+          // This observer also settles a late response after the caller was aborted.
+          if (observeResponse) await observeResponse(response, sentHeaders, interrupted)
+          return response
+        }))
       if (interrupted()) return interrupted()
       consuming = true
       if (!response.ok && response.status !== 304) {
@@ -290,6 +319,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         body = JSON.stringify({ ...(holder !== undefined ? { holder } : {}), ttl_s: ttlS })
       }
     } catch { return local('SIP_R7_REQUEST_INVALID') }
+    revokeDelegations()
     const lock = {}
     mutation = lock
     pending = true
@@ -325,6 +355,7 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
       assert(!disposed)
       if ((next === null && binding === null) || (sameSolarDrawingBinding(next, binding) && key === authorityKey)) return
       const checkoutChanged = !sameSolarCheckoutBinding(next, binding) || key !== authorityKey
+      revokeDelegations()
       bindingGeneration += 1
       if (checkoutChanged) checkoutGeneration += 1
       abort((operation) => !operation.checkoutScope || checkoutChanged)
@@ -357,6 +388,59 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
     }, true),
     acquireCheckout: (options = {}) => guarded((scope) => mutate('take', options, scope), true),
     releaseCheckout: (options = {}) => guarded((scope) => mutate('release', options, scope), true),
+    delegateApprovedRun: (options = {}) => guarded(async (scope) => {
+      assert(plain(options))
+      const { confirmationId, sessionId, inputVersionId, signal } = options
+      assert(typeof confirmationId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(confirmationId) &&
+        typeof sessionId === 'string' && /^[A-Za-z0-9_-]{1,128}$/.test(sessionId) &&
+        inputVersionId === scope.binding.input_version_id)
+      if (!capability || mutation || !checkout || Date.parse(checkout.expires) <= Date.now()) {
+        return local('SIP_R7_CHECKOUT_REQUIRED')
+      }
+      let issued
+      const revision = leaseRevision
+      const custodyRevision = custodyGeneration
+      const valid = (data) => plain(data) && Object.keys(data).length === 4 &&
+        data.delegated === true && UUID.test(data.delegation_id) &&
+        String(data.fence) === checkout?.fence && Number.isFinite(Date.parse(data.expires_at)) &&
+        Date.parse(data.expires_at) > Date.now()
+      const outcome = await request(custodyPath(confirmationId), {
+        method: 'POST', scope, signal, headers: proof(),
+        body: JSON.stringify({ session_id: sessionId, input_version_id: inputVersionId }),
+        observeResponse: async (response, sentHeaders, interrupted) => {
+          if (!response.ok) return
+          issued = responseSnapshot(await response.json())
+          if (!plain(issued) || issued.delegated !== true || !UUID.test(issued.delegation_id)) return
+          const { 'X-Checkout-Capability': ignored, ...cleanupHeaders } = sentHeaders
+          const entry = { confirmationId, sessionId, delegationId: issued.delegation_id, headers: cleanupHeaders }
+          if (interrupted() || mutation || custodyRevision !== custodyGeneration
+            || revision !== leaseRevision || !valid(issued)) await revokeDelegation(entry)
+          else {
+            clearTimeout(delegations.get(entry.delegationId)?.timer)
+            delegations.set(entry.delegationId, entry)
+            const expire = () => {
+              const remaining = Date.parse(issued.expires_at) - Date.now()
+              if (remaining <= 0) void revokeDelegation(entry)
+              else entry.timer = setTimeout(expire, Math.min(remaining, 2147483647))
+            }
+            expire()
+          }
+        },
+        consume: async () => issued,
+        validate: valid,
+      })
+      if (!outcome.ok || mutation || custodyRevision !== custodyGeneration || revision !== leaseRevision || signal?.aborted) {
+        const entry = delegations.get(issued?.delegation_id)
+        if (entry) await revokeDelegation(entry)
+        return outcome.ok ? local('SIP_R7_SCOPE_STALE') : outcome
+      }
+      return outcome
+    }, false, true),
+    revokeApprovedRun({ confirmationId, sessionId, delegationId } = {}) {
+      const entry = delegations.get(delegationId)
+      return entry && entry.confirmationId === confirmationId && entry.sessionId === sessionId
+        ? revokeDelegation(entry) : Promise.resolve()
+    },
     prepareRun,
     captureCatalogScope: () => {
       const scope = capture(false, true)

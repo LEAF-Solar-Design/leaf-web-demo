@@ -1975,6 +1975,41 @@ export default function App() {
   const conversationProjectContext = useMemo(() => openProjectId && canonicalVersionId
     ? { project_id: openProjectId, input_version_id: canonicalVersionId }
     : null, [openProjectId, canonicalVersionId])
+  const assistantCheckoutRef = useRef(null)
+  const assistantCheckoutBinding = projectSolar.ready ? projectSolar.projectClient.getSnapshot().binding : null
+  assistantCheckoutRef.current = { projectSolar, controller: session.controller,
+    generation: session.generation, sessionId: agentSessionId, projectContext: conversationProjectContext }
+  const prepareApprovedProjectRun = useCallback(async ({ confirmationId, sessionId: owningSessionId, projectContext }) => {
+    const owner = projectSolar
+    const client = owner.projectClient
+    if (!owner.ready || !client) return null
+    const stillCurrent = () => {
+      const live = assistantCheckoutRef.current
+      const next = live.projectSolar
+      const snapshot = client.getSnapshot()
+      return projectModeRef.current && owner.ready && next.ready && owner.isCurrent()
+        && live.controller === session.controller && live.generation === session.generation
+        && session.controller.getSnapshot().generation === session.generation
+        && live.sessionId === owningSessionId && agentSessionId === owningSessionId
+        && next.projectClient === client && next.scope.authorityKey === owner.scope.authorityKey
+        && snapshot.binding === assistantCheckoutBinding
+        && snapshot.authorityKey === owner.scope.authorityKey
+        && sameSolarDrawingBinding(snapshot.binding, owner.scope.binding)
+        && live.projectContext?.project_id === projectContext?.project_id
+        && live.projectContext?.input_version_id === projectContext?.input_version_id
+        && projectContext?.project_id === owner.scope.binding?.project_id
+        && projectContext?.input_version_id === owner.scope.binding?.input_version_id
+    }
+    if (!stillCurrent()) return null
+    const outcome = await client.delegateApprovedRun({ confirmationId, sessionId: owningSessionId,
+      inputVersionId: projectContext.input_version_id })
+    if (!outcome.ok) return null
+    const revoke = () => client.revokeApprovedRun({ confirmationId, sessionId: owningSessionId,
+      delegationId: outcome.data.delegation_id })
+    if (!stillCurrent()) { await revoke(); return null }
+    return { isCurrent: stillCurrent, revoke }
+  }, [projectSolar.projectClient, projectSolar.ready, projectSolar.isCurrent, projectSolar.scope.binding,
+    projectSolar.scope.authorityKey, assistantCheckoutBinding, session.controller, session.generation, agentSessionId])
   useLayoutEffect(() => {
     setProjectContext(openProjectId || null, canonicalVersionId || null)
   }, [openProjectId, canonicalVersionId, setProjectContext])
@@ -6135,6 +6170,8 @@ export default function App() {
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
             onBeforeWriteApproval={closeStartForChange}
+            prepareApprovedProjectRun={prepareApprovedProjectRun}
+            canonicalProjectWriteTools={PROJECT_SOLAR_SUPPORTED_TOOLS}
             engineDirty={engineDirty}
           />
           </PersistentSeat>
