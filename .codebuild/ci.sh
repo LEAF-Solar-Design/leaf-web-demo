@@ -919,6 +919,50 @@ fi
 export LEAF_GATE_DATABASE_URL
 export LEAF_GATE_REQUIRE_DATABASE=1
 echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
+# LEAF_DIAGNOSTIC_BEGIN
+# Server-owned exact-suite diagnostics never grant a full or shard verdict.
+if [[ "${LEAF_DIAGNOSTIC_PROFILE:-}" == web-demo-suite && "${LEAF_GATE_ONLY:-}" =~ ^[a-z0-9][a-z0-9-]{0,63}$ ]]; then
+  unset PYTHONSAFEPATH
+  export PYTHONUNBUFFERED=1
+  diagnostic_status=2
+  echo "LEAF_DIAGNOSTIC diagnostic-only/no-full-verdict suite=$LEAF_GATE_ONLY"
+  if python scripts/run-all-gates.py --list --catalog-root "$CODEBUILD_SRC_DIR" > "$selection_dir/diagnostic-catalog.json" \
+    && python -I -B - "$selection_dir/diagnostic-catalog.json" "$LEAF_GATE_ONLY" <<'LEAF_DIAGNOSTIC_EXACT'
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as source:
+        catalog = json.load(source)
+    if catalog.get("schema") != "leaf.ci.catalog.v1" or not isinstance(catalog.get("suites"), list):
+        raise ValueError("invalid catalog")
+    ids = [row["id"] for row in catalog["suites"]]
+    if any(not isinstance(suite_id, str) for suite_id in ids):
+        raise ValueError("invalid suite ID")
+    if [suite_id for suite_id in ids if sys.argv[2] in suite_id] != [sys.argv[2]]:
+        raise ValueError("--only must select exactly the requested suite ID")
+except (OSError, ValueError, KeyError, TypeError, AttributeError) as exc:
+    print("LEAF_DIAGNOSTIC refused: " + str(exc)[:300], file=sys.stderr)
+    raise SystemExit(2)
+LEAF_DIAGNOSTIC_EXACT
+  then
+    diagnostic_status=0
+    python scripts/run-all-gates.py --jobs 1 --retry 0 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs --only "$LEAF_GATE_ONLY" || diagnostic_status=$?
+  else
+    echo "LEAF_DIAGNOSTIC refused: catalog unavailable or selection not exact" >&2
+  fi
+  if [[ "$postgres_status" != 0 && "$diagnostic_status" == 0 ]]; then
+    echo "FATAL: diagnostic suite passed without its PostgreSQL proofs; failing the diagnostic" >&2
+    diagnostic_status=1
+  fi
+  printf 'LEAF_DIAGNOSTIC diagnostic-only/no-full-verdict suite=%s status=%s postgres_status=%s\n' \
+    "$LEAF_GATE_ONLY" "$diagnostic_status" "$postgres_status" | tee /tmp/gate-results/diagnostic.txt || true
+  # Reuse the runner's result and suite log, bounding each text excerpt to 16 KiB.
+  tail -c 16384 /tmp/gate-results/gate-result.json 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
+  tail -c 16384 "/tmp/gate-logs/$LEAF_GATE_ONLY.log" 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
+  exit "$diagnostic_status"
+fi
+# LEAF_DIAGNOSTIC_END
 gate_status=0
 unset PYTHONSAFEPATH
 # Ensure gate rows reach the log even when the job is killed at its deadline.

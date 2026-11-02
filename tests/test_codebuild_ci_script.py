@@ -34,6 +34,181 @@ def _bash_runs_python() -> bool:
 
 
 class TestCodebuildCiScript(unittest.TestCase):
+    def _run_diagnostic(self, overrides, ids=None, runner_status=0, postgres_status=0,
+                        catalog_status=0, raw_catalog=None):
+        script = CI_PATH.read_text(encoding="utf-8")
+        # Execute the real PostgreSQL setup, EXIT trap, admission, catalog validator,
+        # runner invocation and early exit. Only external commands are inert doubles.
+        start = script.index('echo "LEAF_T start postgres ')
+        block = script[start:script.index('# LEAF_DIAGNOSTIC_END', start)]
+        env = {key: value for key, value in os.environ.items()
+               if key not in ("LEAF_DIAGNOSTIC_PROFILE", "LEAF_GATE_ONLY", "BASH_ENV")}
+        env.update(overrides)
+        catalog = {"schema": "leaf.ci.catalog.v1",
+                   "suites": [{"id": suite_id} for suite_id in (ids or [])]}
+        with tempfile.TemporaryDirectory() as temporary:
+            directory = Path(temporary)
+            runner = directory / "fake_runner.py"
+            runner.write_text(
+                "import json, os, sys\n"
+                "args = sys.argv[1:]\n"
+                "with open(os.environ['TEST_CALLS'], 'a', encoding='utf-8') as out:\n"
+                "    out.write(json.dumps(args) + '\\n')\n"
+                "if '--list' in args:\n"
+                "    print(os.environ['TEST_CATALOG'])\n"
+                "    sys.exit(int(os.environ['TEST_CATALOG_STATUS']))\n"
+                "sys.exit(int(os.environ['TEST_RUNNER_STATUS']))\n", encoding="utf-8")
+            # Forward slashes also work when this test is run by Windows Python/Git Bash.
+            env.update(MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*",
+                       TEST_PYTHON=sys.executable.replace("\\", "/"),
+                       TEST_RUNNER=runner.as_posix(), TEST_CALLS=(directory / "calls").as_posix(),
+                       TEST_DIAGNOSTIC=(directory / "diagnostic.txt").as_posix(),
+                       TEST_CATALOG=raw_catalog if raw_catalog is not None else json.dumps(catalog),
+                       TEST_CATALOG_STATUS=str(catalog_status),
+                       TEST_RUNNER_STATUS=str(runner_status), TEST_POSTGRES_STATUS=str(postgres_status))
+            command = '''set -euo pipefail
+selection_dir="$1"
+CODEBUILD_SRC_DIR="$2"
+python() {
+  if [[ "$1" == scripts/run-all-gates.py ]]; then
+    command "$TEST_PYTHON" "$TEST_RUNNER" "$@"
+  else
+    command "$TEST_PYTHON" "$@"
+  fi
+}
+bash() {
+  [[ "$1" == "$CODEBUILD_SRC_DIR/scripts/ci/start_ephemeral_postgres.sh" ]] || return 98
+  if [[ "$2" == start ]]; then
+    printf 'postgresql://inert-private-database\n'
+    return "$TEST_POSTGRES_STATUS"
+  fi
+  [[ "$2" == stop ]] || return 98
+  printf 'POSTGRES_CLEANUP\n'
+}
+tee() {
+  # Keep the production block byte-for-byte intact while redirecting its fixed
+  # output destination into this test's temporary directory.
+  if [[ "$1" == -a ]]; then
+    [[ "$2" == /tmp/gate-results/diagnostic.txt && "$#" == 2 ]] || return 98
+    command tee -a "$TEST_DIAGNOSTIC"
+  else
+    [[ "$1" == /tmp/gate-results/diagnostic.txt && "$#" == 1 ]] || return 98
+    command tee "$TEST_DIAGNOSTIC"
+  fi
+}
+tail() {
+  [[ "$#" == 3 && "$1" == -c && "$2" == 16384 ]] || return 98
+  [[ "$3" == /tmp/gate-results/gate-result.json || "$3" == "/tmp/gate-logs/$LEAF_GATE_ONLY.log" ]] || return 98
+  printf 'INERT_BOUNDED_RUNNER_EVIDENCE\n'
+}
+''' + block + '''
+printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
+'''
+            result = subprocess.run(
+                [BASH, "-c", command, "diagnostic", directory.as_posix(), ROOT.as_posix()],
+                env=env, capture_output=True, text=True, timeout=30)
+            calls_path = directory / "calls"
+            calls = [json.loads(line) for line in calls_path.read_text(encoding="utf-8").splitlines()] \
+                if calls_path.exists() else []
+            diagnostic_path = directory / "diagnostic.txt"
+            diagnostic = diagnostic_path.read_text(encoding="utf-8") if diagnostic_path.exists() else None
+            return result, calls, diagnostic
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic execution requires bash")
+    def test_diagnostic_exact_suite_status_and_no_full_proof(self):
+        for suite_id in ("a", "studio-suite", "a" + "-" * 63):
+            for status in (0, 7, 137):
+                with self.subTest(suite_id=suite_id, status=status):
+                    result, calls, diagnostic = self._run_diagnostic(
+                        {"LEAF_DIAGNOSTIC_PROFILE": "web-demo-suite", "LEAF_GATE_ONLY": suite_id},
+                        ["other", suite_id], runner_status=status)
+                    self.assertEqual(result.returncode, status, result.stdout + result.stderr)
+                    self.assertEqual(calls, [
+                        ["scripts/run-all-gates.py", "--list", "--catalog-root", ROOT.as_posix()],
+                        ["scripts/run-all-gates.py", "--jobs", "1", "--retry", "0", "--fail-fast",
+                         "--result-json", "/tmp/gate-results/gate-result.json", "--log-dir",
+                         "/tmp/gate-logs", "--only", suite_id]])
+                    self.assertIn("diagnostic-only/no-full-verdict", result.stdout)
+                    self.assertNotIn("ORDINARY_REQUIRED_CONTROLS", result.stdout)
+                    self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
+                    self.assertEqual(result.stdout.count("POSTGRES_CLEANUP"), 1)
+                    self.assertIn(f"suite={suite_id} status={status} postgres_status=0", diagnostic)
+                    self.assertEqual(diagnostic.count("INERT_BOUNDED_RUNNER_EVIDENCE"), 2)
+                    self.assertLess(len(diagnostic), 33000)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic execution requires bash")
+    def test_diagnostic_unknown_colliding_or_invalid_catalog_runs_no_suite(self):
+        cases = [([], 0, None), (["other"], 0, None), (["suite-extra"], 0, None),
+                 (["suite", "suite-extra"], 0, None), (["prefix-suite", "suite"], 0, None),
+                 (["suite", "suite"], 0, None), (["suite"], 9, None),
+                 ([], 0, "not json"), ([], 0, "[]"),
+                 ([], 0, '{"schema":"wrong","suites":[{"id":"suite"}]}'),
+                 ([], 0, '{"schema":"leaf.ci.catalog.v1","suites":[{}]}'),
+                 ([None], 0, None)]
+        for ids, catalog_status, raw_catalog in cases:
+            with self.subTest(ids=ids, catalog_status=catalog_status, raw_catalog=raw_catalog):
+                result, calls, diagnostic = self._run_diagnostic(
+                    {"LEAF_DIAGNOSTIC_PROFILE": "web-demo-suite", "LEAF_GATE_ONLY": "suite"},
+                    ids, catalog_status=catalog_status, raw_catalog=raw_catalog)
+                self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+                self.assertEqual(calls, [["scripts/run-all-gates.py", "--list", "--catalog-root",
+                                          ROOT.as_posix()]])
+                self.assertIn("LEAF_DIAGNOSTIC refused", result.stderr)
+                self.assertIn("status=2", diagnostic)
+                self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
+                self.assertEqual(result.stdout.count("POSTGRES_CLEANUP"), 1)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic execution requires bash")
+    def test_diagnostic_unpaired_wrong_or_malformed_env_preserves_normal_path(self):
+        cases = [{}, {"LEAF_DIAGNOSTIC_PROFILE": "web-demo-suite"}, {"LEAF_GATE_ONLY": "suite"},
+                 {"LEAF_DIAGNOSTIC_PROFILE": "other", "LEAF_GATE_ONLY": "suite"},
+                 {"LEAF_DIAGNOSTIC_PROFILE": "", "LEAF_GATE_ONLY": "suite"},
+                 {"LEAF_DIAGNOSTIC_PROFILE": "web-demo-suite\n", "LEAF_GATE_ONLY": "suite"}]
+        cases.extend({"LEAF_DIAGNOSTIC_PROFILE": "web-demo-suite", "LEAF_GATE_ONLY": value}
+                     for value in ("", "Suite", "-suite", "suite_name", "suite/path", "suite other",
+                                   "suite;false", "suite\n", "a" * 65))
+        for overrides in cases:
+            with self.subTest(overrides=overrides):
+                result, calls, diagnostic = self._run_diagnostic(overrides, ["suite"])
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertEqual(calls, [])
+                self.assertIsNone(diagnostic)
+                self.assertNotIn("LEAF_DIAGNOSTIC", result.stdout)
+                self.assertIn("ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF", result.stdout)
+                self.assertEqual(result.stdout.count("POSTGRES_CLEANUP"), 1)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic execution requires bash")
+    def test_diagnostic_postgres_failure_never_becomes_pass(self):
+        for runner_status, expected in ((0, 1), (7, 7)):
+            with self.subTest(runner_status=runner_status):
+                result, calls, diagnostic = self._run_diagnostic(
+                    {"LEAF_DIAGNOSTIC_PROFILE": "web-demo-suite", "LEAF_GATE_ONLY": "suite"},
+                    ["suite"], runner_status=runner_status, postgres_status=1)
+                self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
+                self.assertEqual(len(calls), 2)
+                self.assertIn("FATAL: ephemeral PostgreSQL did not start", result.stderr)
+                self.assertIn(f"status={expected} postgres_status=1", diagnostic)
+                self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
+                self.assertEqual(result.stdout.count("POSTGRES_CLEANUP"), 1)
+
+    def test_diagnostic_exit_precedes_normal_publication_and_proof(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        before, rest = script.split("# LEAF_DIAGNOSTIC_BEGIN\n", 1)
+        block, after = rest.split("# LEAF_DIAGNOSTIC_END\n", 1)
+        self.assertIn('export LEAF_GATE_REQUIRE_DATABASE=1', before)
+        self.assertIn('exit "$diagnostic_status"', block)
+        self.assertNotIn("--early-feedback", block)
+        self.assertNotIn("--emit-proof", block)
+        self.assertNotIn("aws ", block)
+        self.assertTrue(after.startswith('gate_status=0\nunset PYTHONSAFEPATH\n'))
+        self.assertIn('# LEAF_GATE_PROOF_BEGIN', after)
+        self.assertIn('--key "mq/leaf-web-demo/selection/main/', after)
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic syntax requires bash")
+    def test_diagnostic_bash_syntax(self):
+        result = subprocess.run([BASH, "-n", CI_PATH.as_posix()], capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
     @unittest.skipUnless(BASH, "bash is not on PATH; capture summary requires bash")
     def test_capture_summary_exception_names_type_and_preserves_verdict(self):
         source = CI_PATH.read_text(encoding="utf-8")
@@ -177,9 +352,13 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertLess(script.index("CODEBUILD_WEBHOOK_BASE_REF:-"),
                         script.index("##refs/heads/"))
         self.assertNotIn("git fetch", script)
+        # The diagnostic branch has its own executable contract; keep the
+        # original required-control invocation pinned independently.
+        ordinary_script = re.sub(r"# LEAF_DIAGNOSTIC_BEGIN\n.*?# LEAF_DIAGNOSTIC_END\n",
+                                 "", script, flags=re.DOTALL)
         invocations = re.findall(
             r"\bpython scripts/run-all-gates\.py\b(?:(?!\bpython scripts/run-all-gates\.py\b)[^\n])*",
-            re.sub(r"\\\n\s*", " ", script))
+            re.sub(r"\\\n\s*", " ", ordinary_script))
         gate_runs = [call for call in invocations
                      if "--verify-shard-results" not in call and "--verify-gate-proof" not in call]
         self.assertEqual(gate_runs, [invocations[0]])
