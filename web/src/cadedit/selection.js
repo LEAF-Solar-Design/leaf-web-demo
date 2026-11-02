@@ -1,6 +1,6 @@
 export const NO_IDS = Object.freeze([])
 export const MAX_SELECTION_EDIT_ENTITIES = 256
-export const SELECTION_EDIT_OPS = Object.freeze(['delete', 'move', 'copy', 'rotate', 'scale', 'mirror'])
+export const SELECTION_EDIT_OPS = Object.freeze(['delete', 'move', 'copy', 'rotate', 'scale', 'mirror', 'setLayer'])
 
 export function withSelection(ids) {
   const unique = [...new Set((ids || []).filter((id) => typeof id === 'string'))]
