@@ -67,6 +67,16 @@ export function validateGraph(document, entries = registry) {
   try {
     const problems = document.blocks.map(block => resolveManifest(block, entries).problem).filter(Boolean)
     if (problems.length) return { ready: false, problems, message: problems.join('; '), ms: performance.now() - started }
+    for (const block of document.blocks) {
+      const { manifest } = resolveManifest(block, entries)
+      for (const key of (manifest.settings_schema.required || []).filter(key => !Object.hasOwn(block.settings || {}, key))) {
+        problems.push(`${manifest.title || block.id}: setting "${key}" is required`)
+      }
+      for (const name of missingInputs(document, block, entries)) {
+        problems.push(`${manifest.title || block.id}: input "${name}" needs a connection`)
+      }
+    }
+    if (problems.length) return { ready: false, problems, message: problems.join('; '), ms: performance.now() - started }
     contract.graph(document, entries); return { ready: true, problems: [], message: 'Ready', ms: performance.now() - started }
   }
   catch (error) { return { ready: false, problems: [error.message], message: error.message, ms: performance.now() - started } }

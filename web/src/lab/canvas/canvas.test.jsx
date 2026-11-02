@@ -468,7 +468,7 @@ describe('canvas authoring', () => {
       fireEvent.click(screen.getByRole('button', { name: 'Disconnect value' }))
     } else fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
     expect(changed).toHaveBeenCalledTimes(2)
-    expect(changed.mock.calls[1][0]).toEqual({ document: initial, ready: false, problems: ['Test: input required'] })
+    expect(changed.mock.calls[1][0]).toEqual({ document: initial, ready: false, problems: [`${required.title}: input "value" needs a connection`] })
     expect(connected.document.pipes).toEqual([pipe])
 
     fireEvent.click(screen.getByRole('button', { name: 'Connect first pair' }))
@@ -495,7 +495,7 @@ describe('canvas authoring', () => {
 
     fireEvent.click(screen.getByRole('button', { name: 'Delete first pipe' }))
     expect(readiness.getByRole('status')).toHaveTextContent('No valid graph')
-    expect(readiness.getByRole('listitem')).toHaveTextContent('Test: input required')
+    expect(readiness.getByRole('listitem')).toHaveTextContent(`${required.title}: input "value" needs a connection`)
     expect(run).toBeDisabled()
     fireEvent.click(run)
     expect(onRun).toHaveBeenCalledTimes(1)
@@ -720,5 +720,83 @@ describe('layout runner cancellation', () => {
     pending.resolve({ children: [{ id: 'adjust-none-1', x: 999 }] })
     runner.cancel()
     expect(secondWorker.terminateWorker).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('palette placement and actionable graph readiness', () => {
+  it('places three palette clicks in distinct, non-intersecting card boxes', () => {
+    render(<LabCanvas entries={entriesOf(manifest)} />)
+    vi.spyOn(screen.getByTestId('flow').parentElement, 'getBoundingClientRect')
+      .mockReturnValue({ left: 100, top: 60, width: 600, height: 400 })
+    const button = within(screen.getByRole('region', { name: 'Strategy palette' })).getByRole('button', { name: 'Strategy' })
+    for (let index = 0; index < 3; index += 1) fireEvent.click(button)
+    const positions = [1, 2, 3].map(index => JSON.parse(screen.getByTestId(`adjust-none-${index}`).getAttribute('data-position')))
+    expect(positions).toEqual([{ x: 400, y: 260 }, { x: 740, y: 260 }, { x: 1080, y: 260 }])
+    expect(new Set(positions.map(point => JSON.stringify(point))).size).toBe(3)
+    positions.forEach((point, index) => {
+      for (const other of positions.slice(index + 1)) {
+        expect(point.x < other.x + 310 && point.x + 310 > other.x &&
+          point.y < other.y + 360 && point.y + 360 > other.y).toBe(false)
+      }
+    })
+  })
+
+  it('preserves an explicit drop position even when that spot is occupied', () => {
+    render(<LabCanvas entries={entriesOf(manifest)} />)
+    const canvas = screen.getByTestId('flow').parentElement
+    const drop = () => fireEvent.drop(canvas, {
+      dataTransfer: { getData: type => type === BLOCK_MIME ? manifest.id : '' }, clientX: 120, clientY: 90,
+    })
+    drop()
+    const position = screen.getByTestId('adjust-none-1').getAttribute('data-position')
+    drop()
+    expect(screen.getByTestId('adjust-none-2')).toHaveAttribute('data-position', position)
+  })
+
+  it('names each missing top-level setting and its block in document order', () => {
+    const required = { ...manifest, title: 'Configured strategy', settings_schema: {
+      type: 'object', additionalProperties: false, properties: { first: { type: 'number' }, second: { type: 'number' } }, required: ['first', 'second'],
+    } }
+    const document = addBlock(addBlock(emptyGraph(), required), required)
+    document.blocks[1].settings = { first: 0 }
+    const problems = ['Configured strategy: setting "first" is required',
+      'Configured strategy: setting "second" is required', 'Configured strategy: setting "second" is required']
+    expect(validateGraph(document, entriesOf(required))).toMatchObject({ ready: false, problems, message: problems.join('; ') })
+  })
+
+  it('names a required unconnected input while allowing an input with a default', () => {
+    const required = { ...manifest, title: 'Connected strategy', inputs: {
+      value: { ...manifest.inputs.value, required: true, has_default: false },
+      auxiliary: { ...manifest.inputs.auxiliary, required: true, has_default: true, default: 0 },
+    } }
+    expect(validateGraph(addBlock(emptyGraph(), required), entriesOf(required))).toMatchObject({
+      ready: false, problems: ['Connected strategy: input "value" needs a connection'],
+      message: 'Connected strategy: input "value" needs a connection',
+    })
+  })
+
+  it('still validates a complete graph with required settings and a connected input as Ready', () => {
+    const required = { ...manifest, id: 'complete-strategy', inputs: {
+      value: { ...manifest.inputs.value, required: true, has_default: false },
+    }, settings_schema: { type: 'object', additionalProperties: false, properties: { amount: { type: 'number' } }, required: ['amount'] } }
+    const entries = entriesOf(manifest, required)
+    let document = addBlock(documentOf(1), required)
+    document = updateSettings(document, 'complete-strategy-1', { amount: 0 }, entries)
+    document = connectPipe(document, { from: { node: 'adjust-none-1', port: 'result' },
+      to: { node: 'complete-strategy-1', port: 'value' } }, entries)
+    expect(contract.graph(document, entries)).toBe(true)
+    expect(validateGraph(document, entries)).toMatchObject({ ready: true, problems: [], message: 'Ready' })
+  })
+
+  it('preserves contract errors when required fields are present but invalid', () => {
+    const required = { ...manifest, settings_schema: {
+      type: 'object', additionalProperties: false, properties: { amount: { type: 'number' } }, required: ['amount'],
+    } }
+    const document = addBlock(emptyGraph(), required)
+    document.blocks[0].settings = { amount: 'invalid' }
+    let message
+    try { contract.graph(document, entriesOf(required)) } catch (error) { message = error.message }
+    expect(message).toBeTruthy()
+    expect(validateGraph(document, entriesOf(required))).toMatchObject({ ready: false, problems: [message], message })
   })
 })

@@ -57,7 +57,18 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       const centre = position || flow.screenToFlowPosition({ x: bounds.left + bounds.width / 2, y: bounds.top + bounds.height / 2 })
       const next = addBlock(current.current, manifest)
       const id = next.blocks.at(-1).id
-      setPositions(previous => ({ ...previous, [id]: centre }))
+      setPositions(previous => {
+        let placement = centre
+        if (!position) {
+          for (let index = 0; index < 50; index += 1) {
+            placement = { x: centre.x + (index % 4) * 340, y: centre.y + Math.floor(index / 4) * 400 }
+            if (!Object.values(previous).some(point =>
+              placement.x < point.x + 310 && placement.x + 310 > point.x &&
+              placement.y < point.y + 360 && placement.y + 360 > point.y)) break
+          }
+        }
+        return { ...previous, [id]: placement }
+      })
       commit(next); setSelected(id); setMessage(`${manifest.title} added`)
     } catch (error) { setMessage(error.message) }
   }
