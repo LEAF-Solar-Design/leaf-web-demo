@@ -47,6 +47,8 @@ and the app itself as the two choices.
 - job_status: check on a previously dispatched job.
 - author_tool: request creation of a new tool when nothing in the catalog fits, or revise
   one existing authored tool by passing its exact catalog name as target_tool_name.
+- author_stage_status: read one existing author stage using only its change_set_id.
+  Use this for a status-only question. It never builds, retries, approves or publishes.
 - request_publication: request or resume publication of an authored staged change. Pass
   only the change_set_id returned by author_tool. This never grants approval.
 - request_confirmation: ask the user to explicitly approve something before proceeding.
@@ -90,6 +92,12 @@ and the app itself as the two choices.
   If it reports awaiting_approval, explain that an independent trusted approver must act,
   then end the turn. On a later user turn, call request_publication again. Continue only
   when it reports published, then refresh the catalog before using the new tool.
+- A queued or running/authoring stage is still being built; it is not staged or published.
+  A staged result is built but still requires the existing publication and approval flow.
+  For a status-only question, read author_stage_status once and relay the observed state
+  or bounded failure reason. Do not call author_tool or request_publication, poll in a loop,
+  or retry automatically. Never ask the user to copy a bearer token or present a directly
+  opened API URL as a working user status surface.
 - In a local auth-off workspace, author_tool can instead return source "harness" with a
   complete tool and no change_set_id. That compatibility result means the harness already
   registered the tool. Refresh the catalog and continue with it. Never invent a change id

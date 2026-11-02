@@ -28,7 +28,7 @@ import type {
   IntegrationToolResult,
   ProjectPageProposalInput,
 } from "../index.js";
-import { INTEGRATION_TOOL_INPUTS } from "../index.js";
+import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS } from "../index.js";
 import { z } from "zod";
 import {
   DatasetReadV1, IntegrationActionCatalogV1, IntegrationElementV1, IntegrationRefV1,
@@ -192,6 +192,38 @@ export class AppRunClientError extends Error {
   }
 }
 
+// ChangeSet.updated_at is TEXT (SQLite strftime; PostgreSQL serializes to text).
+// Strip producer-only receipt/result/polling fields, including nested tool source.
+const StageStatusMetadata = z.object({
+  contract: z.literal("leaf.customization-stage-job.v1"),
+  change_set_id: CanonicalChangeSetId,
+  status: z.enum(["queued", "running", "staged", "failed"]),
+  change_kind: z.enum(["create", "revise"]),
+  attempt: z.number().int().nonnegative().refine(Number.isSafeInteger),
+  phase: z.enum(["queued", "authoring", "staged", "failed"]),
+  updated_at: z.string().min(1).max(64).refine(value =>
+    /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})$/.test(value) &&
+    Number.isFinite(Date.parse(value))),
+  target_tool_name: z.string().min(1).max(64).optional(),
+  error: z.object({
+    reason_code: z.string().min(1).max(200),
+    retryable: z.boolean(),
+    message: z.string().min(1).max(500).optional(),
+  }).optional(),
+});
+
+export function projectAuthorStageStatus(changeSetId: string, value: unknown): Record<string, unknown> {
+  const parsed = StageStatusMetadata.safeParse(value);
+  const fail = () => new AppRunClientError("Author stage status unavailable.", 502);
+  if (!parsed.success || parsed.data.change_set_id !== changeSetId) throw fail();
+  const result = parsed.data;
+  const phases = { queued: "queued", running: "authoring", staged: "staged", failed: "failed" };
+  if (result.phase !== phases[result.status] ||
+      (result.status === "failed") !== (result.error !== undefined) ||
+      /\bbearer\s+\S+|\b(?:api[_ -]?key|password|access[_ -]?token|secret)\s*[:=]\s*\S+|\bsk-[A-Za-z0-9_-]{16,}/i.test(JSON.stringify(result))) throw fail();
+  return result;
+}
+
 export class HttpAppRunClient implements AppRunClient {
   private readonly baseUrl: string;
   private readonly secret: string;
@@ -209,6 +241,49 @@ export class HttpAppRunClient implements AppRunClient {
       "x-tenant-id": tenantId,
       "x-dispatch-secret": this.secret,
     };
+  }
+
+  async getAuthorStageStatus(tenantId: string, changeSetId: string): Promise<Record<string, unknown>> {
+    const fail = () => new AppRunClientError("Author stage status unavailable.", 502);
+    if (!CanonicalChangeSetId.safeParse(changeSetId).success || !tenantId || !this.secret) throw fail();
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => { cancel(); reject(fail()); }, 15_000);
+    });
+    const work = async () => {
+      const response = await this.fetchImpl(
+        `${this.baseUrl}/api/author/stages/${encodeURIComponent(changeSetId)}`,
+        { method: "GET", headers: this.headers(tenantId), redirect: "error", signal: controller.signal },
+      );
+      if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw fail(); }
+      if (response.status !== 200 || response.redirected || !response.body ||
+          !/^application\/json(?:\s*;.*)?$/i.test(response.headers.get("content-type") ?? "")) throw fail();
+      reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (true) {
+        const next = await reader.read();
+        if (controller.signal.aborted) throw fail();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > 1024 * 1024) throw fail();
+        chunks.push(next.value);
+      }
+      const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+      const projected = projectAuthorStageStatus(changeSetId, value);
+      if (reflectsSecret(projected, this.secret)) throw fail();
+      return projected;
+    };
+    try { return await Promise.race([work(), deadline]); }
+    catch { throw fail(); }
+    finally {
+      clearTimeout(timer);
+      cancel();
+      try { reader?.releaseLock(); } catch { /* pending read cancelled above */ }
+    }
   }
 
   async proposeProjectPage(

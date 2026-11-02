@@ -16,6 +16,8 @@ import type {
   SubmitRunResponse,
   ProjectPageProposalInput,
 } from "../index.js";
+import { CanonicalChangeSetId } from "../index.js";
+import { AppRunClientError, projectAuthorStageStatus } from "../impl/appRunClient.js";
 
 export const FAKE_CATALOG: CapabilityEntry[] = [
   {
@@ -73,6 +75,20 @@ function envelopeFor(tool: string): ResultEnvelope {
 }
 
 export class FakeAppRunClient implements AppRunClient {
+  readonly authorStageStatusCalls: Array<{ tenantId: string; changeSetId: string }> = [];
+  /** Explicit tenant-scoped producer fixtures; a missing row never invents success. */
+  readonly authorStages = new Map<string, Map<string, Record<string, unknown>>>();
+
+  async getAuthorStageStatus(tenantId: string, changeSetId: string): Promise<Record<string, unknown>> {
+    if (!CanonicalChangeSetId.safeParse(changeSetId).success) {
+      throw new AppRunClientError("Author stage status unavailable.", 400);
+    }
+    this.methodLog.push("getAuthorStageStatus");
+    this.authorStageStatusCalls.push({ tenantId, changeSetId });
+    const row = this.authorStages.get(tenantId)?.get(changeSetId);
+    if (!row) throw new AppRunClientError("Author stage status unavailable.", 404);
+    return projectAuthorStageStatus(changeSetId, row);
+  }
   readonly pageProposalCalls: Array<{
     tenantId: string; sessionId: string; body: ProjectPageProposalInput;
     authority: { sessionId: string; turnId: string };

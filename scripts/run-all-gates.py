@@ -2337,6 +2337,8 @@ def build_suites() -> List[Suite]:
         # status). Was never registered, so none of it ran in CI.
         Suite("server-customization-async-stage", "server customization async stage", "pytest",
               SERVER, _py_pytest("tests/test_customization_async_stage.py"), 82),
+        Suite("server-author-stage-status", "server author stage status", "pytest",
+              SERVER, _py_pytest("tests/test_author_stage_status.py"), 41),
         Suite("server-customization-stage-recovery",
               "server customization stage recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_stage_recovery.py"), 27),

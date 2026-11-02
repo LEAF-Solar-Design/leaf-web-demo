@@ -7,12 +7,18 @@ export * from "../vendor/mushy-author/ports/index.js";
 // Host additions do not change the immutable vendor catalog.
 export const SPINE_TOOL_NAMES = [
   "catalog_search", "drawing_state", "ask_user", "run_capability", "job_status",
-  "author_tool", "request_publication", "request_confirmation", "propose_overlay",
+  "author_tool", "author_stage_status", "request_publication", "request_confirmation", "propose_overlay",
   "customize_platform", "finish_project", "project_completion_status",
   "integration_datasets", "integration_action_catalog", "integration_query",
   "integration_save_element", "propose_project_page",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
+
+import { z } from "zod";
+
+export const CanonicalChangeSetId = z.string().length(36)
+  .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+export const AuthorStageStatusInput = z.strictObject({ change_set_id: CanonicalChangeSetId });
 
 export interface ProjectPageProposalInput {
   instruction: string;
@@ -28,6 +34,7 @@ import type {
 
 /** Host-only overlay authority handoff; the app resolves the active turn's actor. */
 export interface AppRunClient extends VendoredAppRunClient {
+  getAuthorStageStatus(tenantId: string, changeSetId: string): Promise<Record<string, unknown>>;
   proposeProjectPage(
     tenantId: string,
     sessionId: string,
