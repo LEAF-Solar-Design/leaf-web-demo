@@ -49,6 +49,36 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         'project_materials', 'UNIQUE (org_id, project_id, sha256)')
     assert catalog['indexes']['project_materials_scope_page'] == db._catalog_contract(
         'project_materials', '(org_id, project_id, material_id)')
+    assert columns["project_reference_materials"] == {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "created_at",
+    }
+    reference_constraints = {
+        "project_reference_materials_pkey": db._catalog_contract(
+            "project_reference_materials", "PRIMARY KEY (material_id)"),
+        "reference_scope_digest": db._catalog_contract(
+            "project_reference_materials", "UNIQUE (org_id, project_id, sha256)"),
+        "reference_project_fk": db._catalog_contract(
+            "project_reference_materials", "FOREIGN KEY (org_id, project_id)",
+            "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+        "reference_actor_fk": db._catalog_contract(
+            "project_reference_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+            "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+        "project_reference_materials_name_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+        "project_reference_materials_media_type_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'"),
+        "project_reference_materials_byte_size_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "byte_size >= 1", "byte_size <= 67108864"),
+        "reference_text_size": db._catalog_contract(
+            "project_reference_materials", "CHECK", "media_type = 'video/quicktime'", "byte_size <= 8388608"),
+        "project_reference_materials_sha256_check": db._catalog_contract(
+            "project_reference_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
+    }
+    assert {name: contract for name, contract in catalog["constraints"].items()
+            if contract["relation"] == "project_reference_materials"} == reference_constraints
+    assert catalog["indexes"]["reference_scope_page"] == db._catalog_contract(
+        "project_reference_materials", "(org_id, project_id, material_id)")
     assert catalog["constraints"]["orgs_account_class_check"] == db._catalog_contract(
         "orgs", "CHECK", "account_class", "'customer'", "'production_acceptance'", "'demo'")
     assert catalog["constraints"]["unit_economics_observations_org_class_check"] == db._catalog_contract(
@@ -56,8 +86,8 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0095_org_invitations.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0095"
+    assert manifest[-1]["name"] == "0096_project_reference_materials.sql"
+    assert inventory["scope"]["migration_ids"][-1] == "0096"
 
     class Schema:
         absent = None
@@ -147,6 +177,21 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
     assert not status['ok']
     assert 'project_materials_scope_page:missing-or-wrong-relation' in status['invalid_indexes']
     schema.absent = None
+    for column in columns["project_reference_materials"]:
+        schema.absent = ("project_reference_materials", column)
+        status = db.schema_status()
+        assert not status["ok"]
+        assert column in status["missing"]["project_reference_materials"]
+    for constraint in reference_constraints:
+        schema.absent = constraint
+        status = db.schema_status()
+        assert not status["ok"]
+        assert f"{constraint}:missing-or-wrong-relation" in status["invalid_constraints"]
+    schema.absent = "reference_scope_page"
+    status = db.schema_status()
+    assert not status["ok"]
+    assert "reference_scope_page:missing-or-wrong-relation" in status["invalid_indexes"]
+    schema.absent = None
     schema.definitions["unit_economics_observations_org_class_check"] = (
         "CHECK (org_account_class = 'production_acceptance')")
     status = db.schema_status()
@@ -163,7 +208,7 @@ def test_runner_registry(monkeypatch):
     columns = db.required_columns_for_selected_authorities({})
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 96)]
+    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 97)]
     assert [item["name"][:4] for item in manifest] == inventory["scope"]["migration_ids"]
     assert len(ADDONS) == 12
     assert "-- expand-contract: contract-of=0083" in sql
@@ -314,18 +359,19 @@ def test_sip_r1_schema_contract_complete():
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 96)]
+    ids = [f"{n:04d}" for n in range(1, 97)]
     assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0095_org_invitations.sql"
+    assert db.migration_manifest()[-1]["name"] == "0096_project_reference_materials.sql"
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_sizing_exchanges" in ledger["postgres_tables"]
     assert "project_solve_exchanges" in ledger["postgres_tables"]
     assert 'project_materials' in ledger['postgres_tables']
+    assert "project_reference_materials" in ledger["postgres_tables"]
     for name in ("test_conversation_model.py", "test_template_store.py",
                  "test_postgres_authority_inventory_contract.py"):
         source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 96)" in source
+        assert "range(1, 97)" in source
         assert "range(1, 74)" not in source
 
 
@@ -510,12 +556,12 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0095_org_invitations.sql",
+        manifest_names[-1], "0096_project_reference_materials.sql",
         "Update this pin to the new last migration filename once main adds "
         "one (and the migration_ids pin below to match).",
     )
     _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0095",
+        inventory["scope"]["migration_ids"][-1], "0096",
         "Update this pin (and authority-inventory.json's "
         "scope.migration_ids) to the new last migration id.",
     )
