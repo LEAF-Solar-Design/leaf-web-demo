@@ -236,6 +236,10 @@ def _well_formed_capability(token):
 
 
 def _expected_capability(tenant, scope, state, capability, *, acquiring=False):
+    if capability is not None and not isinstance(capability, str):
+        from project_checkout_custody import DelegatedCheckout
+        if isinstance(capability, DelegatedCheckout):
+            return capability.fence_for(tenant, scope, state)
     lease = state.checkout
     if lease is None or lease.expires_at <= state.observed_at:
         return None

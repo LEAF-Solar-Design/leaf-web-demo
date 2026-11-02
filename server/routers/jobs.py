@@ -403,7 +403,8 @@ def _catalog_digest_matches(candidate, current):
 
 
 def _project_solar_admission(tool, tenant, req, org_header, project_header,
-                             authorization, checkout_header, *, idempotency_key, preview):
+                             authorization, checkout_header, *, idempotency_key, preview,
+                             expected_intake_sha256=None):
     """Share transport pins between exact catalog previews and submissions."""
     digest = deps.catalog_tool_digest(tool)
     if not _catalog_digest_matches(req.catalog_digest, digest):
@@ -428,6 +429,11 @@ def _project_solar_admission(tool, tenant, req, org_header, project_header,
     if "drawing_id" not in req.params and isinstance(defaults, dict):
         drawing_id = defaults.get("drawing_id")
     auth = authorization if isinstance(authorization, str) else None
+    checkout = checkout_header if isinstance(checkout_header, str) else None
+    if checkout_header is not None and not isinstance(checkout_header, str):
+        from project_checkout_custody import DelegatedCheckout
+        if isinstance(checkout_header, DelegatedCheckout):
+            checkout = checkout_header
     result = solar_project_admission.project_tool_admission(
         tool, tenant,
         org_header=org_header if isinstance(org_header, str) else None,
@@ -436,7 +442,9 @@ def _project_solar_admission(tool, tenant, req, org_header, project_header,
         input_version_id=req.dwg, drawing_id=drawing_id, params=req.params,
         catalog_digest=req.catalog_digest,
         idempotency_key=idempotency_key if isinstance(idempotency_key, str) else None,
-        checkout_capability=checkout_header if isinstance(checkout_header, str) else None,
+        checkout_capability=checkout,
+        **({"expected_intake_sha256": expected_intake_sha256}
+           if expected_intake_sha256 is not None else {}),
         preview=preview, **({"proposal_job_id": req.proposal_job_id}
                           if req.tool == "solar-commit-solve" else {}),
         **({"solve_context": req.solve_context.model_dump()}
@@ -833,6 +841,7 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
         return scoped_project_refusal()
 
     selected_binding = None
+    delegated_checkout = None
     if session_id is not None and any(
         cap in ("drawing.read", "drawing.write") for cap in tool.get("capabilities", [])
     ):
@@ -850,9 +859,11 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
         if selected_binding is not None:
             if binding is not None:
                 return scoped_project_refusal()
-            if not _is_project_read_tool(tool):
-                return error_response(
-                    ErrorCode.BAD_PARAMS, "selected project execution requires a canonical read tool",
+            selected_write = not _is_project_read_tool(tool)
+            if selected_write and ("drawing.write" not in tool.get("capabilities", [])
+                    or solar_project_admission._trusted(tool)[1] is not None):
+                return error_response(ErrorCode.BAD_PARAMS,
+                    "selected project execution requires a trusted canonical Solar tool",
                     retryable=False, status_code=409)
             if (req.dwg not in (selected_binding["drawing_id"], selected_binding["input_version_id"])
                     or (isinstance(x_project_id, str)
@@ -861,6 +872,66 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
                         and x_org_id != selected_binding["organization_id"])):
                 return error_response(ErrorCode.BAD_PARAMS, "selected project drawing conflicts with request",
                                       retryable=False, status_code=409)
+            if selected_write:
+                if not solar_project_admission.project_runs_enabled():
+                    return JSONResponse(status_code=409, content=solar_project_admission._refusal(
+                        "project_execution_disabled")["content"])
+                supplied_drawing = req.params.get("drawing_id")
+                if supplied_drawing is not None and supplied_drawing != selected_binding["drawing_id"]:
+                    return error_response(ErrorCode.BAD_PARAMS, "selected project drawing conflicts with request",
+                                          retryable=False, status_code=409)
+                try:
+                    if not all((req.catalog_commit, req.effective_catalog_digest,
+                                req.tool_manifest_sha256)):
+                        raise ValueError("write approval is missing exact catalog generation pins")
+                    if not text_matches(req.tool_manifest_sha256, current_catalog_digest):
+                        raise ValueError("tool manifest changed after approval; refresh tools and confirm again")
+                    current_pin = (customization_service.effective_catalog_pin(str(tenant_id))
+                                   or deps.base_catalog_pin(deps.all_tools(str(tenant_id))))
+                    if not (text_matches(req.catalog_commit, current_pin["catalog_commit"])
+                            and text_matches(req.effective_catalog_digest,
+                                             current_pin["effective_catalog_digest"])):
+                        raise ValueError("effective catalog changed after approval; refresh tools and confirm again")
+                    if req.dwg_version is not None or req.expected_drawing_head is not None:
+                        import solar_project_context as project_context
+                        current = project_context.resolve_context(tenant_id,
+                            uuid.UUID(selected_binding["project_id"]),
+                            uuid.UUID(selected_binding["input_version_id"]),
+                            drawing_id=uuid.UUID(selected_binding["drawing_id"]), write=True)
+                        if (not current.binding.is_head
+                                or current.intake_sha256 != selected_binding["intake_sha256"]
+                                or any(pin is not None and pin != current.binding.version.seq
+                                       for pin in (req.dwg_version, req.expected_drawing_head))):
+                            raise ValueError("approved drawing version does not match selected project head")
+                except ValueError as exc:
+                    return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False, status_code=409)
+                except Exception:
+                    return error_response(ErrorCode.BAD_PARAMS, "selected project context unavailable",
+                                          retryable=False, status_code=409)
+                import project_checkout_custody
+                try:
+                    delegated_checkout = project_checkout_custody.resolve_for_turn(
+                        tenant_id, session_id, turn_id, tool=req.tool, params=req.params,
+                        catalog_pins={key: getattr(req, key) for key in (
+                            "catalog_digest", "catalog_commit", "effective_catalog_digest",
+                            "tool_manifest_sha256")}, input_binding=selected_binding,
+                        run_extras={key: value for key, value in {
+                            "solve_context": req.solve_context.model_dump()
+                                if req.solve_context is not None else None,
+                            "proposal_job_id": req.proposal_job_id,
+                        }.items() if value is not None})
+                    if not isinstance(delegated_checkout, project_checkout_custody.DelegatedCheckout):
+                        raise project_checkout_custody.CustodyError("checkout_custody_required", 403)
+                    if isinstance(idempotency_key, str) and idempotency_key != delegated_checkout.idempotency_key:
+                        return error_response(ErrorCode.BAD_PARAMS, "checkout custody idempotency conflict",
+                                              retryable=False, status_code=409)
+                    idempotency_key = delegated_checkout.idempotency_key
+                except project_checkout_custody.CustodyError as exc:
+                    return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
+                        "error": error_obj(ErrorCode.FORBIDDEN if exc.status_code == 403
+                                           else ErrorCode.BAD_PARAMS, exc.code, retryable=False),
+                        "reason_code": exc.code,
+                    }))
             x_org_id = selected_binding["organization_id"]
             x_project_id = selected_binding["project_id"]
             # Legacy integer pins cannot substitute for the stored selected UUID.
@@ -872,7 +943,10 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
             and tool.get("name") in capability_catalog.SOLAR_CAPABILITIES):
         response = _project_solar_admission(
             tool, tenant_id, req, x_org_id, x_project_id, authorization,
-            x_checkout_capability, idempotency_key=idempotency_key, preview=False)
+            delegated_checkout if delegated_checkout is not None else x_checkout_capability,
+            idempotency_key=idempotency_key, preview=False,
+            **({"expected_intake_sha256": selected_binding["intake_sha256"]}
+               if delegated_checkout is not None else {}))
         if wait and response.status_code == 202:
             return _wait_project_solar(response, tenant_id)
         return response
