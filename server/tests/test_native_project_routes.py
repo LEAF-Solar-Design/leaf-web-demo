@@ -122,7 +122,158 @@ def create(lane):
         return client.post(PREFIX, json=lane.body, headers=lane.headers)
 
 
-def test_connected_native_create_full_bytes_and_private_reads(connected):
+def prepare_native_edit_consumer(lane):
+    lane.body.update(source_operation='edit', expected_base_commit=BASE, material_refs=[])
+    lane.headers = lane.begin('edit')
+    def helper(result):
+        from project_repository_edit_contract import parse_staged_receipt, staged_receipt_digest
+        result['receipt']['changed_paths'] = ['Sources/RecipeModel.swift']
+        result['receiptDigest'] = staged_receipt_digest(parse_staged_receipt(result['receipt']))
+        return result
+    lane.response_mutation = helper
+
+
+@pytest.mark.parametrize('action', ['confirm', 'reject', 'recover'])
+def test_native_edit_consumer_public_stage_reads_and_durable_lifecycle(connected, action):
+    prepare_native_edit_consumer(connected)
+    result = create(connected)
+    assert result.status_code == 200, result.text
+    assert result.json()['state'] == 'awaiting_confirmation' and result.json()['version'] == 2
+    assert result.json()['changed_paths'] == ['Sources/RecipeModel.swift']
+    assert result.json()['base_commit'] == BASE
+    assert result.headers['cache-control'] == 'private, no-store'
+    assert len(connected.posts) == 1 and not connected.reads
+    dispatch = connected.posts[0]
+    assert dispatch['source_operation'] == 'edit' and dispatch['source_profile'] == native.SOURCE_PROFILE
+    assert dispatch['expected_base_commit'] == BASE and dispatch['material'] == []
+    assert dispatch['actor_binding_id'] == ACTOR and dispatch['project_id'] == PROJECT
+    assert dispatch['requirements'] == connected.body['requirements']
+    assert all(dispatch[key] == value for key, value in connected.authority.items())
+    with TestClient(connected.app) as client:
+        assert client.get(PREFIX).json() == [result.json()]
+        assert client.get(PREFIX+'/'+EDIT).json() == result.json()
+    assert flow.read(connected.tenant, PROJECT) == []
+    with pytest.raises(flow.FlowError) as caught:
+        flow.read(connected.tenant, PROJECT, EDIT)
+    assert caught.value.status == 409
+    row = connected.candidates[EDIT]
+    assert row['receipt_json']['operation'] == 'edit' and 'source_profile' not in row['receipt_json']
+    assert row['observed_main_commit'] is None
+    if action == 'recover':
+        row.update(state='publishing', version=3, confirmation_id=str(uuid.uuid4()))
+    body = dict(receipt_digest=row['receipt_digest'], expected_version=row['version'])
+    if action == 'confirm':
+        body['confirmation_id'] = str(uuid.uuid4())
+    with TestClient(connected.app) as client:
+        settled = client.post(PREFIX+'/'+EDIT+'/'+action, json=body, headers=connected.begin(action, body))
+        assert settled.status_code == 200, settled.text
+        assert settled.json()['state'] == ('rejected' if action == 'reject' else 'published')
+        assert settled.json()['version'] == (3 if action == 'reject' else (5 if action == 'recover' else 4))
+        if action == 'confirm':
+            replay = client.post(PREFIX+'/'+EDIT+'/confirm', json=body, headers=connected.begin('confirm', body))
+            assert replay.status_code == 200 and replay.json() == settled.json()
+        assert client.get(PREFIX+'/'+EDIT).json() == settled.json()
+    assert len(connected.posts) == 1
+    assert len(connected.confirmations) == (1 if action == 'confirm' else 0)
+    assert row['observed_main_commit'] == (None if action == 'reject' else HEAD)
+
+
+def test_native_edit_consumer_lost_author_response_reuses_original_operation(connected):
+    prepare_native_edit_consumer(connected)
+    connected.lose_author_response = True
+    assert create(connected).status_code == 503
+    original_key = connected.candidates[EDIT]['idempotency_key']
+    connected.headers = connected.begin('edit')
+    result = create(connected)
+    assert result.status_code == 200, result.text
+    assert result.json()['state'] == 'awaiting_confirmation' and result.json()['version'] == 2
+    assert len(connected.posts) == 1 and not connected.confirmations
+    assert connected.candidates[EDIT]['idempotency_key'] == original_key
+
+
+@pytest.mark.parametrize('kind', ['missing-base', 'stale-base', 'actor', 'oversize', 'hash'])
+def test_native_edit_consumer_public_refusal_preserves_source_and_claims(connected, kind):
+    prepare_native_edit_consumer(connected)
+    if kind == 'missing-base':
+        connected.body.pop('expected_base_commit')
+    elif kind == 'stale-base':
+        connected.body['expected_base_commit'] = 'f'*40
+    else:
+        connected.body['material_refs'] = copy.deepcopy(connected.request['material_refs'])
+        material = connected.body['material_refs'][0]['material_id']
+        if kind == 'actor':
+            connected.rows[material]['actor_binding_id'] = str(uuid.uuid4())
+        elif kind == 'oversize':
+            connected.rows[material]['byte_size'] = 1048577
+        else:
+            connected.rows[material]['sha256'] = 'f'*64
+    connected.headers = connected.begin('edit')
+    result = create(connected)
+    assert result.status_code == {'missing-base':422, 'stale-base':409, 'actor':404, 'oversize':413, 'hash':409}[kind]
+    assert not connected.posts and not connected.candidates and not connected.confirmations
+    if kind != 'stale-base':
+        assert not connected.initializations
+        assert not any(e['type'] == 'browser_source_dispatch' for e in connected.events)
+
+
+@pytest.mark.parametrize('kind', ['request-operation', 'hint-operation', 'marker-operation', 'fingerprint',
+    'expected-base', 'actor', 'profile', 'receipt-digest', 'receipt-helper'])
+def test_native_edit_consumer_persisted_operation_and_receipt_witness_tamper(connected, kind):
+    prepare_native_edit_consumer(connected)
+    assert create(connected).status_code == 200
+    event = next(e for e in connected.events if e['type'] == 'browser_source_dispatch')
+    marker = event['data']
+    if kind == 'request-operation':
+        marker['request']['source_operation'] = 'create'
+    elif kind == 'hint-operation':
+        connected.started[event['turn_id']]['classifier_hint']['browser_action'] = 'create'
+    elif kind == 'marker-operation':
+        marker['action'] = 'create'
+    elif kind == 'fingerprint':
+        marker['payload_digest'] = hashlib.sha256(flow.canonical(dict(source_profile=native.SOURCE_PROFILE,
+            action='create', source_request_id=EDIT, payload=marker['request']))).hexdigest()
+    elif kind == 'expected-base':
+        marker['request']['expected_base_commit'] = 'f'*40
+    elif kind == 'actor':
+        marker['authority'][2] = str(uuid.uuid4())
+    elif kind == 'profile':
+        marker['source_profile'] = authoring.WEB_PROFILE
+    elif kind == 'receipt-digest':
+        connected.candidates[EDIT]['receipt_digest'] = 'f'*64
+    else:
+        connected.candidates[EDIT]['receipt_json']['changed_paths'] = ['Sources/Tampered.swift']
+    with TestClient(connected.app) as client:
+        assert client.get(PREFIX+'/'+EDIT).status_code == 409
+        assert client.get(PREFIX).status_code == 409
+        row = connected.candidates[EDIT]
+        body = dict(receipt_digest=row['receipt_digest'], expected_version=row['version'], confirmation_id=str(uuid.uuid4()))
+        assert client.post(PREFIX+'/'+EDIT+'/confirm', json=body, headers=connected.begin('confirm', body)).status_code == 409
+    assert len(connected.posts) == 1 and not connected.confirmations
+
+
+@pytest.mark.parametrize('kind', ['version', 'digest', 'revoked', 'repo'])
+def test_native_edit_consumer_confirmation_keeps_cas_and_current_authority(connected, kind):
+    prepare_native_edit_consumer(connected)
+    assert create(connected).status_code == 200
+    row = connected.candidates[EDIT]
+    body = dict(receipt_digest=row['receipt_digest'], expected_version=row['version'], confirmation_id=str(uuid.uuid4()))
+    if kind == 'version':
+        body['expected_version'] += 1
+    elif kind == 'digest':
+        body['receipt_digest'] = 'f'*64
+    elif kind == 'revoked':
+        connected.revoked = True
+    else:
+        connected.authority['repo_key'] = str(uuid.uuid4())
+    with TestClient(connected.app) as client:
+        response = client.post(PREFIX+'/'+EDIT+'/confirm', json=body, headers=connected.begin('confirm', body))
+    assert response.status_code == (403 if kind == 'revoked' else 409)
+    assert row['state'] == 'awaiting_confirmation' and row['version'] == 2
+    assert row['observed_main_commit'] is None
+    assert len(connected.posts) == 1 and not connected.confirmations
+
+
+def test_native_edit_consumer_create_full_bytes_and_private_reads(connected):
     result = create(connected)
     assert result.status_code == 200, result.text
     assert result.json()['schema'] == 'leaf.native-project-source.v1'
@@ -143,7 +294,7 @@ def test_connected_native_create_full_bytes_and_private_reads(connected):
 
 
 @pytest.mark.parametrize('action', ['confirm', 'reject', 'recover'])
-def test_connected_native_lifecycle_reuses_author_row(connected, action):
+def test_native_edit_consumer_create_lifecycle_reuses_author_row(connected, action):
     assert create(connected).status_code == 200
     row = connected.candidates[EDIT]
     if action == 'recover':
@@ -188,10 +339,10 @@ def test_missing_or_mismatched_witness_fails_closed(connected, change):
         assert client.get(PREFIX+'/'+EDIT).status_code == 409
 
 
-@pytest.mark.parametrize('change', [dict(source_operation='edit', expected_base_commit=BASE),
+@pytest.mark.parametrize('change', [dict(source_operation='edit'), dict(source_operation='delete'),
     dict(material_refs=[]), dict(source_profile=authoring.WEB_PROFILE), dict(requirements=''),
     dict(expected_base_commit='bad')])
-def test_closed_public_native_request_refuses_without_effect(connected, change):
+def test_native_edit_consumer_closed_public_request_refuses_without_effect(connected, change):
     connected.body.update(change)
     result = create(connected)
     assert result.status_code == 422

@@ -339,14 +339,15 @@ def _membership(row, bound, current, source_profile):
             raise ValueError()
         marker = markers[0]
         body = parse_request(canonical(marker['request']), 'request', source_profile=NATIVE_PROFILE)
+        operation = body['source_operation']
         started = session_store.turn_started_data(sid, tid, current[0])
         if (not started or started.get('stage_authority') is not True
                 or started.get('text') != body['requirements']
-                or started.get('classifier_hint') != _hint('create', row['edit_id'], body, source_profile=NATIVE_PROFILE)
+                or started.get('classifier_hint') != _hint(operation, row['edit_id'], body, source_profile=NATIVE_PROFILE)
                 or marker.get('source_profile') != NATIVE_PROFILE or marker.get('authority') != list(current)
-                or marker.get('action') != 'create' or marker.get('source_request_id') != row['edit_id']
+                or marker.get('action') != operation or marker.get('source_request_id') != row['edit_id']
                 or marker.get('payload_digest') != hashlib.sha256(canonical(dict(
-                    source_profile=NATIVE_PROFILE, action='create', source_request_id=row['edit_id'], payload=body))).hexdigest()
+                    source_profile=NATIVE_PROFILE, action=operation, source_request_id=row['edit_id'], payload=body))).hexdigest()
                 or key != _request_key(body, NATIVE_PROFILE, sid, tid)):
             raise ValueError()
         _same_request(row, bound, current, body, key)
@@ -566,7 +567,7 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, so
         prior = _read(bound, edit_id) if bound else None
         if prior is not None:
             _membership(prior, bound, current, source_profile)
-        if action == 'create' and prior is None:
+        if action in ('create', 'edit') and prior is None:
             try:
                 authoring.validate_native_materials(tenant, project_id, dict(body_to_author(body), idempotency_key='validate'), cancelled=lambda: _cancelled(recheck))
             except authoring.AuthoringError as exc:
