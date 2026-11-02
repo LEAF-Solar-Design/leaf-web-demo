@@ -300,14 +300,22 @@ def publication_intake_key(org_id, project_id, drawing_id, digest):
             f"intakes/{digest}.json")
 
 
+def publication_source_key(org_id, project_id, drawing_id, digest):
+    return (f"tenants/{org_id}/projects/{project_id}/drawings/{drawing_id}/"
+            f"sources/{digest}.dxf")
+
+
 def _publication_proof(org_id, project_id, drawing_id, parent_id, actor, fence,
-                       request_id, digest, base_object_ref):
-    return {"schema": PUBLICATION_SCHEMA, "organization_id": str(org_id),
+                       request_id, digest, base_object_ref, source_sha256=None):
+    proof = {"schema": PUBLICATION_SCHEMA, "organization_id": str(org_id),
             "project_id": str(project_id), "drawing_id": str(drawing_id),
             "parent_version_id": str(parent_id), "request_id": str(request_id),
             "actor_binding_id": str(actor), "checkout_fence": str(fence),
             "intake": {"ref": publication_intake_key(org_id, project_id, drawing_id, digest),
                        "sha256": digest}, "base_object_ref": base_object_ref}
+    if source_sha256 is not None:
+        proof["source"] = {"ref": base_object_ref, "sha256": source_sha256}
+    return proof
 
 
 def _publication_fingerprint(proof):
@@ -318,10 +326,18 @@ def _publication_fingerprint(proof):
 def publish_version(org_id: UUID, project_id: UUID, drawing_id: UUID, *,
                     expected_parent_version_id: UUID, actor_binding_id: UUID,
                     expected_fence: int, request_id: UUID, intake_sha256: str,
-                    conn, before_new=None) -> DrawingVersion:
+                    conn, before_new=None, source_object_ref=None,
+                    source_sha256=None) -> DrawingVersion:
     """Publish under the artifact fence; the caller owns commit and rollback."""
     validate_publication_params(org_id, project_id, drawing_id, expected_parent_version_id,
                                 actor_binding_id, expected_fence, request_id, intake_sha256)
+    if source_object_ref is not None or source_sha256 is not None:
+        if (not isinstance(source_sha256, str)
+                or re.fullmatch(r"[0-9a-f]{64}", source_sha256) is None
+                or not isinstance(source_object_ref, str)
+                or source_object_ref != publication_source_key(
+                    org_id, project_id, drawing_id, source_sha256)):
+            raise ProjectContextError("SIP_R2_PUBLICATION_PARAMS_INVALID")
     args = {"org_id": org_id, "project_id": project_id, "drawing_id": drawing_id,
             "parent_id": expected_parent_version_id, "actor_binding_id": actor_binding_id,
             "expected_fence": expected_fence, "key": "sip-r2:" + str(request_id)}
@@ -340,8 +356,10 @@ def publish_version(org_id: UUID, project_id: UUID, drawing_id: UUID, *,
                 refuse("CONTEXT_NOT_FOUND")
             proof = _publication_proof(org_id, project_id, drawing_id,
                 expected_parent_version_id, actor_binding_id, expected_fence,
-                request_id, intake_sha256, row["oss_object"])
+                request_id, intake_sha256, source_object_ref if source_object_ref is not None
+                else row["oss_object"], source_sha256)
             if (row["drawing_id"] != drawing_id or row["provenance"] != proof
+                    or row["oss_object"] != proof["base_object_ref"]
                     or row["intake_ref"] != proof["intake"]["ref"]
                     or row["import_fingerprint"] != _publication_fingerprint(proof)):
                 raise ProjectContextError("SIP_R2_IDEMPOTENCY_CONFLICT")
@@ -375,9 +393,10 @@ def publish_version(org_id: UUID, project_id: UUID, drawing_id: UUID, *,
             "WHERE org_id = %(org_id)s AND project_id = %(project_id)s "
             "AND drawing_id = %(drawing_id)s", args)
         seq = cur.fetchone()["next_seq"]
+        object_ref = source_object_ref if source_object_ref is not None else parent["oss_object"]
         proof = _publication_proof(org_id, project_id, drawing_id, expected_parent_version_id,
-            actor_binding_id, expected_fence, request_id, intake_sha256, parent["oss_object"])
-        args.update(version_id=uuid4(), seq=seq, oss_object=parent["oss_object"],
+            actor_binding_id, expected_fence, request_id, intake_sha256, object_ref, source_sha256)
+        args.update(version_id=uuid4(), seq=seq, oss_object=object_ref,
                     intake_ref=proof["intake"]["ref"], created_by=str(actor_binding_id),
                     provenance=Jsonb(proof), fingerprint=_publication_fingerprint(proof))
         cur.execute(

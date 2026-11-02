@@ -588,6 +588,109 @@ export function createProjectSolarClient(options = {}) {
   })
 }
 
+// Browser editor material stays on the canonical project's immutable version rail.
+// Capability values are transport inputs only, never retained in a public snapshot.
+export function createProjectDrawingEditorTransport({ fetchImpl = apiFetch } = {}) {
+  const uuid = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+  const digest = /^[0-9a-f]{64}$/
+  const maximum = 16 * 1024 * 1024
+  const failure = (status, reason = 'project_editor_unavailable') => Object.assign(
+    new Error('The project drawing operation could not be completed.'), { status, reason })
+  const pathFor = (scope) => {
+    if (!scope || !['organization_id', 'project_id', 'drawing_id'].every((key) => uuid.test(scope[key]))) {
+      throw failure(null, 'project_editor_scope_invalid')
+    }
+    return `/api/projects/${scope.project_id}/drawings/${scope.drawing_id}`
+  }
+  const headersFor = (scope) => ({ ...authHeaders(), 'X-Org-Id': scope.organization_id,
+    'X-Project-Id': scope.project_id, 'X-Tenant-Id': scope.organization_id })
+  async function bounded(response, limit) {
+    if (Number(response.headers.get('content-length')) > limit) throw failure(response.status, 'project_editor_response_invalid')
+    if (!response.body?.getReader) {
+      const bytes = new Uint8Array(await response.arrayBuffer())
+      if (bytes.byteLength > limit) throw failure(response.status, 'project_editor_response_invalid')
+      return bytes
+    }
+    const reader = response.body.getReader()
+    const chunks = []
+    let size = 0
+    try {
+      while (true) {
+        const { value, done } = await reader.read()
+        if (done) break
+        size += value.byteLength
+        if (size > limit) { await reader.cancel(); throw failure(response.status, 'project_editor_response_invalid') }
+        chunks.push(value)
+      }
+    } finally { reader.releaseLock() }
+    const bytes = new Uint8Array(size)
+    let offset = 0
+    for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+    return bytes
+  }
+  async function request(scope, path, options, bytes = false) {
+    let response
+    try {
+      response = await fetchImpl(`${API_BASE}${path}`, { cache: 'no-store', redirect: 'error', ...options,
+        signal: options.signal || globalThis.AbortSignal?.timeout?.(30000),
+        headers: { ...headersFor(scope), ...options.headers } }, path)
+    } catch (error) {
+      const refused = failure(null)
+      refused.outcomeUnknown = options.method === 'POST'
+      throw refused
+    }
+    if (!response.ok) {
+      let reason
+      try { reason = JSON.parse(new TextDecoder().decode(await bounded(response, 1024 * 1024)))?.error?.reason_code } catch { /* sanitized refusal */ }
+      const refused = failure(response.status, typeof reason === 'string' && /^[A-Za-z0-9_]+$/.test(reason) ? reason : undefined)
+      refused.outcomeUnknown = options.method === 'POST' && response.status >= 500
+      throw refused
+    }
+    if (bytes) {
+      const source = response.headers.get('X-Leaf-Source-Sha256')
+      if (!digest.test(source || '') || response.headers.get('content-type')?.split(';', 1)[0].trim() !== 'application/dxf') {
+        throw failure(response.status, 'project_editor_response_invalid')
+      }
+      return { bytes: await bounded(response, maximum), source_sha256: source }
+    }
+    try { return JSON.parse(new TextDecoder().decode(await bounded(response, 1024 * 1024))) }
+    catch { const refused = failure(response.status, 'project_editor_response_invalid'); refused.outcomeUnknown = options.method === 'POST'; throw refused }
+  }
+  const versionPath = (scope) => {
+    const path = pathFor(scope)
+    if (!uuid.test(scope.input_version_id)) throw failure(null, 'project_editor_scope_invalid')
+    return `${path}/versions/${scope.input_version_id}`
+  }
+  const writeHeaders = ({ requestId, capability }) => {
+    if (!uuid.test(requestId) || typeof capability !== 'string' || !/^lco1\.[0-9a-f]{64}$/.test(capability)) {
+      throw failure(null, 'project_editor_checkout_required')
+    }
+    return { 'Idempotency-Key': requestId, 'X-Checkout-Capability': capability }
+  }
+  return {
+    read: (scope, { signal } = {}) => request(scope, `${versionPath(scope)}/dxf`, { method: 'GET', signal }, true),
+    save: (scope, bytes, options) => {
+      if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0 || bytes.byteLength > maximum) throw failure(null, 'project_editor_source_invalid')
+      return request(scope, `${versionPath(scope)}/editor`, { method: 'POST', body: bytes, signal: options.signal,
+        headers: { 'Content-Type': 'application/dxf', ...writeHeaders(options) } })
+    },
+    restore: (scope, versionId, options) => {
+      if (!uuid.test(versionId)) throw failure(null, 'project_editor_scope_invalid')
+      return request(scope, `${versionPath(scope)}/editor/restore`, { method: 'POST', body: JSON.stringify({ version_id: versionId }), signal: options.signal,
+        headers: { 'Content-Type': 'application/json', ...writeHeaders(options) } })
+    },
+    acquireCheckout: async (scope) => {
+      const body = await request(scope, `${pathFor(scope)}/checkout`, { method: 'POST',
+        headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ holder: 'Project drawing editor' }) })
+      if (body.project_id !== scope.project_id || body.drawing_id !== scope.drawing_id || body.organization_id !== scope.organization_id
+        || body.acquired !== true || !/^lco1\.[0-9a-f]{64}$/.test(body.checkout_capability || '')) throw failure(null, 'project_editor_response_invalid')
+      return { capability: body.checkout_capability }
+    },
+    releaseCheckout: (scope, capability) => request(scope, `${pathFor(scope)}/checkout`, { method: 'DELETE',
+      headers: { 'X-Checkout-Capability': capability } }),
+  }
+}
+
 export async function getCapabilities(mock, context, options = {}) {
   if (context?.catalogDiscovery) {
     const { projectId, orgId } = context.catalogDiscovery
