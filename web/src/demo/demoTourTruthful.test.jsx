@@ -10,6 +10,7 @@ import { TOUR_STEPS } from './tourScript.js'
 import AuthorPanel from '../components/AuthorPanel.jsx'
 import ResultPanel from '../components/ResultPanel.jsx'
 import useJobController from '../controllers/useJobController.js'
+import useDrawingVersionController from '../controllers/useDrawingVersionController.js'
 import useAuthorStageController from '../controllers/useAuthorStageController.js'
 import { humanizeError } from '../errorHumanize.js'
 import { matchPrompt } from '../mock/mockNlPrompt.js'
@@ -74,7 +75,10 @@ function deferred() {
   return { promise, resolve, reject }
 }
 
-function mountBeat(id, { runTool = vi.fn(), stageAuthorTool = vi.fn(), publish = vi.fn() } = {}) {
+function mountBeat(id, { runTool = vi.fn(), stageAuthorTool = vi.fn(), publish = vi.fn(),
+  initialHead = 1, loadCompletedView = async (version, envelope) => ({
+    drawing_id: version.drawing_id, version: version.version, head: version.version, intake: envelope.result.intake,
+  }) } = {}) {
   const dispatch = vi.fn(), track = vi.fn()
   let current
   function WiredTour() {
@@ -86,18 +90,28 @@ function mountBeat(id, { runTool = vi.fn(), stageAuthorTool = vi.fn(), publish =
     const [route, setRoute] = useState(null)
     const tourStepRef = useRef(index)
     const cannedSeq = useRef(0)
+    const tourVersionStartRef = useRef(null)
     const runIntentStateRef = useRef(createRunIntentState('tour-test'))
     const runIntentSessionRef = useRef('tour-test')
     const runIntentSeqRef = useRef(0)
     const catalogRunContextRef = useRef(context)
     const confirmEmitRef = useRef(null)
     const tourDispatchRef = useRef(false)
-    const jobs = useJobController({ mock: true })
+    const drawing = useDrawingVersionController({
+      initialIntake: intake,
+      initialDrawingState: { drawing_id: 'demo', version: initialHead, head: initialHead, latest: initialHead },
+      onVersionEvent: event => scope.onTourVersionSeated(event),
+    })
+    const jobs = useJobController({ mock: true, onCompleteVersion: async (version, envelope) => {
+      const view = await loadCompletedView(version, envelope)
+      drawing.actions.seatVersion(view, { drawingId: version.drawing_id })
+    } })
     const authorStage = useAuthorStageController({ mock: true, stageAuthorTool })
     const dismissRoute = () => setRoute(null)
     const scope = {
       mock: true, tourOn: true, tools, prompt, authorSeed, authorSignal, tourStepRef,
-      cannedSeq, setTourLanded, tourLanded, tourDispatchRef,
+      cannedSeq, setTourLanded, tourLanded, tourDispatchRef, tourVersionStartRef,
+      drawingState: drawing.drawingState,
       runIntentStateRef, runIntentSessionRef, runIntentSeqRef, catalogRunContextRef,
       confirmEmitRef, dismissRoute, track, TOUR_STEPS, authorStage,
       confirmRunIntent, createCatalogToolSnapshot, dismissRunIntent, stageRunIntent,
@@ -112,6 +126,7 @@ function mountBeat(id, { runTool = vi.fn(), stageAuthorTool = vi.fn(), publish =
       ENV_SOLAR_SETTINGS_FORM: false, ENV_SOLAR_FLOW_RAIL: false,
       onPromptChange: value => { setPrompt(value); dismissRoute() },
     }
+    scope.onTourVersionSeated = callback('onTourVersionSeated', scope)
     scope.armDecision = callback('armDecision', scope)
     scope.commitCatalogDecision = decision => {
       const armed = scope.armDecision(decision)
@@ -130,7 +145,7 @@ function mountBeat(id, { runTool = vi.fn(), stageAuthorTool = vi.fn(), publish =
     } }
     for (const name of ['onDispatch', 'onRequestCatalogRun', 'onRun', 'onConfirmCatalogRun',
       'onAuthor', 'onTourAuthorSettled', 'onCannedPrompt']) scope[name] = callback(name, scope)
-    current = { scope, jobs, route }
+    current = { scope, jobs, route, drawing }
     const tourProps = props(tourElement, ['onCannedPrompt', 'landed', 'busy'], scope)
     const authorProps = props(authorElement, ['onAuthor', 'onStageSettled', 'seed', 'seedSignal',
       'seedAutoSubmit', 'stageActivity'], scope)
@@ -153,6 +168,11 @@ async function finishTyping(id) {
   await act(async () => { await vi.advanceTimersByTimeAsync(step.prompt.length * 22 + 50) })
 }
 const next = () => screen.getByRole('button', { name: 'Next' })
+function requestVersionRun(h) {
+  const tool = tools.find(tool => tool.name === 'delete-marked-panel')
+  const armed = h.current().scope.onRequestCatalogRun(tool, h.current().route.params, 'Confirm Run', 'tour')
+  return () => h.current().scope.onConfirmCatalogRun(armed.runIntent, tool, armed.runIntent.params)
+}
 
 beforeEach(() => {
   vi.useFakeTimers()
@@ -261,9 +281,69 @@ describe('the author beat lands at staging, with no Publish click', () => {
     expect(screen.getByText('Step 7 of 9')).toBeInTheDocument()
     expect(h.current().route.runIntent.toolName).toBe('delete-marked-panel')
     expect(h.runTool).not.toHaveBeenCalled()
+    expect(next()).toBeDisabled()
+    h.runTool.mockResolvedValueOnce(runMock(tools[3], h.current().route.params, intake))
+    let confirm
+    act(() => { confirm = requestVersionRun(h) })
+    expect(h.runTool).not.toHaveBeenCalled()
+    expect(next()).toBeDisabled()
+    await act(async () => { await confirm() })
+    expect(h.current().drawing.drawingState.head).toBe(2)
+    expect(screen.getByText('Passed')).toBeInTheDocument()
     expect(next()).toBeEnabled()
     fireEvent.click(next())
     expect(screen.getByText('Step 8 of 9')).toBeInTheDocument()
+    expect(next()).toBeEnabled()
+  })
+})
+
+describe('the version beat waits for a newer seated head', () => {
+  it('stays locked through Run and the successful write until the new head seats', async () => {
+    const drawingOptions = declarations.find(node => node.id.name === 'drawing').init.arguments[0]
+    expect(drawingOptions.properties.find(node => node.key?.name === 'onVersionEvent').value.name).toBe('onTourVersionSeated')
+    const write = deferred(), seat = deferred()
+    const h = mountBeat('version', {
+      runTool: vi.fn(() => write.promise), loadCompletedView: () => seat.promise,
+    })
+    await finishTyping('version')
+    const envelope = runMock(tools[3], h.current().route.params, intake)
+    expect(next()).toBeDisabled()
+    expect(h.runTool).not.toHaveBeenCalled()
+    let confirm, completion
+    act(() => { confirm = requestVersionRun(h) })
+    expect(h.runTool).not.toHaveBeenCalled()
+    expect(next()).toBeDisabled()
+    act(() => { completion = confirm() })
+    expect(h.runTool).toHaveBeenCalledTimes(1)
+    expect(next()).toBeDisabled()
+    await act(async () => { write.resolve(envelope) })
+    expect(h.current().jobs.result).toEqual(envelope)
+    expect(h.current().jobs.running).toBe(true)
+    expect(h.current().drawing.drawingState.head).toBe(1)
+    expect(screen.queryByText('Passed')).not.toBeInTheDocument()
+    expect(next()).toBeDisabled()
+    await act(async () => {
+      seat.resolve({ drawing_id: 'demo', version: 2, head: 2, intake: envelope.result.intake })
+      await completion
+    })
+    expect(h.current().jobs.running).toBe(false)
+    expect(h.current().drawing.drawingState.head).toBe(2)
+    expect(screen.getByText('Passed')).toBeInTheDocument()
+    expect(next()).toBeEnabled()
+    expect(h.current().drawing.shown.polylines).toHaveLength(0)
+  })
+
+  it.each([
+    ['older', { drawing_id: 'demo', version: 2, head: 2 }],
+    ['unchanged', { drawing_id: 'demo', version: 3, head: 3 }],
+    ['unrelated drawing', { drawing_id: 'other', version: 4, head: 4 }],
+    ['older geometry', { drawing_id: 'demo', version: 2, head: 4 }],
+  ])('does not unlock for an %s completion', async (_label, view) => {
+    const h = mountBeat('version', { initialHead: 3 })
+    await finishTyping('version')
+    act(() => { h.current().drawing.actions.seatVersion({ ...view, intake }) })
+    expect(next()).toBeDisabled()
+    act(() => { h.current().drawing.actions.seatVersion({ drawing_id: 'demo', version: 4, head: 4, intake }) })
     expect(next()).toBeEnabled()
   })
 })
