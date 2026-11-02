@@ -18,6 +18,7 @@ import type {
 } from "../index.js";
 import { CanonicalChangeSetId } from "../index.js";
 import { AppRunClientError, projectAuthorStageStatus } from "../impl/appRunClient.js";
+import type { ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
 
 export const FAKE_CATALOG: CapabilityEntry[] = [
   {
@@ -76,12 +77,12 @@ function envelopeFor(tool: string): ResultEnvelope {
 
 export class FakeAppRunClient implements AppRunClient {
   readonly photoInspectionCalls: Array<{ tenantId: string; sessionId: string;
-    body: import("../../agent/projectPhotoInspection.js").ProjectPhotoInspectionInput;
+    body: ProjectPhotoInspectionInput;
     authority: { sessionId: string; turnId: string } }> = [];
   photoInspectionResult: Record<string, unknown> = {};
   async inspectProjectPhoto(
     tenantId: string, sessionId: string,
-    body: import("../../agent/projectPhotoInspection.js").ProjectPhotoInspectionInput,
+    body: ProjectPhotoInspectionInput,
     authority: { sessionId: string; turnId: string },
   ): Promise<Record<string, unknown>> {
     this.methodLog.push("inspectProjectPhoto");
