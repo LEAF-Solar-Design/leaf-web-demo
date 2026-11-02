@@ -4,23 +4,29 @@ import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-libra
 let APPROVALS = []
 let streamHandlers = null
 let deferred = { promise: Promise.resolve() }
+let useRealResolution = false
 
 vi.mock('../telemetry.js', () => ({ track: vi.fn() }))
-vi.mock('../converse.js', () => ({
+vi.mock('../api.js', () => ({ config: { apiBase: '', tenant: 'demo' }, authHeaders: () => ({}), noteUnauthorized: (res) => res }))
+vi.mock('../converse.js', async (importOriginal) => {
+  const actual = await importOriginal()
+  return {
   openStream: vi.fn((sessionId, afterSeq, handlers) => {
     streamHandlers = handlers
     return { close: vi.fn() }
   }),
   postMessage: vi.fn(),
   resolveApproval: vi.fn(async (id, sid, ok, recorded, hooks) => {
+    if (useRealResolution) return actual.resolveApproval(id, sid, ok, recorded, hooks)
     await deferred.promise
-    const allowed = hooks?.beforeResume ? hooks.beforeResume() : true
+    const allowed = hooks?.beforeResume ? await hooks.beforeResume() : true
     return allowed ? { turn_id: 'turn-2', status: 'started' } : { held: true, recorded: true }
   }),
   cancelTurn: vi.fn(),
   classifyAgentError: vi.fn(() => 'unreachable'),
   listPendingApprovals: vi.fn(() => Promise.resolve(APPROVALS)),
-}))
+  }
+})
 
 import { listPendingApprovals, resolveApproval } from '../converse.js'
 import { REASONS } from '../lib/actionRegistry.js'
@@ -41,6 +47,90 @@ afterEach(() => {
   APPROVALS = []
   streamHandlers = null
   deferred = { promise: Promise.resolve() }
+  useRealResolution = false
+  vi.unstubAllGlobals()
+})
+
+describe('canonical project approval custody using the actual resume transport', () => {
+  const projectContext = { project_id: 'project-1', input_version_id: 'version-1' }
+  const start = async (prepareApprovedProjectRun, props = {}, decision = 'Approve') => {
+    useRealResolution = true
+    APPROVALS = [WRITE_APPROVAL]
+    const calls = []
+    vi.stubGlobal('fetch', vi.fn(async (path, options) => {
+      calls.push({ path, body: JSON.parse(options.body) })
+      return { ok: true, status: 200, json: async () => ({ turn_id: 'resumed', status: 'started' }) }
+    }))
+    const view = render(<ConversePanel sessionId="session-1" projectContext={projectContext}
+      prepareApprovedProjectRun={prepareApprovedProjectRun} {...props} />)
+    await screen.findByText(/delete-marked-panel/)
+    fireEvent.click(screen.getByRole('button', { name: decision }))
+    return { ...view, calls }
+  }
+
+  it('records the decision, waits for custody, then sends exactly one resume', async () => {
+    let issue
+    const custody = new Promise((resolve) => { issue = resolve })
+    const prepare = vi.fn(() => custody)
+    const { calls } = await start(prepare)
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1))
+    expect(calls).toHaveLength(1)
+    expect(calls[0].body).toEqual({ approved: true })
+    expect(prepare).toHaveBeenCalledWith({ confirmationId: 'c1', sessionId: 'session-1', projectContext })
+    const revoke = vi.fn()
+    await act(async () => issue({ isCurrent: () => true, revoke }))
+    await waitFor(() => expect(calls).toHaveLength(2))
+    expect(calls[1].body).toEqual({ confirm: { confirmationId: 'c1', approved: true } })
+    expect(revoke).not.toHaveBeenCalled()
+  })
+
+  it.each(['dirty', 'version', 'session', 'auth'])('holds and revokes custody after %s changes during exchange', async (change) => {
+    let issue
+    const custody = new Promise((resolve) => { issue = resolve })
+    const prepare = vi.fn(() => custody)
+    const { calls, rerender } = await start(prepare)
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1))
+    APPROVALS = [{ ...WRITE_APPROVAL, approved: true, resume_required: true }]
+    rerender(<ConversePanel sessionId={change === 'session' ? 'session-2' : 'session-1'}
+      projectContext={change === 'version' ? { ...projectContext, input_version_id: 'version-2' } : projectContext}
+      engineDirty={change === 'dirty'} prepareApprovedProjectRun={prepare} />)
+    const revoke = vi.fn()
+    await act(async () => issue({ isCurrent: () => change !== 'auth', revoke }))
+    await waitFor(() => expect(revoke).toHaveBeenCalledTimes(1))
+    expect(calls).toHaveLength(1)
+  })
+
+  it('retains an approved resume row when custody is refused', async () => {
+    const prepare = vi.fn(async () => {
+      APPROVALS = [{ ...WRITE_APPROVAL, approved: true, resume_required: true }]
+      return null
+    })
+    const { calls } = await start(prepare)
+    await screen.findByRole('button', { name: 'Resume approved request' })
+    expect(calls).toHaveLength(1)
+  })
+
+  it('does not exchange custody for an unbound legacy write', async () => {
+    const prepare = vi.fn()
+    const { calls } = await start(prepare, { projectContext: null })
+    await waitFor(() => expect(calls).toHaveLength(2))
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
+  it('does not exchange custody for denial', async () => {
+    const prepare = vi.fn()
+    const { calls } = await start(prepare, {}, 'Deny')
+    await waitFor(() => expect(calls).toHaveLength(2))
+    expect(calls[0].body).toEqual({ approved: false })
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
+  it('preserves noncanonical write approval without an exchange', async () => {
+    const prepare = vi.fn()
+    const { calls } = await start(prepare, { canonicalProjectWriteTools: new Set(['solar-settings']) })
+    await waitFor(() => expect(calls).toHaveLength(2))
+    expect(prepare).not.toHaveBeenCalled()
+  })
 })
 
 const setup = async (props = {}) => {
