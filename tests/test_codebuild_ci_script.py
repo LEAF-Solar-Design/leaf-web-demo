@@ -171,12 +171,12 @@ class TestCodebuildCiScript(unittest.TestCase):
                         script.index("##refs/heads/"))
         self.assertNotIn("git fetch", script)
         invocations = re.findall(
-            r"\bpython scripts/run-all-gates\.py\b(?:(?!\bpython scripts/run-all-gates\.py\b)[^\n])*",
+            r"\bpython(?: -u)? scripts/run-all-gates\.py\b(?:(?!\bpython(?: -u)? scripts/run-all-gates\.py\b)[^\n])*",
             re.sub(r"\\\n\s*", " ", script))
         gate_runs = [call for call in invocations
                      if "--verify-shard-results" not in call and "--verify-gate-proof" not in call]
         self.assertEqual(gate_runs, [invocations[0]])
-        for flag in ("--retry 0", "--early-feedback", "--result-json", "--log-dir"):
+        for flag in ("--retry 0", "--early-feedback", "--fail-fast", "--result-json", "--log-dir"):
             self.assertIn(flag, invocations[0])
         self.assertNotIn("--retry 1", gate_runs[0])
         self.assertIn('LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"', script)
@@ -407,7 +407,7 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertIn('unset "${!LEAF_READSET_@}"', skipped)
         self.assertIn('INFO: read-set tracing skipped (not a tracing build)', skipped)
         self.assertIn('WARNING: trusted capture unavailable;', skipped)
-        self.assertIn('unset PYTHONSAFEPATH\npython scripts/run-all-gates.py', script)
+        self.assertIn('unset PYTHONSAFEPATH\npython -u scripts/run-all-gates.py', script)
         self.assertIn('tracing_active=sys.argv[2] == "1", reporters_active=sys.argv[3] == "1"', script)
         self.assertIn('"tracing_active": detail["tracing_active"]', script)
         self.assertIn('"reporters_active": detail["reporters_active"]', script)

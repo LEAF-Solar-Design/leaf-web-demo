@@ -578,7 +578,7 @@ reporter.onEnd({status: 'passed'});
         self.assertFalse(any(line.startswith("export PYTHONSAFEPATH") for line in lines))
         unset_index = lines.index("unset PYTHONSAFEPATH")
         gate_index = next(index for index, line in enumerate(lines)
-                          if line.startswith("python scripts/run-all-gates.py"))
+                          if line.startswith("python -u scripts/run-all-gates.py"))
         self.assertLess(unset_index, gate_index)
 
 
