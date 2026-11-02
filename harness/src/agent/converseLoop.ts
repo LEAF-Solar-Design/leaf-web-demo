@@ -777,7 +777,12 @@ export class ConverseLoop {
                 : !entry || entry.capabilities.includes("drawing.write")
                 ? "run_write_tool"
                 : "run_read_tool";
-          const dwg = String(args.dwg ?? session.drawing_id);
+          const projectState = await appRun.getProjectDrawingState?.();
+          if (projectState && ((args.dwg != null && args.dwg !== projectState.binding.drawing_id) ||
+              (params.drawing_id != null && params.drawing_id !== projectState.binding.drawing_id))) {
+            throw new Error("project capability drawing must match the stored app turn");
+          }
+          const dwg = projectState?.binding.drawing_id ?? String(args.dwg ?? session.drawing_id);
           if (
             entry?.aps_live === true &&
             typeof args.dwg === "string" &&
@@ -793,7 +798,27 @@ export class ConverseLoop {
           ) {
             params = { ...params, drawing_id: dwg };
           }
-          let drawingPins: Record<string, unknown> = {};
+          if (projectState && action !== "run_read_tool" && !projectState.is_head) {
+            throw new Error("project write preparation requires the current immutable version");
+          }
+          if (projectState && action !== "run_read_tool" && target === "solar-settings") {
+            if (projectState.graph_revision === null) {
+              const initialize = params.initialize;
+              if (!initialize || typeof initialize !== "object" || Array.isArray(initialize)) {
+                throw new Error("project Solar settings require explicit graph initialization units");
+              }
+              params = { ...params, expected_rev: 0, initialize: { ...initialize,
+                source_intake_sha256: projectState.binding.intake_sha256 } };
+            } else {
+              params = { ...params, expected_rev: projectState.graph_revision };
+            }
+          }
+          let drawingPins: Record<string, unknown> = projectState ? {
+            project_execution_context: projectState.binding,
+            input_version_id: projectState.binding.input_version_id,
+            intake_sha256: projectState.binding.intake_sha256,
+            drawing_version: projectState.revision,
+          } : {};
           const canonicalRead = instant.projectExecution === "canonical-read" &&
             action === "run_read_tool" &&
             (entry?.capabilities.includes("drawing.read") || entry?.capabilities.includes("drawing.write"));
@@ -801,7 +826,7 @@ export class ConverseLoop {
             throw new Error("project capability drawing must match the current session drawing");
           }
           if (
-            !canonicalRead && (entry?.capabilities.includes("drawing.read") ||
+            !projectState && !canonicalRead && (entry?.capabilities.includes("drawing.read") ||
             entry?.capabilities.includes("drawing.write"))
           ) {
             const versions = await appRun.getDrawingState(tenantId, dwg, "versions");

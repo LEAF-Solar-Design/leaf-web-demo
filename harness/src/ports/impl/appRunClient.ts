@@ -15,6 +15,7 @@
 
 import type {
   AppRunClient,
+  ProjectDrawingState,
   CapabilityEntry,
   SubmitRunRequest,
   SubmitRunResponse,
@@ -577,6 +578,46 @@ export class HttpAppRunClient implements AppRunClient {
       for (const entry of caps as CapabilityEntry[]) out.push(entry);
     }
     return out;
+  }
+
+  forTurn(authority: { tenantId: string; sessionId: string; turnId: string }): AppRunClient {
+    // Copy before any await. A shared singleton never stores mutable turn authority.
+    const { tenantId, sessionId, turnId } = authority;
+    const client = this;
+    const resolve = async (): Promise<ProjectDrawingState | null> => {
+      const value = await client.request(tenantId, "POST", "/internal/agent/project-drawing-state", {
+        tenant_id: tenantId, session_id: sessionId, turn_id: turnId,
+      });
+      if (Object.keys(value).length === 1 && value.binding === null) return null;
+      const uuid = z.string().uuid();
+      const parsed = z.object({
+        binding: z.strictObject({ schema: z.literal("leaf.project-execution-context.v1"),
+          organization_id: uuid, project_id: uuid, drawing_id: uuid, input_version_id: uuid,
+          intake_sha256: z.string().regex(/^[0-9a-f]{64}$/) }),
+        revision: z.number().int().positive().refine(Number.isSafeInteger),
+        graph_revision: z.number().int().nonnegative().refine(Number.isSafeInteger).nullable(),
+        head_version_id: uuid, is_head: z.boolean(), summary: z.record(z.string(), z.unknown()),
+      }).safeParse(value);
+      if (!parsed.success) throw new AppRunClientError("Project drawing state unavailable.", 502);
+      const state = parsed.data;
+      if (state.is_head !== (state.head_version_id === state.binding.input_version_id)) {
+        throw new AppRunClientError("Project drawing state unavailable.", 502);
+      }
+      return state;
+    };
+    return new Proxy(this, { get(target, key) {
+      if (key === "getProjectDrawingState") return resolve;
+      if (key === "getDrawingState") return async (tenant: string, drawing: string, what: string) => {
+        if (tenant !== tenantId) throw new AppRunClientError("Project drawing tenant mismatch.", 403);
+        const state = await resolve();
+        if (!state) return client.getDrawingState(tenant, drawing, what as "summary" | "versions" | "checkout");
+        if (drawing !== state.binding.drawing_id) throw new AppRunClientError("Project drawing mismatch.", 409);
+        return { ...state.summary, ...state.binding, revision: state.revision,
+          graph_revision: state.graph_revision, head_version_id: state.head_version_id, is_head: state.is_head, view: what };
+      };
+      const value = Reflect.get(target, key);
+      return typeof value === "function" ? value.bind(target) : value;
+    } });
   }
 
   async getDrawingState(

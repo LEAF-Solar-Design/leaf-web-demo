@@ -420,3 +420,28 @@ def killswitch(tenant=Depends(deps.require_tenant)) -> Any:
     # Read-only BY DESIGN: the kill switch is file-presence
     # (LEAF_AGENT_KILL_FILE) and has NO API off-toggle at any privilege level.
     return with_envelope_fields({"active": agent_gate.kill_switch_active()})
+
+
+class ProjectDrawingStateRequest(BaseModel):
+    tenant_id: str
+    session_id: str
+    turn_id: str
+
+
+@router.post("/internal/agent/project-drawing-state")
+def internal_project_drawing_state(req: ProjectDrawingStateRequest,
+                                  x_dispatch_secret: Optional[str] = Header(default=None)):
+    denied = _require_dispatch(x_dispatch_secret)
+    if denied is not None:
+        return denied
+    import project_execution_context as context
+    try:
+        return JSONResponse(content=context.drawing_state(req.session_id, req.turn_id, req.tenant_id),
+                            headers={"Cache-Control": "no-store"})
+    except context.ContextError as exc:
+        return JSONResponse(content={"error": {"error_code": exc.code,
+                            "message": "Project drawing state unavailable."}}, status_code=exc.status_code,
+                            headers={"Cache-Control": "no-store"})
+    except Exception:
+        return JSONResponse(content={"error": {"error_code": "project_context_unavailable"}},
+                            status_code=503, headers={"Cache-Control": "no-store"})
