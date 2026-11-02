@@ -143,6 +143,37 @@ function r13Evaluate(node, env) {
 const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
 const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
 
+function assertCanonicalSaveCustody() {
+  const target = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'engineSaveTarget').init
+  for (const mock of [false, true]) for (const projectMode of [false, true]) for (const intake of [null, {}]) {
+    const value = r13Evaluate(target, { mock, projectMode, intake, REQUESTED_DRAWING_ID: 'standalone' })
+    if (mock || projectMode || !intake) assert.equal(value, null)
+    else { assert.equal(value.drawingId, 'standalone'); assert.equal(typeof value.save, 'function') }
+  }
+  const provider = r13One(node => node.type === 'JSXOpeningElement' && node.name.name === 'EngineSessionProvider')
+  const expression = provider.attributes.find(attr => attr.name?.name === 'saveTarget').value.expression
+  const standalone = {}, project = {}
+  for (const localCadActive of [false, true]) for (const projectMode of [false, true]) {
+    for (const projectEditorTarget of [null, project]) {
+      assert.equal(r13Evaluate(expression, { localCadActive, projectMode, projectEditorTarget,
+        engineSaveTarget: standalone }), localCadActive ? null : projectMode ? projectEditorTarget : standalone)
+    }
+  }
+  const calls = [], controller = {}, receipt = { drawing_version: {}, new_version: {} }, result = {}
+  const saved = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'onEngineSaved').init
+  const complete = r13Evaluate(saved, { workspaceController: controller,
+    seatProjectDrawingPublication: (...args) => { calls.push(['project', ...args]); return result },
+    completedVersionRef: { current: (...args) => calls.push(['standalone', ...args]) } })
+  assert.equal(complete(receipt), result)
+  assert.deepEqual(calls, [['project', controller, receipt]], 'canonical receipt never falls through to demo')
+  calls.length = 0
+  complete({ new_version: receipt.new_version })
+  assert.deepEqual(calls, [['standalone', receipt.new_version, { result: {} }]])
+  calls.length = 0
+  complete(null)
+  assert.deepEqual(calls, [])
+}
+
 it('S1-68 retained Undo refuses a different version or drawing', () => {
   let calls = 0
   const noticeTargetRef = { current: { drawingId: 'roof', version: 2, blocked: false } }
@@ -734,14 +765,15 @@ describe('R13F project Solar execution and form ingresses', () => {
     assert.equal(r13Find(refusal).length, 21)
     for (const [name, hash] of Object.entries({
       // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-      engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
-      onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
+      engineSaveTarget: '06d0e28a19d194c630cc12c67343d021614cd756aff0d3d446425845d384e84b',
+      onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
       onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
       retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
     })) {
       const declaration = r13One((node) => node.type === 'VariableDeclarator' && node.id.name === name)
       assert.equal(r13Hash(r13Text(declaration.init)), hash, name + ' remains unchanged')
     }
+    assertCanonicalSaveCustody()
     const job = r13One((node) => node.type === 'CallExpression' && node.callee.name === 'useJobController')
     assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
     for (const name of ['useProjectSolarScope', 'useCatalogController', 'useProjectCheckoutController']) {
@@ -5755,15 +5787,15 @@ describe('KEYS-b the phone Studio drawer is an Escape owner', () => {
   })
 })
 
-// Frozen predecessor values below were measured at e9f3628b. These rows execute
-// App AST sites, and keep the generic operation owners distinct from presentation.
+// Unchanged operation pins retain the e9f3628b predecessor values. Canonical
+// custody pins below bind current source together with explicit branch checks.
 it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () => {
   const hashes = {
     onUndo: 'ae7f7d8ea55310a93f4599ce6be8a70a53c52a14a46a02cbc106ad2ef64081f4',
-    onRedo: '8ead5e6dbeecad3503382bc09117b3e90f8198dade34d75c9aca5c00b1bd94c8',
+    onRedo: 'da27b4a464e6fc6a0d9fb8ffd0355ac87bab162d47906a73e3a8824ba051e8d2',
     // SW save-lock labels holders for display; SCB3e suspension guards remain intact.
-    engineSaveTarget: '9aaa29714109c98e27011d8fd021efe45d3da5f4aebe9a5c3e64eb1503d32b3c',
-    onEngineSaved: 'db8ca9aaf81fb303cf41077443a8f66a0feebf74c05c1763430385b26247d4f6',
+    engineSaveTarget: '06d0e28a19d194c630cc12c67343d021614cd756aff0d3d446425845d384e84b',
+    onEngineSaved: 'cb635c9b798a35f39291384c8eb0fe5b63cc8e89e4fc1d3e406bb432b005ff3a',
     onRetryViewerRefresh: '08119f70ab2f65dd12b1c5f2d45a79529b11efb549e16fc70b27c59fdeeb31ec',
     retryUnreadableHead: '89cf46eab49e0a3bc2184456848017a3267afd2ad590682fb3308de3492698f9',
   }
@@ -5771,6 +5803,7 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     const node = r13One(node => node.type === 'VariableDeclarator' && node.id.name === name)
     assert.equal(r13Hash(r13Text(node.init)), hash, name)
   }
+  assertCanonicalSaveCustody()
   const job = r13One(node => node.type === 'CallExpression' && node.callee.name === 'useJobController')
   assert.equal(r13Hash(r13Text(job)), '3ceaf226d1b00ac4275f446a376165f7a9d690c2f9a6478c2727f96dcc97d89e')
   const head = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineHeadOpener')
@@ -5785,11 +5818,19 @@ it('R13G2A-10 drawing activation preserves tool-agnostic operations', async () =
     const attribute = r13One(node => node.type === 'JSXAttribute' && node.name.name === name, head.openingElement)
     assert.equal(r13Text(attribute.value.expression), expression, name)
   }
-  let undo = 0, redo = 0
+  let undo = 0
   const projectModeRef = { current: true }
   assert.equal(r13Evaluate(r13Callback('onUndo'), { projectModeRef, undoActionRef: { current: () => ++undo } })(), 1)
-  await r13Evaluate(r13Callback('onRedo'), { projectModeRef, redoDrawingVersion: async () => { redo++; return null } })()
-  assert.equal(redo, 1)
+  for (const projectMode of [false, true]) {
+    let redo = 0
+    projectModeRef.current = projectMode
+    const outcome = await r13Evaluate(r13Callback('onRedo'), {
+      projectModeRef, redoDrawingVersion: async () => { redo++; return null },
+    })()
+    assert.equal(redo, projectMode ? 0 : 1, 'only standalone invokes legacy redo')
+    assert.equal(outcome, projectMode ? null : undefined)
+  }
+  projectModeRef.current = true
   const calls = [], view = { intake: {} }, metadata = { canonical: true }, canonical = { outputVersionId: 'canonical' }
   const env = { projectModeRef, isScopeCurrent: () => true, mock: false,
     getDrawingIntake: async (...args) => { calls.push(['read', ...args]); return view },
