@@ -28,6 +28,7 @@ import type {
   IntegrationSaveElementResult,
   IntegrationToolResult,
   ProjectPageProposalInput,
+  PlatformSourceRange,
 } from "../index.js";
 import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS } from "../index.js";
 import { z } from "zod";
@@ -42,6 +43,35 @@ export const ProjectPageProposalRequest = z.strictObject({
   expected_revision: z.number().int().positive().refine(Number.isSafeInteger),
   expected_digest: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
 });
+
+/** Mixed app/harness deployments must not turn an ignored range into a whole-file success. */
+function validatePlatformSourceRange(result: Record<string, unknown>, path: string, requested: PlatformSourceRange): void {
+  const invalid = () => { throw new AppRunClientError("Invalid platform source range response.", 502, "invalid_source_range_response"); };
+  if (result.commit !== requested.expectedCommit || result.path !== path ||
+      typeof result.ref !== "string" || !result.ref ||
+      !Number.isSafeInteger(result.size) || Number(result.size) < 0 || Number(result.size) > 4194304 ||
+      typeof result.binary !== "boolean") return invalid();
+  if (result.binary) {
+    if (Object.hasOwn(result, "content")) return invalid();
+    return;
+  }
+  if (typeof result.content !== "string" || Buffer.byteLength(result.content, "utf8") > 32768 ||
+      result.range === null || typeof result.range !== "object" || Array.isArray(result.range)) return invalid();
+  const page = result.range as Record<string, unknown>;
+  const { start_line: start, end_line: end, next_line: next, total_lines: total, eof } = page;
+  if (start !== requested.startLine || !Number.isSafeInteger(end) || !Number.isSafeInteger(total) ||
+      typeof eof !== "boolean") return invalid();
+  if (total === 0) {
+    if (start !== 1 || end !== 0 || next !== null || !eof || result.content !== "") return invalid();
+    return;
+  }
+  if (Number(total) < 1 || Number(end) < Number(start) || Number(end) > Number(total) ||
+      Number(end) - Number(start) + 1 > requested.maxLines ||
+      eof !== (end === total) || (eof ? next !== null : next !== Number(end) + 1)) return invalid();
+  const breaks = result.content.match(/\r\n|[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]/g)?.length ?? 0;
+  const lines = breaks + (result.content && !/[\n\r\v\f\x1c-\x1e\u0085\u2028\u2029]$/.test(result.content) ? 1 : 0);
+  if (lines !== Number(end) - Number(start) + 1) return invalid();
+}
 
 export type IntegrationTool = keyof typeof INTEGRATION_TOOL_INPUTS;
 type IntegrationInputs = {
@@ -723,12 +753,19 @@ export class HttpAppRunClient implements AppRunClient {
     );
   }
 
-  async customizeReadSource(tenantId: string, path: string): Promise<Record<string, unknown>> {
-    return this.request(
+  async customizeReadSource(tenantId: string, path: string, range?: PlatformSourceRange): Promise<Record<string, unknown>> {
+    const query = range
+      ? `&start_line=${encodeURIComponent(String(range.startLine))}` +
+        `&max_lines=${encodeURIComponent(String(range.maxLines))}` +
+        `&expected_commit=${encodeURIComponent(range.expectedCommit)}`
+      : "";
+    const result = await this.request(
       tenantId,
       "GET",
-      `/api/platform/source?path=${encodeURIComponent(path)}`,
+      `/api/platform/source?path=${encodeURIComponent(path)}${query}`,
     );
+    if (range) validatePlatformSourceRange(result, path, range);
+    return result;
   }
 
   async customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>> {
