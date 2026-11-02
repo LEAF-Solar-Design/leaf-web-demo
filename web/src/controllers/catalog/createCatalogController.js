@@ -533,7 +533,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     })
   }
 
-  const dispatch = async (override, { allowSecretOnce = false } = {}) => {
+  const dispatch = async (override, { allowSecretOnce = false, images = [] } = {}) => {
     // --- credential refusal: THE RENDER CHANNEL, not the guard (round 3) ---
     // The GUARD now sits on the wire (lib/secretGuardTransport.js, called by
     // api.nlPrompt and converse.postMessage). This function no longer decides
@@ -553,7 +553,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
     // point, so a new bar cannot be added around it.
     //
     const activeDraft = ensureDraft()
-    const text = (typeof override === 'string' ? override : state.prompt).trim()
+    const originalText = typeof override === 'string' ? override : state.prompt
+    const text = originalText.trim()
     if (!text || state.routing || current.running) return undefined
     const generation = ++dispatchGeneration
     const scope = projectFingerprint()
@@ -607,6 +608,12 @@ export function createCatalogController({ services, adapters = {}, context = {} 
         return commitDecision(decision, { requestText: text })
       }
       const confidence = Number(decision.confidence) || 0
+      if (decision.lane === 'build' && adapters.openProjectSource) {
+        const handled = await adapters.openProjectSource(originalText, { allowSecretOnce,
+          ...(Array.isArray(images) && images.length ? { images } : {}) })
+        if (!requestIsCurrent()) return undefined
+        if (handled) return decision
+      }
       const chipOnly = current.agentDisabled ||
         (decision.lane === 'run' && !unmatched && !!decision.tool && confidence >= thresholds.CHIP_ONLY)
 
