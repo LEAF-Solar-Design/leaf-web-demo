@@ -459,6 +459,7 @@
     "server-plan-first-gate",
     "server-plan-job-spine",
     "server-platform-customize",
+    "server-platform-source-snapshot",
     "server-platform-postgres-startup",
     "server-boot-probe-implicit-constraints",
     "server-platform-release-policy",
