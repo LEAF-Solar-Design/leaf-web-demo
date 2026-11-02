@@ -749,6 +749,9 @@ export class ConverseLoop {
           return { action: "read_platform_state", args: { what: "capabilities" } };
         case "job_status":
           return { action: "read_platform_state", args: { what: "jobs" } };
+        case "author_stage_status":
+          authorStageStatusId(args);
+          return { action: "read_platform_state", args: { what: "jobs" } };
         case "run_capability": {
           const target = String(args.tool ?? "");
           const entry = (await catalogFor()).find((c) => c.name === target);
@@ -1377,6 +1380,12 @@ export class ConverseLoop {
         return ok(JSON.stringify(row));
       }
 
+      case "author_stage_status": {
+        const changeSetId = authorStageStatusId(args);
+        const status = await appRun.getAuthorStageStatus(tenantId, changeSetId);
+        return ok(JSON.stringify(status));
+      }
+
       case "author_tool": {
         const description = String(args.description ?? "").trim();
         if (!description) return err("author_tool requires args.description");
@@ -1631,6 +1640,20 @@ function isIntegrationTool(name: string): name is IntegrationTool {
   return name === "integration_datasets" || name === "integration_action_catalog" || name === "integration_query" || name === "integration_save_element";
 }
 
+function authorStageStatusId(args: Record<string, unknown>): string {
+  const prototype = Object.getPrototypeOf(args);
+  const keys = Reflect.ownKeys(args);
+  const field = Object.getOwnPropertyDescriptor(args, "change_set_id");
+  if ((prototype !== Object.prototype && prototype !== null) ||
+      keys.length !== 1 || keys[0] !== "change_set_id" ||
+      !field || !Object.hasOwn(field, "value") ||
+      typeof field.value !== "string" || field.value.length !== 36 ||
+      !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(field.value)) {
+    throw new Error("author_stage_status requires only a canonical args.change_set_id");
+  }
+  return field.value;
+}
+
 function asRecord(v: unknown): Record<string, unknown> {
   return v && typeof v === "object" && !Array.isArray(v) ? (v as Record<string, unknown>) : {};
 }
@@ -1731,6 +1754,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `tool=${String(args.tool ?? "?")}${args.confirmation_id ? " (confirmed)" : ""}`;
     case "job_status":
       return `job_id=${String(args.job_id ?? "?")}`;
+    case "author_stage_status":
+      return "read author stage status";
     case "author_tool":
       return `mode=${String(args.mode ?? "build")}`;
     case "request_publication":
