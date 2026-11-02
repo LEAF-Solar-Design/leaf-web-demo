@@ -23,6 +23,7 @@ export default defineConfig({
   reporter: [['list']],
   use: {
     baseURL, browserName: 'chromium', headless: true,
+    actionTimeout: 10_000,
     viewport: { width: 1600, height: 1000 },
     video: 'off', screenshot: 'only-on-failure', trace: 'retain-on-failure',
     serviceWorkers: 'block',

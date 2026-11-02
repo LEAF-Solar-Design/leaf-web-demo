@@ -5,6 +5,12 @@ import { catProofResponse, makeCatProofState } from './catProofFixture.mjs'
 const CORS = { 'access-control-allow-origin': '*', 'access-control-allow-headers': '*', 'access-control-allow-methods': '*' }
 const API = 'http://leaf-proof.invalid'
 
+// Implicit labels contain option text in Playwright's getByLabel lookup.
+// Match the actual combobox's label prefix within its existing inspector.
+const selectControl = (scope, label) => scope.getByRole('combobox', {
+  name: new RegExp(`^${label.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}(?:\\s|$)`),
+})
+
 async function openProject(page, name) {
   await page.getByRole('button', { name: 'Project', exact: true }).click()
   const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
@@ -25,9 +31,9 @@ async function openProject(page, name) {
 // Exercise the same optional design controls in both editing surfaces, without
 // replacing the existing portfolio/photo/native and full control regressions.
 async function design(inspector, variant) {
-  await inspector.getByLabel('Elements / Outline', { exact: true }).selectOption({ label: 'Headline' })
+  await selectControl(inspector, 'Elements / Outline').selectOption({ label: 'Headline' })
   for (const [label, value] of Object.entries({ Font: variant ? 'sans' : 'serif', Weight: variant ? 'medium' : 'bold', Alignment: variant ? 'left' : 'center' })) {
-    await inspector.getByLabel(label, { exact: true }).selectOption(value)
+    await selectControl(inspector, label).selectOption(value)
   }
   for (const [label, value] of Object.entries({ 'Text size': variant ? '36' : '40', 'Text color': variant ? '#eeeeee' : '#222222', 'Line height': '1.4', 'Letter spacing': variant ? '1' : '2' })) {
     await inspector.getByLabel(label, { exact: true }).fill(value)
@@ -36,9 +42,9 @@ async function design(inspector, variant) {
   await inspector.getByLabel('Underline', { exact: true }).setChecked(!variant)
   await inspector.getByLabel('Hidden', { exact: true }).check()
   await inspector.getByLabel('Hidden', { exact: true }).uncheck()
-  await inspector.getByLabel('Elements / Outline', { exact: true }).selectOption({ label: 'Page appearance' })
+  await selectControl(inspector, 'Elements / Outline').selectOption({ label: 'Page appearance' })
   for (const [label, value] of Object.entries({ 'Page theme': variant ? 'dark' : 'cream', 'Page alignment': variant ? 'left' : 'center', Font: variant ? 'sans' : 'serif', 'Text scale': variant ? 'regular' : 'large', Spacing: 'airy', 'Content width': 'narrow' })) {
-    await inspector.getByLabel(label, { exact: true }).selectOption(value)
+    await selectControl(inspector, label).selectOption(value)
   }
   for (const [label, value] of Object.entries({ Gap: '24', Padding: '32', 'Maximum width': '900', Background: variant ? '#111111' : '#fff8ee', Text: variant ? '#eeeeee' : '#222222', Muted: '#888888', Accent: '#aa6600' })) {
     await inspector.getByLabel(label, { exact: true }).fill(value)
@@ -136,7 +142,7 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
   const preview = page.locator('[data-ground="browser-asset"] .project-page')
   const style = async value => {
     await toolbar.getByRole('button', { name: 'Settings', exact: true }).click()
-    await page.getByLabel('Editing style', { exact: true }).selectOption(value)
+    await selectControl(page.getByRole('region', { name: 'Settings', exact: true }), 'Editing style').selectOption(value)
     await page.getByRole('button', { name: 'Close settings', exact: true }).click()
     await toolbar.getByRole('button', { name: 'Edit', exact: true }).click()
   }
