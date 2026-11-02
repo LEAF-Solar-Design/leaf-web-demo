@@ -13,6 +13,12 @@
 .canvas-toolbar, .canvas-settings, .canvas-properties { background: var(--leaf-surface, #fff); color: var(--leaf-ink, #202020); font: 14px/1.5 Arial, sans-serif; }
 .canvas-toolbar { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; border-bottom: 1px solid var(--leaf-line, #bbb); }
 .canvas-toolbar button, .canvas-settings button, .canvas-properties button, .element-inspector button { min-height: 44px; padding: 8px 12px; color: inherit; background: var(--leaf-surface, #fff); border: 1px solid var(--leaf-line, #bbb); border-radius: 4px; }
+.canvas-toolbar__actions, .canvas-toolbar__status { display: contents; }
+.canvas-toolbar [hidden] { display: none !important; }
+.canvas-toolbar button { min-width: 44px; font: inherit; }
+.canvas-toolbar button:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.canvas-toolbar__status-details { flex-basis: 100%; min-width: 0; overflow-wrap: anywhere; }
+.canvas-toolbar__status-details p { margin: 4px 0; white-space: pre-wrap; }
 .canvas-settings { position: sticky; top: 0; z-index: 5; padding: 16px; }
 .canvas-settings select, .element-inspector input, .element-inspector select, .element-inspector textarea { box-sizing: border-box; width: 100%; max-width: 100%; min-height: 44px; font: inherit; color: var(--leaf-ink, #202020); background: var(--leaf-surface, #fff); }
 .element-inspector, .element-properties { display: grid; gap: 12px; min-width: 0; }
@@ -29,6 +35,12 @@
 .canvas-properties .portfolio-editor :is(input, textarea, select) { width: 100%; min-width: 0; min-height: 44px; box-sizing: border-box; font: inherit; color: var(--leaf-ink, #202020); background: var(--leaf-surface, #fff); }
 .canvas-properties .portfolio-editor label { display: grid; gap: 4px; }
 @media(max-width:899px) {
+  .canvas-toolbar { gap: 4px; padding: 4px; }
+  .canvas-toolbar > button { flex: 1 1 0; min-width: 44px; padding: 4px; }
+  .canvas-toolbar__actions { display: flex; flex-wrap: wrap; flex-basis: 100%; gap: 4px; min-width: 0; }
+  .canvas-toolbar__status { display: flex; flex-basis: 100%; align-items: center; gap: 4px; min-width: 0; }
+  .canvas-toolbar__status > span { flex: 1; min-width: 0; overflow: hidden; white-space: nowrap; text-overflow: ellipsis; }
+  .canvas-toolbar__status > button { flex-shrink: 0; padding: 4px 8px; }
   .browser-asset-viewport[data-inspector] { padding-right: 0; padding-bottom: 45vh; }
   .canvas-properties { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: 100%; height: 45vh; max-height: 45vh; }
 }
