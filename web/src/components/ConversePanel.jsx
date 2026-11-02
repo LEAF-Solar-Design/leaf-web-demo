@@ -585,6 +585,7 @@ export default function ConversePanel({
       const t = turnOf(env.turn_id)
         if (type === 'turn_started') {
           t.started = true
+          if (typeof data.text === 'string' && data.text.trim()) t.userText = data.text
           t.images = thumbnailImages(data.images)
           t.imageDescriptors = (data.images || []).filter((image) => !image?.data)
         quota = false; quotaRetry = null; grant = false // a fresh turn clears the paused banners
@@ -663,14 +664,15 @@ export default function ConversePanel({
              activeTurnId: activeTurn ? activeTurn.turnId : null }
   }, [events, stoppedTurns, endedTurns])
 
-  // User bubbles come from the dispatching side (§3 has no user-message event):
-  // App-dispatched turns + panel-sent follow-ups, keyed by turn_id.
+  // Durable turn text survives remounts. Current App-dispatched turns and
+  // panel-sent follow-ups retain their existing precedence, keyed by turn_id.
   const allUserTurns = useMemo(() => [...userTurns, ...localTurns], [userTurns, localTurns])
   const userTextByTurn = useMemo(() => {
     const m = new Map()
+    for (const t of model.turns) if (t.userText) m.set(t.turnId, t.userText)
     for (const u of allUserTurns) if (u.turnId && u.text) m.set(u.turnId, u.text)
     return m
-  }, [allUserTurns])
+  }, [allUserTurns, model.turns])
 
   const localImagesByTurn = useMemo(() => {
     const m = new Map()
