@@ -143,6 +143,48 @@ function r13Evaluate(node, env) {
 const r13Text = (node) => appSource.slice(node.start, node.end).replace(/\r\n/g, '\n')
 const r13Hash = (value) => createHash('sha256').update(value).digest('hex')
 
+// Inspect the mounted engine, not a particular spelling of its project branch.
+function assertEngineDocumentGate() {
+  const engine = r13One(node => node.type === 'JSXElement' && node.openingElement.name.name === 'EngineDocumentView')
+  const guards = r13Find(node => node.type === 'LogicalExpression' && node.operator === '&&'
+    && node.right === engine)
+  assert.equal(guards.length, 1)
+  for (const ENV_CAD_EDIT of [false, true]) for (const studioGround of [false, true]) {
+    for (const projectMode of [false, true]) for (const engineViewArmed of [false, true]) {
+      for (const projectEditorBinding of [null, { input_version_id: 'project-version' }]) {
+        assert.equal(Boolean(r13Evaluate(guards[0].left, {
+          ENV_CAD_EDIT, studioGround, projectMode, engineViewArmed, projectEditorBinding,
+        })), ENV_CAD_EDIT && studioGround && (projectMode ? !!projectEditorBinding : engineViewArmed))
+      }
+    }
+  }
+}
+
+function assertShownDocumentCustody() {
+  const engine = r13One(node => node.type === 'JSXOpeningElement' && node.name.name === 'EngineDocumentView')
+  const callback = name => engine.attributes.find(attr => attr.name?.name === name).value.expression
+  for (const projectMode of [false, true]) for (const intake of [null, { documentId: 'engine.dxf' }]) {
+    const writes = { project: [], active: [], history: [] }, dataset = {}
+    const env = {
+      projectMode, projectEditorKey: 'project-scope', resultCandidate: null,
+      workspaceCardRef: { current: { dataset } },
+      setProjectEditorEngine: value => writes.project.push(value),
+      setActiveIntake: value => writes.active.push(value),
+      setEngineHistory: value => writes.history.push(value),
+      setResultCandidate: () => {}, setOffscreenResult: () => {},
+    }
+    r13Evaluate(callback('onShown'), env)(intake, { undoDepth: 2, redoDepth: 1 })
+    assert.deepEqual(writes.active, [intake])
+    assert.deepEqual(writes.history, [{ undoDepth: 2, redoDepth: 1 }])
+    assert.deepEqual(writes.project, projectMode ? [intake ? { scopeKey: 'project-scope', intake } : null] : [])
+    assert.equal(dataset.engineDocument, intake?.documentId)
+    r13Evaluate(callback('onHidden'), env)()
+    assert.deepEqual(writes.active, [intake, null])
+    assert.deepEqual(writes.history, [{ undoDepth: 2, redoDepth: 1 }, null])
+    assert.deepEqual(writes.project, projectMode ? [intake ? { scopeKey: 'project-scope', intake } : null, null] : [])
+  }
+}
+
 function assertCanonicalSaveCustody() {
   const target = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'engineSaveTarget').init
   for (const mock of [false, true]) for (const projectMode of [false, true]) for (const intake of [null, {}]) {
@@ -232,13 +274,22 @@ it('S1-68 View from another scene requests the recorded drawing and version', ()
 
 it('S1-68 redo notices bind View to the resulting drawing version', async () => {
   const target = { label: 'View' }, toasts = []
-  await r13Evaluate(r13Callback('onRedo'), {
-    redoDrawingVersion: async () => ({ head: 3 }), drawingState: { drawing_id: 'roof' },
+  const projectModeRef = { current: true }
+  let redoCalls = 0
+  const redo = r13Evaluate(r13Callback('onRedo'), {
+    projectModeRef,
+    redoDrawingVersion: async () => { redoCalls++; return { head: 3 } }, drawingState: { drawing_id: 'roof' },
     track: () => {}, showToast: notice => toasts.push(notice),
     versionViewAction: (drawingId, version) => {
       assert.equal(drawingId, 'roof'); assert.equal(version, 3); return target
     },
-  })()
+  })
+  assert.equal(await redo(), null)
+  assert.equal(redoCalls, 0)
+  assert.deepEqual(toasts, [])
+  projectModeRef.current = false
+  await redo()
+  assert.equal(redoCalls, 1)
   assert.deepEqual(toasts, [{ text: 'Advanced to version 3', action: target }])
 })
 
@@ -298,7 +349,7 @@ it('R13G2B-22 workspace stays in the existing Solar seat with one drawing owner'
   assert.ok(r13Text(overlay).includes('!projectMode'))
   const engine = r13One(n => n.type === 'VariableDeclarator' && n.id.name === 'engineViewArmed')
   assert.equal(r13Text(engine.init), 'useEngineViewArmed(projectMode)')
-  assert.ok(appSource.includes('engineViewArmed &&'))
+  assertEngineDocumentGate()
 })
 
 it('R13G-01 App owns one runtime beside the existing scope owner', () => {
@@ -3982,14 +4033,16 @@ describe('J1 Browser composition', () => {
     assert.match(live, /project:\s*workspace.project/)
     assert.match(live, /onAttached:\s*rehydrate/)
     assert.match(live, /artifacts:\s*workspace\.drawing_artifacts \|\| \[\]/)
-    assert.equal((compiled.match(/= useDrawingUploadController\(/g) || []).length, 2)
-    assert.equal((compiled.match(/= useMaterialIntake\(/g) || []).length, 1)
 
     // Execute only the mounted adapter, with the two IO controllers replaced.
     // This pins ordering and refusal without making an upload or a project write.
     const adapterNode = parseJs(appSource, { sourceType: 'module', plugins: ['jsx'] }).program.body
       .find((node) => node.type === 'FunctionDeclaration' && node.id?.name === 'LiveProjectMaterialIntake')
     assert.ok(adapterNode, 'the mounted material adapter must exist')
+    for (const name of ['useDrawingUploadController', 'useMaterialIntake']) {
+      assert.equal(r13Find(node => node.type === 'CallExpression' && node.callee.name === name, adapterNode).length, 1,
+        name + ' has one owner in the mounted material adapter')
+    }
     const adapter = esbuild.transformSync(appSource.slice(adapterNode.start, adapterNode.end), { loader: 'jsx' }).code
     const events = []
     const project = { project_id: 'project-j1', name: 'J1 roof' }
@@ -4212,7 +4265,7 @@ describe('C-04C Solar shown-document readiness', () => {
     for (const state of ['idle', 'opening', 'open', 'failed']) assert.equal(ready(null, document, 'solar', state), false)
     assert.doesNotMatch(derivation, /solarStarter|hasDrawing|session\.engineParsed/)
     assert.match(appSource, new RegExp(String.raw`productSurfaceStates\(\{[\s\S]*?\bsolarReady,\s*\}\), \[mock, signedOut, shown, health, iosShipController.phase, solarReady\]`))
-    assert.match(appSource, new RegExp(String.raw`onShown=\{\(intake, history\) => \{\s*setActiveIntake\(intake\)`))
+    assertShownDocumentCustody()
   })
 
   it('C-04C row6 shown starter requires surface, shown intake, matching document and load provenance', () => {
@@ -4507,7 +4560,7 @@ describe('W4g bleed-2b: profile presentation preserves the engine document', () 
     const engine = appSource.indexOf('<EngineDocumentView')
     assert.ok(ribbonStart >= 0 && ribbonEnd > ribbonStart)
     assert.ok(engine > ribbonEnd)
-    assert.match(appSource.slice(ribbonEnd, engine), new RegExp('\\)\\}\\s*[\\s\\S]*?\\{ENV_CAD_EDIT && studioGround && !projectMode && engineViewArmed && \\(\\s*$'))
+    assertEngineDocumentGate()
     assert.equal(appSource.split('<EngineDocumentView').length - 1, 1)
   })
   it('closes Start before requesting a profile and commits the URL with the state', () => {
@@ -4964,15 +5017,24 @@ describe('App.jsx wiring', () => {
     // The engine paints the viewer while shown; the console intake remains
     // the exact fallback when the consumer closes or unmounts.
     it('binds selection, geometry, legend, dock totals and status to the active intake', () => {
-      assert.match(stripped, /const drawingIntake = projectMode \? projectDrawing.intake : activeIntake \|\| shown/)
+      const drawing = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'drawingIntake').init
+      const engineIntake = r13One(node => node.type === 'VariableDeclarator' && node.id.name === 'projectEngineIntake').init
+      const canonical = {}, active = {}, shown = {}, edited = {}
+      for (const projectMode of [false, true]) for (const activeIntake of [null, active]) {
+        for (const projectEditorEngine of [null, { scopeKey: 'current', intake: edited }, { scopeKey: 'stale', intake: edited }]) {
+          const projectEngineIntake = r13Evaluate(engineIntake, { projectEditorEngine, projectEditorKey: 'current' })
+          assert.equal(projectEngineIntake, projectEditorEngine?.scopeKey === 'current' ? edited : null)
+          assert.equal(r13Evaluate(drawing, { projectMode, projectEngineIntake, projectDrawing: { intake: canonical }, activeIntake, shown }),
+            projectMode ? projectEngineIntake || canonical : activeIntake || shown)
+        }
+      }
       assert.match(stripped, /countEntitiesByLayer\(drawingIntake\)/)
       assert.match(stripped, /selectEntity\(drawingIntake, selectedHandle,/)
       assert.match(stripped, /drawingIntake\.polylines \|\| \[\]/)
       assert.match(stripped, /drawingExtents\(drawingIntake\.polylines\)/)
       assert.match(appNoComments, new RegExp('<Legend\\s+layers=\\{drawingIntake.layers\\}'))
       assert.match(appNoComments, new RegExp('<CockpitStatus[^>]*shown=\\{drawingIntake\\}'))
-      assert.match(appNoComments, new RegExp('onShown=\\{\\(intake, history\\) => \\{\\s*setActiveIntake\\(intake\\)'))
-      assert.match(appNoComments, new RegExp('onHidden=\\{\\(\\) => \\{\\s*setActiveIntake\\(null\\)'))
+      assertShownDocumentCustody()
       assert.match(appNoComments, /undoDepth: history.undoDepth, redoDepth: history.redoDepth/)
     })
     it('drops a result from a different document before resolving its handle', () => {
