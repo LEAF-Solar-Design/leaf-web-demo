@@ -370,6 +370,10 @@ _REQUIRED_COLUMNS = {
         "media_type", "byte_size", "sha256", "width", "height",
         "preview_media_type", "preview_sha256", "created_at",
     },
+    "project_reference_materials": {
+        "material_id", "org_id", "project_id", "actor_binding_id", "name",
+        "media_type", "byte_size", "sha256", "created_at",
+    },
     "project_lifecycle_receipts": {
         "receipt_id", "org_id", "project_id", "action", "actor_binding_id",
         "idempotency_key", "input_digest", "result_json", "created_at",
@@ -1139,6 +1143,26 @@ _REQUIRED_CONSTRAINTS = {
         "project_web_page_revisions", "CHECK", "jsonb_typeof(document) = 'object'"),
     "project_web_page_revisions_digest_check": _catalog_contract(
         "project_web_page_revisions", "CHECK", "digest ~ '^[0-9a-f]{64}$'"),
+    "project_reference_materials_pkey": _catalog_contract(
+        "project_reference_materials", "PRIMARY KEY (material_id)"),
+    "reference_scope_digest": _catalog_contract(
+        "project_reference_materials", "UNIQUE (org_id, project_id, sha256)"),
+    "reference_project_fk": _catalog_contract(
+        "project_reference_materials", "FOREIGN KEY (org_id, project_id)",
+        "REFERENCES projects(org_id, project_id) ON DELETE CASCADE"),
+    "reference_actor_fk": _catalog_contract(
+        "project_reference_materials", "FOREIGN KEY (org_id, actor_binding_id)",
+        "REFERENCES identity_bindings(platform_tenant_id, binding_id)"),
+    "project_reference_materials_name_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
+    "project_reference_materials_media_type_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'"),
+    "project_reference_materials_byte_size_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "byte_size >= 1", "byte_size <= 67108864"),
+    "reference_text_size": _catalog_contract(
+        "project_reference_materials", "CHECK", "media_type = 'video/quicktime'", "byte_size <= 8388608"),
+    "project_reference_materials_sha256_check": _catalog_contract(
+        "project_reference_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
     "project_materials_pkey": _catalog_contract(
         "project_materials", "PRIMARY KEY (material_id)"),
     "project_materials_org_id_project_id_sha256_key": _catalog_contract(
@@ -1223,6 +1247,8 @@ _REQUIRED_INDEXES = {
         "project_member_bindings", "(org_id, project_id, created_at, membership_id)"),
     "idx_project_files_scope": _catalog_contract(
         "project_files", "(org_id, project_id, path)"),
+    "reference_scope_page": _catalog_contract(
+        "project_reference_materials", "(org_id, project_id, material_id)"),
     "project_materials_scope_page": _catalog_contract(
         "project_materials", "(org_id, project_id, material_id)"),
     "idx_project_lifecycle_receipts_scope": _catalog_contract(
