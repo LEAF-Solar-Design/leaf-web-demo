@@ -427,19 +427,6 @@ def forge_case(tmp_path, monkeypatch):
         forge_request_bytes=lambda value: json.dumps(value, sort_keys=True, separators=(",", ":")).encode(),
         parse_forge_descriptor=lambda value, mode: SimpleNamespace(**value), read_forge_release=read_gate)
     monkeypatch.setattr(producer, "load_forge_contract", lambda *args: (contract, bootstrap))
-    def fake_authoring_snapshot(root, output, source):
-        # This orchestration fixture doubles Git and buildx. The separate real
-        # Git context test below exercises the actual snapshot producer.
-        assert root == roots["source_snapshot"] and source == request["source_revision"]
-        output.mkdir()
-        bundle = b"explicit orchestration fixture, not a Git bundle"
-        (output / "snapshot.bundle").write_bytes(bundle)
-        (output / "manifest.json").write_text(json.dumps({
-            "schema": "leaf.platform-source-snapshot.v1", "source_sha": source,
-            "source_tree": request["source_tree"],
-            "bundle_sha256": hashlib.sha256(bundle).hexdigest(),
-        }))
-    monkeypatch.setattr(producer, "_prepare_authoring_source_context", fake_authoring_snapshot)
     monkeypatch.setattr(producer, "host_gate_jobs", lambda root: 1)
     monkeypatch.setattr(producer, "resolve_freshness", lambda root:
         {service: {name: "b" * 64 for name in FRESHNESS.get(service, TRIXIE)} for service in SERVICES})
@@ -1446,8 +1433,6 @@ def fake_buildx(monkeypatch, tmp_path):
         return SimpleNamespace(stdout="")
 
     monkeypatch.setattr(producer.subprocess, "run", run)
-    monkeypatch.setattr(producer, "_prepare_authoring_source_context",
-                        lambda root, output, source: output.mkdir())
     return calls
 
 
@@ -2071,59 +2056,3 @@ def test_native_entrypoints_release_mode_unchanged(native_install_case, entrypoi
     gate = [call for call in case.recorded("python") if
             "scripts/ci/native_release_producer.py" in call["args"]]
     assert len(gate) == 1
-
-def test_authoring_source_build_context_contains_exact_local_snapshot(tmp_path, monkeypatch):
-    import shutil
-    real_run = subprocess.run
-    root = tmp_path / 'checkout'
-    root.mkdir()
-    def git(*args):
-        return real_run(['git', '-c', 'core.hooksPath=', '-C', str(root), *args],
-                        check=True, capture_output=True, text=True).stdout.strip()
-    git('init', '-b', 'main')
-    git('config', 'user.email', 'test@example.com')
-    git('config', 'user.name', 'Test')
-    (root / 'server').mkdir()
-    shutil.copyfile(Path(__file__).resolve().parents[1] / 'server/platform_source_snapshot.py',
-                    root / 'server/platform_source_snapshot.py')
-    (root / 'README.md').write_text('source material\n')
-    git('add', '.')
-    git('commit', '-m', 'source')
-    sha, tree = git('rev-parse', 'HEAD'), git('rev-parse', 'HEAD^{tree}')
-    refs = git('show-ref')
-    (root / '.git' / 'private-config-marker').write_text('not part of image')
-    metadata = tmp_path / 'image.json'
-    seen = []
-    def run(command, **kwargs):
-        if command[0] != 'docker':
-            return real_run(command, **kwargs)
-        assert command[:3] == ['docker', 'buildx', 'build']
-        index = command.index('--build-context', command.index('--tag') + 1)
-        name, directory = command[index + 1].split('=', 1)
-        assert name == 'platform_source'
-        snapshot = Path(directory)
-        assert {p.name for p in snapshot.iterdir()} == {'snapshot.bundle', 'manifest.json'}
-        manifest = json.loads((snapshot / 'manifest.json').read_text())
-        assert manifest['source_sha'] == sha and manifest['source_tree'] == tree
-        assert manifest['bundle_sha256'] == hashlib.sha256((snapshot / 'snapshot.bundle').read_bytes()).hexdigest()
-        seen.append(snapshot)
-        metadata.write_text(json.dumps({'containerimage.digest': 'sha256:' + 'c' * 64}))
-        return SimpleNamespace(stdout='')
-    monkeypatch.setattr(producer.subprocess, 'run', run)
-    result = producer.build_image(root, 'app', sha, 7,
-                                  {name: 'b' * 64 for name in TRIXIE}, metadata)
-    assert result['source_revision'] == sha
-    assert len(seen) == 1 and not seen[0].exists()
-    assert git('status', '--porcelain') == ''
-    assert git('show-ref') == refs
-    assert (root / '.git' / 'private-config-marker').read_text() == 'not part of image'
-
-
-def test_authoring_source_context_is_only_added_for_app(tmp_path, monkeypatch):
-    write_integration_config(tmp_path)
-    calls = fake_buildx(monkeypatch, tmp_path)
-    monkeypatch.setattr(producer, '_prepare_authoring_source_context',
-                        lambda *args: pytest.fail('web must not prepare source objects'))
-    producer.build_image(tmp_path, 'web', 'a' * 40, 7,
-                         {name: 'b' * 64 for name in FRESHNESS['web']}, tmp_path / 'image.json')
-    assert not any('platform_source=' in str(part) for part in calls[-1][0])

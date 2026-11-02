@@ -112,12 +112,6 @@ def base_ref() -> str:
     return os.environ.get("LEAF_PLATFORM_REPO_BASE_REF", "").strip() or "refs/heads/main"
 
 
-def source_ref(*, fallback: Optional[str] = None) -> str:
-    """Authoring snapshot, independent of the logical PR target."""
-    return (os.environ.get("LEAF_PLATFORM_REPO_SOURCE_REF", "").strip()
-            or (fallback if fallback is not None else base_ref()))
-
-
 def state_dir() -> Path:
     raw = os.environ.get("LEAF_PLATFORM_CUSTOMIZE_STATE_DIR", "").strip()
     root = Path(raw) if raw else SERVER_DIR / "platform_customize_state"
@@ -448,14 +442,12 @@ def load_record(change_id: str) -> dict[str, Any]:
 # --------------------------------------------------------------------------- #
 def propose(*, tenant_id: str, subject: str, title: str,
             edits: list[Mapping[str, Any]]) -> dict[str, Any]:
-    """Create ONE commit from the source snapshot for the bound PR target.
+    """Create ONE commit on ONE new lane branch from the base ref tip.
 
     Never touches HEAD, never advances any existing ref, never pushes. The
     returned record is the durable authority for everything after (co-sign,
     land); the branch ref in the local repo is derived state.
     """
-    proposal_base_ref = base_ref()
-    proposal_source_ref = source_ref(fallback=proposal_base_ref)
     title = str(title or "").strip()
     if not title or len(title) > MAX_TITLE:
         raise PlatformCustomizeError("title_invalid", 422)
@@ -492,7 +484,7 @@ def propose(*, tenant_id: str, subject: str, title: str,
     fundamental = classify_fundamental([e["path"] for e in normalized])
 
     git_dir = repo_dir()
-    base_sha = _git(git_dir, "rev-parse", "--verify", proposal_source_ref + "^{commit}")
+    base_sha = _git(git_dir, "rev-parse", "--verify", base_ref() + "^{commit}")
     if not _SHA_RE.fullmatch(base_sha):
         raise PlatformCustomizeError(
             "platform_repo_unavailable", 503, f"base_unresolvable: {base_sha!r}")
@@ -672,8 +664,7 @@ def propose(*, tenant_id: str, subject: str, title: str,
         "author_subject": str(subject),
         "title": title,
         "branch_ref": ref,
-        "base_ref": proposal_base_ref,
-        "source_ref": proposal_source_ref,
+        "base_ref": base_ref(),
         "base_sha": base_sha,
         "commit_sha": commit_sha,
         "paths": [e["path"] for e in normalized],
@@ -1563,10 +1554,10 @@ def _git_out(git_dir: Path, *args: str, timeout: int = 30) -> bytes:
     return result.stdout
 
 
-def _base_tip(git_dir: Path, ref: Optional[str] = None) -> str:
-    """The authoring-source commit — proves the repo is reachable, so a later
+def _base_tip(git_dir: Path) -> str:
+    """The base-ref tip commit — proves the repo is reachable, so a later
     per-object failure can honestly be attributed to the PATH, not the repo."""
-    return _git(git_dir, "rev-parse", "--verify", (ref if ref is not None else source_ref()) + "^{commit}")
+    return _git(git_dir, "rev-parse", "--verify", base_ref() + "^{commit}")
 
 
 def _validated_query_path(raw: Any) -> str:
@@ -1587,7 +1578,7 @@ def _object_type(git_dir: Path, spec: str) -> str:
 
 
 def read_source(*, path: str) -> dict[str, Any]:
-    """Read ONE file from the platform repo's authoring-source snapshot.
+    """Read ONE file from the platform repo at the base-ref tip.
 
     Same path discipline as an edit (`_validated_repo_path`: no traversal, no
     `.git`, allowlisted charset), size-checked before the bytes are read, and
@@ -1595,8 +1586,7 @@ def read_source(*, path: str) -> dict[str, Any]:
     """
     rel = _validated_query_path(path)
     git_dir = repo_dir()
-    ref = source_ref()
-    tip = _base_tip(git_dir, ref)
+    tip = _base_tip(git_dir)
     spec = f"{tip}:{rel}"
     obj_type = _object_type(git_dir, spec)
     if obj_type == "tree":
@@ -1609,7 +1599,7 @@ def read_source(*, path: str) -> dict[str, Any]:
     blob = _git_out(git_dir, "cat-file", "blob", spec)
     view: dict[str, Any] = {
         "contract": "leaf.platform-customize.v1",
-        "ref": ref,
+        "ref": base_ref(),
         "commit": tip,
         "path": rel,
         "size": size,
@@ -1623,14 +1613,13 @@ def read_source(*, path: str) -> dict[str, Any]:
 
 
 def list_source(*, dir: str = "") -> dict[str, Any]:
-    """List ONE directory level of the authoring-source snapshot.
+    """List ONE directory level of the platform repo at the base-ref tip.
 
     Empty ``dir`` lists the repo root. Bounded at MAX_TREE_ENTRIES with an
     honest ``truncated`` flag — a silent cap would read as "that was all".
     """
     git_dir = repo_dir()
-    ref = source_ref()
-    tip = _base_tip(git_dir, ref)
+    tip = _base_tip(git_dir)
     rel = _validated_query_path(dir) if dir else ""
     spec = f"{tip}:{rel}" if rel else tip
     if rel and _object_type(git_dir, spec) == "blob":
@@ -1665,7 +1654,7 @@ def list_source(*, dir: str = "") -> dict[str, Any]:
         entries.append(entry)
     return {
         "contract": "leaf.platform-customize.v1",
-        "ref": ref,
+        "ref": base_ref(),
         "commit": tip,
         "dir": rel,
         "entries": entries,
