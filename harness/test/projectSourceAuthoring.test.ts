@@ -152,6 +152,44 @@ describe("mounted first source author transaction with real private Git", () => 
     return files;
   }
 
+  const nativeEditId = "77777777-7777-4777-8777-777777777777";
+  function nativeEditRequest() {
+    return { ...body(), edit_id: nativeEditId, source_profile: nativeProfile.id, source_operation: "edit", material: [] as ReturnType<typeof material>[] };
+  }
+  async function publishedNative() {
+    // Keep unrelated Web/source files, including paths that Web edit preflight
+    // would reject. They are immutable baseline data for a Native edit.
+    seed({ ...PROJECT_SOURCE_SCAFFOLD, "app/page.tsx": page, "app/legacy.jsx": "legacy\n",
+      "components/legacy.jsx": "legacy\n", "src/legacy.ts": "source\n", "pages/old.tsx": "old\n",
+      "public/data/nested/items.json": raw });
+    nativeEditor();
+    const create = edit.getMockImplementation()!;
+    edit.mockImplementation(async input => {
+      const result = await create(input);
+      writeFileSync(join(input.repoDir, "Sources/Old.swift"), "struct Old {}\n");
+      return result;
+    });
+    const response = await post({ ...body(), source_profile: nativeProfile.id });
+    expect(response.status).toBe(200);
+    const initial = await response.json() as StagedProjectRepositoryEdit;
+    expect((await post({ ...common, confirmation_id: actor, receipt_digest: initial.receiptDigest,
+      expected_version: 1, transition_key: "publish-native" }, "publish")).status).toBe(200);
+    base = initial.receipt.staged_head_commit;
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+    const work = join(root, "work");
+    git(work, ["fetch", bare, "main"]);
+    git(work, ["reset", "--hard", "FETCH_HEAD"]);
+    vi.clearAllMocks();
+    confirmed = false;
+  }
+
+  function nativeEditUnchanged() {
+    unchanged();
+    // The coordinator can reserve a private ref at the base before preflight.
+    // Failure must never advance it to an authored candidate.
+    expect(["", base]).toContain(git(bare, ["for-each-ref", "--format=%(objectname)", `refs/leaf/changes/${nativeEditId}`]));
+  }
+
   it.each([undefined, "create"])("creates a plain Browser brief without material with operation %s", async source_operation => {
     const requirements = "Create a landing page for a neighborhood garden.";
     edit.mockImplementation(async input => {
@@ -168,13 +206,186 @@ describe("mounted first source author transaction with real private Git", () => 
 
   it.each([null, 1, false, {}, [], "", "update", "EDIT"])("rejects invalid operation %j before grants", async source_operation => {
     expect((await post({ ...body(), source_operation })).status).toBe(409);
+    expect((await post({ ...body(), source_profile: nativeProfile.id, source_operation })).status).toBe(409);
     expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
   });
 
-  it("rejects native edits and native empty input before grants", async () => {
+  it("rejects native edits without existing source and native create without input before grants", async () => {
     expect((await post({ ...body(), source_profile: nativeProfile.id, source_operation: "edit" })).status).toBe(409);
     expect((await post({ ...body(), source_profile: nativeProfile.id, material: [] })).status).toBe(409);
     expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it.each([false, true])("edits a published Native candidate with real Git evidence, new material=%s", async supplied => {
+    await publishedNative();
+    const updated = swift + "// updated\n";
+    edit.mockImplementation(async input => {
+      expect(input.instruction).toBe(body().requirements);
+      expect(input.context).toContain("Edit the existing SwiftUI source in Sources/ContentView.swift");
+      expect(input.context).toContain("Resources/Input/nested/items.json");
+      expect(input.context).toContain("Do not execute shell, builds, tools, network");
+      expect(input.context).toContain("Do not invoke Xcode, XcodeGen or a simulator");
+      expect(input.context).not.toContain("Next");
+      expect(readFileSync(join(input.repoDir, "Sources/ContentView.swift"), "utf8")).toBe(swift);
+      expect(readFileSync(join(input.repoDir, "Resources/Input/nested/items.json"), "utf8")).toBe(raw);
+      if (supplied) expect(readFileSync(join(input.repoDir, "Resources/Input/new.csv"), "utf8")).toBe("value\n2\n");
+      writeFileSync(join(input.repoDir, "Sources/ContentView.swift"), updated);
+      mkdirSync(join(input.repoDir, "Sources/Views"));
+      writeFileSync(join(input.repoDir, "Sources/Views/Helper.swift"), "struct Helper {}\n");
+      rmSync(join(input.repoDir, "Sources/Old.swift"));
+      return { summary: "private native edit", changedFiles: ["lie"], telemetry: { input_tokens: 11, output_tokens: 4 } };
+    });
+    const stage = vi.spyOn(service, "stageEdit");
+    const response = await post({ ...nativeEditRequest(), material: supplied ? [material("nested/items.json", raw), material("new.csv", "value\n2\n")] : [] });
+    expect(response.status).toBe(200);
+    const staged = await response.json() as StagedProjectRepositoryEdit;
+    expect(stage).toHaveBeenCalledWith(expect.objectContaining({ authority, operation: "edit", expectedBaseCommit: base }));
+    expect(staged.receipt).toMatchObject({ operation: "edit", base_commit: base, tenant_id: authority.tenantId,
+      organization_id: authority.organizationId, project_id: authority.projectId, repo_key: authority.repoKey });
+    expect(staged.receipt).not.toHaveProperty("source_profile");
+    const head = staged.receipt.staged_head_commit;
+    expect(git(bare, ["rev-parse", `refs/leaf/changes/${nativeEditId}`])).toBe(head);
+    expect(git(bare, ["rev-parse", `${head}^{tree}`])).toBe(staged.receipt.staged_tree);
+    expect(staged.receipt.changed_paths).toEqual([...(supplied ? ["Resources/Input/new.csv"] : []),
+      "Sources/ContentView.swift", "Sources/Old.swift", "Sources/Views/Helper.swift"]);
+    expect(execFileSync("git", ["show", `${head}:Sources/ContentView.swift`], { cwd: bare }).toString()).toBe(updated);
+    expect(execFileSync("git", ["show", `${head}:Sources/Views/Helper.swift`], { cwd: bare }).toString()).toBe("struct Helper {}\n");
+    expect(git(bare, ["ls-tree", head, "--", "Sources/Old.swift"])).toBe("");
+    if (supplied) expect(execFileSync("git", ["show", `${head}:Resources/Input/new.csv`], { cwd: bare }).toString()).toBe("value\n2\n");
+    const changed = new Set(staged.receipt.changed_paths);
+    for (const path of git(bare, ["ls-tree", "-r", "--name-only", base]).split("\n")) if (!changed.has(path)) {
+      expect(execFileSync("git", ["show", `${head}:${path}`], { cwd: bare })).toEqual(execFileSync("git", ["show", `${base}:${path}`], { cwd: bare }));
+    }
+    const diff = execFileSync("git", ["-c", "diff.algorithm=myers", "-c", "diff.indentHeuristic=false", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+      "--binary", "--full-index", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--unified=3", base, head, "--"], { cwd: bare });
+    expect(staged.receipt.diff_digest).toBe(hash(diff));
+    expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+    expect(oauth.getGrant).not.toHaveBeenCalled();
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 15 }, stop_reason: "end_turn" });
+    expect(coordination.recordStaged).toHaveBeenCalledTimes(1);
+    expect(coordination.authorizePublish).not.toHaveBeenCalled();
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+  });
+
+  it.each(["wrong-project", "app-entry", "missing-scaffold", "missing-product", "empty-product", "unsupported-source", "source-case",
+    "input-bytes", "input-case", "directory-case", "stale", "wrong-base", "wrong-authority", "symlink", "executable"])("rejects Native edit %s before a grant", async mode => {
+    await publishedNative();
+    const work = join(root, "work");
+    const changes: Record<string, string> = {};
+    if (mode === "wrong-project") changes["project.yml"] = nativeProjectSourceProfile(actor).scaffold["project.yml"];
+    if (mode === "app-entry") changes["Sources/LeafProjectApp.swift"] = "changed\n";
+    if (mode === "empty-product") changes["Sources/ContentView.swift"] = " \n";
+    if (mode === "unsupported-source") changes["Sources/unknown.txt"] = "unknown\n";
+    if (Object.keys(changes).length) seed(changes);
+    if (["missing-scaffold", "missing-product", "source-case", "symlink", "executable"].includes(mode)) {
+      if (mode.startsWith("missing")) rmSync(join(work, mode === "missing-scaffold" ? "project.yml" : "Sources/ContentView.swift"));
+      git(work, ["add", "-A"]);
+      if (mode === "symlink") {
+        const blob = git(work, ["rev-parse", "HEAD:Sources/ContentView.swift"]);
+        git(work, ["update-index", "--add", "--cacheinfo", "120000", blob, "Sources/Link.swift"]);
+      }
+      if (mode === "source-case") {
+        const blob = git(work, ["rev-parse", "HEAD:Sources/ContentView.swift"]);
+        git(work, ["update-index", "--add", "--cacheinfo", "100644", blob, "Sources/contentview.swift"]);
+      }
+      if (mode === "executable") git(work, ["update-index", "--chmod=+x", "Sources/ContentView.swift"]);
+      git(work, ["-c", "user.name=test", "-c", "user.email=test@leaf.invalid", "commit", "-qm", "invalid native baseline"]);
+      git(bare, ["fetch", work, "main:main"]);
+      base = git(bare, ["rev-parse", "main"]);
+    }
+    const request = nativeEditRequest();
+    if (mode === "input-bytes") request.material = [material("nested/items.json", "{}")];
+    if (mode === "input-case") request.material = [material("nested/ITEMS.json", raw)];
+    if (mode === "directory-case") request.material = [material("NESTED/new.json", "{}")];
+    if (mode === "stale") request.expected_base_commit = git(bare, ["rev-parse", `${base}^`]);
+    if (mode === "wrong-base") request.expected_base_commit = "f".repeat(40);
+    if (mode === "wrong-authority") request.project_id = actor;
+    expect((await post(request)).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); expect(oauth.getGrant).not.toHaveBeenCalled();
+    nativeEditUnchanged();
+  });
+
+  it("rejects a resumed Native candidate whose HEAD has advanced beyond the requested base before grants", async () => {
+    await publishedNative();
+    edit.mockImplementation(async input => {
+      writeFileSync(join(input.repoDir, "Sources/ContentView.swift"), swift + "// edited\n");
+      return { summary: "done", changedFiles: [] };
+    });
+    expect((await post(nativeEditRequest())).status).toBe(200);
+    const head = git(bare, ["rev-parse", `refs/leaf/changes/${nativeEditId}`]);
+    vi.clearAllMocks();
+    expect((await post(nativeEditRequest())).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled();
+    unchanged();
+    expect(git(bare, ["rev-parse", `refs/leaf/changes/${nativeEditId}`])).toBe(head);
+  });
+
+  it("accepts eight new Native originals at the exact per-file and total byte limits", async () => {
+    await publishedNative();
+    const originals = Array.from({ length: 8 }, (_, i) => material(`reference${i}.txt`, i < 4 ? "x".repeat(1048576) : ""));
+    edit.mockImplementation(async input => {
+      for (const original of originals) {
+        const bytes = readFileSync(join(input.repoDir, "Resources/Input", original.path));
+        expect(bytes.length).toBe(original.size_bytes); expect(hash(bytes)).toBe(original.sha256);
+      }
+      writeFileSync(join(input.repoDir, "Sources/ContentView.swift"), swift + "// referenced\n");
+      return { summary: "done", changedFiles: [] };
+    });
+    const response = await post({ ...nativeEditRequest(), material: originals });
+    expect(response.status).toBe(200);
+    const staged = await response.json() as StagedProjectRepositoryEdit;
+    for (const original of originals) expect(hash(execFileSync("git", ["show", `${staged.receipt.staged_head_commit}:Resources/Input/${original.path}`], { cwd: bare }))).toBe(original.sha256);
+    expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "end_turn" });
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+    expect(coordination.authorizePublish).not.toHaveBeenCalled();
+  });
+
+  it("enforces Native edit original count, byte, hash and path limits before grants", async () => {
+    await publishedNative();
+    const first = material("new.txt", "new");
+    const invalid = [
+      [material("large.txt", "x".repeat(1048577))],
+      Array.from({ length: 5 }, (_, i) => material(`${i}.txt`, "x".repeat(900000))),
+      Array.from({ length: 9 }, (_, i) => material(`${i}.txt`, "x")),
+      [{ ...first, sha256: "a".repeat(64) }], [{ ...first, size_bytes: 1 }], [{ ...first, product_b64: first.product_b64 + "\n" }],
+      [first, first], [material("../new.txt", "new")], [material("new.swift", "new")],
+    ];
+    for (const originals of invalid) expect((await post({ ...nativeEditRequest(), material: originals })).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); nativeEditUnchanged();
+  });
+
+  it.each(["noop", "failure", "empty", "delete-product", "scaffold", "app-entry", "material", "web", "component", "source", "seed", "control",
+    "delete-material", "unknown", "entitlements", "dependencies", "scripts", "output", "alias", "symlink", "executable",
+    "file-limit", "count-limit", "total-limit"])("rejects Native edit %s output atomically and settles its grant", async mode => {
+    await publishedNative();
+    edit.mockImplementation(async input => {
+      const dir = input.repoDir, product = "Sources/ContentView.swift";
+      if (mode === "failure") throw new Error("private editor failure");
+      if (mode !== "noop") writeFileSync(join(dir, product), mode === "empty" ? " \n" : swift + "// edited\n");
+      const paths: Record<string, string> = { scaffold: "project.yml", "app-entry": "Sources/LeafProjectApp.swift", material: "Resources/Input/nested/items.json",
+        web: "app/page.tsx", component: "components/legacy.jsx", source: "src/legacy.ts", seed: ".leaf/source-seed.json", control: "PROMPT.md",
+        unknown: "Sources/extra.txt", entitlements: "Sources/entitlements.swift", dependencies: "Sources/Package.swift", scripts: "Sources/scripts/run.swift", output: "output.txt" };
+      if (paths[mode]) { mkdirSync(dirname(join(dir, paths[mode])), { recursive: true }); writeFileSync(join(dir, paths[mode]), "changed"); }
+      if (mode === "delete-product") rmSync(join(dir, product));
+      if (mode === "delete-material") rmSync(join(dir, "Resources/Input/nested/items.json"));
+      if (mode === "alias") {
+        const blob = git(dir, ["rev-parse", `HEAD:${product}`]);
+        git(dir, ["update-index", "--add", "--cacheinfo", "100644", blob, "Sources/CONTENTVIEW.swift"]);
+      }
+      if (mode === "symlink") symlinkSync(join(dir, "Resources/Input/nested/items.json"), join(dir, "Sources/Link.swift"));
+      if (mode === "executable") {
+        if (process.platform !== "win32") chmodSync(join(dir, product), 0o755);
+        else { git(dir, ["add", product]); git(dir, ["update-index", "--chmod=+x", product]); }
+      }
+      if (mode === "file-limit") writeFileSync(join(dir, product), "x".repeat(1048577));
+      if (mode === "count-limit" || mode === "total-limit") for (let i = 0; i < (mode === "count-limit" ? 64 : 5); i++) writeFileSync(join(dir, `Sources/File${i}.swift`), "x".repeat(mode === "count-limit" ? 1 : 900000));
+      return { summary: "private", changedFiles: [] };
+    });
+    expect((await post(nativeEditRequest())).status).toBe(409);
+    expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "error" });
+    nativeEditUnchanged();
   });
 
   it("rejects duplicate nested and escaped author keys before staging or grants", async () => {
