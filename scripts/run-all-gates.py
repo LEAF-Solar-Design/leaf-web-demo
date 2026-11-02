@@ -5542,6 +5542,13 @@ _EARLY_FEEDBACK_SUITES = frozenset({
     "harness-tsc-noemit", "server-campaign-dxf-inventory",
     "server-campaign-release-service", "server-entity-scope-admission",
     "server-entity-scope-transport", "server-sip-r5-routes", "web-app-wiring",
+    # Existing deterministic Solar authority/registry contracts use patched
+    # in-memory graph/blob/transaction fixtures; launcher processes are doubles.
+    # They require installed Python dependencies, not writer/build/browser output.
+    "server-sip-r3b-chain", "server-sip-r4-jobs", "server-sip-r5-policy",
+    "server-sip-r6-routes", "server-sip-r3c-multi-add",
+    "server-sip-r3d-conductors", "server-sip-r3e-groups",
+    "server-start-leaf-harness-config",
 })
 
 

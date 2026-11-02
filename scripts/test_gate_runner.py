@@ -5208,3 +5208,59 @@ def test_early_feedback_actual_trusted_heavy_entry_preserves_producers(tmp_path)
     assert run(shard=1) == browsers
     assert run(fail_os=True) == license_checks + [browsers[0], "npx playwright install chromium",
                                                browsers[1], "python -m playwright install chromium"]
+
+
+_SIP_EARLY_POLICY_IDS = (
+    "server-sip-r3b-chain", "server-sip-r4-jobs", "server-sip-r5-policy",
+    "server-sip-r6-routes", "server-sip-r3c-multi-add",
+    "server-sip-r3d-conductors", "server-sip-r3e-groups",
+    "server-start-leaf-harness-config",
+)
+
+
+@pytest.mark.parametrize("suite_id", _SIP_EARLY_POLICY_IDS)
+def test_sip_policy_feedback_red_blocks_heavy_without_retries(suite_id, tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    found = [suite for suite in g.build_suites() if suite.id == suite_id]
+    assert len(found) == 1
+    cheap = found[0]
+    assert suite_id in g._EARLY_FEEDBACK_SUITES
+    assert cheap.kind == "pytest" and cheap.cwd == g.SERVER
+    assert not cheap.db_gated and not cheap.uses_database and not cheap.reset_authored
+    assert not cheap.opt_in_env
+    assert "harness-vitest" not in g._EARLY_FEEDBACK_SUITES
+    heavy = g.Suite("web-build", "heavy writer", "script", tmp_path, ["fixture"], None)
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "FAIL", "err", 0.01, note="fixture authority/registry mismatch")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("heavy setup admitted"))
+    results, attempts = g.run_suites_parallel([heavy, cheap], tmp_path, 2, 2, True,
+                                             early_feedback=True,
+                                             before_heavy_command=["trusted-ci"])
+    assert seen == [suite_id] and attempts == {suite_id: 1}
+    assert [result.suite.id for result in results] == [suite_id]
+    assert results[0].status == "FAIL"
+    output = capsys.readouterr().out
+    assert f"GATE_RESULT id={suite_id} status=FAIL" in output
+    assert "heavy_started=0" in output
+
+
+def test_sip_policy_feedback_green_runs_each_selected_control_once(tmp_path, monkeypatch):
+    g = _load_runner()
+    cheap = [suite for suite in g.build_suites() if suite.id in _SIP_EARLY_POLICY_IDS]
+    assert len(cheap) == len(_SIP_EARLY_POLICY_IDS)
+    heavy = g.Suite("web-build", "heavy writer", "script", tmp_path, ["fixture"], None)
+    suites, seen = [heavy, *cheap], []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 3, 0, True, early_feedback=True)
+    assert [result.suite.id for result in results] == [suite.id for suite in suites]
+    assert len(seen) == len(suites) and len(set(seen)) == len(seen)
+    assert set(attempts) == set(seen) and set(attempts.values()) == {1}
+    assert seen[-1] == heavy.id
