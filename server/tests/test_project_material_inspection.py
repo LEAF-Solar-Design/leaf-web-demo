@@ -346,3 +346,282 @@ def test_service_rejects_unverified_demo_or_wrong_subject(mounted, tenant):
     with pytest.raises(inspection.InspectionError):
         inspection.inspect(tenant, 's', 's', 't', {'op': 'catalog'})
     assert mounted[1]['calls'] == []
+
+
+PHOTO_ROUTE = '/api/sessions/s/page/photo-assignment-proposals'
+
+
+@pytest.fixture
+def photo_mounted(mounted, monkeypatch):
+    from leaf_platform import project_lifecycle, project_page_proposal
+    state = mounted[1]
+    state.update(writer=True, write_checks=0)
+    # This producer is independent of any particular inventory size or gallery.
+    state['rows'] = state['rows'][:23]
+    document = state['page']['document']
+    document['galleryLayout'] = 'single'
+    document['categories'][0]['slug'] = 'selected-work'
+    document['categories'][0]['title'] = 'Selected work'
+    other = copy.deepcopy(document['categories'][0])
+    other.update(slug='other-work', title='Other work')
+    other['images'][0].update({key: state['rows'][-1][key]
+                               for key in ('material_id', 'sha256', 'preview_sha256')})
+    document['categories'].append(other)
+    state['page']['digest'] = project_page_proposal.document_digest(document)
+
+    def role(*args, write):
+        assert write is True
+        state['write_checks'] += 1
+        if not state['writer'] or tuple(map(str, args)) != (ORG, PROJECT, BINDING):
+            raise project_lifecycle.LifecycleForbidden('private viewer or revoked membership')
+        return 'editor'
+
+    def forbidden(*args, **kwargs):
+        pytest.fail('photo assignment used pixels, inference, or a write')
+
+    monkeypatch.setattr(project_lifecycle, 'require_project_role', role)
+    monkeypatch.setattr(project_material_images, 'read_content', forbidden)
+    monkeypatch.setattr(project_page_proposal, 'propose', forbidden)
+    monkeypatch.setattr(project_page_proposal.requests, 'post', forbidden)
+    yield mounted
+
+
+def photo_body(state, count=1):
+    return dict(expected_revision=state['page']['revision'], expected_digest=state['page']['digest'],
+                operations=[dict(op='assign', material_id=row['material_id'], sha256=row['sha256'],
+                                 preview_sha256=row['preview_sha256'], gallery_slug='selected-work',
+                                 title=f'Proposed caption {i}', alt=f'Proposed alternative {i}')
+                            for i, row in enumerate(state['rows'][1:count + 1])])
+
+
+def photo_post(mounted, body=None, **kwargs):
+    return post(mounted, photo_body(mounted[1]) if body is None else body, route=PHOTO_ROUTE, **kwargs)
+
+
+@pytest.mark.parametrize('count', [1, 7, 21])
+def test_photo_assignment_review_only_canonical_batch(photo_mounted, count):
+    from leaf_platform import portfolio_page_template, project_web_page
+    state = photo_mounted[1]
+    before = copy.deepcopy(state['page'])
+    body = photo_body(state, count)
+    for i, operation in enumerate(body['operations']):
+        if i % 2:
+            operation['gallery_slug'] = 'other-work'
+    response = photo_post(photo_mounted, body)
+    assert response.status_code == 200, response.text
+    result = response.json()
+    assert set(result) == {'schema', 'source', 'proposed_document', 'proposed_digest', 'changes'}
+    assert result['schema'] == 'leaf.project-photo-assignment-proposal.v1'
+    assert result['source'] == dict(project_id=PROJECT, revision=7, digest=before['digest'])
+    candidate = result['proposed_document']
+    assert portfolio_page_template.validate_document(candidate) == candidate
+    assert project_web_page.document_digest(candidate) == result['proposed_digest'] != before['digest']
+    assert state['page'] == before
+    expected = copy.deepcopy(before['document'])
+    expected_changes = []
+    for i, operation in enumerate(body['operations']):
+        gallery = expected['categories'][i % 2]
+        expected_changes.append(dict(op='assign', material_id=operation['material_id'],
+            material_name=state['rows'][i + 1]['name'], gallery_slug=gallery['slug'],
+            gallery_title=gallery['title'], index=len(gallery['images']),
+            title=operation['title'], alt=operation['alt']))
+        gallery['images'].append({key: operation[key]
+            for key in ('material_id', 'sha256', 'preview_sha256', 'title', 'alt')})
+    assert candidate == expected
+    assert result['changes'] == expected_changes
+    assert state['calls'] == ['page'] + ['get'] * (count * 2) + ['page']
+    assert state['write_checks'] >= 2 * len(state['calls'])
+
+
+@pytest.mark.parametrize('header', list(HEADERS))
+@pytest.mark.parametrize('wrong', [False, True])
+def test_photo_assignment_private_headers(photo_mounted, header, wrong):
+    headers = dict(HEADERS)
+    if wrong:
+        headers[header] = 'wrong'
+    else:
+        del headers[header]
+    response = photo_post(photo_mounted, headers=headers)
+    assert response.status_code in (403, 404)
+    assert set(response.json()) == {'code', 'detail'}
+    assert photo_mounted[1]['calls'] == []
+
+
+@pytest.mark.parametrize('failure', ['viewer', 'revoked', 'turn', 'path', 'demo', 'guest', 'binding', 'project', 'actor'])
+def test_photo_assignment_authority_closed_before_reads(photo_mounted, monkeypatch, failure):
+    state = photo_mounted[1]
+    headers, route = dict(HEADERS), PHOTO_ROUTE
+    if failure == 'viewer':
+        state['writer'] = False
+    elif failure == 'revoked':
+        state['revoked'] = True
+    elif failure == 'turn':
+        state['active'] = False
+    elif failure == 'path':
+        route = PHOTO_ROUTE.replace('/s/', '/other/')
+    elif failure in ('demo', 'guest'):
+        headers[f'x-{failure}-session'] = 'untrusted'
+    elif failure == 'binding':
+        state['binding'].platform_tenant_id = UUID(PROJECT)
+    elif failure == 'project':
+        state['session']['org_id'] = PROJECT
+    else:
+        monkeypatch.setattr(deps, 'stage_author_identity', lambda *a: None)
+    response = post(photo_mounted, photo_body(state), headers=headers, route=route)
+    assert response.status_code in (403, 404)
+    assert set(response.json()) == {'code', 'detail'}
+    assert state['calls'] == []
+
+
+@pytest.mark.parametrize('boundary', ['page', 'get'])
+@pytest.mark.parametrize('change', ['writer', 'revoked', 'turn', 'binding', 'project', 'actor'])
+def test_photo_assignment_authority_rechecked(photo_mounted, monkeypatch, boundary, change):
+    state = photo_mounted[1]
+
+    def mutate(name):
+        if name != boundary:
+            return
+        if change == 'writer':
+            state['writer'] = False
+        elif change == 'revoked':
+            state['revoked'] = True
+        elif change == 'turn':
+            state['active'] = False
+        elif change == 'binding':
+            state['binding'].binding_id = UUID(int=999)
+        elif change == 'actor':
+            monkeypatch.setattr(deps, 'stage_author_identity', lambda *a: None)
+        else:
+            state['session']['project_id'] = str(UUID(int=999))
+
+    state['hook'] = mutate
+    assert photo_post(photo_mounted).status_code in (403, 404)
+
+
+@pytest.mark.parametrize('change', ['revision', 'digest', 'sha256', 'preview_sha256', 'name'])
+def test_photo_assignment_source_changes_during_reads(photo_mounted, change):
+    state = photo_mounted[1]
+
+    def mutate(name):
+        if name == 'get':
+            if change == 'revision':
+                state['page']['revision'] += 1
+            elif change == 'digest':
+                state['page']['digest'] = 'e' * 64
+            else:
+                state['rows'][1][change] = 'e' * 64
+
+    state['hook'] = mutate
+    assert photo_post(photo_mounted).status_code == 409
+
+
+def test_photo_assignment_unrelated_inventory_addition_is_allowed(photo_mounted):
+    state = photo_mounted[1]
+
+    def mutate(name):
+        if name == 'get':
+            row = copy.deepcopy(state['rows'][0])
+            row['material_id'] = str(UUID(int=1000 + len(state['rows'])))
+            state['rows'].append(row)
+
+    state['hook'] = mutate
+    assert photo_post(photo_mounted).status_code == 200
+
+
+@pytest.mark.parametrize('failure', ['revision', 'digest', 'original', 'preview', 'foreign', 'assigned',
+    'other_assigned', 'slug', 'duplicate', 'op', 'identity', 'bool', 'uuid', 'zero_uuid', 'hash',
+    'title', 'alt', 'url', 'empty', 'too_many', 'extra', 'missing', 'schema'])
+def test_photo_assignment_closed_request_and_source(photo_mounted, failure):
+    state = photo_mounted[1]
+    body = photo_body(state)
+    op = body['operations'][0]
+    status = 422
+    if failure in ('revision', 'digest'):
+        body['expected_' + failure] = 8 if failure == 'revision' else 'e' * 64
+        status = 409
+    elif failure in ('original', 'preview'):
+        op['sha256' if failure == 'original' else 'preview_sha256'] = 'e' * 64
+        status = 409
+    elif failure == 'foreign':
+        op['material_id'] = str(UUID(int=999))
+        status = 404
+    elif failure in ('assigned', 'other_assigned'):
+        row = state['rows'][0 if failure == 'assigned' else -1]
+        op.update({key: row[key] for key in ('material_id', 'sha256', 'preview_sha256')})
+    elif failure == 'slug':
+        op['gallery_slug'] = 'unknown'
+    elif failure == 'duplicate':
+        body['operations'].append(copy.deepcopy(op))
+    elif failure == 'op':
+        op['op'] = 'move'
+    elif failure == 'identity':
+        op['project_id'] = PROJECT
+    elif failure == 'bool':
+        body['expected_revision'] = True
+    elif failure in ('uuid', 'zero_uuid'):
+        op['material_id'] = 'BAD' if failure == 'uuid' else str(UUID(int=0))
+    elif failure == 'hash':
+        op['sha256'] = 'A' * 64
+    elif failure in ('title', 'alt'):
+        op[failure] = 'x' * (201 if failure == 'title' else 401)
+    elif failure == 'url':
+        op['alt'] = 'https://private.example/photo'
+    elif failure == 'empty':
+        body['operations'] = []
+    elif failure == 'too_many':
+        body['operations'] *= 201
+    elif failure == 'extra':
+        body['actor_id'] = BINDING
+    elif failure == 'missing':
+        del op['alt']
+    else:
+        state['page']['document']['schema'] = 'leaf.page.v1'
+        status = 409
+    response = photo_post(photo_mounted, body)
+    assert response.status_code == status, response.text
+    assert set(response.json()) == {'code', 'detail'}
+
+
+@pytest.mark.parametrize('raw', [b'{', b'\xff', b'{}', b'{"operations":NaN}',
+    b'{"operations":Infinity}', b'{"operations":[],"operations":[]}', b'\xff\xfe{\x00}\x00'])
+def test_photo_assignment_invalid_json(photo_mounted, raw):
+    assert photo_post(photo_mounted, content=raw).status_code == 422
+
+
+def test_photo_assignment_nested_duplicate_and_size(photo_mounted):
+    raw = json.dumps(photo_body(photo_mounted[1])).replace('"op": "assign"', '"op": "assign", "op": "assign"')
+    assert photo_post(photo_mounted, content=raw).status_code == 422
+    assert photo_post(photo_mounted, content=b' ' * (256 * 1024 + 1)).status_code == 413
+
+
+def test_photo_assignment_final_canonical_image_cap(photo_mounted):
+    from leaf_platform import project_web_page
+    state = photo_mounted[1]
+    gallery = state['page']['document']['categories'][0]
+    for i in range(198):
+        image = copy.deepcopy(gallery['images'][0])
+        image['material_id'] = str(UUID(int=1000 + i))
+        gallery['images'].append(image)
+    state['page']['digest'] = project_web_page.document_digest(state['page']['document'])
+    assert photo_post(photo_mounted).status_code == 422
+
+
+def test_photo_assignment_unavailable_and_private_errors(photo_mounted):
+    state = photo_mounted[1]
+    body = photo_body(state)
+    state['page'] = None
+    assert photo_post(photo_mounted, body).status_code == 404
+
+    def fail(name):
+        raise RuntimeError('private provider secret pixels')
+
+    state['hook'] = fail
+    response = photo_post(photo_mounted, body)
+    assert response.status_code == 503
+    assert response.json() == {'code': 'service_unavailable', 'detail': 'Photo assignment service is unavailable.'}
+
+
+def test_photo_assignment_response_bound(photo_mounted, monkeypatch):
+    import project_photo_assignment_proposal as proposals
+    monkeypatch.setattr(proposals, 'MAX_RESPONSE_BYTES', 1)
+    assert photo_post(photo_mounted).status_code == 422
