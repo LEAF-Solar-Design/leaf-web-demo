@@ -20,6 +20,14 @@ from project_repository_edit_contract import parse_staged_receipt, receipt_diges
 
 MATERIAL_LIMIT = 8 * 1024 * 1024
 WIRE_LIMIT = 12 * 1024 * 1024
+WEB_PROFILE = 'web-next-static-v1'
+NATIVE_PROFILE = 'ios-swiftui-xcodegen-v1'
+
+
+def require_profile(source_profile):
+    if source_profile not in (WEB_PROFILE, NATIVE_PROFILE):
+        raise AuthoringError('invalid_request')
+    return source_profile
 _AUTHORITY = {'tenant_id', 'organization_id', 'project_id', 'repo_key'}
 _ERRORS = {
     'invalid_request': (422, 'Invalid browser author request.'),
@@ -50,7 +58,8 @@ def _sha(value, size=64):
     return type(value) is str and re.fullmatch('[0-9a-f]{' + str(size) + '}', value) is not None
 
 
-def _request(value):
+def _request(value, *, source_profile=WEB_PROFILE):
+    require_profile(source_profile)
     required = {'edit_id', 'requirements', 'idempotency_key', 'source_operation'}
     try:
         if type(value) is not dict or not required <= value.keys() or value.keys() - required - {'material_refs', 'expected_base_commit'}:
@@ -69,6 +78,8 @@ def _request(value):
             raise ValueError()
         refs = body.setdefault('material_refs', [])
         if type(refs) is not list or len(refs) > 8:
+            raise ValueError()
+        if source_profile == NATIVE_PROFILE and (operation != 'create' or not refs):
             raise ValueError()
         seen = set()
         for ref in refs:
@@ -120,6 +131,10 @@ def _result(result, body):
         if not receipt_digest_matches(receipt, result['receiptDigest']):
             raise ValueError()
         actual = receipt.to_mapping()
+        # This rejects an evident profile/producer mismatch. A changed-path
+        # witness does not establish file contents or replace package evidence.
+        if body['source_profile'] == NATIVE_PROFILE and 'Sources/ContentView.swift' not in receipt.changed_paths:
+            raise ValueError()
         for key in (*_AUTHORITY, 'edit_id', 'actor_binding_id', 'instruction_digest', 'idempotency_key'):
             if actual[key] != body[key]:
                 raise ValueError()
@@ -134,17 +149,7 @@ def _result(result, body):
         raise AuthoringError('source_changed') from None
 
 
-def author(tenant, project_id, request, *, cancelled=None):
-    """Stage complete immutable text/JSON assets; publication stays caller-owned."""
-    request = _request(request)
-    scope = _scope(tenant, project_id)
-
-    def recheck():
-        if cancelled is not None and cancelled():
-            raise AuthoringError('cancelled')
-        if _scope(tenant, project_id) != scope:
-            raise AuthoringError('access_denied')
-
+def _materials(request, scope, recheck, source_profile):
     platform_link._ensure_platform_package()
     from leaf_platform import project_reference_materials as metadata
 
@@ -157,14 +162,17 @@ def author(tenant, project_id, request, *, cancelled=None):
             raise AuthoringError('unavailable') from None
         recheck()
         if (not isinstance(row, dict) or row.get('material_id') != ref['material_id']
-                or row.get('org_id') != scope[0] or row.get('project_id') != scope[1]):
+                or row.get('org_id') != scope[0] or row.get('project_id') != scope[1]
+                or (source_profile == NATIVE_PROFILE and row.get('actor_binding_id') != scope[2])):
             raise AuthoringError('unavailable')
         if row.get('sha256') != ref['sha256']:
             raise AuthoringError('source_changed')
         if row.get('media_type') not in ('text/plain', 'application/json'):
             raise AuthoringError('unsupported_material')
         size = row.get('byte_size')
-        if type(size) is not int or not 0 < size <= MATERIAL_LIMIT or total + size > MATERIAL_LIMIT:
+        per_file = 1048576 if source_profile == NATIVE_PROFILE else MATERIAL_LIMIT
+        aggregate = 4194304 if source_profile == NATIVE_PROFILE else MATERIAL_LIMIT
+        if type(size) is not int or not 0 < size <= per_file or total + size > aggregate:
             raise AuthoringError('material_too_large')
         total += size
         materials.append(copy.deepcopy(row))
@@ -176,6 +184,13 @@ def author(tenant, project_id, request, *, cancelled=None):
         except Exception:
             raise AuthoringError('unavailable') from None
         recheck()
+        if source_profile == NATIVE_PROFILE:
+            try:
+                fresh = metadata.get_material(*scope, row['material_id'])
+            except Exception:
+                raise AuthoringError('unavailable') from None
+            if fresh != row:
+                raise AuthoringError('source_changed')
         if type(raw) is not bytes or len(raw) != row['byte_size'] or hashlib.sha256(raw).hexdigest() != row['sha256']:
             raise AuthoringError('source_changed')
         suffix = '.json' if row['media_type'] == 'application/json' else '.txt'
@@ -183,6 +198,21 @@ def author(tenant, project_id, request, *, cancelled=None):
             'key': 'reference:' + scope[1] + ':' + row['material_id'] + ':' + row['sha256'],
             'sha256': row['sha256'], 'size_bytes': len(raw), 'product_b64': base64.b64encode(raw).decode('ascii')})
     recheck()
+    return wire_material
+
+
+def author(tenant, project_id, request, *, cancelled=None, source_profile=WEB_PROFILE):
+    """Stage complete immutable text/JSON assets; publication stays caller-owned."""
+    request = _request(request, source_profile=source_profile)
+    scope = _scope(tenant, project_id)
+
+    def recheck():
+        if cancelled is not None and cancelled():
+            raise AuthoringError('cancelled')
+        if _scope(tenant, project_id) != scope:
+            raise AuthoringError('access_denied')
+
+    wire_material = _materials(request, scope, recheck, source_profile)
     if request['source_operation'] == 'edit':
         _repo(scope)  # Never initialize a missing edit target.
     try:
@@ -200,7 +230,9 @@ def author(tenant, project_id, request, *, cancelled=None):
         instruction_digest=hashlib.sha256(request['requirements'].encode('utf-8')).hexdigest(),
         idempotency_key=request['idempotency_key'], commit_message='Author browser project',
         requirements=request['requirements'], material=wire_material,
-        source_profile='web-next-static-v1', source_operation=request['source_operation'])
+        source_profile=source_profile, source_operation=request['source_operation'])
+    if source_profile == NATIVE_PROFILE:
+        body['commit_message'] = 'Author native project'
     encoded = json.dumps(body, ensure_ascii=False, separators=(',', ':')).encode('utf-8')
     if len(encoded) > WIRE_LIMIT:
         raise AuthoringError('material_too_large')
@@ -223,6 +255,8 @@ def author(tenant, project_id, request, *, cancelled=None):
             raise AuthoringError('source_changed')
         if response.status_code != 200:
             raise AuthoringError('author_unavailable')
+        if source_profile == NATIVE_PROFILE and len(getattr(response, 'content', b'')) > 256 * 1024:
+            raise AuthoringError('author_unavailable')
         return _result(response.json(object_pairs_hook=source._closed_pairs), body)
     except (requests.RequestException, ValueError) as exc:
         if isinstance(exc, AuthoringError):
@@ -231,3 +265,15 @@ def author(tenant, project_id, request, *, cancelled=None):
     finally:
         if response is not None:
             response.close()
+
+
+def validate_native_materials(tenant, project_id, request, *, cancelled=None):
+    """Check complete originals before reserving a Native dispatch, without source effects."""
+    request = _request(request, source_profile=NATIVE_PROFILE)
+    scope = _scope(tenant, project_id)
+    def recheck():
+        if cancelled is not None and cancelled():
+            raise AuthoringError('cancelled')
+        if _scope(tenant, project_id) != scope:
+            raise AuthoringError('access_denied')
+    _materials(request, scope, recheck, NATIVE_PROFILE)
