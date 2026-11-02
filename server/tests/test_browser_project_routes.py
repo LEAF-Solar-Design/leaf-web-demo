@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sys
+import hashlib
 from pathlib import Path
 
 import pytest
@@ -41,7 +42,7 @@ def test_registered_routes_use_active_public_auth(app, monkeypatch):
     app.dependency_overrides[deps.require_active_tenant] = deny
     monkeypatch.setattr(flow, 'mutate', lambda *a: pytest.fail('unauthenticated mutation'))
     with TestClient(app) as client:
-        for suffix in ('/requests', '/requests/' + EDIT):
+        for suffix in ('/requests', '/requests/' + EDIT, '/requests/' + EDIT + '/export?repo=bad'):
             response = client.get(PREFIX + suffix, headers={'X-Dispatch-Secret': 'untrusted'})
             assert response.status_code == 403
             assert response.headers['cache-control'] == 'private, no-store'
@@ -136,3 +137,67 @@ def test_response_limit_and_fixed_diagnostics(app, monkeypatch):
     with TestClient(app) as client:
         response = client.get(PREFIX + '/requests')
     assert response.status_code == 503 and 'secret' not in response.text
+
+
+@pytest.fixture
+def bundle_route(app, monkeypatch):
+    row = dict(project_id=PROJECT, source_request_id=EDIT, state='published', version=2,
+               source_commit='c' * 40, source_tree='d' * 40, receipt_digest='a' * 64)
+    bundle = b'# v3 git bundle\n@object-format=sha1\n' + b'c' * 40 + b' refs/heads/main\n\nPACK'
+    monkeypatch.setattr(flow, 'repository', lambda *a: dict(tenant_id=ORG, organization_id=ORG,
+        project_id=PROJECT, repo_key=ACTOR))
+    monkeypatch.setattr(flow, 'read', lambda *a: row)
+    calls = []
+    def produce(*a, **kw):
+        calls.append(a)
+        return dict(bundle=bundle, size_bytes=len(bundle), bundle_sha256=hashlib.sha256(bundle).hexdigest(),
+                    source_commit=row['source_commit'], source_tree=row['source_tree'], lease_id=ACTOR)
+    monkeypatch.setattr(routes.source_export.source, 'export_project_source_bundle', produce)
+    query = '?source_commit=' + 'c' * 40 + '&source_tree=' + 'd' * 40 + '&receipt_digest=' + 'a' * 64 + '&version=2'
+    return app, PREFIX + '/requests/' + EDIT + '/export' + query, bundle, calls
+
+
+def test_mounted_export_returns_only_verified_binary(bundle_route):
+    app, url, bundle, calls = bundle_route
+    with TestClient(app) as client:
+        response = client.get(url)
+    assert response.status_code == 200
+    assert response.content == bundle
+    assert response.headers['content-type'] == 'application/octet-stream'
+    assert response.headers['content-length'] == str(len(bundle))
+    assert response.headers['cache-control'] == 'private, no-store'
+    assert response.headers['x-content-type-options'] == 'nosniff'
+    assert response.headers['x-leaf-bundle-sha256'] == hashlib.sha256(bundle).hexdigest()
+    assert not any('lease' in key or 'repo' in key for key in response.headers)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize('suffix', ['&version=2', '&tenant_id=foreign', '&format=zip'])
+def test_mounted_export_closed_query(bundle_route, suffix):
+    app, url, _, calls = bundle_route
+    with TestClient(app) as client:
+        response = client.get(url + suffix)
+    assert response.status_code == 422
+    assert not calls
+
+
+def test_export_project_denial_precedes_bad_query_and_producer(bundle_route, monkeypatch):
+    app, url, _, calls = bundle_route
+    def denied(*a, **kw):
+        raise flow.FlowError(403)
+    monkeypatch.setattr(flow, 'scope', denied)
+    with TestClient(app) as client:
+        response = client.get(url + '&version=garbage')
+    assert response.status_code == 403
+    assert not calls
+
+
+def test_export_hides_unexpected_provider_diagnostics(bundle_route, monkeypatch):
+    app, url, _, _ = bundle_route
+    def fail(*a, **kw):
+        raise RuntimeError('private repo and lease diagnostics')
+    monkeypatch.setattr(routes.source_export.source, 'export_project_source_bundle', fail)
+    with TestClient(app) as client:
+        response = client.get(url)
+    assert response.status_code == 503
+    assert response.json() == {'error': {'code': 'service_unavailable', 'message': str(flow.FlowError(503))}}

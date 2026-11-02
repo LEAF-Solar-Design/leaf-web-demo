@@ -1,9 +1,10 @@
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash, webcrypto } from 'node:crypto'
 import useProjectSourceController from './useProjectSourceController.js'
 import { createCatalogController } from '../controllers/catalog/createCatalogController.js'
 import { readActiveScope, notifyActiveScopeChanged } from '../auth/activeScope.js'
-import { listProjectSourceRequests, stageProjectSource, validateProjectSource } from '../api.js'
+import { listProjectSourceRequests, stageProjectSource, validateProjectSource, exportProjectSourceBundle } from '../api.js'
 
 const PROJECT = '11111111-1111-4111-8111-111111111111'
 const OTHER = '22222222-2222-4222-8222-222222222222'
@@ -57,6 +58,214 @@ async function open(hook, text = brief) {
 }
 beforeEach(() => { localStorage.clear(); signIn() })
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear() })
+
+const bundleBytes = new TextEncoder().encode(`# v2 git bundle\n${'c'.repeat(40)} refs/heads/main\n\nPACK\u0000\u0000\u0000\u0002`)
+const bundleHash = createHash('sha256').update(bundleBytes).digest('hex')
+function bundleReply({ headers = {}, body = bundleBytes, status = 200 } = {}) {
+  return new Response(body, { status, headers: {
+    'Content-Type': 'application/octet-stream', 'Content-Length': String(bundleBytes.byteLength),
+    'Content-Disposition': `attachment; filename="project-source-${'c'.repeat(40)}.bundle"`,
+    'X-Leaf-Source-Commit': 'c'.repeat(40), 'X-Leaf-Source-Tree': 'd'.repeat(40),
+    'X-Leaf-Bundle-Sha256': bundleHash, 'X-Leaf-Source-Receipt-Digest': 'a'.repeat(64),
+    'X-Leaf-Source-Version': '1', 'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff', ...headers,
+  } })
+}
+function downloadEnvironment() {
+  vi.stubGlobal('crypto', webcrypto)
+  const NativeURL = URL
+  const create = vi.fn(() => 'blob:verified-source')
+  const revoke = vi.fn()
+  vi.stubGlobal('URL', class extends NativeURL {
+    static createObjectURL = create
+    static revokeObjectURL = revoke
+  })
+  return { create, revoke }
+}
+
+describe('Verified source bundle download through the real API', () => {
+  it('hashes actual streamed bytes and sends only frozen published witnesses using normal auth', async () => {
+    downloadEnvironment()
+    const fetch = vi.fn(async () => bundleReply())
+    vi.stubGlobal('fetch', fetch)
+    const value = await exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope() })
+    expect(value.sha256).toBe(bundleHash)
+    expect(value.blob.size).toBe(bundleBytes.byteLength)
+    expect(value.filename).toBe(`project-source-${'c'.repeat(40)}.bundle`)
+    const [url, init] = fetch.mock.calls[0]
+    const parsed = new URL(url, 'https://app.example')
+    expect(parsed.pathname).toBe(`/api/projects/${PROJECT}/browser/source/requests/${REQUEST}/export`)
+    expect(Object.fromEntries(parsed.searchParams)).toEqual({ source_commit: 'c'.repeat(40), source_tree: 'd'.repeat(40), receipt_digest: 'a'.repeat(64), version: '1' })
+    expect(init).toMatchObject({ method: 'GET', cache: 'no-store', redirect: 'error', headers: { Authorization: expect.stringMatching(/^Bearer /) } })
+    expect(init.body).toBeUndefined()
+  })
+
+  it.each([
+    { 'Content-Length': '67108865' }, { 'Content-Length': '0' }, { 'Content-Length': '01' },
+    { 'Content-Length': 'garbage' }, { 'Content-Length': '2' }, { 'Content-Type': 'application/zip' },
+    { 'Content-Disposition': 'attachment; filename="bad.zip"' }, { 'X-Leaf-Bundle-Sha256': '0'.repeat(64) },
+    { 'X-Leaf-Source-Commit': 'e'.repeat(40) }, { 'X-Leaf-Source-Tree': 'f'.repeat(40) },
+    { 'X-Leaf-Source-Version': '2' }, { 'X-Leaf-Source-Receipt-Digest': 'b'.repeat(64) },
+    { 'Content-Encoding': 'gzip' },
+  ])('rejects malformed, oversized or mismatched binary metadata: %j', async (headers) => {
+    downloadEnvironment()
+    vi.stubGlobal('fetch', vi.fn(async () => bundleReply({ headers })))
+    await expect(exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope() })).rejects.toThrow()
+  })
+
+  it('rejects altered actual bytes despite valid-looking headers', async () => {
+    downloadEnvironment()
+    const altered = bundleBytes.slice(); altered[altered.length - 1] ^= 1
+    vi.stubGlobal('fetch', vi.fn(async () => bundleReply({ body: altered })))
+    await expect(exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope() })).rejects.toThrow()
+  })
+
+  it('caps streamed bytes and cancels before trusting a misleading length', async () => {
+    downloadEnvironment()
+    const cancel = vi.fn()
+    let reads = 0
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, headers: bundleReply({ headers: { 'Content-Length': '1' } }).headers,
+      body: { getReader: () => ({ read: async () => { reads += 1; return { done: false, value: bundleBytes } }, cancel, releaseLock: vi.fn() }) } })))
+    await expect(exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope() })).rejects.toThrow()
+    expect(reads).toBe(1)
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it('rejects invalid declared length before opening the body reader', async () => {
+    downloadEnvironment()
+    const getReader = vi.fn()
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true,
+      headers: bundleReply({ headers: { 'Content-Length': '67108865' } }).headers, body: { getReader } })))
+    await expect(exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope() })).rejects.toThrow()
+    expect(getReader).not.toHaveBeenCalled()
+  })
+
+  it.each(['scope', 'abort'])('rechecks %s after body bytes arrive', async (change) => {
+    downloadEnvironment()
+    const entered = deferred(), late = deferred(), cancel = vi.fn()
+    const abort = new AbortController()
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, headers: bundleReply().headers,
+      body: { getReader: () => ({ read: () => { entered.resolve(); return late.promise }, cancel, releaseLock: vi.fn() }) } })))
+    const result = exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope(), signal: abort.signal })
+    const rejected = expect(result).rejects.toThrow()
+    await entered.promise
+    if (change === 'scope') signIn('other')
+    else abort.abort()
+    late.resolve({ done: false, value: bundleBytes })
+    await rejected
+    expect(cancel).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(['scope', 'abort'])('rechecks %s after the actual digest completes', async (change) => {
+    downloadEnvironment()
+    const entered = deferred(), late = deferred()
+    const abort = new AbortController()
+    vi.stubGlobal('crypto', { subtle: { digest: async (...args) => {
+      entered.resolve(); await late.promise; return webcrypto.subtle.digest(...args)
+    } } })
+    vi.stubGlobal('fetch', vi.fn(async () => bundleReply()))
+    const result = exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope(), signal: abort.signal })
+    const rejected = expect(result).rejects.toThrow()
+    await entered.promise
+    if (change === 'scope') signIn('other')
+    else abort.abort()
+    late.resolve()
+    await rejected
+  })
+
+  it('accepts a bounded inert arrayBuffer response and verifies its actual digest', async () => {
+    downloadEnvironment()
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, headers: bundleReply().headers,
+      arrayBuffer: async () => bundleBytes.slice().buffer })))
+    const result = await exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope() })
+    expect(result.sha256).toBe(bundleHash)
+  })
+
+  it.each([403, 409, 500, 503])('uses fixed human errors for HTTP %s without reading provider diagnostics', async (status) => {
+    downloadEnvironment()
+    vi.stubGlobal('fetch', vi.fn(async () => bundleReply({ status, body: 'PRIVATE_PROVIDER_LEASE' })))
+    await expect(exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope() })).rejects.toThrow(/Project source/)
+  })
+
+  it('refuses unpublished candidates and already-aborted requests before any GET', async () => {
+    downloadEnvironment()
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(exportProjectSourceBundle(PROJECT, row(), { expectedScope: readActiveScope() })).rejects.toThrow()
+    const abort = new AbortController(); abort.abort()
+    await expect(exportProjectSourceBundle(PROJECT, row({ state: 'published' }), { expectedScope: readActiveScope(), signal: abort.signal })).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('fences duplicate clicks, never mints or posts, and revokes on replacement and close', async () => {
+    const { create, revoke } = downloadEnvironment()
+    const h = setup({ saved: [row({ state: 'published' })], fetcher: (url) => url.includes('/export?') ? bundleReply() : undefined })
+    await open(h)
+    const witness = h.result.current.candidate
+    await act(async () => { await Promise.all([h.result.current.prepareDownload(witness), h.result.current.prepareDownload(witness)]) })
+    expect(h.calls.filter((call) => call.url.includes('/export?'))).toHaveLength(1)
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(h.result.current.download.sha256).toBe(bundleHash)
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+    await act(async () => { await h.result.current.prepareDownload(witness) })
+    expect(revoke).toHaveBeenCalledWith('blob:verified-source')
+    act(() => h.result.current.close())
+    expect(h.result.current.download).toBeNull()
+    expect(revoke).toHaveBeenCalledTimes(2)
+  })
+
+  it('preserves the original candidate and intent when a download is rejected', async () => {
+    const { create, revoke } = downloadEnvironment()
+    let tamper = false
+    const h = setup({ saved: [row({ state: 'published' })], fetcher: (url) => url.includes('/export?')
+      ? bundleReply({ headers: tamper ? { 'X-Leaf-Bundle-Sha256': '0'.repeat(64) } : {} }) : undefined })
+    await open(h)
+    const selected = h.result.current.candidate
+    const intent = h.result.current.intent
+    await act(async () => { await h.result.current.prepareDownload(selected) })
+    tamper = true
+    await act(async () => { await h.result.current.prepareDownload(selected) })
+    expect(h.result.current.candidate).toEqual(selected)
+    expect(h.result.current.intent).toBe(intent)
+    expect(h.result.current.download).toBeNull()
+    expect(h.result.current.error).toMatch(/unavailable/)
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(revoke).toHaveBeenCalledWith('blob:verified-source')
+    expect(h.startAgentTurn).not.toHaveBeenCalled()
+    const before = h.calls.length
+    await act(async () => { await h.result.current.prepareDownload({ ...selected, version: 9 }) })
+    expect(h.calls).toHaveLength(before)
+  })
+
+  it.each(['account', 'project', 'close', 'candidate'])('discards late bytes after %s changes', async (change) => {
+    const { create } = downloadEnvironment()
+    const late = deferred()
+    const h = setup({ saved: [row({ state: 'published' })], fetcher: (url) => url.includes('/export?') ? late.promise : undefined })
+    await open(h)
+    let action
+    act(() => { action = h.result.current.prepareDownload(h.result.current.candidate) })
+    if (change === 'account') act(() => { signIn('other'); notifyActiveScopeChanged() })
+    if (change === 'project') h.rerender({ ...h.props, projectId: OTHER })
+    if (change === 'close') act(() => h.result.current.close())
+    if (change === 'candidate') {
+      h.setDurable([row({ state: 'published', version: 2 })])
+      await act(async () => { await h.result.current.refresh() })
+    }
+    await act(async () => { late.resolve(bundleReply()); await action })
+    expect(create).not.toHaveBeenCalled()
+    expect(h.result.current.download).toBeNull()
+  })
+
+  it.each(['account', 'project', 'unmount'])('revokes ready URLs on %s changes', async (change) => {
+    const { revoke } = downloadEnvironment()
+    const h = setup({ saved: [row({ state: 'published' })], fetcher: (url) => url.includes('/export?') ? bundleReply() : undefined })
+    await open(h)
+    await act(async () => { await h.result.current.prepareDownload(h.result.current.candidate) })
+    if (change === 'account') act(() => { signIn('other'); notifyActiveScopeChanged() })
+    if (change === 'project') h.rerender({ ...h.props, projectId: OTHER })
+    if (change === 'unmount') h.unmount()
+    expect(revoke).toHaveBeenCalledWith('blob:verified-source')
+  })
+})
 
 describe('Browser source through the real API', () => {
   it('mints shared intent before the exact metadata-only POST and explicitly confirms once', async () => {

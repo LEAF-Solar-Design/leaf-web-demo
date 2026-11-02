@@ -153,6 +153,84 @@ export const confirmProjectSource = (projectId, requestId, body, options) => pro
 export const recoverProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'recover', body, options)
 export const rejectProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'reject', body, options)
 
+export async function exportProjectSourceBundle(projectId, candidate, { expectedScope, signal } = {}) {
+  sourceId(projectId)
+  // Freeze caller witnesses before the first await; they never select a newer version.
+  const row = { ...validateProjectSource(candidate, projectId) }
+  if (row.state !== 'published') throw sourceUnavailable()
+  const current = () => expectedScope && !signal?.aborted && readActiveScope() === expectedScope
+    && !!authHeaders().Authorization && !isMockConversation()
+  const check = () => { if (!current()) throw sourceUnavailable() }
+  check()
+  const query = new URLSearchParams({ source_commit: row.source_commit, source_tree: row.source_tree,
+    receipt_digest: row.receipt_digest, version: String(row.version) })
+  const path = `/api/projects/${projectId}/browser/source/requests/${row.source_request_id}/export?${query}`
+  let response
+  try {
+    response = await apiFetch(`${API_BASE}${path}`, { method: 'GET', cache: 'no-store', redirect: 'error',
+      signal, headers: authHeaders() }, path)
+  } catch { throw sourceUnavailable() }
+  check()
+  if (!response.ok) {
+    throw new Error(response.status === 403 ? 'Project source access denied.'
+      : response.status === 409 ? 'Project source changed. Refresh and review before downloading.'
+        : 'Project source download is unavailable. Try again later.')
+  }
+  const cap = 64 * 1024 * 1024
+  const headers = response.headers
+  const filename = `project-source-${row.source_commit}.bundle`
+  const declared = headers.get('Content-Length')
+  const sha256 = headers.get('X-Leaf-Bundle-Sha256')
+  if (headers.get('Content-Type') !== 'application/octet-stream'
+    || headers.get('Content-Disposition') !== `attachment; filename="${filename}"`
+    || !/^[1-9][0-9]{0,7}$/.test(declared || '') || Number(declared) > cap
+    || !sourceHash(sha256, 64) || headers.get('X-Leaf-Source-Commit') !== row.source_commit
+    || headers.get('X-Leaf-Source-Tree') !== row.source_tree
+    || headers.get('X-Leaf-Source-Version') !== String(row.version)
+    || headers.get('X-Leaf-Source-Receipt-Digest') !== row.receipt_digest
+    || headers.get('Cache-Control') !== 'private, no-store'
+    || headers.get('X-Content-Type-Options') !== 'nosniff'
+    || !['identity', null].includes(headers.get('Content-Encoding'))) throw sourceUnavailable()
+  let bytes
+  if (response.body?.getReader) {
+    // Use the intrinsic brand across realms without trusting a caller-supplied tag.
+    const typedArrayBrand = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(Uint8Array.prototype), Symbol.toStringTag).get
+    bytes = new Uint8Array(Number(declared))
+    const reader = response.body.getReader()
+    let total = 0, complete = false
+    try {
+      while (true) {
+        check()
+        const { done, value } = await reader.read()
+        check()
+        if (done) { complete = true; break }
+        if (!ArrayBuffer.isView(value) || typedArrayBrand.call(value) !== 'Uint8Array'
+          || total + value.byteLength > Math.min(cap, Number(declared))) throw sourceUnavailable()
+        bytes.set(value, total)
+        total += value.byteLength
+      }
+      if (total !== Number(declared)) throw sourceUnavailable()
+    } finally {
+      if (!complete) { try { await reader.cancel() } catch { /* Discard rejected bytes. */ } }
+      reader.releaseLock()
+    }
+  } else {
+    // Bounded inert responses in tests; real Fetch responses provide a stream.
+    bytes = new Uint8Array(await response.arrayBuffer())
+  }
+  check()
+  if (bytes.byteLength !== Number(declared) || bytes.byteLength > cap || !globalThis.crypto?.subtle) throw sourceUnavailable()
+  const signature = new TextDecoder().decode(bytes.subarray(0, 16))
+  if (!signature.startsWith('# v2 git bundle\n') && !signature.startsWith('# v3 git bundle\n')) throw sourceUnavailable()
+  const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+  check()
+  const actual = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('')
+  if (actual !== sha256) throw sourceUnavailable()
+  return { blob: new Blob([bytes], { type: 'application/octet-stream' }), filename, sha256,
+    sourceCommit: row.source_commit, sourceTree: row.source_tree, version: row.version,
+    receiptDigest: row.receipt_digest, sourceRequestId: row.source_request_id, projectId }
+}
+
 // Intake and catalog loads carry the shell's current mode, including empty or
 // fixture workspaces that skip intake. Conversation authoring reads that same
 // choice instead of build defaults or URL parameters. Default to live.

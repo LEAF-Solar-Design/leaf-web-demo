@@ -1,5 +1,6 @@
 import { useLifecycleDialog } from '../projects/CloneDialog.jsx'
 import { sourceMaterialProblem } from './useProjectSourceController.js'
+import { validateProjectSource } from '../api.js'
 
 export default function ProjectSourceCandidateReview({ controller }) {
   const c = controller
@@ -8,7 +9,13 @@ export default function ProjectSourceCandidateReview({ controller }) {
   const row = c.candidate
   const witness = row && { source_request_id: row.source_request_id, receipt_digest: row.receipt_digest, version: row.version }
   const reviewable = !c.unknown && ['staged', 'awaiting_confirmation'].includes(row?.state)
-  const disabled = c.busy || c.loading || c.materialsLoading
+  const disabled = c.busy || c.exportBusy || c.loading || c.materialsLoading
+  let exportable = false
+  try { exportable = row?.state === 'published' && !!validateProjectSource(row, c.projectId) } catch { /* Invalid readback cannot be exported. */ }
+  const downloadReady = exportable && !c.unknown && !c.loading && c.sourceLoaded && c.download
+    && c.download.sourceRequestId === row.source_request_id && c.download.version === row.version
+    && c.download.receiptDigest === row.receipt_digest && c.download.sourceCommit === row.source_commit
+    && c.download.sourceTree === row.source_tree && c.download.projectId === c.projectId
   const frozen = c.unknown || c.candidates.some((item) => ['staged', 'awaiting_confirmation', 'publishing'].includes(item.state))
   const displayedIntent = c.intent && (!row || c.intent.source_request_id === row.source_request_id) ? c.intent : null
   return <div className="clone-dialog-backdrop" role="presentation">
@@ -52,7 +59,15 @@ export default function ProjectSourceCandidateReview({ controller }) {
           <p>Candidate digest: {row.receipt_digest}</p>
           <p>Changed paths</p><ul>{row.changed_paths.map((path) => <li key={path}>{path}</li>)}</ul>
         </div>}
+        {c.exportBusy && <p role="status">Verifying source download…</p>}
+        {downloadReady && <div><p role="status">Source download ready</p>
+          <p>Git source bundle for this saved version. Private source only; app build and private preview are still pending.</p>
+          <a href={c.download.url} download={c.download.filename}>Download Git source bundle</a>
+          <p>SHA256: {c.download.sha256}</p>
+        </div>}
         <div className="clone-dialog-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          <button type="button" className="chip-act" disabled={disabled || c.unknown || !c.sourceLoaded || !exportable}
+            onClick={() => c.prepareDownload(witness)}>Prepare source download</button>
           <button type="button" className="chip-act" onClick={() => c.stage()} disabled={disabled || c.unknown || !c.sourceLoaded || !c.materialsComplete || !c.selectionReviewed || !!c.selectionProblem || !c.requirements.trim() || frozen}>Stage source</button>
           {c.secretRefusal?.overridable && <button type="button" disabled={disabled} onClick={() => c.stage({ allowSecretOnce: true })}>Send anyway</button>}
           <button type="button" className="chip-act" disabled={disabled || !reviewable} onClick={() => c.confirm(witness)}>Confirm changes</button>

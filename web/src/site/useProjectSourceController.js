@@ -3,7 +3,7 @@ import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { listProjectReferences } from '../projects/api.js'
 import {
   isSourceUuid, listProjectSourceRequests, readProjectSourceRequest, stageProjectSource,
-  confirmProjectSource, recoverProjectSource, rejectProjectSource,
+  confirmProjectSource, recoverProjectSource, rejectProjectSource, exportProjectSourceBundle, validateProjectSource,
 } from '../api.js'
 import { isSecretRefused } from '../lib/secretGuardTransport.js'
 
@@ -11,7 +11,14 @@ const LIMIT = 8 * 1024 * 1024
 const pending = (row) => ['staged', 'awaiting_confirmation', 'publishing'].includes(row?.state)
 const freshState = () => ({ open: false, requirements: '', materials: [], selected: [], materialsComplete: false,
   selectionReviewed: false, candidates: [], candidate: null, intent: null, busy: false, loading: false, sourceLoaded: false,
-  error: null, secretRefusal: null, unknown: false, materialsLoading: false, unsupportedInputs: [] })
+  error: null, secretRefusal: null, unknown: false, materialsLoading: false, unsupportedInputs: [],
+  exportBusy: false, download: null })
+function discardDownload(owner) {
+  if (!owner) return
+  owner.exportEpoch = (owner.exportEpoch || 0) + 1
+  if (owner.downloadUrl) URL.revokeObjectURL(owner.downloadUrl)
+  owner.downloadUrl = null
+}
 export function sourceMaterialProblem(row, projectId, orgId) {
   if (!row || !isSourceUuid(row.material_id) || row.project_id !== projectId || row.org_id !== orgId
     || !isSourceUuid(row.actor_binding_id) || typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.sha256)
@@ -40,6 +47,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     const previous = live.current
     if (previous && readActiveScope() !== previous.accountScope) {
       previous.abort.abort()
+      discardDownload(previous)
       live.current = null
     }
     accountChanged((value) => value + 1)
@@ -47,8 +55,12 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
   const accountScope = readActiveScope()
   const key = JSON.stringify([projectId, orgId, accountScope, !!signedIn, !!mock])
   const live = useRef(null)
-  if (live.current?.key !== key) live.current = { key, projectId, orgId, accountScope, signedIn, mock,
-    abort: new AbortController(), locked: false, sequence: 0, state: freshState() }
+  if (live.current?.key !== key) {
+    live.current?.abort.abort()
+    discardDownload(live.current)
+    live.current = { key, projectId, orgId, accountScope, signedIn, mock,
+      abort: new AbortController(), locked: false, sequence: 0, state: freshState() }
+  }
   const owner = live.current
   owner.startAgentTurn = startAgentTurn
   const [view, setView] = useState(() => ({ owner, ...owner.state }))
@@ -61,7 +73,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
   useEffect(() => {
     if (owner.abort.signal.aborted) owner.abort = new AbortController()
     if (!live.current) live.current = owner
-    return () => { owner.abort.abort(); if (live.current === owner) live.current = null }
+    return () => { owner.abort.abort(); discardDownload(owner); if (live.current === owner) live.current = null }
   }, [owner])
   const available = () => {
     if (!owner.signedIn || owner.mock || !owner.accountScope) return 'Source authoring needs a signed-in live account.'
@@ -69,6 +81,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     return null
   }
   const options = () => ({ expectedScope: owner.accountScope, signal: owner.abort.signal })
+  const clearDownload = () => { discardDownload(owner); publish({ download: null }) }
   const accept = (row) => {
     const previous = owner.state.candidates.find((item) => item.source_request_id === row.source_request_id)
     const differs = (key) => JSON.stringify(row[key]) !== JSON.stringify(previous?.[key])
@@ -89,6 +102,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
   }
   const refresh = async () => {
     if (owner.locked) return
+    clearDownload()
     const issue = available()
     if (issue) { publish({ error: issue }); return }
     const sequence = ++owner.sequence
@@ -158,7 +172,8 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     return true
   }
   const mutate = async (action, { allowSecretOnce = false, witness } = {}) => {
-    if (owner.locked || !current()) return
+    if (owner.locked || owner.exportLocked || !current()) return
+    clearDownload()
     owner.locked = true // Click fencing must precede React's next render.
     let sent = false, minting = false, requestId
     publish({ busy: true, error: null, secretRefusal: null })
@@ -230,16 +245,50 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
       publish({ busy: false })
     }
   }
+  const prepareDownload = async (witness) => {
+    if (owner.exportLocked || owner.locked || !current()) return
+    clearDownload()
+    owner.exportLocked = true // Fence duplicate clicks before React renders.
+    const epoch = owner.exportEpoch
+    const sequence = owner.sequence
+    const row = owner.state.candidate && { ...owner.state.candidate }
+    const matches = () => {
+      const selected = owner.state.candidate
+      return current() && owner.state.open && epoch === owner.exportEpoch && sequence === owner.sequence
+        && !owner.state.unknown && !owner.state.loading && owner.state.sourceLoaded
+        && row?.state === 'published' && selected?.state === 'published'
+        && ['source_request_id', 'version', 'receipt_digest', 'source_commit', 'source_tree'].every((key) => selected[key] === row[key])
+    }
+    publish({ exportBusy: true, error: null })
+    try {
+      if (available() || !matches() || !witness
+        || ['source_request_id', 'version', 'receipt_digest'].some((key) => witness[key] !== row[key])) throw new Error('Refresh and review the saved source before downloading.')
+      validateProjectSource(row, owner.projectId)
+      const result = await exportProjectSourceBundle(owner.projectId, row, options())
+      if (!matches()) return
+      owner.downloadUrl = URL.createObjectURL(result.blob)
+      publish({ download: { ...result, blob: undefined, url: owner.downloadUrl } })
+    } catch (error) {
+      if (current() && epoch === owner.exportEpoch) {
+        clearDownload()
+        publish({ error: error?.message || 'Project source download is unavailable.' })
+      }
+    } finally {
+      owner.exportLocked = false
+      publish({ exportBusy: false })
+    }
+  }
   const state = view.owner === owner ? view : owner.state
   return { ...state, isOpen: state.open, projectId, orgId,
     selectionProblem: sourceSelectionProblem(state.materials, state.selected, projectId, orgId),
-    open, close: () => publish({ open: false }), refresh,
+    open, close: () => { clearDownload(); publish({ open: false }) }, refresh, prepareDownload,
     refreshMaterials: () => { if (!owner.locked) void loadMaterials() },
     setRequirements: (requirements) => { if (!owner.locked) publish({ requirements }) },
     toggleMaterial: (id) => { if (!owner.locked) publish({ selected: owner.state.selected.includes(id)
       ? owner.state.selected.filter((value) => value !== id) : [...owner.state.selected, id], selectionReviewed: true }) },
     reviewSelection: () => publish({ selectionReviewed: true }),
     selectCandidate: (id) => { if (!owner.locked && !owner.state.loading) {
+      clearDownload()
       const sequence = ++owner.sequence
       publish({ candidate: null, loading: true, sourceLoaded: false })
       void readBack(id, sequence).catch(() => {
