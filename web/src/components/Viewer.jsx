@@ -4,7 +4,7 @@ import { blockDefinitions } from './viewerIntake.js'
 import { createCameraChannel } from './cameraChannel.js'
 import { viewportFromCamera } from './viewerMath.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
-import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
+import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
@@ -361,10 +361,11 @@ const Viewer = forwardRef(function Viewer(
     // draws exactly as before ([] appended).
     const roundPolylines = intakeRoundPolylines(activeIntake)
     const intakePolylines = expandBulgedPolylines(activeIntake.polylines || [])
-    const polylines = roundPolylines.length
-      ? [...intakePolylines, ...roundPolylines]
+    const blocks = projectServerBlocks(activeIntake)
+    const polylines = roundPolylines.length || blocks.polylines.length
+      ? [...intakePolylines, ...roundPolylines, ...blocks.polylines]
       : intakePolylines
-    const inserts = activeIntake.inserts || []
+    const inserts = blocks.inserts
     const faces3d = activeIntake.faces3d || []
     // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
     // shown through applyVersion) and a live AutoCAD (bridge) drawing draw
@@ -540,7 +541,8 @@ const Viewer = forwardRef(function Viewer(
     for (const ins of inserts) {
       if (!ins.pt) continue
       const definition = definitions.get(String(ins.name).toUpperCase())
-      if (definition?.complete === true && definition.baseUnknown !== true && ins.incomplete !== true) continue
+      if (ins.incomplete === false || ((activeIntake.source === 'engine' || activeIntake.source === 'bridge')
+        && definition?.complete === true && definition.baseUnknown !== true && ins.incomplete !== true)) continue
       const geom = new THREE.PlaneGeometry(hs * 2, hs * 2)
       const mat = new THREE.MeshBasicMaterial({
         color: insertColor, transparent: true, opacity: 0.18, depthWrite: false,

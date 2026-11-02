@@ -6,7 +6,7 @@
 // the engine holds while a DXF is open and the prompts have something to point
 // at. Bounded and fail-closed: a malformed entity is skipped, never thrown on;
 // a huge document is truncated at MAX_POINTS with the truncation reported.
-import { MAX_GLYPH_CHARS, textGlyphPolylines } from '../components/viewerIntake.js'
+import { blockDefinitions, MAX_GLYPH_CHARS, textGlyphPolylines } from '../components/viewerIntake.js'
 
 export const MAX_POINTS = 200_000
 export const CIRCLE_SEGMENTS = 48
@@ -496,7 +496,7 @@ export function entityToPolyline(entity, markSize = POINT_MARK) {
  * entities were dropped past MAX_POINTS (an honest number for the status
  * line, never a silent cut).
  */
-export function expandBlockReference(insert, definition) {
+export function expandBlockReference(insert, definition, options = {}) {
   if (definition?.baseUnknown === true) return { polylines: [], complete: false }
   const base = point(definition?.base)
   const ip = point(insert?.ip)
@@ -514,11 +514,19 @@ export function expandBlockReference(insert, definition) {
   const cells = Math.min(columns * rows, MAX_ARRAY_CELLS)
   const children = Array.isArray(definition?.children) ? definition.children : []
   let complete = definition?.complete === true && children.length <= BLOCK_CHILD_CAP && columns * rows <= MAX_ARRAY_CELLS
+  const pointLimit = Number.isSafeInteger(options.pointLimit) ? Math.max(0, options.pointLimit) : Infinity
+  const normal = insert.normal
+  if (normal !== undefined && (!Array.isArray(normal) || normal.length !== 3
+    || !normal.every(finite) || !finite(Math.hypot(...normal))
+    || Math.hypot(...normal) <= 1e-12)) return { polylines: [], complete: false }
+  const basis = ocsBasisForNormal(normal)
   const rad = rotation * Math.PI / 180
   const cos = Math.cos(rad)
   const sin = Math.sin(rad)
-  const handle = hexHandle(insert.id ?? insert.handle ?? '')
+  const handle = typeof insert.sourceHandle === 'string' ? insert.sourceHandle : hexHandle(insert.id ?? insert.handle ?? '')
   const polylines = []
+  let points = 0, truncated = 0
+  if (children.length && pointLimit < 2) return { polylines, complete: false, truncated: children.length * cells }
   for (const child of children.slice(0, BLOCK_CHILD_CAP)) {
     if (!['LINE', 'LWPOLYLINE', 'POLYLINE', 'CIRCLE', 'ARC', 'TEXT'].includes(child?.type)) { complete = false; continue }
     // Sample in child coordinates first so non-uniform scale and mirrors
@@ -526,6 +534,7 @@ export function expandBlockReference(insert, definition) {
     const pl = entityToPolyline(child)
     if (!pl) { complete = false; continue }
     for (let cell = 0; cell < cells; cell += 1) {
+      if (points + pl.pts.length > pointLimit) { complete = false; truncated += cells - cell; break }
       const column = cell % columns
       const row = Math.floor(cell / columns)
       const pts = pl.pts.map((p) => {
@@ -533,13 +542,116 @@ export function expandBlockReference(insert, definition) {
         const y = (p[1] - base[1]) * scale[1]
         // The pinned Insert::array_transforms adds spacing to the insertion
         // point, outside both the child's scale and rotation.
-        return [ip[0] + column * columnSpacing + x * cos - y * sin, ip[1] + row * rowSpacing + x * sin + y * cos, ip[2] + (p[2] - base[2]) * scale[2]]
+        const relative = [x * cos - y * sin, x * sin + y * cos, (p[2] - base[2]) * scale[2]]
+        const world = basis ? ocsToWcs(relative, basis) : relative
+        return [ip[0] + column * columnSpacing + world[0], ip[1] + row * rowSpacing + world[1], ip[2] + world[2]]
       })
       if (pts.some((p) => !p.every(finite))) { complete = false; continue }
       polylines.push({ ...pl, handle, sourceHandle: handle, layer: pl.layer === '0' ? (insert.layer || '0') : pl.layer, pts })
+      points += pts.length
     }
   }
-  return { polylines, complete }
+  return { polylines, complete, ...(finite(pointLimit) ? { truncated } : {}) }
+}
+
+function serverPoint(value) {
+  if (!Array.isArray(value) || !finite(value[0]) || !finite(value[1])
+    || (value[2] !== undefined && !finite(value[2]))) return null
+  return point(value)
+}
+
+// The server's BKE catalogue uses kind/pts and OCS coordinates; the engine
+// uses type/vertices. Sample each stored definition once, then use the same
+// base/scale/rotation projector as an engine INSERT. Never change the intake.
+function serverBlockChild(child) {
+  if (!child || typeof child !== 'object') return null
+  if (typeof child.type === 'string' && Array.isArray(child.vertices)) {
+    if (child.vertices.length > MAX_POINTS || !child.vertices.every(serverPoint)) return null
+    if (child.type === 'TEXT' && (typeof child.text !== 'string' || child.text.length > MAX_GLYPH_CHARS)) return null
+    return entityToPolyline(child)
+  }
+  const kind = child.kind
+  if (!['LINE', 'LWPOLYLINE', 'CIRCLE', 'ARC'].includes(kind)) return null
+  let vertices
+  if (kind === 'LINE' || kind === 'LWPOLYLINE') {
+    if (!Array.isArray(child.pts) || child.pts.length < 2 || child.pts.length > MAX_POINTS
+      || !child.pts.every((p) => Array.isArray(p) && finite(p[0]) && finite(p[1])
+        && (p[2] === undefined || finite(p[2])))) return null
+    if (kind === 'LWPOLYLINE' && child.elev !== undefined && !finite(child.elev)) return null
+    vertices = child.pts.map((p) => [p[0], p[1], kind === 'LWPOLYLINE' ? (child.elev ?? 0) : (p[2] ?? 0)])
+  } else {
+    if (!serverPoint(child.c)) return null
+    vertices = [child.c]
+  }
+  const row = { type: kind, layer: typeof child.layer === 'string' && child.layer ? child.layer : '0',
+    vertices, closed: child.closed === true, radius: child.r, startDeg: child.start_deg, endDeg: child.end_deg,
+    bulges: child.bulges }
+  const pl = entityToPolyline(row)
+  if (!pl) return null
+  if (kind === 'LINE') return pl
+  const normal = child.nrm ?? [0, 0, 1]
+  if (!Array.isArray(normal) || normal.length !== 3 || !normal.every(finite) || !finite(Math.hypot(...normal))
+    || Math.hypot(...normal) <= 1e-12) return null
+  const basis = ocsBasisForNormal(normal)
+  return basis ? { ...pl, pts: pl.pts.map((p) => ocsToWcs(p, basis)) } : pl
+}
+
+export function projectServerBlocks(intake) {
+  const originals = Array.isArray(intake?.inserts) ? intake.inserts : []
+  // These paths have already gone through their own geometry projection.
+  if (intake?.source === 'engine' || intake?.source === 'bridge') {
+    return { polylines: [], inserts: originals, truncated: 0, incompleteInserts: 0 }
+  }
+  const definitions = blockDefinitions(intake)
+  const cache = new Map()
+  const polylines = [], inserts = []
+  let points = 0, sampledPoints = 0, truncated = 0
+  const normalizedDefinition = (name) => {
+    if (cache.has(name)) return cache.get(name)
+    const source = definitions.get(name)
+    if (!source) { cache.set(name, null); return null }
+    const children = [], rows = Array.isArray(source.children) ? source.children : []
+    let complete = source.complete === true && rows.length <= BLOCK_CHILD_CAP
+    if (source.count !== undefined && source.count !== rows.length) complete = false
+    for (const child of rows.slice(0, BLOCK_CHILD_CAP)) {
+      if (sampledPoints >= MAX_POINTS) { complete = false; truncated++; break }
+      const pl = serverBlockChild(child)
+      if (!pl) { complete = false; continue }
+      if (sampledPoints + pl.pts.length > MAX_POINTS) { complete = false; truncated++; continue }
+      sampledPoints += pl.pts.length
+      children.push({ type: 'LWPOLYLINE', layer: pl.layer, vertices: pl.pts, closed: pl.closed })
+    }
+    const result = { base: serverPoint(source.base), baseUnknown: source.baseUnknown, complete, children }
+    cache.set(name, result)
+    return result
+  }
+  for (let i = 0; i < Math.min(originals.length, MAX_POINTS); i++) {
+    const source = originals[i]
+    if (!source || typeof source !== 'object') continue
+    const positioned = Array.isArray(source.pt)
+    const ip = positioned ? serverPoint(source.pt) : (finite(source.x) && finite(source.y)
+      && (source.z === undefined || finite(source.z)) ? [source.x, source.y, source.z ?? 0] : null)
+    if (!ip) continue
+    const rotation = source.rot ?? 0
+    const normal = source.nrm ?? [0, 0, 1]
+    const row = { ...source, ip, pt: ip, sourceHandle: String(source.handle ?? ''),
+      layer: typeof source.layer === 'string' && source.layer ? source.layer : '0',
+      scale: source.scale ?? [1, 1, 1], normal,
+      rotationDeg: finite(rotation) ? (positioned ? rotation : rotation * 180 / Math.PI) : NaN }
+    const definition = normalizedDefinition(String(source.name).toUpperCase())
+    const expanded = definition ? expandBlockReference(row, definition, { pointLimit: MAX_POINTS - points })
+      : { polylines: [], complete: false }
+    for (const pl of expanded.polylines) { polylines.push(pl); points += pl.pts.length }
+    truncated += expanded.truncated ?? 0
+    const markerScale = Array.isArray(row.scale) && row.scale.length === 3 && row.scale.every(finite)
+      ? row.scale : [1, 1, 1]
+    inserts.push({ ...source, handle: row.sourceHandle, pt: ip,
+      rot: finite(row.rotationDeg) ? row.rotationDeg : 0,
+      scale: markerScale, incomplete: source.incomplete === true || !expanded.complete })
+  }
+  truncated += Math.max(0, originals.length - MAX_POINTS)
+  return { polylines, inserts, truncated,
+    incompleteInserts: inserts.filter((insert) => insert.incomplete).length }
 }
 
 export function engineIntake(entities, documentId = '', catalogue = entities?.blocks, sourceEntityCount = null) {
