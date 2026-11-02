@@ -1,5 +1,6 @@
 """Acquisition recovery actions survive the completion runtime stage receipt."""
 from copy import deepcopy
+import importlib
 from types import SimpleNamespace
 import uuid
 
@@ -9,12 +10,19 @@ import campaign_acquisition_service as acquisition
 import campaign_release_service as runtime
 
 
+@pytest.fixture
+def canonical():
+    import job_pg_store
+    job_pg_store._db()  # Register the existing platform package, no DB connection.
+    return importlib.import_module('leaf_platform.campaign_release')
+
+
 @pytest.mark.parametrize('workflow', [
     '  Design feeder routing, parts and cost from this structured input.\n'
     + 'Preserve every constraint and report unresolved requirements.\n' * 30 + 'Final constraint: café.  ',
     'Deliver feeder_request.json unchanged.\nVerify the downloaded file.',
 ])
-def test_compile_preserves_exact_request_without_claiming_existing_file_fulfills_it(monkeypatch, workflow):
+def test_compile_preserves_exact_request_without_claiming_existing_file_fulfills_it(monkeypatch, workflow, canonical):
     from routers import campaigns
 
     source = '{"feeders":[{"name":"F1","load":100}]}'
@@ -38,6 +46,49 @@ def test_compile_preserves_exact_request_without_claiming_existing_file_fulfills
     assert len(contract['required_checks']) == 5
     assert not any(key in contract for key in ('web_recipe', 'transform_recipe', 'cad_recipe'))
     assert state == before
+    stored = canonical._contract(deepcopy(contract), 'cad_file')
+    assert stored == contract
+    assert stored['requested_workflow'] == workflow
+    assert stored['original_goal'] == 'Original campaign goal'
+
+    legacy = deepcopy(contract)
+    del legacy['requested_workflow']
+    del legacy['scope_classification']
+    assert canonical._contract(deepcopy(legacy), 'cad_file') == legacy
+
+    bounded = deepcopy(contract)
+    bounded['requested_workflow'] = ' ' + 'x' * 16382 + ' '
+    assert canonical._contract(deepcopy(bounded), 'cad_file') == bounded
+
+    for mutate in [
+        lambda c: c.update(extra='unsupported'),
+        *[lambda c, text=text: c.update(requested_workflow=text)
+          for text in (None, True, 1, [], {}, '', ' \n\t', 'x' * 16385, 'text\x00')],
+        *[lambda c, classification=classification: c.update(scope_classification=classification)
+          for classification in (None, True, 1, 'unverified', [])],
+        lambda c: c['scope_classification'].update(extra='unsupported'),
+        *[lambda c, version=version: c['scope_classification'].update(version=version)
+          for version in (True, 1.0, '1', 0, 2, None)],
+        *[lambda c, capability=capability: c['scope_classification'].update(capability=capability)
+          for capability in ('requested_workflow', None, 1, [], {})],
+        *[lambda c, status=status: c['scope_classification'].update(requested_workflow_status=status)
+          for status in ('verified', None, True, [], {})],
+        *[lambda c, field=field: c['scope_classification'].pop(field)
+          for field in ('version', 'capability', 'requested_workflow_status')],
+        lambda c: c.pop('requested_workflow'),
+        lambda c: c.pop('selected_artifact'),
+        lambda c: c.update(selected_artifact=None),
+        lambda c: c['selected_artifact'].update(bytes_verified=False),
+        lambda c: c['selected_artifact'].update(extra='unsupported'),
+        *[lambda c, field=field: c.update({field: None})
+          for field in ('web_recipe', 'transform_recipe', 'cad_recipe')],
+        lambda c: c['scope_classification'].update(command='execute'),
+        lambda c: c['scope_classification'].update(token='credential'),
+    ]:
+        invalid = deepcopy(contract)
+        mutate(invalid)
+        with pytest.raises(canonical.CampaignError):
+            canonical._contract(invalid, 'cad_file')
 
 
 @pytest.mark.parametrize('adapter', ['web', 'transform', 'cad'])
