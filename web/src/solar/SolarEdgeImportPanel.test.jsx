@@ -63,6 +63,21 @@ async function build() {
 }
 
 describe('SolarEdgeImportPanel', () => {
+  it('shows canonical source UUIDs without passing them through the legacy integer contract', async () => {
+    const version = '44444444-4444-4444-4444-444444444444'
+    const canonicalSource = { ...source(), input_version_id: version }
+    const canonicalReport = { ...report(), input_version_id: version }
+    delete canonicalSource.source_version
+    delete canonicalReport.source_version
+    const { props } = setup({ drawingVersion: version, client: {
+      uploadPdf: vi.fn(async () => success(canonicalSource)), requestReport: vi.fn(async () => success(canonicalReport)),
+    } })
+    await upload(); await build()
+    expect(screen.getByText(`Report source version: ${version}.`)).toBeTruthy()
+    fireEvent.click(acceptButton())
+    expect(props.onAccept).toHaveBeenCalledWith({ expected_rev: 12, report_artifact_id: reportId })
+  })
+
   it('SE16 accepts one report once', async () => {
     const { props } = setup({ onAccept: vi.fn(() => undefined) })
     await upload(); await build()

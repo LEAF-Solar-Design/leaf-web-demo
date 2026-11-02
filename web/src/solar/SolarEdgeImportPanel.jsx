@@ -197,7 +197,7 @@ export default function SolarEdgeImportPanel({
       {pending && <p>{SOLAREDGE_PANEL_REASONS.request_pending}</p>}
       {sourceValue && <>
         <h3>2. Build the report</h3>
-        <p>Uploaded PDF: {sourceValue.page_count} pages. Source version: {sourceValue.source_version}.</p>
+        <p>Uploaded PDF: {sourceValue.page_count} pages. Source version: {sourceValue.input_version_id ?? sourceValue.source_version}.</p>
         <label>Alignment tolerance<input type="text" required value={tolerance}
           aria-describedby={toleranceHint} aria-invalid={!parsed.ok} disabled={disabled || busy}
           onChange={(event) => setTolerance(event.target.value)} /></label>
@@ -212,7 +212,7 @@ export default function SolarEdgeImportPanel({
       {reportValue && <section aria-label="Report review">
         <h3>3. Review the tracking labels</h3>
         <p>The report labels which panels belong to which SolarEdge string. Accepting records those labels on the design.</p>
-        <p>Report source version: {reportValue.source_version}.</p>
+        <p>Report source version: {reportValue.input_version_id ?? reportValue.source_version}.</p>
         <table aria-label="SolarEdge report counts"><thead><tr><th scope="col">Count</th><th scope="col">Total</th></tr></thead>
           <tbody>{reportSummary(reportValue).map((row) => <tr key={row.key}><th scope="row">{row.label}</th><td>{row.value}</td></tr>)}</tbody>
         </table>

@@ -255,6 +255,12 @@ export const PROJECT_SOLAR_REVIEW_TOOLS = Object.freeze([
   'solar-settings', 'solar-panels-from-drawing', 'solar-size-strings',
   'solar-string-add', 'solar-string-multi-add', 'solar-solve-proposal', 'solar-commit-solve', 'solar-correct-string',
   'solar-string-conductors', 'solar-assign-equipment',
+  'solar-solaredge-accept', 'solar-solaredge-tracking-read',
+])
+
+export const PROJECT_SOLAR_SOLAREDGE_STAGES = Object.freeze([
+  flowStage('import', 'Upload, match and accept tracking', ['solar-solaredge-accept']),
+  flowStage('review', 'Review accepted tracking', ['solar-solaredge-tracking-read']),
 ])
 
 export const PROJECT_SOLAR_ROOFTOP_STAGES = Object.freeze([
@@ -299,7 +305,8 @@ export function projectSolarRailReason(code) {
 export function projectSolarFlowSelect(families, flowId) {
   const id = solarFlowId(flowId)
   const flow = SOLAR_FLOWS.find((entry) => entry.id === id)
-  const stages = id === DEFAULT_SOLAR_FLOW ? PROJECT_SOLAR_ROOFTOP_STAGES : flow.stages
+  const stages = id === DEFAULT_SOLAR_FLOW ? PROJECT_SOLAR_ROOFTOP_STAGES
+    : id === 'solaredge-import' ? PROJECT_SOLAR_SOLAREDGE_STAGES : flow.stages
   const grouped = new Map()
   let visited = 0
   let unreadable = false
