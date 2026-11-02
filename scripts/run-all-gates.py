@@ -3666,6 +3666,11 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_material_inspection.py"), 134),
         Suite("server-project-reference-materials", "server tests/test_project_reference_materials.py", "pytest", SERVER,
               _py_pytest("tests/test_project_reference_materials.py"), 25),
+        # BSP43 accepted focused floors; run through the normal server CI rail.
+        Suite("server-project-checkout-custody", "server private project checkout custody", "pytest", SERVER,
+              _py_pytest("tests/test_project_checkout_custody.py"), 35),
+        Suite("server-conversational-project-write", "server canonical conversational project write", "pytest", SERVER,
+              _py_pytest("tests/test_conversational_project_write.py"), 31),
         Suite("server-browser-project-flow", "server shared Browser source flow", "pytest", SERVER,
               _py_pytest("tests/test_browser_project_flow.py"), 32),
         Suite("server-browser-project-routes", "server public Browser source routes", "pytest", SERVER,
