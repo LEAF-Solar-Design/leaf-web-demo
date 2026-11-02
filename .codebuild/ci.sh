@@ -921,7 +921,9 @@ export LEAF_GATE_REQUIRE_DATABASE=1
 echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
 gate_status=0
 unset PYTHONSAFEPATH
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
+# Ensure gate rows reach the log even when the job is killed at its deadline.
+export PYTHONUNBUFFERED=1
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
 if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2
   gate_status=1
