@@ -45,6 +45,10 @@ _ERROR_MESSAGES = {
     "merge_base_retargeted": "The pull request no longer targets the branch the proposal named. Nothing was merged.",
     "source_not_found": "That path does not exist in the platform source at the review base.",
     "source_too_large": "That file is too large to read through this lane.",
+    "source_range_invalid": "Supply a complete source range and its exact commit.",
+    "source_range_out_of_bounds": "The requested line is outside this source file.",
+    "source_line_too_large": "That source line exceeds the bounded response size.",
+    "source_changed": "The source changed. List it again before reading another range.",
     "source_is_directory": "That path is a directory. List it instead of reading it.",
     "source_not_a_directory": "That path is a file. Read it instead of listing it.",
 }
@@ -215,7 +219,9 @@ def list_changes(limit: int = 20,
 
 
 @router.get("/api/platform/source")
-def read_source(path: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
+def read_source(path: str, start_line: Optional[int] = None,
+                max_lines: Optional[int] = None, expected_commit: Optional[str] = None,
+                tenant=Depends(deps.require_tenant)) -> Dict[str, Any]:
     """Read ONE platform source file at the review base (R7 read side).
 
     The lane's eyes: an admin agent proposing an edit can first read the file
@@ -227,7 +233,11 @@ def read_source(path: str, tenant=Depends(deps.require_tenant)) -> Dict[str, Any
     if isinstance(admitted, JSONResponse):
         return admitted
     try:
-        return lane.read_source(path=path)
+        range_args = {}
+        if any(value is not None for value in (start_line, max_lines, expected_commit)):
+            range_args = {"start_line": start_line, "max_lines": max_lines,
+                          "expected_commit": expected_commit}
+        return lane.read_source(path=path, **range_args)
     except lane.PlatformCustomizeError as exc:
         return _error(exc)
     except Exception as exc:  # noqa: BLE001
