@@ -1,4 +1,5 @@
 import React, { useState } from 'react'
+import { createHash, webcrypto } from 'node:crypto'
 import { Blob as NativeBlob } from 'node:buffer'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -11,7 +12,7 @@ import { registerEscapeOwner } from '../lib/useEscapeOwner.js'
 import ElementInspector from './ElementInspector.jsx'
 import CanvasToolbar from './CanvasToolbar.jsx'
 
-const auth = vi.hoisted(() => ({ logout: null, token: null, scope: 'account-a', unauthorized: vi.fn(), logouts: new Set(), tokens: new Set() }))
+const auth = vi.hoisted(() => ({ logout: null, token: null, scope: 'account-a', org: 'org-a', actor: 'binding-a', unauthorized: vi.fn(), logouts: new Set(), tokens: new Set() }))
 vi.mock('../auth.js', () => ({
   subscribeBeforeLogout: callback => { auth.logouts.add(callback); auth.logout = () => [...auth.logouts].forEach(fn => fn()); return () => auth.logouts.delete(callback) },
   subscribeTokenStored: callback => { auth.tokens.add(callback); auth.token = () => [...auth.tokens].forEach(fn => fn()); return () => auth.tokens.delete(callback) },
@@ -20,9 +21,9 @@ vi.mock('../auth/activeScope.js', async importOriginal => ({ ...await importOrig
 vi.mock('../lib/composerDraft.js', () => ({ composerDraftAccountScope: () => auth.scope }))
 vi.mock('../api.js', () => ({
   config: { apiBase: 'https://api.example.test' }, authHeaders: () => ({ Authorization: 'Bearer fixture' }),
-  getStoredOrgId: () => 'org-a', noteUnauthorized: auth.unauthorized,
+  getStoredOrgId: () => auth.org, noteUnauthorized: auth.unauthorized,
 }))
-vi.mock('../projects/api.js', () => ({ getStoredActorBindingId: () => 'binding-a', listProjectPhotos: vi.fn(), readProjectPhotoPreview: vi.fn() }))
+vi.mock('../projects/api.js', () => ({ getStoredActorBindingId: () => auth.actor, listProjectPhotos: vi.fn(), readProjectPhotoPreview: vi.fn() }))
 vi.mock('./projectPageClient.js', async importOriginal => ({
   ...await importOriginal(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn(), downloadProjectPageSource: vi.fn(),
   submitProjectNativePreview: vi.fn(), loadProjectNativePreview: vi.fn(), downloadProjectNativePreviewScreenshot: vi.fn(),
@@ -43,6 +44,7 @@ const openSaved = async () => { fireEvent.click(button('Open page')); await scre
 beforeEach(() => {
   vi.clearAllMocks()
   auth.scope = 'account-a'
+  auth.org = 'org-a'; auth.actor = 'binding-a'
   auth.logouts.clear(); auth.tokens.clear()
   listProjectPhotos.mockResolvedValue({ materials: [] })
   readProjectPhotoPreview.mockResolvedValue(new Blob(['photo'], { type: 'image/jpeg' }))
@@ -87,6 +89,107 @@ const ask = () => {
 
 const incoming = (result = proposalResult()) => ({ result, accountScope: 'account-a', activeScope: 'account-a',
   isCurrent: () => true, consumed: vi.fn() })
+
+const assignmentDigest = value => createHash('sha256').update(JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
+  ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex')
+const assignmentRequest = () => {
+  const document = portfolioDraft(), image = { ...imageRef({ ...PHOTO, material_id: OTHER }), title: 'Fresh bread', alt: 'Bread on a table' }
+  document.categories[0].images.push(image)
+  return { ...incoming({ schema: 'leaf.project-photo-assignment-proposal.v1', source: { ...proposalResult().source, digest: assignmentDigest(portfolioDraft()) },
+    proposed_document: document, proposed_digest: assignmentDigest(document), changes: [{ op: 'assign', material_id: OTHER,
+      material_name: 'Original bread.jpg', gallery_slug: 'cakes', gallery_title: 'Cakes', index: 2, title: image.title, alt: image.alt }] }),
+    provenance: { sessionId: 'session-a', turnId: 'turn-a', seq: 2, orgId: 'org-a', actorBindingId: 'binding-a' } }
+}
+const openAssignmentPortfolio = async () => {
+  loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: assignmentDigest(portfolioDraft()), document: portfolioDraft() })
+  fireEvent.click(button('Open page'))
+  await screen.findByLabelText('Name')
+}
+
+describe('private photo assignment review', () => {
+  beforeEach(() => { vi.stubGlobal('crypto', webcrypto) })
+
+  it('reviews without mutation, discards, applies through history and undoes the complete append', async () => {
+    const onPreview = vi.fn(), onSession = vi.fn(), view = setup({ onPreview, onSession })
+    await openAssignmentPortfolio()
+    const request = assignmentRequest()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} onSession={onSession} incomingProposal={request} />)
+    const review = await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    expect(within(review).getByText('Original bread.jpg')).toBeTruthy()
+    expect(within(review).getByText(OTHER)).toBeTruthy()
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Discard proposal'))
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} onSession={onSession} incomingProposal={assignmentRequest()} />)
+    await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    fireEvent.click(button('Use proposed assignments'))
+    expect(onPreview.mock.lastCall[0].document).toEqual(request.result.proposed_document)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    act(() => onSession.mock.lastCall[0].session.undo())
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    expect(button('Save page')).toBeDisabled()
+  })
+
+  it.each(['org', 'actor', 'current'])('rechecks %s at Use without changing the draft', async mode => {
+    let current = true
+    const onPreview = vi.fn(), view = setup({ onPreview })
+    await openAssignmentPortfolio()
+    const request = { ...assignmentRequest(), isCurrent: () => current }
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={request} />)
+    await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    if (mode === 'current') current = false
+    else auth[mode] = 'changed'
+    fireEvent.click(button('Use proposed assignments'))
+    expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft())
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it.each(['draft', 'source', 'org', 'actor', 'scope', 'project', 'account', 'native busy', 'logout', 'unmount', 'new proposal'])('discards a late digest after %s changes', async mode => {
+    const hash = deferred(), digest = vi.fn(() => hash.promise), onPreview = vi.fn(), view = setup({ onPreview })
+    await openAssignmentPortfolio()
+    vi.stubGlobal('crypto', { subtle: { digest }, randomUUID: () => OTHER })
+    const request = assignmentRequest()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={request} />)
+    await waitFor(() => expect(digest).toHaveBeenCalledTimes(1))
+    if (mode === 'draft') fireEvent.change(screen.getByLabelText('Name'), { target: { value: 'Keep my edit' } })
+    if (mode === 'source') {
+      loadProjectPage.mockResolvedValueOnce({ revision: 8, digest: 'e'.repeat(64), document: { ...portfolioDraft(), name: 'New source' } })
+      fireEvent.click(button('Reload saved page'))
+      await screen.findByDisplayValue('New source')
+    }
+    if (mode === 'org' || mode === 'actor') auth[mode] = 'changed'
+    if (mode === 'project' || mode === 'account') view.rerender(<ProjectPageEditor projectId={mode === 'project' ? OTHER : PROJECT} accountScope={mode === 'account' ? 'other' : 'account-a'} onPreview={onPreview} />)
+    if (mode === 'native busy') fireEvent.click(button('Build iOS preview'))
+    if (mode === 'scope') act(() => { auth.scope = 'other'; window.dispatchEvent(new Event('leaf:active-scope')) })
+    if (mode === 'logout') act(() => auth.logout())
+    if (mode === 'unmount') view.unmount()
+    if (mode === 'new proposal') view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={incoming()} />)
+    await act(async () => hash.resolve(Uint8Array.from(Buffer.from(request.result.proposed_digest, 'hex')).buffer))
+    expect(screen.queryByRole('region', { name: 'Review proposed photo assignments' })).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    if (mode === 'draft') expect(screen.getByLabelText('Name')).toHaveValue('Keep my edit')
+    if (mode === 'source') expect(screen.getByLabelText('Name')).toHaveValue('New source')
+  })
+
+  it('uses the real 409 response boundary, retains the draft and reloads the durable source', async () => {
+    const client = await vi.importActual('./projectPageClient.js'), onPreview = vi.fn(), view = setup({ onPreview })
+    await openAssignmentPortfolio()
+    const request = assignmentRequest()
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={request} />)
+    await screen.findByRole('region', { name: 'Review proposed photo assignments' })
+    fireEvent.click(button('Use proposed assignments'))
+    saveProjectPage.mockImplementationOnce(client.saveProjectPage)
+    fetch.mockResolvedValueOnce({ ok: false, status: 409 })
+    fireEvent.click(button('Save page'))
+    await screen.findByRole('alert')
+    expect(JSON.parse(fetch.mock.lastCall[1].body)).toEqual({ expected_revision: 7, document: request.result.proposed_document })
+    expect(onPreview.mock.lastCall[0].document).toEqual(request.result.proposed_document)
+    loadProjectPage.mockResolvedValueOnce({ revision: 7, digest: 'a'.repeat(64), document: portfolioDraft() })
+    fireEvent.click(button('Reload saved page'))
+    await waitFor(() => expect(onPreview.mock.lastCall[0].document).toEqual(portfolioDraft()))
+  })
+})
 
 
 describe('environment controls share the editor owner', () => {
