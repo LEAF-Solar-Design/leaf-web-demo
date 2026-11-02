@@ -180,6 +180,8 @@ import { resumeHref } from './components/ConversationList.jsx'
 import LiveRegion, { HIDE_WITH_STYLE } from './components/LiveRegion.jsx'
 import ConversePanel from './components/ConversePanel.jsx'
 import AuthorPanel from './components/AuthorPanel.jsx'
+import useProjectSourceController from './site/useProjectSourceController.js'
+import ProjectSourceCandidateReview from './site/ProjectSourceCandidateReview.jsx'
 import ProjectLifecyclePanel from './projects/ProjectLifecyclePanel.jsx'
 import { ENV_LIFECYCLE_UI } from './projects/flag.js'
 import {
@@ -1278,6 +1280,7 @@ export default function App() {
       setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
     },
     startAgentTurn: (...args) => catalogUiRef.current.startAgentTurn?.(...args),
+    openProjectSource: (...args) => catalogUiRef.current.openProjectSource?.(...args),
     agentBannerFor,
     // W2b: same edge, same source name /try already uses. The controller
     // records WHICH surface refused (`sources`) instead of collapsing every
@@ -1975,6 +1978,41 @@ export default function App() {
   const conversationProjectContext = useMemo(() => openProjectId && canonicalVersionId
     ? { project_id: openProjectId, input_version_id: canonicalVersionId }
     : null, [openProjectId, canonicalVersionId])
+  const assistantCheckoutRef = useRef(null)
+  const assistantCheckoutBinding = projectSolar.ready ? projectSolar.projectClient.getSnapshot().binding : null
+  assistantCheckoutRef.current = { projectSolar, controller: session.controller,
+    generation: session.generation, sessionId: agentSessionId, projectContext: conversationProjectContext }
+  const prepareApprovedProjectRun = useCallback(async ({ confirmationId, sessionId: owningSessionId, projectContext }) => {
+    const owner = projectSolar
+    const client = owner.projectClient
+    if (!owner.ready || !client) return null
+    const stillCurrent = () => {
+      const live = assistantCheckoutRef.current
+      const next = live.projectSolar
+      const snapshot = client.getSnapshot()
+      return projectModeRef.current && owner.ready && next.ready && owner.isCurrent()
+        && live.controller === session.controller && live.generation === session.generation
+        && session.controller.getSnapshot().generation === session.generation
+        && live.sessionId === owningSessionId && agentSessionId === owningSessionId
+        && next.projectClient === client && next.scope.authorityKey === owner.scope.authorityKey
+        && snapshot.binding === assistantCheckoutBinding
+        && snapshot.authorityKey === owner.scope.authorityKey
+        && sameSolarDrawingBinding(snapshot.binding, owner.scope.binding)
+        && live.projectContext?.project_id === projectContext?.project_id
+        && live.projectContext?.input_version_id === projectContext?.input_version_id
+        && projectContext?.project_id === owner.scope.binding?.project_id
+        && projectContext?.input_version_id === owner.scope.binding?.input_version_id
+    }
+    if (!stillCurrent()) return null
+    const outcome = await client.delegateApprovedRun({ confirmationId, sessionId: owningSessionId,
+      inputVersionId: projectContext.input_version_id })
+    if (!outcome.ok) return null
+    const revoke = () => client.revokeApprovedRun({ confirmationId, sessionId: owningSessionId,
+      delegationId: outcome.data.delegation_id })
+    if (!stillCurrent()) { await revoke(); return null }
+    return { isCurrent: stillCurrent, revoke }
+  }, [projectSolar.projectClient, projectSolar.ready, projectSolar.isCurrent, projectSolar.scope.binding,
+    projectSolar.scope.authorityKey, assistantCheckoutBinding, session.controller, session.generation, agentSessionId])
   useLayoutEffect(() => {
     setProjectContext(openProjectId || null, canonicalVersionId || null)
   }, [openProjectId, canonicalVersionId, setProjectContext])
@@ -2579,7 +2617,9 @@ export default function App() {
     }
     return armed
   }, [tools, mock, session.status, prepareRunParams, running, previewing, writeLocked, canRunWrite, catalogRunContext, engineDirty, refuseProjectSolar])
-  catalogUiRef.current = { armDecision, startAgentTurn, running }
+  const projectSource = useProjectSourceController({ projectId: openProjectId, orgId, signedIn, mock, startAgentTurn })
+  catalogUiRef.current = { armDecision, startAgentTurn, running,
+    openProjectSource: (text, options) => activeSurface === 'browser' ? projectSource.open(text, options) : false }
 
   const onRequestCatalogRun = useCallback((tool, params, rationale = null, source = 'catalog', { complete = false } = {}) => {
     if (!tool) return
@@ -3307,11 +3347,12 @@ export default function App() {
     return catalogActions.dispatch(override, options)
   }, [catalogActions, running, prompt, refuseProjectSolar])
 
-  const onOpenAuthor = useCallback(() => {
+  const onOpenAuthor = useCallback((options) => {
+    if (catalogUiRef.current.openProjectSource?.(prompt, options)) return
     if (!authorPendingRef.current) setAuthorTargetTool(null)
     setAuthorOpen(true)
     setTimeout(() => authorSectionRef.current?.scrollIntoView({ block: 'nearest' }), 0)
-  }, [])
+  }, [prompt])
 
   // --- M5 guided tour: canned prompts ride the REAL handlers ----------------
   // The tour types its beat into the real command bar, dispatches it through the
@@ -6135,6 +6176,8 @@ export default function App() {
             onAttachJob={onAttachAgentJob}
             onJobLinked={refreshJobs}
             onBeforeWriteApproval={closeStartForChange}
+            prepareApprovedProjectRun={prepareApprovedProjectRun}
+            canonicalProjectWriteTools={PROJECT_SOLAR_SUPPORTED_TOOLS}
             engineDirty={engineDirty}
           />
           </PersistentSeat>
@@ -6410,6 +6453,7 @@ export default function App() {
       <DetailsDrawer data={sessionDetails} onClose={() => setDrawer(null)} />
 
       <ShortcutSheet open={shortcutsOpen} onClose={() => setShortcutsOpen(false)} />
+      <ProjectSourceCandidateReview controller={projectSource} />
 
       {/* M5: the ?demo=tour walkthrough. Mock-only — the tour drives real mock
           handlers, so it must never point at a live/paid backend. */}

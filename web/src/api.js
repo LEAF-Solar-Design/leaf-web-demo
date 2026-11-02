@@ -29,7 +29,7 @@ import { track, trackErrorShown } from './telemetry.js'
 import { SecretRefusedError, guardedText } from './lib/secretGuardTransport.js'
 import { createSolarProjectClient } from './solar/solarProjectClient.js'
 import { sameSolarDrawingBinding } from './solar/solarDrawingBinding.js'
-import { notifyActiveScopeChanged } from './auth/activeScope.js'
+import { notifyActiveScopeChanged, readActiveScope } from './auth/activeScope.js'
 
 // A deployed static bundle talks to the app through the same public origin.
 // Local stacks pass VITE_API_BASE explicitly from .env or docker-compose.
@@ -54,6 +54,104 @@ const GUEST_SESSION_KEY = 'leaf.guest_session'
 const unauthorizedListeners = new Set()
 
 export const config = { apiBase: API_BASE, mockDefault: MOCK_DEFAULT, tenant: TENANT }
+
+const SOURCE_UUID = /^(?!00000000-0000-0000-0000-000000000000$)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+const sourceHash = (value, size) => typeof value === 'string' && new RegExp(`^[0-9a-f]{${size}}$`).test(value)
+const sourceUnavailable = () => new Error('Project source is unavailable. Refresh to review its current state.')
+export function isSourceUuid(value) { return typeof value === 'string' && SOURCE_UUID.test(value) }
+function sourceId(value) {
+  if (!isSourceUuid(value)) throw sourceUnavailable()
+  return value
+}
+const SOURCE_FIELDS = ['schema', 'project_id', 'source_request_id', 'state', 'version', 'receipt_digest',
+  'base_commit', 'source_commit', 'source_tree', 'changed_paths', 'created_at', 'updated_at']
+const SOURCE_STATES = ['staged', 'awaiting_confirmation', 'publishing', 'published', 'rejected',
+  'conflicted', 'failed', 'superseded', 'rolled_back']
+function sourceTimestamp(value) {
+  if (typeof value !== 'string' || value.length > 64
+    || !/^\d{4}-\d{2}-\d{2}T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d{1,6})?(?:Z|[+-]\d{2}:\d{2})?$/.test(value)
+    || !Number.isFinite(Date.parse(value))) return false
+  const day = value.slice(0, 10)
+  return new Date(`${day}T00:00:00Z`).toISOString().slice(0, 10) === day
+}
+export function validateProjectSource(value, projectId, requestId) {
+  if (!value || Object.keys(value).length !== SOURCE_FIELDS.length || SOURCE_FIELDS.some((key) => !Object.hasOwn(value, key))
+    || value.schema !== 'leaf.browser-project-source.v1' || value.project_id !== projectId
+    || !isSourceUuid(value.project_id) || !isSourceUuid(value.source_request_id)
+    || (requestId && value.source_request_id !== requestId) || !SOURCE_STATES.includes(value.state)
+    || !Number.isInteger(value.version) || value.version < 1 || value.version > 2147483647
+    || !sourceHash(value.receipt_digest, 64) || !sourceHash(value.base_commit, 40)
+    || !sourceHash(value.source_commit, 40) || !sourceHash(value.source_tree, 40)
+    || !Array.isArray(value.changed_paths) || value.changed_paths.length > 1000
+    || value.changed_paths.some((path) => typeof path !== 'string' || !path || path.length > 4096
+      || path.startsWith('/') || path.includes('\\') || path.split('/').some((part) => !part || part === '..' || part === '.') || /[\x00-\x1f]/.test(path))
+    || new Set(value.changed_paths).size !== value.changed_paths.length
+    || !sourceTimestamp(value.created_at) || !sourceTimestamp(value.updated_at)
+    || Date.parse(value.updated_at) < Date.parse(value.created_at)) throw sourceUnavailable()
+  return value
+}
+function sourceBody(action, body) {
+  const fields = action === 'request'
+    ? ['source_request_id', 'requirements', 'source_operation', 'material_refs']
+    : ['receipt_digest', 'expected_version', ...(action === 'confirm' ? ['confirmation_id'] : [])]
+  if (!body || fields.some((key) => !Object.hasOwn(body, key))
+    || Object.keys(body).some((key) => !fields.includes(key) && !(action === 'request' && key === 'expected_base_commit'))) throw sourceUnavailable()
+  if (action === 'request') {
+    sourceId(body.source_request_id)
+    if (typeof body.requirements !== 'string' || !body.requirements.trim() || body.requirements.includes('\0')
+      || new TextEncoder().encode(body.requirements).length > 16384
+      || !['create', 'edit'].includes(body.source_operation)
+      || (body.source_operation === 'edit' && !sourceHash(body.expected_base_commit, 40))
+      || (body.expected_base_commit !== undefined && !sourceHash(body.expected_base_commit, 40))
+      || !Array.isArray(body.material_refs) || body.material_refs.length > 8
+      || body.material_refs.some((ref) => !ref || Object.keys(ref).sort().join(',') !== 'material_id,sha256'
+        || !isSourceUuid(ref.material_id) || !sourceHash(ref.sha256, 64))
+      || new Set(body.material_refs.map((ref) => ref.material_id)).size !== body.material_refs.length) throw sourceUnavailable()
+  } else if (!sourceHash(body.receipt_digest, 64) || !Number.isInteger(body.expected_version)
+    || body.expected_version < 1 || body.expected_version > 2147483647
+    || (action === 'confirm' && !isSourceUuid(body.confirmation_id))) throw sourceUnavailable()
+}
+async function projectSourceRequest(projectId, requestId, action, body, { expectedScope, signal, authority, allowSecretOnce = false } = {}) {
+  sourceId(projectId)
+  if (requestId !== null) sourceId(requestId)
+  if (action) {
+    sourceBody(action, body)
+    if (action === 'request') {
+      const verdict = guardedText(body.requirements, { allowSecretOnce })
+      if (!verdict.ok) throw new SecretRefusedError(verdict.refusal)
+    }
+    if ([authority?.session_id, authority?.turn_id].some((id) => typeof id !== 'string' || !id || id.length > 200 || /[\x00-\x20\x7f]/.test(id))) throw sourceUnavailable()
+  }
+  const current = () => expectedScope && !signal?.aborted && readActiveScope() === expectedScope && !!authHeaders().Authorization && !isMockConversation()
+  if (!current()) throw new Error('Sign in to the current account and open this project again.')
+  const path = `/api/projects/${projectId}/browser/source/requests${requestId ? `/${requestId}` : ''}${action && action !== 'request' ? `/${action}` : ''}`
+  const headers = { ...authHeaders(), ...(body ? { 'Content-Type': 'application/json',
+    'X-Authority-Session-Id': authority.session_id, 'X-Authority-Turn-Id': authority.turn_id } : {}) }
+  const response = await apiFetch(`${API_BASE}${path}`, { method: body ? 'POST' : 'GET', cache: 'no-store',
+    redirect: 'error', signal, headers, ...(body ? { body: JSON.stringify(body) } : {}) }, path)
+  if (!current()) throw sourceUnavailable()
+  if (!response.ok) {
+    const error = new Error(response.status === 409 ? 'Project source changed or its outcome is unknown. Refresh and review.'
+      : response.status === 403 ? 'Project source access denied.' : 'Project source is unavailable. Refresh to review its current state.')
+    error.status = response.status
+    throw error
+  }
+  const raw = await response.text()
+  if (new TextEncoder().encode(raw).length > 262144 || !current()) throw sourceUnavailable()
+  let value
+  try { value = JSON.parse(raw) } catch { throw sourceUnavailable() }
+  if (!body && !requestId) {
+    if (!Array.isArray(value) || value.length > 20 || new Set(value.map((row) => row?.source_request_id)).size !== value.length) throw sourceUnavailable()
+    return value.map((row) => validateProjectSource(row, projectId))
+  }
+  return validateProjectSource(value, projectId, requestId || body.source_request_id)
+}
+export const listProjectSourceRequests = (projectId, options) => projectSourceRequest(projectId, null, null, null, options)
+export const readProjectSourceRequest = (projectId, requestId, options) => projectSourceRequest(projectId, requestId, null, null, options)
+export const stageProjectSource = (projectId, body, options) => projectSourceRequest(projectId, null, 'request', body, options)
+export const confirmProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'confirm', body, options)
+export const recoverProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'recover', body, options)
+export const rejectProjectSource = (projectId, requestId, body, options) => projectSourceRequest(projectId, requestId, 'reject', body, options)
 
 // Intake and catalog loads carry the shell's current mode, including empty or
 // fixture workspaces that skip intake. Conversation authoring reads that same
