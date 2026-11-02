@@ -7,7 +7,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHarness } from "../src/server.js";
-import { PROJECT_SOURCE_SCAFFOLD } from "../src/agent/projectSourceAuthoring.js";
+import { authorProjectSource, PROJECT_SOURCE_SCAFFOLD } from "../src/agent/projectSourceAuthoring.js";
 import { nativeProjectSourceProfile } from "../src/agent/nativeProjectSourceProfile.js";
 import { ProjectRepositoryEditCoordinator, type StagedProjectRepositoryEdit } from "../src/agent/projectRepositoryEditCoordinator.js";
 import { TenantRepoProviderImpl, type PgTenantRepoLeaseCoordinator } from "../src/ports/impl/tenantRepoProvider.js";
@@ -144,6 +144,266 @@ describe("mounted first source author transaction with real private Git", () => 
       return { summary: "private native", changedFiles: ["deliberate-lie"] };
     });
   }
+
+  function existingApp(extra: Record<string, string> = {}) {
+    const files = { ...PROJECT_SOURCE_SCAFFOLD, "app/page.tsx": page, "public/data/nested/items.json": raw,
+      ...nativeProfile.scaffold, "Sources/ContentView.swift": swift, "Resources/Input/old.txt": "native input\n", ...extra };
+    seed(files);
+    return files;
+  }
+
+  it.each([undefined, "create"])("creates a plain Browser brief without material with operation %s", async source_operation => {
+    const requirements = "Create a landing page for a neighborhood garden.";
+    edit.mockImplementation(async input => {
+      expect(input.instruction).toBe(requirements);
+      writeFileSync(join(input.repoDir, "app/page.tsx"), "export default function Page(){return <main>Garden</main>;}\n");
+      return { summary: "done", changedFiles: [] };
+    });
+    const request = { ...body(), material: [], requirements, instruction_digest: hash(requirements),
+      ...(source_operation === undefined ? {} : { source_operation }) };
+    expect((await post(request)).status).toBe(200);
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "end_turn" });
+  });
+
+  it.each([null, 1, false, {}, [], "", "update", "EDIT"])("rejects invalid operation %j before grants", async source_operation => {
+    expect((await post({ ...body(), source_operation })).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it("rejects native edits and native empty input before grants", async () => {
+    expect((await post({ ...body(), source_profile: nativeProfile.id, source_operation: "edit" })).status).toBe(409);
+    expect((await post({ ...body(), source_profile: nativeProfile.id, material: [] })).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it("rejects duplicate nested and escaped author keys before staging or grants", async () => {
+    const stage = vi.spyOn(service, "stageEdit");
+    const original = JSON.stringify(body());
+    for (const wire of [
+      original.replace('"path":"nested/items.json"', '"path":"nested/items.json","path":"nested/items.json"'),
+      original.replace('"path":"nested/items.json"', '"path":"nested/items.json","p\\u0061th":"nested/items.json"'),
+      original.replace('"tenant_id":', `"tenant_\\u0069d":"${authority.tenantId}","tenant_id":`),
+    ]) {
+      expect(wire).not.toBe(original);
+      const response = await fetch(`${url}/internal/project-repository-source/author`, { method: "POST",
+        headers: { "content-type": "application/json", "x-harness-secret": secret, "x-tenant-id": authority.tenantId }, body: wire });
+      expect(response.status).toBe(409);
+    }
+    expect(stage).not.toHaveBeenCalled(); expect(edit).not.toHaveBeenCalled();
+    expect(oauth.acquireGrant).not.toHaveBeenCalled(); expect(oauth.settleGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it("accepts escaped quotes and structural characters in string values", async () => {
+    const requirements = 'Show literal text: "path":"one", "path":"two", [{ }] and a backslash \\.';
+    edit.mockImplementation(async input => {
+      expect(input.instruction).toBe(requirements);
+      writeFileSync(join(input.repoDir, "app/page.tsx"), page);
+      return { summary: "done", changedFiles: [] };
+    });
+    const request = { ...body(), requirements, instruction_digest: hash(requirements) };
+    // Escaped property names and whitespace before the colon remain valid.
+    const wire = JSON.stringify(request).replace('"requirements":', '"requ\\u0069rements" \n :');
+    const response = await fetch(`${url}/internal/project-repository-source/author`, { method: "POST",
+      headers: { "content-type": "application/json", "x-harness-secret": secret, "x-tenant-id": authority.tenantId }, body: wire });
+    expect(response.status).toBe(200);
+    expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["input", "http", "boundary"])("preserves a real large valid JSON %s fixture through authenticated HTTP and Git", async fixture => {
+    const stage = vi.spyOn(service, "stageEdit");
+    // Synthetic transport fixture, never a recreated user result. Cover both exact input and wire sizes.
+    const length = fixture === "input" ? 6915737 : fixture === "boundary" ? 8388608 : 5185500;
+    const json = JSON.stringify({ payload: "x".repeat(length - 14) });
+    expect(Buffer.byteLength(json)).toBe(length);
+    JSON.parse(json);
+    const request = { ...body(), material: [material("large.json", json)] };
+    if (fixture === "http") {
+      const padding = 6915737 - Buffer.byteLength(JSON.stringify(request));
+      expect(padding).toBeGreaterThan(0);
+      request.material[0].key += "x".repeat(padding);
+      expect(request.material[0].key.length).toBeLessThanOrEqual(1024);
+      expect(Buffer.byteLength(JSON.stringify(request))).toBe(6915737);
+    }
+    edit.mockImplementation(async input => {
+      const bytes = readFileSync(join(input.repoDir, "public/data/large.json"));
+      expect(bytes.equals(Buffer.from(json))).toBe(true);
+      expect(hash(bytes)).toBe(request.material[0].sha256);
+      writeFileSync(join(input.repoDir, "app/page.tsx"), "export default function Page(){return <main>Large input</main>;}\n");
+      return { summary: "done", changedFiles: [] };
+    });
+    const response = await post(request);
+    // Call counts identify parser/preflight refusal separately from failures
+    // inside the model or Git staging, without returning private model errors.
+    expect(stage).toHaveBeenCalledTimes(1);
+    expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+    expect(edit).toHaveBeenCalledTimes(1);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "end_turn" });
+    expect(response.status).toBe(200);
+    const staged = await response.json() as StagedProjectRepositoryEdit;
+    const bytes = execFileSync("git", ["show", `${staged.receipt.staged_head_commit}:public/data/large.json`], { cwd: bare, maxBuffer: 12 * 1024 * 1024 });
+    expect(bytes.length).toBe(length);
+    expect(bytes.equals(Buffer.from(json))).toBe(true);
+    expect(hash(bytes)).toBe(request.material[0].sha256);
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+  }, 30000);
+
+  it.each([false, true])("edits an existing protected app and publishes its exact tree once, deleting component=%s", async deleting => {
+    const old = existingApp({ "components/Old.tsx": "export default function Old(){return <p>Old</p>;}\n" });
+    const requirements = "Add a favorite toggle and a comparison message for each fruit.";
+    const updated = '"use client";\nimport {useState} from "react";\nexport default function Page(){const [favorite,setFavorite]=useState(false);return <main><button onClick={()=>setFavorite(!favorite)}>{favorite?"Favorite pear":"Compare fruits"}</button></main>;}\n';
+    const component = "export const Label = () => <span>Compare</span>;\n";
+    edit.mockImplementation(async input => {
+      expect(input.instruction).toBe(requirements);
+      expect(input.context).toContain("Edit the existing");
+      expect(input.context).toContain("public/data/nested/items.json");
+      expect(readFileSync(join(input.repoDir, "app/page.tsx"), "utf8")).toBe(page);
+      expect(readFileSync(join(input.repoDir, "public/data/new.txt"), "utf8")).toBe("additional input\n");
+      writeFileSync(join(input.repoDir, "app/page.tsx"), updated);
+      writeFileSync(join(input.repoDir, "components/Label.tsx"), component);
+      if (deleting) rmSync(join(input.repoDir, "components/Old.tsx"));
+      return { summary: "private", changedFiles: ["incorrect"] };
+    });
+    const response = await post({ ...body(), source_operation: "edit", requirements, instruction_digest: hash(requirements),
+      material: [material("nested/items.json", raw), material("new.txt", "additional input\n")] });
+    expect(response.status).toBe(200);
+    const staged = await response.json() as StagedProjectRepositoryEdit;
+    const head = staged.receipt.staged_head_commit;
+    expect(staged.receipt.changed_paths).toEqual(["app/page.tsx", "components/Label.tsx", ...(deleting ? ["components/Old.tsx"] : []), "public/data/new.txt"]);
+    expect(staged.receipt).toMatchObject({ tenant_id: authority.tenantId, organization_id: authority.organizationId,
+      project_id: authority.projectId, repo_key: authority.repoKey, actor_binding_id: actor });
+    const bytes = (path: string) => execFileSync("git", ["show", `${head}:${path}`], { cwd: bare });
+    expect(bytes("app/page.tsx").toString()).toBe(updated);
+    expect(bytes("components/Label.tsx").toString()).toBe(component);
+    for (const [path, content] of Object.entries(old)) if (path !== "app/page.tsx" && !(deleting && path === "components/Old.tsx")) expect(bytes(path)).toEqual(Buffer.from(content));
+    expect(bytes(".leaf/source-seed.json").toString()).toBe('{"seed":true}\n');
+    expect(bytes("PROMPT.md").toString()).toBe("Protected seed\n");
+    if (deleting) expect(git(bare, ["ls-tree", head, "components/Old.tsx"])).toBe("");
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "end_turn" });
+    const request = { ...common, confirmation_id: actor, receipt_digest: staged.receiptDigest, expected_version: 1, transition_key: "publish" };
+    expect((await post(request, "publish")).status).toBe(200);
+    expect((await post(request, "publish")).status).toBe(409);
+    expect(git(bare, ["rev-parse", "main"])).toBe(head);
+    expect(git(bare, ["rev-parse", "main^{tree}"])).toBe(staged.receipt.staged_tree);
+    expect(coordination.authorizePublish).toHaveBeenCalledTimes(2);
+  });
+
+  it("edits without new material and refuses replay before acquiring another grant", async () => {
+    existingApp();
+    edit.mockImplementation(async input => {
+      expect(input.context).toContain("public/data/nested/items.json");
+      writeFileSync(join(input.repoDir, "app/page.tsx"), page + "// New content\n");
+      return { summary: "done", changedFiles: [] };
+    });
+    const request = { ...body(), source_operation: "edit", material: [] };
+    expect((await post(request)).status).toBe(200);
+    const head = git(bare, ["rev-parse", `refs/leaf/changes/${editId}`]);
+    expect((await post(request)).status).toBe(409);
+    expect((await post({ ...request, source_operation: "create" })).status).toBe(409);
+    expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+    expect(git(bare, ["rev-parse", `refs/leaf/changes/${editId}`])).toBe(head);
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+  });
+
+  it.each(["missing-app", "scaffold", "missing-scaffold", "empty-page", "src", "pages", "unknown", "input-bytes", "input-case", "directory-case", "stale"])("rejects edit %s preflight before model and grants", async mode => {
+    if (mode !== "missing-app") {
+      const extra: Record<string, string> = {};
+      if (mode === "scaffold") extra["package.json"] = "{}\n";
+      if (mode === "empty-page") extra["app/page.tsx"] = " \n";
+      if (mode === "src") extra["src/app/page.tsx"] = page;
+      if (mode === "pages") extra["pages/index.tsx"] = page;
+      if (mode === "unknown") extra["app/unsupported.jsx"] = page;
+      existingApp(extra);
+      if (mode === "missing-scaffold") {
+        const work = join(root, "work");
+        rmSync(join(work, "next.config.mjs"));
+        git(work, ["add", "-A"]);
+        git(work, ["-c", "user.name=test", "-c", "user.email=test@leaf.invalid", "commit", "-qm", "incomplete scaffold"]);
+        git(bare, ["fetch", work, "main:main"]);
+        base = git(bare, ["rev-parse", "main"]);
+      }
+    }
+    const request = { ...body(), source_operation: "edit" };
+    if (mode === "input-bytes") request.material = [material("nested/items.json", "{}")];
+    if (mode === "input-case") request.material = [material("nested/ITEMS.json", raw)];
+    if (mode === "directory-case") request.material = [material("NESTED/new.json", "{}")];
+    if (mode === "stale") request.expected_base_commit = "f".repeat(40);
+    expect((await post(request)).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); expect(oauth.getGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it.each(["symlink", "executable"])("rejects %s baseline before grants", async mode => {
+    existingApp();
+    const work = join(root, "work");
+    // The source boundary rejects Git symlink mode even when Windows checks it
+    // out as a regular file. Do not require the host's symlink privilege.
+    if (mode === "symlink") writeFileSync(join(work, "app/link.ts"), "../public/data/nested/items.json");
+    else if (process.platform !== "win32") chmodSync(join(work, "app/page.tsx"), 0o755);
+    git(work, ["add", "-A"]);
+    if (mode === "symlink") {
+      const blob = git(work, ["hash-object", "-w", "app/link.ts"]);
+      git(work, ["update-index", "--add", "--cacheinfo", "120000", blob, "app/link.ts"]);
+    }
+    if (mode === "executable") git(work, ["update-index", "--chmod=+x", "app/page.tsx"]);
+    git(work, ["-c", "user.name=test", "-c", "user.email=test@leaf.invalid", "commit", "-qm", "invalid baseline mode"]);
+    git(bare, ["fetch", work, "main:main"]);
+    base = git(bare, ["rev-parse", "main"]);
+    expect((await post({ ...body(), source_operation: "edit", material: [] })).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it.each([false, true])("rejects aborted edits and settles only acquired grants, during model=%s", async duringModel => {
+    existingApp();
+    const controller = new AbortController();
+    if (duringModel) edit.mockImplementation(async input => {
+      writeFileSync(join(input.repoDir, "app/page.tsx"), page + "// changed\n");
+      controller.abort();
+      return { summary: "done", changedFiles: [] };
+    });
+    else controller.abort();
+    await expect(authorProjectSource(service, { oauth, editor: { edit } },
+      { ...body(), source_operation: "edit", material: [] }, authority.tenantId, controller.signal)).rejects.toThrow();
+    expect(oauth.acquireGrant).toHaveBeenCalledTimes(duringModel ? 1 : 0);
+    expect(edit).toHaveBeenCalledTimes(duringModel ? 1 : 0);
+    if (duringModel) expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "error" });
+    else expect(oauth.settleGrant).not.toHaveBeenCalled();
+    unchanged();
+  });
+
+  it.each(["noop", "data", "scaffold", "layout", "native", "seed", "control", "delete-page", "delete-scaffold", "unknown", "alias", "symlink", "executable", "file-limit", "count-limit", "total-limit"])("rejects edit model %s mutation after acquiring and settling grant", async mode => {
+    existingApp();
+    edit.mockImplementation(async input => {
+      const dir = input.repoDir;
+      if (mode !== "noop") writeFileSync(join(dir, "app/page.tsx"), page + "// updated\n");
+      const paths: Record<string, string> = { data: "public/data/nested/items.json", scaffold: "package.json", layout: "app/layout.tsx",
+        native: "Sources/ContentView.swift", seed: ".leaf/source-seed.json", control: "PROMPT.md", unknown: "app/extra.jsx" };
+      if (paths[mode]) writeFileSync(join(dir, paths[mode]), "changed");
+      if (mode === "alias") {
+        if (process.platform !== "win32") writeFileSync(join(dir, "app/PAGE.tsx"), "changed");
+        // Insert an actual alias into Git's index on every host. A write to
+        // PAGE.tsx alone can overwrite page.tsx on a case-insensitive volume.
+        const blob = git(dir, ["rev-parse", "HEAD:app/page.tsx"]);
+        git(dir, ["update-index", "--add", "--cacheinfo", "100644", blob, "app/PAGE.tsx"]);
+        const paths = git(dir, ["ls-files", "-z"]).split("\0");
+        expect(paths).toContain("app/page.tsx"); expect(paths).toContain("app/PAGE.tsx");
+      }
+      if (mode === "delete-page") rmSync(join(dir, "app/page.tsx"));
+      if (mode === "delete-scaffold") rmSync(join(dir, "tsconfig.json"));
+      if (mode === "symlink") symlinkSync(join(dir, "public/data/nested/items.json"), join(dir, "app/link.ts"));
+      if (mode === "executable") {
+        if (process.platform !== "win32") chmodSync(join(dir, "app/page.tsx"), 0o755);
+        else { git(dir, ["add", "app/page.tsx"]); git(dir, ["update-index", "--chmod=+x", "app/page.tsx"]); }
+      }
+      if (mode === "file-limit") writeFileSync(join(dir, "app/page.tsx"), "x".repeat(1048577));
+      if (mode === "count-limit" || mode === "total-limit") for (let i = 0; i < (mode === "count-limit" ? 64 : 5); i++) writeFileSync(join(dir, `app/File${i}.ts`), "x".repeat(mode === "count-limit" ? 1 : 900000));
+      return { summary: "done", changedFiles: [] };
+    });
+    expect((await post({ ...body(), source_operation: "edit", material: [] })).status).toBe(409);
+    expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "error" });
+    unchanged();
+  });
 
   it("stages exact native scaffold, resource bytes and new Swift, then requires explicit publication", async () => {
     nativeEditor();
@@ -349,21 +609,25 @@ describe("mounted first source author transaction with real private Git", () => 
       { ...original, instruction_digest: "a".repeat(64) }, { ...original, requirements: "" },
       { ...original, requirements: "bad\0", instruction_digest: hash("bad\0") },
       { ...original, requirements: "a".repeat(16385), instruction_digest: hash("a".repeat(16385)) },
-      { ...original, extra: true }, { ...original, tenant_id: "bad" }, { ...original, material: [] },
+      { ...original, extra: true }, { ...original, tenant_id: "bad" },
       { ...original, material: [{ ...first, product_b64: first.product_b64 + "\n" }] },
       { ...original, material: [{ ...first, sha256: "b".repeat(64) }] },
       { ...original, material: [{ ...first, size_bytes: first.size_bytes + 1 }] },
       { ...original, material: [first, { ...first, path: "NESTED/items.json" }] },
       { ...original, material: [material("folder.json", "{}"), material("folder.json/item.txt", "data")] },
-      { ...original, material: [material("large.txt", "x".repeat(1048577))] },
+      { ...original, material: [material("large.txt", "x".repeat(8388609))] },
       { ...original, material: Array.from({ length: 9 }, (_, i) => material(`${i}.txt`, "x")) },
-      { ...original, material: Array.from({ length: 5 }, (_, i) => material(`${i}.txt`, "x".repeat(900000))) },
+      { ...original, material: Array.from({ length: 2 }, (_, i) => material(`${i}.txt`, "x".repeat(4194305))) },
       ...["../x.json", "https://example/x.json", "CON.json", ".env.txt", "app.tsx", ".git/config.txt", "credentials.json"].map(path => ({ ...original, material: [{ ...first, path }] })),
     ];
     for (const request of invalid) {
       expect((await post(request)).status).toBe(409);
       expect((await post({ ...request, source_profile: nativeProfile.id })).status).toBe(409);
     }
+    expect((await post({ ...original, source_profile: nativeProfile.id, material: [] })).status).toBe(409);
+    expect((await post({ ...original, source_profile: nativeProfile.id, material: [material("large.txt", "x".repeat(1048577))] })).status).toBe(409);
+    expect((await post({ ...original, source_profile: nativeProfile.id,
+      material: Array.from({ length: 5 }, (_, i) => material(`${i}.txt`, "x".repeat(900000))) })).status).toBe(409);
     expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
   });
 
