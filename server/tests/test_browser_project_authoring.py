@@ -118,6 +118,25 @@ def call(lane):
     return authoring.author(lane.tenant, PROJECT, lane.request, cancelled=lambda: lane.cancelled)
 
 
+@pytest.mark.parametrize('operation', ['create', 'edit'])
+def test_native_edit_consumer_web_helper_only_parity(lane, operation):
+    lane.request.update(source_operation=operation, material_refs=[])
+    if operation == 'edit':
+        lane.request['expected_base_commit'] = BASE
+    def helper(result):
+        result['receipt']['changed_paths'] = ['app/helper.ts']
+        result['receiptDigest'] = staged_receipt_digest(parse_staged_receipt(result['receipt']))
+        return result
+    lane.response_mutation = helper
+    result = call(lane)
+    assert result['receipt']['changed_paths'] == ['app/helper.ts']
+    assert result['receipt']['operation'] == 'edit' and 'source_profile' not in result['receipt']
+    assert len(lane.posts) == 1 and len(lane.initializations) == 1 and not lane.reads
+    assert lane.posts[0]['source_operation'] == operation
+    assert lane.posts[0]['source_profile'] == authoring.WEB_PROFILE
+    assert lane.posts[0]['expected_base_commit'] == BASE
+
+
 def test_complete_original_reaches_hash_bound_asset_not_prompt(lane):
     result = call(lane)
     assert result['receipt']['staged_head_commit'] == HEAD

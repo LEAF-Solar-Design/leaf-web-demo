@@ -79,7 +79,7 @@ def _request(value, *, source_profile=WEB_PROFILE):
         refs = body.setdefault('material_refs', [])
         if type(refs) is not list or len(refs) > 8:
             raise ValueError()
-        if source_profile == NATIVE_PROFILE and (operation != 'create' or not refs):
+        if source_profile == NATIVE_PROFILE and operation == 'create' and not refs:
             raise ValueError()
         seen = set()
         for ref in refs:
@@ -133,7 +133,8 @@ def _result(result, body):
         actual = receipt.to_mapping()
         # This rejects an evident profile/producer mismatch. A changed-path
         # witness does not establish file contents or replace package evidence.
-        if body['source_profile'] == NATIVE_PROFILE and 'Sources/ContentView.swift' not in receipt.changed_paths:
+        if (body['source_profile'] == NATIVE_PROFILE and body['source_operation'] == 'create'
+                and 'Sources/ContentView.swift' not in receipt.changed_paths):
             raise ValueError()
         for key in (*_AUTHORITY, 'edit_id', 'actor_binding_id', 'instruction_digest', 'idempotency_key'):
             if actual[key] != body[key]:

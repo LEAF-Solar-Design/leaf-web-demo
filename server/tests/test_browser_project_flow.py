@@ -106,6 +106,31 @@ def execute(body=BODY, action='request'):
     return flow.mutate('tenant', PROJECT, 'session', 'turn', action, EDIT, copy.deepcopy(body))
 
 
+@pytest.mark.parametrize('operation', ['create', 'edit'])
+def test_native_edit_consumer_web_stage_replay_and_membership_parity(lane, monkeypatch, operation):
+    body = dict(BODY, source_operation=operation)
+    if operation == 'edit':
+        body['expected_base_commit'] = '1' * 40
+    lane.hint = flow._hint(operation, EDIT, body)
+    def author(tenant, project, request, **kwargs):
+        lane.author_calls += 1
+        assert request == dict(flow.body_to_author(body), idempotency_key=flow._request_key(body, flow.WEB_PROFILE))
+        row = candidate(body, state='staged', version=1)
+        lane.rows[EDIT] = row
+        return dict(receipt=row['receipt_json'], receiptDigest=row['receipt_digest'], version=1)
+    monkeypatch.setattr(flow.authoring, 'author', author)
+    result = execute(body)
+    assert result['schema'] == 'leaf.browser-project-source.v1'
+    assert result['state'] == 'awaiting_confirmation'
+    assert flow.read('tenant', PROJECT, EDIT) == result
+    marker = next(e['data'] for e in lane.events if e['type'] == 'browser_source_dispatch')
+    assert marker == dict(action=operation, source_request_id=EDIT, payload_digest=hashlib.sha256(
+        flow.canonical(dict(action=operation, source_request_id=EDIT, payload=body))).hexdigest())
+    lane.active = 'turn'
+    assert execute(body) == result
+    assert lane.author_calls == 1 and lane.finished == ['turn']
+
+
 @pytest.mark.parametrize('raw', [
     b'{"receipt_digest":"a","receipt_digest":"b","expected_version":1}',
     b'{"receipt_digest":"a","expected_version":NaN}',
