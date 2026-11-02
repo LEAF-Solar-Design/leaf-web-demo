@@ -16,4 +16,5 @@ SUPPORTED_TOOLS = frozenset((
     "solar-correct-string",
     "solar-solve-proposal",
     "solar-commit-solve",
+    "solar-solaredge-accept",
 ))
