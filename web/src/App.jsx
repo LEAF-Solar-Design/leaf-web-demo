@@ -123,6 +123,8 @@ import CockpitEngineStatus from './site/CockpitEngineStatus.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
 import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
+import { createProjectDrawingEditor, projectDrawingEditorScopeKey } from './cadedit/projectDrawingEditor.js'
+import { createProjectDrawingEditorTransport } from './api.js'
 import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
 import CanvasPointPicker from './cadedit/CanvasPointPicker.jsx'
 import { COCKPIT_COMMAND_EVENT, parseDrawingCommand } from './lib/commandWords.js'
@@ -393,6 +395,97 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
     intake={materialIntake} artifacts={artifacts} onStartUpload={startMaterialUpload}
     onRetry={materialIntake.retry} mock={false}
     photos={<PhotoMaterialIntake projectId={project?.project_id} />} />
+}
+
+export async function seatProjectDrawingPublication(controller, receipt) {
+  const version = receipt?.drawing_version
+  const before = controller.getSnapshot()
+  if (!version || before.openProjectId !== version.project_id || before.orgId !== version.org_id) return false
+  const workspace = await controller.rehydrate()
+  const after = controller.getSnapshot()
+  if (after.openProjectId !== version.project_id || after.orgId !== version.org_id
+    || after.canonicalVersionId !== before.canonicalVersionId
+    || !workspace?.drawing_versions?.some((row) => row.version_id === version.version_id
+      && row.drawing_id === version.drawing_id && row.project_id === version.project_id && row.org_id === version.org_id)) return false
+  controller.selectCanonicalVersion(version.version_id)
+  return true
+}
+
+export function projectEditorScope({ enabled, orgId, projectId, workspace, versionId }) {
+  if (!enabled || !orgId || !projectId || workspace?.project?.project_id !== projectId
+    || workspace.project.org_id !== orgId) return null
+  const version = workspace.drawing_versions?.find((row) => row.version_id === versionId)
+  if (versionId && (!version || version.org_id !== orgId || version.project_id !== projectId)) return null
+  return { organization_id: orgId, project_id: projectId,
+    drawing_id: version?.drawing_id ?? null, input_version_id: version?.version_id ?? null }
+}
+
+// This mounted project adapter reuses the existing upload/adoption controller.
+// Opening a file cannot silently retain the standalone drawing's save target.
+export function ProjectDrawingEditorBridge({ scope, onTarget, transport: suppliedTransport = null }) {
+  const scopeRef = useRef(scope)
+  scopeRef.current = scope
+  const attachedRef = useRef(null)
+  const upload = useDrawingUploadController()
+  const intake = useMaterialIntake({ upload, onAttached: (drawing) => { attachedRef.current = drawing } })
+  const uploadRef = useRef(upload), intakeRef = useRef(intake)
+  uploadRef.current = upload
+  intakeRef.current = intake
+  const transport = useMemo(() => suppliedTransport || createProjectDrawingEditorTransport(), [suppliedTransport])
+  const editor = useMemo(() => createProjectDrawingEditor({
+    getScope: () => scopeRef.current,
+    transport,
+    acquireCheckout: transport.acquireCheckout,
+    releaseCheckout: transport.releaseCheckout,
+    importFile: async (file, captured) => {
+      attachedRef.current = null
+      const material = intakeRef.current
+      if (!material.begin({ projectId: captured.project_id, fileName: file.name })) {
+        throw new Error('Wait for the current drawing upload to finish.')
+      }
+      uploadRef.current.actions.setEngine('local')
+      const result = await uploadRef.current.actions.upload(file)
+      const drawing = attachedRef.current
+      if (!result || !drawing) throw new Error('The drawing could not be attached to this project. Try again.')
+      return { drawing_version: drawing }
+    },
+  }), [transport])
+  const scopeKey = projectDrawingEditorScopeKey(scope)
+  useLayoutEffect(() => {
+    scopeRef.current = scope
+    if (!scope) { onTarget(null); return }
+    onTarget(editor.getSaveTarget())
+  }, [editor, scopeKey, onTarget])
+  useLayoutEffect(() => {
+    scopeRef.current = scope
+    return () => {
+      scopeRef.current = null
+      uploadRef.current.actions.cancel()
+      intakeRef.current.reset()
+      onTarget(null)
+    }
+  }, [scope?.organization_id, scope?.project_id, onTarget])
+  return null
+}
+
+function ProjectDrawingEngineOpener({ scope, target }) {
+  const { session, setReach } = useEngineSessionContext()
+  const scopeKey = projectDrawingEditorScopeKey(scope)
+  const [failure, setFailure] = useState(false)
+  const [retry, setRetry] = useState(0)
+  useEffect(() => {
+    let alive = true
+    if (!scope?.input_version_id || target?.scopeKey !== scopeKey) return undefined
+    setFailure(false)
+    setReach({ state: REACH_STATE.OPENING, sentence: 'Opening the saved project drawing.' })
+    Promise.resolve(session.actions.openProjectVersion(scope.input_version_id)).then((result) => {
+      if (!alive) return
+      if (result === false || result === null) { setFailure(true); return }
+      setReach({ state: REACH_STATE.OPEN, sentence: '' })
+    }, () => { if (alive) setFailure(true) })
+    return () => { alive = false }
+  }, [scopeKey, target?.scopeKey, retry, session.actions, setReach])
+  return failure ? <button className="btn ghost" onClick={() => setRetry((value) => value + 1)}>Retry saved drawing</button> : null
 }
 
 function promoteStandaloneUpload({ receipt }, attempt, current, setFromUpload) {
@@ -992,8 +1085,8 @@ export default function App() {
     shown,
     visibleLayers: standaloneVisibleLayers,
     drawingState,
-    canUndo,
-    canRedo,
+    canUndo: standaloneCanUndo,
+    canRedo: standaloneCanRedo,
     versionBusy,
     overlayStale,
     historyOpen,
@@ -1206,6 +1299,16 @@ export default function App() {
   catalogRunContextRef.current = catalogRunContext
   const projectMode = !mock && !!openProjectId
   projectModeRef.current = projectMode
+  const [projectEditorTarget, setProjectEditorTarget] = useState(null)
+  const [projectEditorEngine, setProjectEditorEngine] = useState(null)
+  const projectEditorBinding = projectEditorScope({ enabled: projectMode && session.status === 'active',
+    orgId, projectId: openProjectId, workspace, versionId: canonicalVersionId })
+  const projectEditorKey = projectDrawingEditorScopeKey(projectEditorBinding)
+  const projectSelectedDrawingVersion = workspace?.drawing_versions?.find((row) => row.version_id === canonicalVersionId)
+  const canUndo = projectMode ? !!projectSelectedDrawingVersion && !!projectEditorTarget?.restoreVersion
+    && workspace.drawing_versions.some((row) => row.drawing_id === projectSelectedDrawingVersion.drawing_id
+      && row.seq < projectSelectedDrawingVersion.seq) : standaloneCanUndo
+  const canRedo = !projectMode && standaloneCanRedo
   const projectSolarAccountScope = composerDraftAccountScope()
   const projectSolarSession = {
     authenticated: !mock && session.status === 'active',
@@ -2162,7 +2265,8 @@ export default function App() {
       current: projectScene.ready === true,
     } : null,
   })
-  const drawingIntake = projectMode ? projectDrawing.intake : activeIntake || shown
+  const projectEngineIntake = projectEditorEngine?.scopeKey === projectEditorKey ? projectEditorEngine.intake : null
+  const drawingIntake = projectMode ? projectEngineIntake || projectDrawing.intake : activeIntake || shown
   const projectDrawingName = projectDrawing.intake?.dwg || projectSolar.scope.binding?.drawing_id || ''
   const visibleLayers = projectMode ? projectSolarRuntime.visibleLayers : standaloneVisibleLayers
   const setVisibleLayers = projectMode ? projectSolarRuntime.setVisibleLayers : setStandaloneVisibleLayers
@@ -2436,15 +2540,28 @@ export default function App() {
   // version-navigation gestures; action is the closed vocabulary
   // undo/redo/history/preview, counted only when the navigation happened.
   const undoCurrentVersion = useCallback(async () => {
+    if (projectModeRef.current) {
+      const current = workspaceController.getSnapshot()
+      const selected = current.workspace?.drawing_versions?.find((row) => row.version_id === current.canonicalVersionId)
+      const previous = current.workspace?.drawing_versions?.filter((row) => row.drawing_id === selected?.drawing_id && row.seq < selected.seq)
+        .sort((a, b) => b.seq - a.seq)[0]
+      if (!previous || !projectEditorTarget?.restoreVersion) return null
+      try {
+        const receipt = await projectEditorTarget.restoreVersion(previous.version_id)
+        if (await seatProjectDrawingPublication(workspaceController, receipt)) showToast({ text: 'Previous project drawing restored.' })
+        return receipt
+      } catch (error) { showToast({ text: humanizeError(error) }); return null }
+    }
     const view = await undoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'undo' })
       showToast({ text: `Reverted to version ${view.head}`, action: versionViewAction(drawingState?.drawing_id, view.head) })
     }
-  }, [drawingState, showToast, undoDrawingVersion, versionViewAction])
+  }, [drawingState, showToast, undoDrawingVersion, versionViewAction, workspaceController, projectEditorTarget])
   undoActionRef.current = undoCurrentVersion
 
   const onRedo = useCallback(async () => {
+    if (projectModeRef.current) return null
     const view = await redoDrawingVersion()
     if (view) {
       track('drawing.version_navigated', { action: 'redo' })
@@ -2453,6 +2570,11 @@ export default function App() {
   }, [drawingState, redoDrawingVersion, showToast, versionViewAction])
 
   const onToggleHistoryTracked = useCallback(() => {
+    if (projectModeRef.current) {
+      setProjectPane('versions')
+      setBrowserPanel('project')
+      return
+    }
     returnToDrawing()
     if (!historyOpen) track('drawing.version_navigated', { action: 'history' })
     onToggleHistory()
@@ -4738,7 +4860,7 @@ export default function App() {
   // NEW VERSION of the open drawing. The engine supplies its committed
   // parent; the server's compare-and-set still guards the race. Mock/demo
   // stays download-only, honestly.
-  const engineSaveTarget = !mock && intake ? {
+  const engineSaveTarget = !mock && !projectMode && intake ? {
     drawingId: REQUESTED_DRAWING_ID,
     headVersion: null,
     // W4g-3b (one head): a save that carries a `plan` (the store's diff of
@@ -4802,12 +4924,20 @@ export default function App() {
     },
   } : null
   const onEngineSaved = (receipt) => {
+    if (receipt?.drawing_version) {
+      return seatProjectDrawingPublication(workspaceController, receipt)
+    }
     if (receipt?.new_version) {
       completedVersionRef.current?.(receipt.new_version, { result: {} })
     }
   }
   const engineScope = (node) => (ENV_CAD_EDIT ? (
-    <EngineSessionProvider saveTarget={localCadActive ? null : engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}><LocalCadEngineHold active={localCadActive} />{node}</EngineSessionProvider>
+    <EngineSessionProvider saveTarget={localCadActive ? null : projectMode ? projectEditorTarget : engineSaveTarget} onSaved={onEngineSaved} onDirtyChange={onEngineDirtyChange} onDocumentChange={setEngineDocument} onBeforeEdit={closeStartForChange} onBeforeArm={onBeforeArm}>
+      <LocalCadEngineHold active={localCadActive} />
+      {projectMode && <ProjectDrawingEditorBridge key={session.generation} scope={projectEditorBinding} onTarget={setProjectEditorTarget} />}
+      {projectMode && <ProjectDrawingEngineOpener scope={projectEditorBinding} target={projectEditorTarget} />}
+      {node}
+    </EngineSessionProvider>
   ) : node)
 
   return (
@@ -5630,7 +5760,7 @@ export default function App() {
               the card carries data-engine-document for the pins. */}
           {ENV_CAD_EDIT && <EngineObjectBridge active={!projectMode && !!studioGround && groundShowsDrawing(activeSurface)} intake={activeIntake} />}
           {!localCadActive && <>
-          {ENV_CAD_EDIT && studioGround && !projectMode && engineViewArmed && (
+          {ENV_CAD_EDIT && studioGround && (projectMode ? !!projectEditorBinding?.input_version_id : engineViewArmed) && (
             <EngineDocumentView
               viewerRef={viewerRef}
               consoleIntake={intake}
@@ -5639,6 +5769,9 @@ export default function App() {
               registerCanvasPick={registerCanvasPick}
               registerCanvasMarquee={registerCanvasMarquee}
               onShown={(intake, history) => {
+                if (projectMode) {
+                  setProjectEditorEngine(intake ? { scopeKey: projectEditorKey, intake } : null)
+                }
                 setActiveIntake(intake)
                 setEngineHistory(history ? { undoDepth: history.undoDepth, redoDepth: history.redoDepth } : null)
                 if (!intake || (resultCandidate && resultCandidate.documentId !== intake.documentId)) {
@@ -5655,6 +5788,7 @@ export default function App() {
                 else delete el.dataset.engineDocument
               }}
               onHidden={() => {
+                if (projectMode) setProjectEditorEngine(null)
                 setActiveIntake(null)
                 setEngineHistory(null)
                 setResultCandidate(null)
@@ -5819,7 +5953,7 @@ export default function App() {
                     >
                       History{previewing ? ` · v${previewing.version}` : ''}
                     </button>
-                    {historyExit.shown && (
+                    {!projectMode && historyExit.shown && (
                       <VersionHistory
                         data={history}
                         error={historyErr}

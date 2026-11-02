@@ -19,7 +19,7 @@ router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?)|"
+    r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
@@ -181,6 +181,109 @@ def release_route(project_id: UUID, drawing_id: UUID, tenant=Depends(deps.requir
             checkout_capability_token=x_checkout_capability)
         return {**_identity(tenant, project_id, drawing_id), "released": released, "checkout": None}
     return _dispatch(operation)
+
+
+# Browser edits publish both immutable DXF bytes and their derived intake in
+# the canonical project chain. These never enter the legacy drawing store.
+import project_drawing_editor as drawing_editor
+
+
+def _editor_dispatch(operation):
+    try:
+        result = operation()
+        return result if isinstance(result, Response) else JSONResponse(
+            content=with_envelope_fields(result), headers=_NO_STORE)
+    except drawing_editor.EditorError as exc:
+        body = err_envelope(ErrorCode.INTERNAL if exc.status >= 500 else ErrorCode.BAD_PARAMS,
+                            "Project drawing edit unavailable.", exc.retryable)
+        body["error"]["reason_code"] = exc.code
+        return JSONResponse(content=body, status_code=exc.status, headers=_NO_STORE)
+    except service.ProjectContextError as exc:
+        def refused():
+            raise exc
+        return _dispatch(refused)
+    except Exception:
+        return _dispatch(lambda: service.refuse("INTERNAL"))
+
+
+async def _editor_request(request, *, restore=False):
+    expected = "application/json" if restore else "application/dxf"
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != expected:
+        raise drawing_editor.EditorError("PROJECT_EDITOR_MEDIA_TYPE_REFUSED", 415)
+    maximum = 4096 if restore else drawing_editor.MAX_DXF_BYTES
+    declared = request.headers.get("content-length")
+    if declared and declared.isdigit() and int(declared) > maximum:
+        raise drawing_editor.EditorError("PROJECT_EDITOR_TOO_LARGE", 413)
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > maximum:
+            raise drawing_editor.EditorError("PROJECT_EDITOR_TOO_LARGE", 413)
+        raw.extend(chunk)
+    if not restore:
+        return bytes(raw)
+    try:
+        import json
+        body = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=service._object_pairs,
+                          parse_constant=service._nonfinite)
+        if type(body) is not dict or set(body) != {"version_id"}:
+            raise ValueError()
+        return drawing_editor.request_uuid(body["version_id"])
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise drawing_editor.EditorError("PROJECT_EDITOR_REQUEST_INVALID") from None
+
+
+@router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{version_id}/dxf")
+def project_editor_source_route(project_id: UUID, drawing_id: UUID, version_id: UUID,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[UUID] = Header(default=None),
+        x_project_id: Optional[UUID] = Header(default=None)):
+    def operation():
+        _headers(tenant, project_id, x_org_id, x_project_id)
+        raw, digest = drawing_editor.read_dxf(tenant, project_id, drawing_id, version_id)
+        return Response(content=raw, media_type="application/dxf", headers={**_NO_STORE,
+            "X-Content-Type-Options": "nosniff", "X-Leaf-Source-Sha256": digest,
+            "Content-Disposition": 'attachment; filename="drawing.dxf"'})
+    return _editor_dispatch(operation)
+
+
+async def _project_editor_write(request, tenant, project_id, drawing_id, parent_version_id,
+                                org_header, project_header, capability, idempotency_key, *, restore):
+    try:
+        _headers(tenant, project_id, org_header, project_header)
+        # Authorize before reading/parsing up to16MiB from an untrusted caller.
+        service._access(tenant, project_id, write=True)
+        request_id = drawing_editor.request_uuid(idempotency_key)
+        body = await _editor_request(request, restore=restore)
+    except (service.ProjectContextError, drawing_editor.EditorError) as exc:
+        def refused():
+            raise exc
+        return _editor_dispatch(refused)
+    operation = drawing_editor.restore_dxf if restore else drawing_editor.save_dxf
+    return await run_in_threadpool(_editor_dispatch, lambda: operation(
+        tenant, project_id, drawing_id, parent_version_id, body,
+        request_id=request_id, capability=capability))
+
+
+@router.post("/api/projects/{project_id}/drawings/{drawing_id}/versions/{parent_version_id}/editor")
+async def project_editor_save_route(project_id: UUID, drawing_id: UUID, parent_version_id: UUID,
+        request: Request, tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[UUID] = Header(default=None),
+        x_project_id: Optional[UUID] = Header(default=None),
+        x_checkout_capability: Optional[str] = Header(default=None),
+        idempotency_key: Optional[str] = Header(default=None)):
+    return await _project_editor_write(request, tenant, project_id, drawing_id, parent_version_id,
+        x_org_id, x_project_id, x_checkout_capability, idempotency_key, restore=False)
+
+
+@router.post("/api/projects/{project_id}/drawings/{drawing_id}/versions/{parent_version_id}/editor/restore")
+async def project_editor_restore_route(project_id: UUID, drawing_id: UUID, parent_version_id: UUID,
+        request: Request, tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[UUID] = Header(default=None),
+        x_project_id: Optional[UUID] = Header(default=None),
+        x_checkout_capability: Optional[str] = Header(default=None),
+        idempotency_key: Optional[str] = Header(default=None)):
+    return await _project_editor_write(request, tenant, project_id, drawing_id, parent_version_id,
+        x_org_id, x_project_id, x_checkout_capability, idempotency_key, restore=True)
 
 
 # These output endpoints share only the existing context and response helpers.
