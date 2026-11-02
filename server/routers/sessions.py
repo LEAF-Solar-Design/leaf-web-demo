@@ -220,6 +220,61 @@ async def propose_project_page(
         return fail(503, "Portfolio proposal service is unavailable.")
 
 
+@router.post("/api/sessions/{session_id}/materials/inspect")
+async def inspect_project_materials(
+    session_id: str, request: Request,
+    tenant=Depends(_page_proposal_tenant),
+    authority_session_id: Optional[str] = Header(default=None, alias="X-Authority-Session-Id"),
+    authority_turn_id: Optional[str] = Header(default=None, alias="X-Authority-Turn-Id"),
+):
+    import project_material_inspection as inspection
+
+    headers = {"Cache-Control": "private, no-store"}
+
+    def fail(status):
+        exc = inspection.InspectionError(status)
+        return JSONResponse({"code": exc.code, "detail": str(exc)}, status_code=status, headers=headers)
+
+    try:
+        scope = await run_in_threadpool(
+            inspection.authority, tenant, session_id, authority_session_id, authority_turn_id)
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > inspection.MAX_INPUT_BYTES:
+                return fail(413)
+            raw.extend(chunk)
+        body = inspection.parse_request(bytes(raw))
+        if await run_in_threadpool(
+                inspection.authority, tenant, session_id, authority_session_id, authority_turn_id) != scope:
+            return fail(403)
+        result = await run_in_threadpool(
+            inspection.inspect, tenant, session_id, authority_session_id, authority_turn_id, body)
+        if await run_in_threadpool(
+                inspection.authority, tenant, session_id, authority_session_id, authority_turn_id) != scope:
+            return fail(403)
+        response = JSONResponse(result, headers=headers)
+        if len(response.body) > inspection.MAX_RESPONSE_BYTES:
+            return fail(422)
+        return response
+    except inspection.InspectionError as exc:
+        return fail(exc.status)
+    except platform_link.ProjectSessionForbidden:
+        return fail(403)
+    except LookupError:
+        return fail(404)
+    except Exception as exc:  # noqa: BLE001 - never expose storage diagnostics
+        # Package loading itself may fail, so classify only already-loaded errors.
+        lifecycle = sys.modules.get('leaf_platform.project_lifecycle')
+        if lifecycle is not None:
+            if isinstance(exc, lifecycle.LifecycleForbidden):
+                return fail(403)
+            if isinstance(exc, lifecycle.LifecycleConflict):
+                return fail(409)
+            if isinstance(exc, lifecycle.LifecycleUnavailable):
+                return fail(404)
+        return fail(503)
+
+
 # --------------------------------------------------------------------------- #
 # "Mount your LLM" input validation (model allowlist + BYO credential hygiene).
 # --------------------------------------------------------------------------- #
