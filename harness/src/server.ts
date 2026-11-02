@@ -691,6 +691,17 @@ export function planFirstOption(req: IncomingMessage): { planFirst?: boolean } {
     : {};
 }
 
+function projectExecutionOption(req: IncomingMessage, authenticated: boolean): { projectExecution?: "canonical-read" } {
+  const name = "x-leaf-project-execution";
+  const value = req.headers[name];
+  const count = req.rawHeaders.filter((header, index) => index % 2 === 0 && header.toLowerCase() === name).length;
+  if (value === undefined && count === 0) return {};
+  if (!authenticated || count !== 1 || value !== "canonical-read") {
+    throw new AuthorLoopError("project execution marker is invalid", 400);
+  }
+  return { projectExecution: "canonical-read" };
+}
+
 function instantTurnOptions(req: IncomingMessage, authenticated: boolean): Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> {
   const encoded = req.headers["x-leaf-instant-assignment"];
   if (typeof encoded !== "string" || !encoded) return {};
@@ -739,7 +750,7 @@ async function streamTurn(
   res: ServerResponse,
   runner: ConverseRunner,
   input: ConverseTurnInput,
-  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> & { planFirst?: boolean },
+  instant?: Pick<Extract<ConverseTurnValidation, { ok: true }>, "instantAssignment" | "instantDrawingContext"> & { planFirst?: boolean; projectExecution?: "canonical-read" },
 ): Promise<void> {
   const turnAbort = new AbortController();
   const iterator = runner.runTurn(input, { signal: turnAbort.signal, ...instant })[Symbol.asyncIterator]();
@@ -1574,7 +1585,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
         // dropped: async-function `return somePromise` does not route through a local
         // catch, only `await` does.
         await streamTurn(req, res, ports.converseRunner, validated.input,
-          { ...instantTurnOptions(req, auth.enabled), ...planFirstOption(req) });
+          { ...instantTurnOptions(req, auth.enabled), ...planFirstOption(req), ...projectExecutionOption(req, auth.enabled) });
         return;
       }
 
