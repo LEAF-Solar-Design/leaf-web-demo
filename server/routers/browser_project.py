@@ -4,10 +4,11 @@ from __future__ import annotations
 import re
 
 from fastapi import APIRouter, Depends, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 import browser_project_flow as flow
+import browser_project_source_export as source_export
 import deps
 
 router = APIRouter(prefix='/api/projects/{project_id}/browser/source')
@@ -85,6 +86,23 @@ async def list_requests(project_id: str, tenant=Depends(deps.require_active_tena
 @router.get('/requests/{source_request_id}')
 async def get_request(project_id: str, source_request_id: str, tenant=Depends(deps.require_active_tenant)):
     return await _get(tenant, project_id, source_request_id)
+
+
+@router.get('/requests/{source_request_id}/export')
+async def export_request(project_id: str, source_request_id: str, request: Request,
+                         tenant=Depends(deps.require_active_tenant)):
+    try:
+        # Same-project authorization precedes even query decoding.
+        await run_in_threadpool(flow.scope, tenant, project_id)
+        if len(request.scope.get('query_string', b'')) > 2048:
+            raise flow.FlowError(422)
+        bundle, headers = await run_in_threadpool(source_export.export_bundle, tenant, project_id,
+                                                 source_request_id, request.query_params.multi_items())
+        return Response(bundle, media_type='application/octet-stream', headers=headers)
+    except flow.FlowError as exc:
+        return _failure(exc)
+    except Exception:
+        return _failure(flow.FlowError(503))
 
 
 async def _post(project_id, request, tenant, action, edit_id=None):

@@ -1,5 +1,6 @@
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { createHash, webcrypto } from 'node:crypto'
 import ProjectSourceCandidateReview from './ProjectSourceCandidateReview.jsx'
 import useProjectSourceController from './useProjectSourceController.js'
 
@@ -23,6 +24,58 @@ beforeEach(() => {
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear() })
 
 describe('Browser source review', () => {
+  it('prepares verified private Git bytes with one GET and requires an explicit download link click', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const NativeURL = URL
+    const create = vi.fn(() => 'blob:source-bundle')
+    const revoke = vi.fn()
+    vi.stubGlobal('URL', class extends NativeURL {
+      static createObjectURL = create
+      static revokeObjectURL = revoke
+    })
+    const bytes = new TextEncoder().encode(`# v3 git bundle\n@object-format=sha1\n${'c'.repeat(40)} refs/heads/main\n\nPACK`)
+    const hash = createHash('sha256').update(bytes).digest('hex')
+    const filename = `project-source-${'c'.repeat(40)}.bundle`
+    const fetch = vi.fn(async (url) => {
+      if (String(url).includes('/reference-files')) return response({ materials: [], next_cursor: null })
+      if (String(url).includes('/export?')) return new Response(bytes, { headers: {
+        'Content-Type': 'application/octet-stream', 'Content-Disposition': `attachment; filename="${filename}"`,
+        'Content-Length': String(bytes.byteLength), 'X-Leaf-Bundle-Sha256': hash,
+        'X-Leaf-Source-Commit': 'c'.repeat(40), 'X-Leaf-Source-Tree': 'd'.repeat(40),
+        'X-Leaf-Source-Version': '1', 'X-Leaf-Source-Receipt-Digest': 'a'.repeat(64),
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+      } })
+      return response(String(url).endsWith('/requests') ? [saved('published')] : saved('published'))
+    })
+    vi.stubGlobal('fetch', fetch)
+    const startAgentTurn = vi.fn()
+    const host = render(<Host startAgentTurn={startAgentTurn} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    await screen.findByText('Private source saved')
+    const prepare = screen.getByRole('button', { name: 'Prepare source download' })
+    await waitFor(() => expect(prepare).toBeEnabled())
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    act(() => { fireEvent.click(prepare); fireEvent.click(prepare) })
+    await screen.findByText('Source download ready')
+    const link = screen.getByRole('link', { name: 'Download Git source bundle' })
+    expect(link).toHaveAttribute('href', 'blob:source-bundle')
+    expect(link).toHaveAttribute('download', filename)
+    expect(link.tabIndex).toBe(0)
+    expect(screen.getByText(`SHA256: ${hash}`)).toBeVisible()
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(fetch.mock.calls.filter(([url]) => String(url).includes('/export?'))).toHaveLength(1)
+    expect(fetch.mock.calls.some(([, init]) => init?.method === 'POST')).toBe(false)
+    expect(startAgentTurn).not.toHaveBeenCalled()
+    host.rerender(<Host startAgentTurn={startAgentTurn} profile="solar" />)
+    expect(screen.getByRole('link')).toBeVisible()
+    fireEvent.click(screen.getByRole('button', { name: 'Close' }))
+    expect(revoke).toHaveBeenCalledWith('blob:source-bundle')
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    await screen.findByText('Private source saved')
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare source download' })).toBeEnabled())
+  })
+
   it('uses the real hook/API, shows source-only save, and requires an explicit single confirmation', async () => {
     let durable = saved()
     const posts = []
@@ -108,6 +161,7 @@ describe('Browser source review', () => {
     await screen.findByText(`Source state: ${state}`)
     expect(screen.getByRole('button', { name: 'Confirm changes' })).toBeDisabled()
     expect(screen.getByRole('button', { name: 'Reject' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Prepare source download' })).toBeDisabled()
     if (state === 'publishing') expect(screen.getByRole('button', { name: 'Recover' })).toBeEnabled()
     else expect(screen.getByRole('button', { name: 'Recover' })).toBeDisabled()
   })
