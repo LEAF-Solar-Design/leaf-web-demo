@@ -97,6 +97,23 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
   const displayedStatus = invalid ? 'invalid' : status
   const problem = invalid ?? failure
   const laProblem = state ? laFitProblem(state.doc) : null
+  const canDownload = !local && state && !invalid && !state.transaction && ['saved', 'editing'].includes(status) && validId(loadedId ?? '') && docId === loadedId
+  function downloadDefinition() {
+    if (!canDownload) return
+    let url, link
+    try {
+      const doc = validateWidgetDoc(state.doc)
+      url = URL.createObjectURL(new Blob([JSON.stringify(doc, null, 2)], { type: 'application/json' }))
+      link = document.createElement('a')
+      link.href = url
+      link.download = `widget-${loadedId}.json`
+      document.body.appendChild(link)
+      link.click()
+    } finally {
+      link?.remove()
+      if (url) setTimeout(() => URL.revokeObjectURL(url), 0)
+    }
+  }
   return <section className="widgets-view" hidden={hidden} aria-label={local ? 'Text widget editor' : 'Widget designer'}>
     <h2>Widget designer</h2>
     {!local && <>
@@ -105,12 +122,14 @@ export function WidgetsView({ scopeKey, hidden = false, host = null, requestPubl
         <button type="button" disabled={!validId(docId) || status === 'loading' || status === 'saving'} onClick={() => load()}>Load</button>
         <button type="button" disabled={!validId(docId) || status === 'loading' || status === 'saving'} onClick={newDocument}>New</button>
         {state && <button type="button" onClick={save} disabled={Boolean(invalid) || status === 'invalid' || status === 'loading' || status === 'saving' || status === 'conflict' || docId !== loadedId}>Save</button>}
+        <button type="button" disabled={!canDownload} onClick={downloadDefinition}>Download widget definition</button>
         {requestPublication && <button type="button" disabled={!loadedId || !head || !sha256 || status !== 'saved' || Boolean(invalid) || Boolean(state?.transaction) || docId !== loadedId}
           onClick={async () => {
             const result = await requestPublication({ doc: state.doc, source: { artifact_id: loadedId, revision: head, digest: sha256 } })
             setPublication(result.ok ? 'Publication requested' : result.reason === 'la_too_tall' ? laFitProblem(state.doc) : result.reason)
           }}>Request publication</button>}
       </div>
+      <p>Downloading does not save edits to the project.</p>
       {requestPublication && laProblem && <p>{laProblem}</p>}
       {publication && <p role="status" aria-label="Publication request">{publication}</p>}
       <p role="status">{({ empty: 'Enter a Document ID, then choose New or Load.', loading: 'Loading widget…', saving: 'Saving widget…', saved: `Saved revision ${head ?? ''}.`, editing: 'Local edits. Save when ready.', invalid: 'Invalid widget. Correct the indicated field before saving.', conflict: 'Conflict: the document changed. Your local edits are kept. Reload to use the stored revision.', error: 'The document request failed. Your local edits are kept.' })[displayedStatus]}</p>
