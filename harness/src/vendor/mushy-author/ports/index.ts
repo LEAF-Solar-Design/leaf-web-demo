@@ -859,6 +859,13 @@ export interface SubmitRunResponse {
   [k: string]: unknown;
 }
 
+/** One bounded page of an immutable platform source file. */
+export interface PlatformSourceRange {
+  startLine: number;
+  maxLines: number;
+  expectedCommit: string;
+}
+
 export interface AppRunClient {
   /** Read-only action configuration discovery; requires the host's explicit action_discovery grant. */
   integrationActionCatalog?(
@@ -946,7 +953,11 @@ export interface AppRunClient {
   customizeList(tenantId: string, limit: number): Promise<Record<string, unknown>>;
   /** GET /api/platform/source?path= — ONE platform source file at the review
    * base (R7 read side). Size-capped server-side; binary reported, not returned. */
-  customizeReadSource(tenantId: string, path: string): Promise<Record<string, unknown>>;
+  customizeReadSource(
+    tenantId: string,
+    path: string,
+    range?: PlatformSourceRange,
+  ): Promise<Record<string, unknown>>;
   /** GET /api/platform/source/tree?dir= — ONE directory level at the review
    * base. Empty dir lists the repo root. */
   customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>>;

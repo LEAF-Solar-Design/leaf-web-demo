@@ -51,6 +51,7 @@ import type {
   IntegrationQueryInput,
   IntegrationSaveElementInput,
   IntegrationToolResult,
+  PlatformSourceRange,
 } from "../ports/index.js";
 
 // --------------------------------------------------------------------------- //
@@ -909,6 +910,7 @@ export class ConverseLoop {
           // turns into confirmation_required (wire contract sections 5 + 6).
           return { action: "request_confirmation", args };
         case "customize_platform": {
+          customizeSourceRange(args);
           const op = customizeOp(args.op);
           if (op === "status" || op === "list" || op === "read_source" || op === "list_source") {
             // Read-only ops have no side effect; the read rung records them
@@ -1522,7 +1524,10 @@ export class ConverseLoop {
         if (op === "read_source") {
           const path = String(args.path ?? "").trim();
           if (!path) return err("customize_platform read_source requires args.path");
-          return ok(JSON.stringify(await appRun.customizeReadSource(tenantId, path)));
+          const range = customizeSourceRange(args);
+          return ok(JSON.stringify(await (range
+            ? appRun.customizeReadSource(tenantId, path, range)
+            : appRun.customizeReadSource(tenantId, path))));
         }
         if (op === "list_source") {
           const dir = String(args.dir ?? "").trim();
@@ -1683,6 +1688,26 @@ function customizeOp(raw: unknown): CustomizeOp {
     default:
       return "propose";
   }
+}
+
+const SOURCE_RANGE_KEYS = ["start_line", "max_lines", "expected_commit"] as const;
+const SourceRangeInput = z.strictObject({
+  start_line: z.number().int().positive().refine(Number.isSafeInteger),
+  max_lines: z.number().int().min(1).max(400),
+  expected_commit: z.string().length(40).regex(/^[0-9a-f]{40}$/),
+});
+
+/** Range fields are one read-only unit, never silently dropped on another op. */
+function customizeSourceRange(args: Record<string, unknown>): PlatformSourceRange | undefined {
+  const present = SOURCE_RANGE_KEYS.filter(key => Object.hasOwn(args, key));
+  if (present.length === 0) return undefined;
+  if (customizeOp(args.op) !== "read_source" || present.length !== SOURCE_RANGE_KEYS.length) {
+    throw new Error("Source ranges require read_source with start_line, max_lines and expected_commit together.");
+  }
+  const parsed = SourceRangeInput.safeParse(Object.fromEntries(SOURCE_RANGE_KEYS.map(key => [key, args[key]])));
+  if (!parsed.success) throw new Error("Invalid platform source range.");
+  return { startLine: parsed.data.start_line, maxLines: parsed.data.max_lines,
+    expectedCommit: parsed.data.expected_commit };
 }
 
 function isSpineTool(name: string): name is SpineToolName {

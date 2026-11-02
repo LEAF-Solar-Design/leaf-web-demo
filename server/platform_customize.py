@@ -70,6 +70,9 @@ MAX_TITLE = 200
 # bounded: a listing never walks more than one tree level, a file read is
 # size-checked BEFORE its bytes leave git, and the change list caps its page.
 MAX_SOURCE_BYTES = 262_144  # per file read
+MAX_SOURCE_RANGE_FILE_BYTES = 4_194_304
+MAX_SOURCE_RANGE_BYTES = 32_768
+MAX_SOURCE_RANGE_LINES = 400
 MAX_TREE_ENTRIES = 500      # per directory listing
 MAX_LIST = 50               # per change-list page
 
@@ -1586,17 +1589,28 @@ def _object_type(git_dir: Path, spec: str) -> str:
         raise PlatformCustomizeError("source_not_found", 404, exc.detail) from exc
 
 
-def read_source(*, path: str) -> dict[str, Any]:
+def read_source(*, path: str, start_line: int | None = None,
+                max_lines: int | None = None,
+                expected_commit: str | None = None) -> dict[str, Any]:
     """Read ONE file from the platform repo's authoring-source snapshot.
 
     Same path discipline as an edit (`_validated_repo_path`: no traversal, no
     `.git`, allowlisted charset), size-checked before the bytes are read, and
-    binary content is reported by size only, never returned.
+    binary content is reported by size only, never returned. Optional ranges
+    bind every page to one source commit and keep whole lines within a separate
+    response budget; they do not raise the legacy whole-file limit.
     """
     rel = _validated_query_path(path)
+    ranged = any(value is not None for value in (start_line, max_lines, expected_commit))
+    if ranged and (type(start_line) is not int or start_line < 1
+                   or type(max_lines) is not int or not 1 <= max_lines <= MAX_SOURCE_RANGE_LINES
+                   or type(expected_commit) is not str or not _SHA_RE.fullmatch(expected_commit)):
+        raise PlatformCustomizeError("source_range_invalid", 422)
     git_dir = repo_dir()
     ref = source_ref()
     tip = _base_tip(git_dir, ref)
+    if ranged and tip != expected_commit:
+        raise PlatformCustomizeError("source_changed", 409)
     spec = f"{tip}:{rel}"
     obj_type = _object_type(git_dir, spec)
     if obj_type == "tree":
@@ -1604,7 +1618,7 @@ def read_source(*, path: str) -> dict[str, Any]:
     if obj_type != "blob":
         raise PlatformCustomizeError("source_not_found", 404, f"{rel}: {obj_type}")
     size = int(_git(git_dir, "cat-file", "-s", spec))
-    if size > MAX_SOURCE_BYTES:
+    if size > (MAX_SOURCE_RANGE_FILE_BYTES if ranged else MAX_SOURCE_BYTES):
         raise PlatformCustomizeError("source_too_large", 413, f"{rel}: {size} bytes")
     blob = _git_out(git_dir, "cat-file", "blob", spec)
     view: dict[str, Any] = {
@@ -1618,7 +1632,32 @@ def read_source(*, path: str) -> dict[str, Any]:
         view["binary"] = True
         return view
     view["binary"] = False
-    view["content"] = blob.decode("utf-8", errors="replace")
+    content = blob.decode("utf-8", errors="replace")
+    if not ranged:
+        view["content"] = content
+        return view
+    lines = content.splitlines(keepends=True)
+    total = len(lines)
+    if start_line > max(1, total):
+        raise PlatformCustomizeError("source_range_out_of_bounds", 422)
+    selected: list[str] = []
+    byte_count = 0
+    for line in lines[start_line - 1:start_line - 1 + max_lines]:
+        line_bytes = len(line.encode("utf-8"))
+        if byte_count + line_bytes > MAX_SOURCE_RANGE_BYTES:
+            if not selected:
+                raise PlatformCustomizeError("source_line_too_large", 413)
+            break
+        selected.append(line)
+        byte_count += line_bytes
+    end_line = start_line + len(selected) - 1 if selected else 0
+    eof = end_line >= total
+    view["content"] = "".join(selected)
+    view["range"] = {
+        "start_line": start_line, "end_line": end_line,
+        "next_line": None if eof else end_line + 1,
+        "total_lines": total, "eof": eof,
+    }
     return view
 
 
