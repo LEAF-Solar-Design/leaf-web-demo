@@ -19,18 +19,24 @@ function discardDownload(owner) {
   if (owner.downloadUrl) URL.revokeObjectURL(owner.downloadUrl)
   owner.downloadUrl = null
 }
-export function sourceMaterialProblem(row, projectId, orgId) {
+export function sourceMaterialProblem(row, projectId, orgId, sourceContext = 'browser') {
+  if (!['browser', 'native'].includes(sourceContext)) return 'Source context is unavailable.'
   if (!row || !isSourceUuid(row.material_id) || row.project_id !== projectId || row.org_id !== orgId
     || !isSourceUuid(row.actor_binding_id) || typeof row.sha256 !== 'string' || !/^[0-9a-f]{64}$/.test(row.sha256)
     || !Number.isInteger(row.byte_size) || row.byte_size < 0 || typeof row.name !== 'string') return 'Reference metadata is unavailable.'
   if (!['text/plain', 'application/json'].includes(row.media_type)) return 'Retained project material; unavailable for this source adapter.'
+  if (sourceContext === 'native' && !row.name.trim()) return 'Reference metadata is unavailable.'
+  if (sourceContext === 'native' && (row.byte_size < 1 || row.byte_size > 1048576)) return 'Choose a nonempty TXT or JSON original of at most 1 MiB.'
   if (row.byte_size > LIMIT) return 'This original exceeds the 8 MiB source limit.'
   return null
 }
-export function sourceSelectionProblem(materials, selected, projectId, orgId) {
+export function sourceSelectionProblem(materials, selected, projectId, orgId, sourceContext = 'browser') {
+  if (!['browser', 'native'].includes(sourceContext)) return 'Source context is unavailable.'
+  if (sourceContext === 'native' && selected.length === 0) return 'Choose one through eight TXT or JSON originals.'
   if (selected.length > 8) return 'Choose at most eight originals.'
   const rows = selected.map((id) => materials.find((row) => row.material_id === id))
-  if (rows.some((row) => sourceMaterialProblem(row, projectId, orgId))) return 'Review the selected originals; some are unavailable.'
+  if (new Set(selected).size !== selected.length || rows.some((row) => sourceMaterialProblem(row, projectId, orgId, sourceContext))) return 'Review the selected originals; some are unavailable.'
+  if (sourceContext === 'native' && rows.reduce((total, row) => total + row.byte_size, 0) > 4194304) return 'Selected originals must total at most 4 MiB.'
   if (rows.reduce((total, row) => total + row.byte_size, 0) > LIMIT) return 'Selected originals must total at most 8 MiB.'
   return null
 }
@@ -41,7 +47,7 @@ function uuid() {
 }
 
 // All state here is presentation. Durable candidates are always read from the server.
-export default function useProjectSourceController({ projectId, orgId, signedIn, mock, startAgentTurn }) {
+export default function useProjectSourceController({ projectId, orgId, signedIn, mock, startAgentTurn, sourceContext = 'browser' }) {
   const [, accountChanged] = useState(0)
   useEffect(() => subscribeActiveScope(() => {
     const previous = live.current
@@ -53,12 +59,12 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     accountChanged((value) => value + 1)
   }), [])
   const accountScope = readActiveScope()
-  const key = JSON.stringify([projectId, orgId, accountScope, !!signedIn, !!mock])
+  const key = JSON.stringify([projectId, orgId, accountScope, !!signedIn, !!mock, sourceContext])
   const live = useRef(null)
   if (live.current?.key !== key) {
     live.current?.abort.abort()
     discardDownload(live.current)
-    live.current = { key, projectId, orgId, accountScope, signedIn, mock,
+    live.current = { key, projectId, orgId, accountScope, signedIn, mock, sourceContext,
       abort: new AbortController(), locked: false, sequence: 0, state: freshState() }
   }
   const owner = live.current
@@ -76,11 +82,12 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     return () => { owner.abort.abort(); discardDownload(owner); if (live.current === owner) live.current = null }
   }, [owner])
   const available = () => {
+    if (!['browser', 'native'].includes(owner.sourceContext)) return 'Source context is unavailable.'
     if (!owner.signedIn || owner.mock || !owner.accountScope) return 'Source authoring needs a signed-in live account.'
     if (!isSourceUuid(owner.projectId)) return 'Open or create a project through the project controls first.'
     return null
   }
-  const options = () => ({ expectedScope: owner.accountScope, signal: owner.abort.signal })
+  const options = () => ({ expectedScope: owner.accountScope, signal: owner.abort.signal, sourceContext: owner.sourceContext })
   const clearDownload = () => { discardDownload(owner); publish({ download: null }) }
   const accept = (row) => {
     const previous = owner.state.candidates.find((item) => item.source_request_id === row.source_request_id)
@@ -141,10 +148,10 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
           ids.add(row.material_id); rows.push(row)
         }
         if (result.next_cursor === null || result.next_cursor === undefined) {
-          const supported = rows.filter((row) => !sourceMaterialProblem(row, owner.projectId, owner.orgId)).map((row) => row.material_id)
-          const automatic = sourceSelectionProblem(rows, supported, owner.projectId, owner.orgId) ? [] : supported
-          const invalid = rows.some((row) => sourceMaterialProblem(row, owner.projectId, owner.orgId) === 'Reference metadata is unavailable.'
-            || (['text/plain', 'application/json'].includes(row.media_type) && sourceMaterialProblem(row, owner.projectId, owner.orgId)))
+          const supported = rows.filter((row) => !sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext)).map((row) => row.material_id)
+          const automatic = sourceSelectionProblem(rows, supported, owner.projectId, owner.orgId, owner.sourceContext) ? [] : supported
+          const invalid = rows.some((row) => sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext) === 'Reference metadata is unavailable.'
+            || (['text/plain', 'application/json'].includes(row.media_type) && sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext)))
           publish({ materials: rows, materialsComplete: true,
             ...(preserveSelection ? {} : { selected: invalid ? [] : automatic,
               selectionReviewed: !invalid && supported.length === automatic.length }) })
@@ -183,10 +190,13 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
       if (owner.state.loading || !owner.state.sourceLoaded) throw new Error('Refresh source readback before continuing.')
       let body, text, hint
       if (action === 'stage') {
+        if (owner.sourceContext === 'native' && owner.state.candidates.some((row) => row.state === 'published')) {
+          throw new Error('iOS source currently supports creation only. Editing saved iOS source is unavailable.')
+        }
         const requirements = owner.state.requirements
         if (!requirements.trim() || requirements.includes('\0') || new TextEncoder().encode(requirements).length > 16384) throw new Error('Enter original requirements of at most 16 KiB.')
         if (owner.state.loading || owner.state.materialsLoading || !owner.state.sourceLoaded || !owner.state.materialsComplete) throw new Error('Source or reference readback is incomplete or unavailable. Refresh it before staging.')
-        const selectionIssue = sourceSelectionProblem(owner.state.materials, owner.state.selected, owner.projectId, owner.orgId)
+        const selectionIssue = sourceSelectionProblem(owner.state.materials, owner.state.selected, owner.projectId, owner.orgId, owner.sourceContext)
         if (selectionIssue || !owner.state.selectionReviewed) throw new Error(selectionIssue || 'Review the reference selection before staging.')
         if (owner.state.unknown || owner.state.candidates.some(pending)) throw new Error('Refresh and review the existing source request first.')
         const base = owner.state.candidates.filter((row) => row.state === 'published')
@@ -213,6 +223,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
         hint = { source: 'author_panel', purpose: 'stage_authority', browser_action: action, source_request_id: requestId, ...body }
         text = { confirm: 'Confirm these source changes.', recover: 'Recover this source publication.', reject: 'Reject these source changes.' }[action]
       }
+      if (owner.sourceContext === 'native') hint = { ...hint, source_profile: 'ios-swiftui-xcodegen-v1' }
       minting = true
       const authority = await owner.startAgentTurn(text, hint, { allowSecretOnce, requireImmediateTurn: true })
       minting = false
@@ -222,7 +233,9 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
         : owner.state.intent || { source_request_id: requestId }
       publish({ intent })
       sent = true
-      const opts = { ...options(), authority, allowSecretOnce }
+      const opts = { ...options(), authority, allowSecretOnce,
+        ...(action === 'stage' && owner.sourceContext === 'native'
+          ? { materialMetadata: owner.state.selected.map((id) => owner.state.materials.find((row) => row.material_id === id)) } : {}) }
       const result = action === 'stage' ? await stageProjectSource(owner.projectId, body, opts)
         : await ({ confirm: confirmProjectSource, recover: recoverProjectSource, reject: rejectProjectSource }[action])(owner.projectId, requestId, body, opts)
       if (current()) {
@@ -246,7 +259,7 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     }
   }
   const prepareDownload = async (witness) => {
-    if (owner.exportLocked || owner.locked || !current()) return
+    if (owner.sourceContext !== 'browser' || owner.exportLocked || owner.locked || !current()) return
     clearDownload()
     owner.exportLocked = true // Fence duplicate clicks before React renders.
     const epoch = owner.exportEpoch
@@ -279,8 +292,9 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     }
   }
   const state = view.owner === owner ? view : owner.state
-  return { ...state, isOpen: state.open, projectId, orgId,
-    selectionProblem: sourceSelectionProblem(state.materials, state.selected, projectId, orgId),
+  return { ...state, isOpen: state.open, projectId, orgId, sourceContext,
+    createOnlyBlocked: sourceContext === 'native' && state.candidates.some((row) => row.state === 'published'),
+    selectionProblem: sourceSelectionProblem(state.materials, state.selected, projectId, orgId, sourceContext),
     open, close: () => { clearDownload(); publish({ open: false }) }, refresh, prepareDownload,
     refreshMaterials: () => { if (!owner.locked) void loadMaterials() },
     setRequirements: (requirements) => { if (!owner.locked) publish({ requirements }) },

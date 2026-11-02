@@ -12,8 +12,8 @@ const saved = (state = 'awaiting_confirmation', version = 1) => ({ schema: 'leaf
   source_commit: 'c'.repeat(40), source_tree: 'd'.repeat(40), changed_paths: ['app/a-very-long-directory-name/page.jsx'],
   created_at: '2026-11-01T12:00:00Z', updated_at: '2026-11-01T12:00:00Z' })
 const response = (value) => new Response(JSON.stringify(value), { headers: { 'Content-Type': 'application/json' } })
-function Host({ startAgentTurn, profile = 'browser', projectId = PROJECT }) {
-  const controller = useProjectSourceController({ projectId, orgId: ORG, signedIn: true, mock: false, startAgentTurn })
+function Host({ startAgentTurn, profile = 'browser', projectId = PROJECT, sourceContext = 'browser' }) {
+  const controller = useProjectSourceController({ projectId, orgId: ORG, signedIn: true, mock: false, startAgentTurn, sourceContext })
   return <><button onClick={() => controller.open('Create a quiet reading page.')}>Build source</button>
     <span>{profile}</span><ProjectSourceCandidateReview controller={controller} /></>
 }
@@ -22,6 +22,75 @@ beforeEach(() => {
   localStorage.setItem('leaf.org_id', ORG)
 })
 afterEach(() => { cleanup(); vi.unstubAllGlobals(); localStorage.clear() })
+
+describe('iOS source review', () => {
+  const native = (state = 'published') => ({ ...saved(state), schema: 'leaf.native-project-source.v1', changed_paths: ['Sources/ContentView.swift'] })
+  const materials = [{ material_id: ORG, project_id: PROJECT, org_id: ORG, actor_binding_id: ORG,
+    name: 'Authentic transcript.txt', media_type: 'text/plain', byte_size: 1000, sha256: 'e'.repeat(64) },
+  { material_id: REQUEST, project_id: PROJECT, org_id: ORG, actor_binding_id: ORG,
+    name: 'Teacher movie.mov', media_type: 'video/quicktime', byte_size: 55000000, sha256: 'f'.repeat(64) }]
+
+  it('shows truthful source-only phases, retained movie and create-only limits with no export affordance', async () => {
+    const fetch = vi.fn(async (url) => response(String(url).includes('/reference-files') ? { materials, next_cursor: null } : [native()]))
+    vi.stubGlobal('fetch', fetch)
+    const startAgentTurn = vi.fn()
+    render(<Host startAgentTurn={startAgentTurn} sourceContext="native" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    await screen.findByText('Private source saved')
+    expect(screen.getByRole('dialog', { name: 'iOS project source' })).toBeVisible()
+    expect(screen.getByText(/one through eight nonempty TXT or JSON/)).toHaveTextContent('at most 1 MiB each and 4 MiB total')
+    expect(screen.getByText(/iOS app build, package, simulator\/device runtime and delivery remain pending/)).toBeVisible()
+    expect(screen.getByText(/a transcript is a text reference, not video processing/)).toBeVisible()
+    expect(screen.getByRole('checkbox', { name: 'Authentic transcript.txt' })).toBeChecked()
+    expect(screen.getByRole('checkbox', { name: 'Teacher movie.mov' })).toBeDisabled()
+    expect(screen.getByText('Retained project material; unavailable for this source adapter.')).toBeVisible()
+    expect(screen.getByText(/Editing saved iOS source is unavailable/)).toBeVisible()
+    expect(screen.getByRole('button', { name: 'Stage source' })).toBeDisabled()
+    expect(screen.queryByRole('button', { name: 'Prepare source download' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+    expect(fetch.mock.calls.some(([url]) => String(url).includes('/export'))).toBe(false)
+    expect(startAgentTurn).not.toHaveBeenCalled()
+  })
+
+  it('requires a supported original and retains modal keyboard behavior', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => response(String(url).includes('/reference-files') ? { materials: [], next_cursor: null } : [])))
+    render(<Host startAgentTurn={vi.fn()} sourceContext="native" />)
+    const opener = screen.getByRole('button', { name: 'Build source' })
+    opener.focus(); fireEvent.click(opener)
+    await screen.findByText('Choose one through eight TXT or JSON originals.')
+    expect(screen.getByRole('button', { name: 'Stage source' })).toBeDisabled()
+    expect(screen.queryByText(/continue with the brief only/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Prepare source download' })).not.toBeInTheDocument()
+    const close = screen.getByRole('button', { name: 'Close' })
+    expect(close).toHaveFocus()
+    fireEvent.keyDown(close, { key: 'Escape' })
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    expect(opener).toHaveFocus()
+  })
+
+  it('closes and clears the prior profile review, then reads the proper durable history on return', async () => {
+    vi.stubGlobal('fetch', vi.fn(async (url) => response(String(url).includes('/reference-files') ? { materials, next_cursor: null }
+      : [String(url).includes('/native/') ? native() : saved('published')])))
+    const startAgentTurn = vi.fn()
+    const host = render(<Host startAgentTurn={startAgentTurn} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    await screen.findByText('Private source saved')
+    expect(screen.getByText('app/a-very-long-directory-name/page.jsx')).toBeVisible()
+    host.rerender(<Host startAgentTurn={startAgentTurn} sourceContext="native" />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    await screen.findByText('Sources/ContentView.swift')
+    expect(screen.queryByText('app/a-very-long-directory-name/page.jsx')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Prepare source download' })).not.toBeInTheDocument()
+    host.rerender(<Host startAgentTurn={startAgentTurn} />)
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    await screen.findByText('app/a-very-long-directory-name/page.jsx')
+    expect(screen.queryByText('Sources/ContentView.swift')).not.toBeInTheDocument()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Prepare source download' })).toBeEnabled())
+    expect(startAgentTurn).not.toHaveBeenCalled()
+  })
+})
 
 describe('Browser source review', () => {
   it('prepares verified private Git bytes with one GET and requires an explicit download link click', async () => {
