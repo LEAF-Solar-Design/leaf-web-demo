@@ -151,27 +151,28 @@ def test_real_engine_no_change_round_trip_preserves_every_tracked_drawing():
         "LEAF_REQUIRE_REAL_ENGINE=1 requires the documented compiled acadrust wasm build"
     )
     cases = (
-        ("web/public/sample.dxf", 2345, 0, 2345),
-        ("web/e2e/fixtures/block-fixture.dxf", 0, 1, 1),
-        ("web/e2e/fixtures/distinctive-panel.dxf", 1, 0, 1),
-        ("vendor/acadrust-worker/fixtures/one_line.dxf", 1, 0, 0),
-        ("engine/corpus/01_closed_lwpolyline_single_layer.dxf", 1, 0, 1),
-        ("engine/corpus/02_open_lwpolyline_two_layers.dxf", 2, 0, 2),
-        ("engine/corpus/03_classic_polyline_vertex_seqend.dxf", 1, 0, 1),
-        ("engine/corpus/04_empty_entities_section.dxf", 0, 0, 0),
+        ("web/public/sample.dxf", 2345, 0, 0, 2345),
+        ("web/e2e/fixtures/block-fixture.dxf", 0, 1, 0, 1),
+        ("web/e2e/fixtures/distinctive-panel.dxf", 1, 0, 0, 1),
+        ("vendor/acadrust-worker/fixtures/one_line.dxf", 1, 0, 0, 0),
+        ("engine/corpus/01_closed_lwpolyline_single_layer.dxf", 1, 0, 0, 1),
+        ("engine/corpus/02_open_lwpolyline_two_layers.dxf", 2, 0, 0, 2),
+        ("engine/corpus/03_classic_polyline_vertex_seqend.dxf", 1, 0, 0, 1),
+        ("engine/corpus/04_empty_entities_section.dxf", 0, 0, 0, 0),
+        ("vendor/acadrust-worker/fixtures/bsp6-rooftop.dxf", 74, 0, 6, 80),
     )
     receipts = export_fidelity.run_tracked(acadrust_adapter.AcadrustAdapter())
-    assert len(receipts) == 8
-    for receipt, (drawing, polylines, inserts, handles) in zip(receipts, cases):
+    assert len(receipts) == len(cases) == 9
+    for receipt, (drawing, polylines, inserts, texts, handles) in zip(receipts, cases):
         assert receipt["drawing"] == drawing
         assert receipt["ok"] is True, receipt
         assert receipt["adapter"] == "acadrust"
         assert isinstance(receipt["byte_identical"], bool)
         assert receipt["source_untouched"] is True
         assert receipt["entities_after"] == {
-            "polylines": polylines, "circles": 0, "arcs": 0, "texts": 0,
+            "polylines": polylines, "circles": 0, "arcs": 0, "texts": texts,
             "dimensions": 0, "inserts": inserts, "mleaders": 0,
         }
         assert receipt["source_handles"] == handles
         assert receipt["handles_preserved"] == handles
-    assert sum(r["handles_preserved"] for r in receipts) == 2351
+    assert sum(r["handles_preserved"] for r in receipts) == 2431
