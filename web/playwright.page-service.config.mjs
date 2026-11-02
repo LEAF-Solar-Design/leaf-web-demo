@@ -11,6 +11,9 @@ const baseURL = `http://127.0.0.1:${port}`
 const directory = process.env.LEAF_PAGE_SMOKE_DIR ||= resolve(`../artifacts/page-service-smoke/w${worker}-${randomUUID()}`)
 const quote = value => `'${value.replaceAll("'", "'\\''")}'`
 const python = process.env.LEAF_PAGE_SMOKE_PYTHON || 'python3'
+// The worker already retains this namespace on failure. Keep textual reports
+// before optional binary attachments within its existing per-job size limits.
+const reports = `/tmp/gate-results/page-service-smoke/w${worker}-${randomUUID()}`
 
 export default defineConfig({
   testDir: './e2e',
@@ -19,8 +22,8 @@ export default defineConfig({
   retries: 0,
   forbidOnly: true,
   timeout: 120_000,
-  outputDir: `../artifacts/page-service-smoke/w${worker}/test-results`,
-  reporter: [['list']],
+  outputDir: `${reports}/test-results`,
+  reporter: [['list'], ['json', { outputFile: `${reports}/report.json` }]],
   use: {
     baseURL, browserName: 'chromium', headless: true,
     actionTimeout: 10_000,
