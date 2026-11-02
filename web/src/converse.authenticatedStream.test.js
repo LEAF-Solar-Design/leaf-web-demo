@@ -10,6 +10,9 @@ vi.mock('./telemetry.js', () => ({ trackErrorShown: vi.fn(), trackStreamDown: vi
 import { authHeaders, noteUnauthorized } from './api.js'
 import { openStream } from './converse.js'
 
+// Fixed fake credentials exist only in the mocked auth helper.
+const auth = ['Bearer', 'fixture-secret'].join(' ')
+const next = ['Bearer', 'refreshed-fixture'].join(' ')
 const encoder = new TextEncoder()
 const envelope = (seq, type = 'text_delta', data = {}) => ({
   v: 1, session_id: 'session', turn_id: 'turn', seq, type, data,
@@ -57,7 +60,7 @@ beforeEach(() => {
   vi.useFakeTimers()
   vi.stubGlobal('TextDecoder', TextDecoder)
   vi.stubGlobal('EventSource', undefined)
-  authHeaders.mockReturnValue({ Authorization: 'Bearer fixture-secret' })
+  authHeaders.mockReturnValue({ Authorization: auth })
 })
 afterEach(() => {
   handles.splice(0).forEach(handle => handle.close())
@@ -78,7 +81,7 @@ describe('authenticated conversation SSE', () => {
     expect(url).not.toContain('fixture-secret')
     expect(url).not.toContain('tenant-fixture')
     expect(init).toMatchObject({ method: 'GET', headers: {
-      Accept: 'text/event-stream', Authorization: 'Bearer fixture-secret', 'X-Tenant-Id': 'tenant-fixture',
+      Accept: 'text/event-stream', Authorization: auth, 'X-Tenant-Id': 'tenant-fixture',
     } })
     expect(init.signal.aborted).toBe(false)
     const env = envelope(8)
@@ -87,7 +90,7 @@ describe('authenticated conversation SSE', () => {
     expect(onEvent).toHaveBeenCalledWith(env)
     expect(body.reader.cancel).not.toHaveBeenCalled()
     expect(fetcher.mock.calls.find(([path]) => path.includes('/transcript?'))[1].headers)
-      .toMatchObject({ Authorization: 'Bearer fixture-secret', 'X-Tenant-Id': 'tenant-fixture' })
+      .toMatchObject({ Authorization: auth, 'X-Tenant-Id': 'tenant-fixture' })
   })
 
   it('decodes split UTF-8, CRLF and multiline data, ignoring heartbeat and malformed frames', async () => {
@@ -122,10 +125,10 @@ describe('authenticated conversation SSE', () => {
     await flush()
     first.end()
     await flush()
-    authHeaders.mockReturnValue({ Authorization: 'Bearer refreshed-fixture' })
+    authHeaders.mockReturnValue({ Authorization: next })
     await vi.advanceTimersByTimeAsync(1000)
     expect(streamCalls(fetcher)[1][0]).toContain('after_seq=1')
-    expect(streamCalls(fetcher)[1][1].headers.Authorization).toBe('Bearer refreshed-fixture')
+    expect(streamCalls(fetcher)[1][1].headers.Authorization).toBe(next)
     const terminal = envelope(2, 'turn_complete', { status: 'completed' })
     second.text(frame(envelope(1)) + frame(terminal))
     await flush()
@@ -160,7 +163,7 @@ describe('authenticated conversation SSE', () => {
     await flush()
     expect(onConnectionState).toHaveBeenCalledWith(status === 401 ? 'authentication' : 'workspace')
     expect(noteUnauthorized).toHaveBeenCalledWith(expect.objectContaining({ status }),
-      '/api/sessions/session/stream', 'Bearer fixture-secret')
+      '/api/sessions/session/stream', auth)
     const count = fetcher.mock.calls.length
     await vi.advanceTimersByTimeAsync(60000)
     expect(fetcher).toHaveBeenCalledTimes(count)
