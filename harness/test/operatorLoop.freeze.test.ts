@@ -62,7 +62,7 @@ describe("operator wire vocabulary is pinned", () => {
   });
 
   it("tenant spine includes integration tools and stays separate from the operator loop", () => {
-    expect([...SPINE_TOOL_NAMES]).toEqual([...VENDOR_SPINE_TOOL_NAMES, "propose_project_page", "inspect_project_photo"].reduce<string[]>((names, name) => {
+    expect([...SPINE_TOOL_NAMES]).toEqual([...VENDOR_SPINE_TOOL_NAMES, "propose_project_page", "inspect_project_photo", "propose_project_photo_assignments"].reduce<string[]>((names, name) => {
       names.push(name);
       if (name === "author_tool") names.push("author_stage_status");
       return names;

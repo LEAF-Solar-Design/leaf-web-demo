@@ -9,7 +9,7 @@ import {
 } from "../../vendor/mushy-author/ports/impl/converseSdkRunner.js";
 import type { ConverseSdkRunnerOptions } from "../../vendor/mushy-author/ports/impl/converseSdkRunner.js";
 import type { ConverseRunInput, ConverseRunnerEvent } from "../index.js";
-import { AuthorStageStatusInput, SPINE_TOOL_NAMES } from "../index.js";
+import { AuthorStageStatusInput, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY } from "../index.js";
 import { ProjectPhotoInspectionShape, photoRequest, projectPhotoResult, PHOTO_FAILURE, type PhotoContent } from "../../agent/projectPhotoInspection.js";
 
 export const SPINE_MCP_TOOL_NAMES = SPINE_TOOL_NAMES.map(name => `mcp__spine__${name}`);
@@ -28,7 +28,7 @@ export class ConverseSdkRunner {
   async *run(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent> {
     const names = input.tools.list();
     if (new Set(names).size !== names.length || typeof input.tools.execute !== "function" ||
-        names.some(name => name.endsWith("__inspect_project_photo"))) throw new Error("Invalid private tool catalog");
+        names.some(name => name.endsWith("__inspect_project_photo") || name.endsWith("__propose_project_photo_assignments"))) throw new Error("Invalid private tool catalog");
     const sdkImport = this.options.sdkImport ??
       (() => import(["@anthropic-ai", "claude-agent-sdk"].join("/")));
     const zodImport = this.options.zodImport ?? (() => import(["zod"].join("/")));
@@ -50,6 +50,13 @@ export class ConverseSdkRunner {
               const actualQuery = Reflect.get(target, "query") as (value: unknown) => unknown;
               return actualQuery.call(target, { ...query, options: { ...query.options,
                 canUseTool: async (name: string, args: Record<string, unknown>) => {
+                  if (name === "propose_project_photo_assignments" || name.endsWith("__propose_project_photo_assignments")) {
+                    if (name !== "mcp__spine__propose_project_photo_assignments" ||
+                        !names.includes("propose_project_photo_assignments") ||
+                        !ProjectPhotoAssignmentRequest.safeParse(args).success) {
+                      return { behavior: "deny", message: PHOTO_ASSIGNMENT_FAILURE };
+                    }
+                  }
                   if (name === "inspect_project_photo" || name.endsWith("__inspect_project_photo")) {
                     try {
                       if (name !== "mcp__spine__inspect_project_photo") throw new Error();
@@ -70,6 +77,21 @@ export class ConverseSdkRunner {
               if (options.name !== "spine") return target.createSdkMcpServer(options);
               if (!Array.isArray(options.tools)) throw new Error("Invalid private tool catalog");
               const tools = [...options.tools];
+              if (tools.some(tool => tool?.name === "propose_project_photo_assignments")) throw new Error("Duplicate private photo assignment tool");
+              if (names.includes("propose_project_photo_assignments")) tools.push(target.tool(
+                "propose_project_photo_assignments",
+                "Propose photo assignments for private review after actual pixel inspection and source catalog reads. Use saved page revision/digest and stable material digest witnesses. Never infer from filenames. Does not save or publish.",
+                ProjectPhotoAssignmentRequest.shape,
+                async args => {
+                  const failure: TextResult = { content: [{ type: "text", text: PHOTO_ASSIGNMENT_FAILURE }], isError: true };
+                  try {
+                    const body = ProjectPhotoAssignmentRequest.parse(args);
+                    const result = await input.tools.execute("propose_project_photo_assignments", body);
+                    if (result.isError || result.content !== PHOTO_ASSIGNMENT_SUMMARY) return failure;
+                    return { content: [{ type: "text", text: PHOTO_ASSIGNMENT_SUMMARY }] };
+                  } catch { return failure; }
+                },
+              ));
               if (tools.some(tool => tool?.name === "inspect_project_photo")) throw new Error("Duplicate private photo tool");
               if (names.includes("inspect_project_photo")) tools.push(target.tool(
                 "inspect_project_photo",

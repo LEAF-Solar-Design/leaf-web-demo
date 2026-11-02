@@ -10,7 +10,7 @@ export const SPINE_TOOL_NAMES = [
   "author_tool", "author_stage_status", "request_publication", "request_confirmation", "propose_overlay",
   "customize_platform", "finish_project", "project_completion_status",
   "integration_datasets", "integration_action_catalog", "integration_query",
-  "integration_save_element", "propose_project_page", "inspect_project_photo",
+  "integration_save_element", "propose_project_page", "inspect_project_photo", "propose_project_photo_assignments",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 
@@ -19,6 +19,28 @@ import { z } from "zod";
 export const CanonicalChangeSetId = z.string().length(36)
   .regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
 export const AuthorStageStatusInput = z.strictObject({ change_set_id: CanonicalChangeSetId });
+
+const photoAssignmentText = (low: number, high: number) => z.string().refine(value =>
+  Array.from(value).length >= low && Array.from(value).length <= high &&
+  (!low || value.trim().length > 0) && !/[<>]/.test(value) &&
+  !/[\p{Cc}\p{Cf}\p{Cs}]/u.test(value.replaceAll("\n", "")) &&
+  !/(?:[a-z][a-z0-9+.-]*:\/\/|\b(?:https?|ftp|file|data|javascript):|\bwww\.)/i.test(value));
+const photoAssignmentDigest = z.string().regex(/^[0-9a-f]{64}(?![\s\S])/);
+export const ProjectPhotoAssignmentRequest = z.strictObject({
+  expected_revision: z.number().int().min(1).max(2147483647),
+  expected_digest: photoAssignmentDigest,
+  operations: z.array(z.strictObject({
+    op: z.literal("assign"),
+    material_id: CanonicalChangeSetId.refine(value => value !== "00000000-0000-0000-0000-000000000000"),
+    sha256: photoAssignmentDigest, preview_sha256: photoAssignmentDigest,
+    gallery_slug: z.string().regex(/^[a-z][a-z0-9-]{0,47}(?![\s\S])/),
+    title: photoAssignmentText(0, 200), alt: photoAssignmentText(1, 400),
+  })).min(1).max(200),
+}).refine(value => new Set(value.operations.map(op => op.material_id)).size === value.operations.length &&
+  Buffer.byteLength(JSON.stringify(value), "utf8") <= 256 * 1024);
+export type ProjectPhotoAssignmentInput = z.infer<typeof ProjectPhotoAssignmentRequest>;
+export const PHOTO_ASSIGNMENT_FAILURE = "Photo assignment proposal failed.";
+export const PHOTO_ASSIGNMENT_SUMMARY = "Photo assignments proposed for private review only. Nothing saved or published.";
 
 export interface ProjectPageProposalInput {
   instruction: string;
@@ -44,6 +66,10 @@ export interface ProjectDrawingState {
 
 /** Host-only overlay authority handoff; the app resolves the active turn's actor. */
 export interface AppRunClient extends VendoredAppRunClient {
+  proposeProjectPhotoAssignments?(
+    tenantId: string, sessionId: string, body: ProjectPhotoAssignmentInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>>;
   forTurn?(authority: { tenantId: string; sessionId: string; turnId: string }): AppRunClient;
   getProjectDrawingState?(): Promise<ProjectDrawingState | null>;
   inspectProjectPhoto(
