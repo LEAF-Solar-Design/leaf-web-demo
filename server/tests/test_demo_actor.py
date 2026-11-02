@@ -306,14 +306,14 @@ def test_list_auth0_keeps_binding_and_per_job_authorization(monkeypatch):
     binding = SimpleNamespace(platform_tenant_id=org)
     authority = Mock(return_value=binding)
     monkeypatch.setattr(deps, "auth_live", lambda: True)
-    monkeypatch.setattr(platform_link, "platform_store", lambda: SimpleNamespace(
-        resolve_active_identity_binding=authority))
+    monkeypatch.setattr(route.jobs.platform_link, "_load_platform", lambda: (
+        SimpleNamespace(resolve_active_identity_binding=authority), None, None))
     own = dict(job_id="own", tenant_id=str(org))
     denied = dict(job_id="denied", tenant_id=str(org))
     foreign = dict(job_id="foreign", tenant_id=str(uuid4()))
     canonical = Mock(return_value=[own, denied, foreign])
     legacy = Mock(return_value=[own])
-    access = Mock(side_effect=lambda rec, *args: object() if rec is denied else None)
+    access = Mock(side_effect=lambda rec, *args, **kwargs: object() if rec is denied else None)
     demo_resolver = Mock(side_effect=AssertionError("Auth0 must not resolve a demo actor"))
     monkeypatch.setattr(route, "resolve_demo_actor", demo_resolver)
     monkeypatch.setattr(route, "_access_error", access)
@@ -326,6 +326,8 @@ def test_list_auth0_keeps_binding_and_per_job_authorization(monkeypatch):
     legacy.assert_called_once_with(str(org), 10)
     authority.assert_called_with("auth0", "auth0-list")
     assert [call.args[0] for call in access.call_args_list] == [own, denied, own]
+    assert all(call.kwargs == {"binding": binding, "bound_tenant_id": str(org)}
+               for call in access.call_args_list)
     demo_resolver.assert_not_called()
 
 
