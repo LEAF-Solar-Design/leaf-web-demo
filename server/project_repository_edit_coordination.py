@@ -147,8 +147,18 @@ ActorRoleResolver = Callable[[str, RepositoryAuthorityKey], Optional[str]]
 
 
 def _active_role(actor_binding_id: str, authority: RepositoryAuthorityKey) -> Optional[str]:
-    return platform_store.active_identity_role(
-        uuid.UUID(authority.organization_id), uuid.UUID(actor_binding_id))
+    from leaf_platform import project_lifecycle
+
+    org, actor = uuid.UUID(authority.organization_id), uuid.UUID(actor_binding_id)
+    role = platform_store.active_identity_role(org, actor)
+    if role not in _WRITER_ROLES:
+        return None
+    try:
+        project_lifecycle.require_project_role(
+            org, uuid.UUID(authority.project_id), actor, write=True)
+    except (project_lifecycle.LifecycleForbidden, project_lifecycle.LifecycleUnavailable):
+        return None
+    return role
 
 
 class _DurableBackend:
