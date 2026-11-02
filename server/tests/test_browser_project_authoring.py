@@ -83,7 +83,8 @@ def lane(monkeypatch):
         receipt = dict(contract='leaf.project-repository-edit.v2', edit_id=EDIT, state='staged',
             operation='edit', source_edit_id=None, actor_binding_id=ACTOR, **authority,
             writer_lease_id=LEASE, writer_lease_generation=1, base_commit=BASE,
-            staged_head_commit=HEAD, staged_tree=TREE, changed_paths=['app/page.tsx'],
+            staged_head_commit=HEAD, staged_tree=TREE,
+            changed_paths=['Sources/ContentView.swift'] if body['source_profile'] == authoring.NATIVE_PROFILE else ['app/page.tsx'],
             diff_digest='d' * 64, instruction_digest=body['instruction_digest'],
             idempotency_key=body['idempotency_key'])
         result = dict(witness=dict(base_commit=BASE, staged_head_commit=HEAD, staged_tree=TREE,
@@ -230,3 +231,12 @@ def test_stale_or_forged_internal_result_is_not_accepted(lane, kind):
     with pytest.raises(authoring.AuthoringError) as error:
         call(lane)
     assert error.value.code == 'source_changed'
+
+
+def test_default_web_and_explicit_web_transport_bytes_match(lane):
+    call(lane)
+    expected = copy.deepcopy(lane.posts[0])
+    authoring.author(lane.tenant, PROJECT, lane.request, source_profile=authoring.WEB_PROFILE)
+    assert lane.posts[1] == expected
+    assert expected['commit_message'] == 'Author browser project'
+    assert expected['source_profile'] == 'web-next-static-v1'

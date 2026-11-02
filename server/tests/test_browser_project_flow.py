@@ -413,3 +413,15 @@ def test_real_scope_rejects_bare_tenant_and_demo():
     demo = flow.deps.TenantContext(ORG, subject='subject', authority_resolved=True, verified_demo=True)
     with pytest.raises(flow.FlowError):
         flow.scope(demo, PROJECT)
+
+
+def test_default_web_hint_key_and_claim_keep_original_shape(lane):
+    assert flow._hint('create', EDIT, BODY) == dict(source='author_panel', purpose='stage_authority',
+        browser_action='create', source_request_id=EDIT, material_refs=[])
+    expected_key = 'browser-source:' + hashlib.sha256(flow.canonical(BODY)).hexdigest()
+    assert flow._request_key(BODY, flow.WEB_PROFILE) == expected_key
+    execute()
+    marker = next(e['data'] for e in lane.events if e['type'] == 'browser_source_dispatch')
+    assert set(marker) == {'action', 'source_request_id', 'payload_digest'}
+    assert marker['payload_digest'] == hashlib.sha256(flow.canonical(dict(
+        action='create', source_request_id=EDIT, payload=BODY))).hexdigest()

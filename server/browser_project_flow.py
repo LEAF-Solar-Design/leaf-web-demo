@@ -22,6 +22,16 @@ from project_repository_edit_contract import (
     receipt_digest_matches, require_confirmation_binding,
 )
 
+WEB_PROFILE = authoring.WEB_PROFILE
+NATIVE_PROFILE = authoring.NATIVE_PROFILE
+
+
+def _profile(value):
+    if value not in (WEB_PROFILE, NATIVE_PROFILE):
+        raise FlowError(422)
+    return value
+
+
 MAX_INPUT_BYTES = 128 * 1024
 MAX_RESPONSE_BYTES = 256 * 1024
 AUTHORITY_FIELDS = ('tenant_id', 'organization_id', 'project_id', 'repo_key')
@@ -69,7 +79,8 @@ def canonical(value):
     return json.dumps(value, sort_keys=True, ensure_ascii=False, separators=(',', ':'), allow_nan=False).encode('utf-8')
 
 
-def parse_request(raw, action):
+def parse_request(raw, action, *, source_profile=WEB_PROFILE):
+    _profile(source_profile)
     if len(raw) > MAX_INPUT_BYTES:
         raise FlowError(413)
     try:
@@ -82,7 +93,7 @@ def parse_request(raw, action):
                 raise ValueError()
             _uuid(body['source_request_id'])
             # Reuse the adapter's exact requirements/reference validation.
-            authoring._request(dict(body_to_author(body), idempotency_key='validate'))
+            authoring._request(dict(body_to_author(body), idempotency_key='validate'), source_profile=source_profile)
         else:
             fields = {'receipt_digest', 'expected_version'}
             if action == 'confirm':
@@ -168,7 +179,7 @@ def _receipt(row, authority):
         raise FlowError(409) from None
 
 
-def representation(row, authority):
+def representation(row, authority, *, source_profile=WEB_PROFILE):
     receipt = _receipt(row, authority)
     if row['state'] not in ('staged', 'awaiting_confirmation', 'publishing', 'published',
                             'rejected', 'conflicted', 'failed', 'superseded', 'rolled_back'):
@@ -181,7 +192,7 @@ def representation(row, authority):
             raise FlowError(503)
         datetime.fromisoformat(value.replace('Z', '+00:00'))
         return value
-    return dict(schema='leaf.browser-project-source.v1', project_id=authority['project_id'],
+    return dict(schema=('leaf.native-project-source.v1' if source_profile == NATIVE_PROFILE else 'leaf.browser-project-source.v1'), project_id=authority['project_id'],
                 source_request_id=row['edit_id'], state=row['state'], version=row['version'],
                 receipt_digest=row['receipt_digest'], base_commit=receipt.base_commit,
                 source_commit=receipt.staged_head_commit, source_tree=receipt.staged_tree,
@@ -189,7 +200,8 @@ def representation(row, authority):
                 updated_at=timestamp('updated_at'))
 
 
-def read(tenant, project_id, edit_id=None):
+def read(tenant, project_id, edit_id=None, *, source_profile=WEB_PROFILE):
+    _profile(source_profile)
     current = scope(tenant, project_id)
     authority = repository(current)
     if edit_id is not None:
@@ -200,20 +212,29 @@ def read(tenant, project_id, edit_id=None):
         row = _read(authority, edit_id) if authority else None
         if row is None:
             raise FlowError(404)
-        result = representation(row, authority)
+        _membership(row, authority, current, source_profile)
+        result = representation(row, authority, source_profile=source_profile)
     else:
         rows = _store().list_edits(*(authority[key] for key in AUTHORITY_FIELDS), limit=20) if authority else []
         if len(rows) > 20:
             raise FlowError(503)
-        result = [representation(row, authority) for row in rows]
+        result = []
+        for row in rows:
+            if row.get('idempotency_key', '').startswith('native-source:') != (source_profile == NATIVE_PROFILE):
+                continue
+            _membership(row, authority, current, source_profile)
+            result.append(representation(row, authority, source_profile=source_profile))
     if scope(tenant, project_id) != current or repository(current) != authority:
         raise FlowError(403)
     return result
 
 
-def _hint(action, edit_id, body):
+def _hint(action, edit_id, body, *, source_profile=WEB_PROFILE):
+    _profile(source_profile)
     value = dict(source='author_panel', purpose='stage_authority', browser_action=action,
                  source_request_id=edit_id)
+    if source_profile == NATIVE_PROFILE:
+        value['source_profile'] = source_profile
     if action in ('create', 'edit'):
         value['material_refs'] = body['material_refs']
         if 'expected_base_commit' in body:
@@ -223,7 +244,8 @@ def _hint(action, edit_id, body):
     return value
 
 
-def authority(tenant, project_id, session_id, turn_id, action, edit_id, body):
+def authority(tenant, project_id, session_id, turn_id, action, edit_id, body, *, source_profile=WEB_PROFILE):
+    _profile(source_profile)
     current = scope(tenant, project_id, write=True)
     try:
         held = inspection.authority(tenant, session_id, session_id, turn_id)
@@ -231,7 +253,7 @@ def authority(tenant, project_id, session_id, turn_id, action, edit_id, body):
             raise ValueError()
         started = session_store.turn_started_data(session_id, turn_id, current[0])
         if (not started or started.get('stage_authority') is not True
-                or started.get('classifier_hint') != _hint(action, edit_id, body)
+                or started.get('classifier_hint') != _hint(action, edit_id, body, source_profile=source_profile)
                 or (action in ('create', 'edit') and started.get('text') != body['requirements'])):
             raise ValueError()
         return current, held[3]
@@ -239,9 +261,12 @@ def authority(tenant, project_id, session_id, turn_id, action, edit_id, body):
         raise FlowError(403) from None
 
 
-def _claim(session_id, turn_id, current, action, edit_id, digest, recheck):
+def _claim(session_id, turn_id, current, action, edit_id, digest, recheck, *, source_profile=WEB_PROFILE, body=None):
     """Snapshot FIRST, then a provably complete bounded current-turn tail."""
+    _profile(source_profile)
     marker = dict(action=action, source_request_id=edit_id, payload_digest=digest)
+    if source_profile == NATIVE_PROFILE:
+        marker.update(source_profile=source_profile, request=body, authority=list(current))
     for _ in range(3):
         recheck()
         snapshot = session_store.get_session(session_id)
@@ -273,6 +298,62 @@ def _claim(session_id, turn_id, current, action, edit_id, digest, recheck):
     raise FlowError(503)
 
 
+def _request_digest(body, source_profile):
+    value = dict(source_profile=source_profile, payload=body) if source_profile == NATIVE_PROFILE else body
+    return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def _request_key(body, source_profile, session_id=None, turn_id=None):
+    if source_profile == WEB_PROFILE:
+        return 'browser-source:' + _request_digest(body, source_profile)
+    try:
+        _uuid(session_id)
+        _uuid(turn_id)
+    except (ValueError, TypeError):
+        raise FlowError(422) from None
+    return 'native-source:' + session_id + ':' + turn_id + ':' + _request_digest(body, source_profile)
+
+
+def _membership(row, bound, current, source_profile):
+    """Bind a profile-less producer receipt to its original durable request/turn."""
+    key = row.get('idempotency_key', '')
+    if source_profile == WEB_PROFILE:
+        if key.startswith('native-source:'):
+            raise FlowError(409)
+        return
+    try:
+        namespace, sid, tid, digest = key.split(':')
+        if namespace != 'native-source' or not _sha(digest):
+            raise ValueError()
+        _uuid(sid)
+        _uuid(tid)
+        snapshot = session_store.get_session(sid)
+        pinned = snapshot['last_seq']
+        if type(pinned) is not int or not 0 < pinned <= 10000:
+            raise ValueError()
+        events = [e for e in session_store.events_after(sid, 0, 10000) if e['seq'] <= pinned]
+        if [e['seq'] for e in events] != list(range(1, pinned + 1)):
+            raise ValueError()
+        markers = [e['data'] for e in events if e['turn_id'] == tid and e['type'] == 'browser_source_dispatch']
+        if len(markers) != 1:
+            raise ValueError()
+        marker = markers[0]
+        body = parse_request(canonical(marker['request']), 'request', source_profile=NATIVE_PROFILE)
+        started = session_store.turn_started_data(sid, tid, current[0])
+        if (not started or started.get('stage_authority') is not True
+                or started.get('text') != body['requirements']
+                or started.get('classifier_hint') != _hint('create', row['edit_id'], body, source_profile=NATIVE_PROFILE)
+                or marker.get('source_profile') != NATIVE_PROFILE or marker.get('authority') != list(current)
+                or marker.get('action') != 'create' or marker.get('source_request_id') != row['edit_id']
+                or marker.get('payload_digest') != hashlib.sha256(canonical(dict(
+                    source_profile=NATIVE_PROFILE, action='create', source_request_id=row['edit_id'], payload=body))).hexdigest()
+                or key != _request_key(body, NATIVE_PROFILE, sid, tid)):
+            raise ValueError()
+        _same_request(row, bound, current, body, key)
+    except (ValueError, TypeError, KeyError, AttributeError):
+        raise FlowError(409) from None
+
+
 def _same_request(row, authority, current, body, key):
     receipt = _receipt(row, authority)
     if (receipt.edit_id != body['source_request_id'] or receipt.actor_binding_id != current[2]
@@ -283,11 +364,16 @@ def _same_request(row, authority, current, body, key):
     return receipt
 
 
-def _stage(tenant, project_id, current, body, recheck, session_id, turn_id):
-    key = 'browser-source:' + hashlib.sha256(canonical(body)).hexdigest()
+def _stage(tenant, project_id, current, body, recheck, session_id, turn_id, *, source_profile=WEB_PROFILE):
+    key = _request_key(body, source_profile, session_id, turn_id)
     bound = repository(current)
     row = _read(bound, body['source_request_id']) if bound else None
     if row is not None:
+        _membership(row, bound, current, source_profile)
+        if source_profile == NATIVE_PROFILE:
+            key = row['idempotency_key']
+            if key.rsplit(':', 1)[-1] != _request_digest(body, source_profile):
+                raise FlowError(409)
         _same_request(row, bound, current, body, key)
     else:
         # A previous turn can have lost the author response before its row was
@@ -305,8 +391,11 @@ def _stage(tenant, project_id, current, body, recheck, session_id, turn_id):
                and event['data'].get('source_request_id') == body['source_request_id'] for event in prefix):
             raise FlowError(409)
         recheck()
-        result = authoring.author(tenant, project_id, dict(body_to_author(body), idempotency_key=key),
-                                  cancelled=lambda: _cancelled(recheck))
+        kwargs = dict(cancelled=lambda: _cancelled(recheck))
+        dispatch_author = authoring.author
+        if source_profile == NATIVE_PROFILE:
+            from native_project_authoring import author as dispatch_author
+        result = dispatch_author(tenant, project_id, dict(body_to_author(body), idempotency_key=key), **kwargs)
         recheck()
         bound = repository(current)
         row = _read(bound, body['source_request_id']) if bound else None
@@ -394,7 +483,7 @@ def _validate_publication(result, row, receipt, *, recover, prior_version):
         raise FlowError(409) from None
 
 
-def _publish(current, bound, row, body, action, recheck):
+def _publish(current, bound, row, body, action, recheck, *, source_profile=WEB_PROFILE):
     receipt = _receipt(row, bound)
     if row['receipt_digest'] != body['receipt_digest']:
         raise FlowError(409)
@@ -407,12 +496,15 @@ def _publish(current, bound, row, body, action, recheck):
         raise FlowError(409)
     if not recover and row['state'] != 'awaiting_confirmation':
         raise FlowError(409)
-    key = 'browser-source:' + hashlib.sha256(canonical(dict(action=action, edit_id=row['edit_id'], **body))).hexdigest()
+    transition = dict(action=action, edit_id=row['edit_id'], **body)
+    if source_profile == NATIVE_PROFILE:
+        transition['source_profile'] = source_profile
+    key = ('native-source:' if source_profile == NATIVE_PROFILE else 'browser-source:') + hashlib.sha256(canonical(transition)).hexdigest()
     dispatch = dict(bound, edit_id=row['edit_id'], actor_binding_id=current[2],
                     expected_version=row['version'], transition_key=key)
     if recover:
         dispatch.update(expected_main_commit=receipt.base_commit, staged_head_commit=receipt.staged_head_commit,
-                        staged_tree=receipt.staged_tree, reason_code='browser_source_recovery')
+                        staged_tree=receipt.staged_tree, reason_code=('native_source_recovery' if source_profile == NATIVE_PROFILE else 'browser_source_recovery'))
     else:
         recheck()
         _store().put_confirmation(_confirmation(row, receipt, current[2], body['confirmation_id']),
@@ -452,23 +544,35 @@ def _publish(current, bound, row, body, action, recheck):
     return fresh
 
 
-def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body):
-    body = parse_request(canonical(body), action)
+def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body, *, source_profile=WEB_PROFILE):
+    body = parse_request(canonical(body), action, source_profile=source_profile)
     if action == 'request':
         edit_id, action = body['source_request_id'], body['source_operation']
     try:
         _uuid(edit_id)
     except (ValueError, TypeError):
         raise FlowError(422) from None
-    held = authority(tenant, project_id, session_id, turn_id, action, edit_id, body)
+    held = authority(tenant, project_id, session_id, turn_id, action, edit_id, body, source_profile=source_profile)
     current, subject = held
 
     def recheck():
-        if authority(tenant, project_id, session_id, turn_id, action, edit_id, body) != held:
+        if authority(tenant, project_id, session_id, turn_id, action, edit_id, body, source_profile=source_profile) != held:
             raise FlowError(403)
 
-    digest = hashlib.sha256(canonical(dict(action=action, source_request_id=edit_id, payload=body))).hexdigest()
-    won = _claim(session_id, turn_id, current, action, edit_id, digest, recheck)
+    claim_body = dict(action=action, source_request_id=edit_id, payload=body)
+    if source_profile == NATIVE_PROFILE:
+        claim_body['source_profile'] = source_profile
+        bound = repository(current)
+        prior = _read(bound, edit_id) if bound else None
+        if prior is not None:
+            _membership(prior, bound, current, source_profile)
+        if action == 'create' and prior is None:
+            try:
+                authoring.validate_native_materials(tenant, project_id, dict(body_to_author(body), idempotency_key='validate'), cancelled=lambda: _cancelled(recheck))
+            except authoring.AuthoringError as exc:
+                raise FlowError(exc.status if exc.status in _ERRORS else 503) from None
+    digest = hashlib.sha256(canonical(claim_body)).hexdigest()
+    won = _claim(session_id, turn_id, current, action, edit_id, digest, recheck, source_profile=source_profile, body=body)
     if not won:
         # Only the marker owner may emit an outcome or end the held turn.
         recheck()
@@ -476,8 +580,12 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body):
             bound = repository(current)
             row = _read(bound, edit_id) if bound else None
             if row is not None:
-                _same_request(row, bound, current, body, 'browser-source:' + hashlib.sha256(canonical(body)).hexdigest())
-                result = representation(row, bound)
+                _membership(row, bound, current, source_profile)
+                key = row['idempotency_key'] if source_profile == NATIVE_PROFILE else _request_key(body, source_profile)
+                if source_profile == NATIVE_PROFILE and key.rsplit(':', 1)[-1] != _request_digest(body, source_profile):
+                    raise FlowError(409)
+                _same_request(row, bound, current, body, key)
+                result = representation(row, bound, source_profile=source_profile)
                 recheck()
                 if repository(current) != bound:
                     raise FlowError(409)
@@ -487,24 +595,25 @@ def mutate(tenant, project_id, session_id, turn_id, action, edit_id, body):
     try:
         recheck()
         if action in ('create', 'edit'):
-            row, bound = _stage(tenant, project_id, current, body, recheck, session_id, turn_id)
+            row, bound = _stage(tenant, project_id, current, body, recheck, session_id, turn_id, source_profile=source_profile)
         else:
             bound = repository(current)
             row = _read(bound, edit_id) if bound else None
             if row is None:
                 raise FlowError(404)
+            _membership(row, bound, current, source_profile)
             _receipt(row, bound)
             recheck()
             if action == 'reject':
                 row = _store().reject_edit(*(bound[key] for key in AUTHORITY_FIELDS), edit_id,
                     receipt_digest=body['receipt_digest'], expected_version=body['expected_version'],
-                    transition_key='browser-reject:' + digest)
+                    transition_key=('native-reject:' if source_profile == NATIVE_PROFILE else 'browser-reject:') + digest)
             else:
-                row = _publish(current, bound, row, body, action, recheck)
+                row = _publish(current, bound, row, body, action, recheck, source_profile=source_profile)
         recheck()
         if repository(current) != bound:
             raise FlowError(409)
-        result = representation(row, bound)
+        result = representation(row, bound, source_profile=source_profile)
         session_store.append_event(session_id, turn_id, 'browser_source_result', dict(
             source_request_id=edit_id, state=row['state'], version=row['version'],
             text='Source ready for review.' if row['state'] == 'awaiting_confirmation' else 'Private source state updated.'))
