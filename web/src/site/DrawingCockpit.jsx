@@ -616,9 +616,9 @@ export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle 
   const stats = scene?.ready && scene.intake === shown ? scene.renderStats : null
   return (
     <span className="cockpit-status" data-testid="cockpit-status">
-      <span className="cockpit-coord">X <b ref={(el) => { refs.x.current = el }}>—</b></span>
-      <span className="cockpit-coord">Y <b ref={(el) => { refs.y.current = el }}>—</b></span>
-      <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>—</b></span>
+      <span className="cockpit-coord">X <b ref={(el) => { refs.x.current = el }}>N/A</b></span>
+      <span className="cockpit-coord">Y <b ref={(el) => { refs.y.current = el }}>N/A</b></span>
+      <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>N/A</b></span>
       {shown && (
         <span className="cockpit-count">
           {stats ? <>{stats.paths} rendered paths · {stats.layers} {stats.layers === 1 ? 'layer' : 'layers'}
