@@ -46,6 +46,8 @@ import { composerDraftAccountScope } from '../lib/composerDraft.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../auth.js'
 import { deliverProjectPageProposal } from '../site/projectPageProposalDelivery.js'
+import { getStoredOrgId } from '../api.js'
+import { getStoredActorBindingId } from '../projects/api.js'
 
 // Calm inline parameter summary — the same rendering RoutePanel gives a
 // route's params ("layer roofline · n 4"). Always the SERVER-truth dict.
@@ -379,10 +381,14 @@ export default function ConversePanel({
     let active = true
     const accountScope = composerDraftAccountScope()
     const activeScope = readActiveScope()
+    let photoIdentity = null
+    let photoTurn = null
+    let photoScopeLive = true
     let proposalScopeLive = true
     const invalidateProposals = () => { proposalScopeLive = false }
     const checkProposalScope = () => {
       if (composerDraftAccountScope() !== accountScope || readActiveScope() !== activeScope) invalidateProposals()
+      if (photoIdentity && (getStoredOrgId() !== photoIdentity.orgId || getStoredActorBindingId() !== photoIdentity.actorBindingId)) photoScopeLive = false
     }
     const logoutProposals = subscribeBeforeLogout(invalidateProposals)
     const tokenProposals = subscribeTokenStored(checkProposalScope)
@@ -392,16 +398,35 @@ export default function ConversePanel({
       && composerDraftAccountScope() === accountScope && readActiveScope() === activeScope
     const notifyPageProposal = env => {
       try {
+        if (env?.type === 'turn_started' && env.session_id === sessionId) {
+          // A new turn invalidates prior photo reviews, including repeated ids.
+          photoTurn = { id: env.turn_id, seq: env.seq }
+        }
+        const photo = env?.data?.tool === 'propose_project_photo_assignments'
         if (!currentProposalScope() || env?.session_id !== sessionId || env.type !== 'tool_result'
-          || !env.data || Array.isArray(env.data) || env.data.tool !== 'propose_project_page' || env.data.ok !== true
+          || !env.data || Array.isArray(env.data) || (!photo && env.data.tool !== 'propose_project_page') || env.data.ok !== true
           || !Number.isSafeInteger(env.seq) || env.seq < 1) return
+        const turn = photoTurn
+        const turnId = env.turn_id, seq = env.seq
+        if (photo && !photoIdentity) photoIdentity = { orgId: getStoredOrgId(), actorBindingId: getStoredActorBindingId() }
+        const { orgId, actorBindingId } = photoIdentity || {}
+        const current = photo ? () => {
+          checkProposalScope()
+          return currentProposalScope() && photoScopeLive && photoTurn === turn
+            && Boolean(orgId && actorBindingId) && typeof turnId === 'string'
+            && turnId.trim().length > 0 && turnId.length <= 200 && turn?.id === turnId
+            && Number.isSafeInteger(turn.seq) && turn.seq > 0 && seq > turn.seq
+        } : currentProposalScope
+        if (!current()) return
         const result = env.data.result
         if (!result || typeof result !== 'object' || Array.isArray(result)
+          || (photo && result.schema !== 'leaf.project-photo-assignment-proposal.v1')
           || typeof result.proposed_digest !== 'string' || !/^[0-9a-f]{64}$/.test(result.proposed_digest)
           || new TextEncoder().encode(JSON.stringify(env)).length > 1024 * 1024) return
         const key = JSON.stringify([sessionId, env.seq, result.proposed_digest])
         deliverProjectPageProposal({ accountScope, activeScope, result: JSON.parse(JSON.stringify(result)), key,
-          isCurrent: currentProposalScope })
+          ...(photo ? { provenance: { sessionId, turnId, seq, orgId, actorBindingId } } : {}),
+          isCurrent: current })
       } catch { /* rejected proposals never prevent transcript ingestion */ }
     }
     const stream = openStream(sessionId, 0, {
