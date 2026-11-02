@@ -28,43 +28,15 @@ async function openProject(page, name) {
   return editor
 }
 
-// Exercise the same optional design controls in both editing surfaces, without
-// replacing the existing portfolio/photo/native and full control regressions.
-async function design(inspector, variant) {
-  await selectControl(inspector, 'Elements / Outline').selectOption({ label: 'Headline' })
-  for (const [label, value] of Object.entries({ Font: variant ? 'sans' : 'serif', Weight: variant ? 'medium' : 'bold', Alignment: variant ? 'left' : 'center' })) {
-    await selectControl(inspector, label).selectOption(value)
-  }
-  for (const [label, value] of Object.entries({ 'Text size': variant ? '36' : '40', 'Text color': variant ? '#eeeeee' : '#222222', 'Line height': '1.4', 'Letter spacing': variant ? '1' : '2' })) {
-    await inspector.getByLabel(label, { exact: true }).fill(value)
-  }
-  await inspector.getByLabel('Italic', { exact: true }).setChecked(!variant)
-  await inspector.getByLabel('Underline', { exact: true }).setChecked(!variant)
-  await inspector.getByLabel('Hidden', { exact: true }).check()
-  await inspector.getByLabel('Hidden', { exact: true }).uncheck()
-  await selectControl(inspector, 'Elements / Outline').selectOption({ label: 'Page appearance' })
-  for (const [label, value] of Object.entries({ 'Page theme': variant ? 'dark' : 'cream', 'Page alignment': variant ? 'left' : 'center', Font: variant ? 'sans' : 'serif', 'Text scale': variant ? 'regular' : 'large', Spacing: 'airy', 'Content width': 'narrow' })) {
-    await selectControl(inspector, label).selectOption(value)
-  }
-  for (const [label, value] of Object.entries({ Gap: '24', Padding: '32', 'Maximum width': '900', Background: variant ? '#111111' : '#fff8ee', Text: variant ? '#eeeeee' : '#222222', Muted: '#888888', Accent: '#aa6600' })) {
-    await inspector.getByLabel(label, { exact: true }).fill(value)
-  }
-}
-
+// The service boundary needs representative edits in each surface. The existing
+// mocked editor regressions retain the complete design-control matrix.
 function expectedDocument(run, variant) {
   return {
     label: `Label ${variant ? 'B' : 'A'} ${run}`,
     headline: `Smoke ${variant ? 'B' : 'A'} ${run}`,
     description: `Description ${variant ? 'B' : 'A'} ${run}`,
     status: `Status ${variant ? 'B' : 'A'} ${run}`,
-    theme: variant ? 'dark' : 'cream', alignment: variant ? 'left' : 'center',
-    textStyles: { headline: { font: variant ? 'sans' : 'serif', size: variant ? 36 : 40,
-      weight: variant ? 'medium' : 'bold', color: variant ? '#eeeeee' : '#222222',
-      align: variant ? 'left' : 'center', lineHeight: 1.4, letterSpacing: variant ? 1 : 2,
-      ...(!variant ? { italic: true, underline: true } : {}) } },
-    appearance: { font: variant ? 'sans' : 'serif', scale: variant ? 'regular' : 'large',
-      spacing: 'airy', width: 'narrow', gap: 24, padding: 32, maxWidth: 900,
-      palette: { background: variant ? '#111111' : '#fff8ee', text: variant ? '#eeeeee' : '#222222', muted: '#888888', accent: '#aa6600' } },
+    theme: variant ? 'cream' : 'dark', alignment: variant ? 'left' : 'center',
   }
 }
 
@@ -133,8 +105,9 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
   const readback = async (revision, document) => {
     const response = await request.get(`${ready.api_origin}${pagePath}`, { headers: directHeaders, maxRedirects: 0 })
     expect(response.status()).toBe(200)
-    expect((await response.json()).page).toMatchObject({ revision, document })
-    expect((await response.json()).page.document).toEqual(document)
+    const body = await response.json()
+    expect(body.page).toMatchObject({ revision, document })
+    expect(body.page.document).toEqual(document)
   }
   const run = ready.project_name.slice(-8)
   const a = expectedDocument(run, false), b = expectedDocument(run, true)
@@ -145,6 +118,15 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
     await selectControl(page.getByRole('region', { name: 'Settings', exact: true }), 'Editing style').selectOption(value)
     await page.getByRole('button', { name: 'Close settings', exact: true }).click()
     await toolbar.getByRole('button', { name: 'Edit', exact: true }).click()
+    await expect(toolbar.getByRole('button', { name: 'Edit', exact: true })).toHaveAttribute('aria-pressed', 'true')
+  }
+  const visiblePreview = async document => {
+    await expect(preview).toBeVisible()
+    for (const field of ['label', 'headline', 'description', 'status']) {
+      await expect(preview.locator(`.project-page__${field}`)).toHaveText(document[field])
+    }
+    await expect(preview).toHaveAttribute('data-theme', document.theme)
+    await expect(preview).toHaveAttribute('data-alignment', document.alignment)
   }
   try {
     await page.goto('/app?surface=browser')
@@ -155,7 +137,10 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
       await preview.getByRole('textbox', { name: field, exact: true }).fill(a[field])
     }
     await toolbar.getByRole('button', { name: 'Elements / Outline', exact: true }).click()
-    await design(page.locator('.canvas-properties'), false)
+    const properties = page.locator('.canvas-properties')
+    await expect(properties).toBeVisible()
+    await selectControl(properties, 'Elements / Outline').selectOption({ label: 'Page appearance' })
+    await selectControl(properties, 'Page theme').selectOption(a.theme)
     await page.locator('.canvas-properties').getByRole('button', { name: 'Close properties', exact: true }).click()
     await toolbar.getByRole('button', { name: 'Save page', exact: true }).click()
     await expect(toolbar.getByRole('status')).toHaveText('Saved')
@@ -165,9 +150,10 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
     await page.reload()
     editor = await openProject(page, ready.project_name)
     await editor.getByRole('button', { name: 'Open page', exact: true }).click()
-    await expect(preview).toHaveAttribute('data-theme', 'cream')
-    await expect(preview).toHaveAttribute('data-alignment', 'center')
-    await expect(editor.getByRole('textbox', { name: 'Headline', exact: true })).toHaveValue(a.headline)
+    // Reload starts in View mode. Assert rendered content, not an input in a
+    // Sidebar that the selected environment style can hide.
+    await visiblePreview(a)
+    await readback(1, a)
     expect(calls.filter(call => call.method === 'GET' && call.path === pagePath).at(-1)).toMatchObject({ status: 200, revision: 1, document: a })
     await style('sidebar')
     await preview.getByRole('button', { name: 'Edit headline', exact: true }).click()
@@ -175,8 +161,8 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
     for (const [field, label] of [['label', 'Page label'], ['headline', 'Headline'], ['description', 'Description'], ['status', 'Status text']]) {
       await editor.getByRole('textbox', { name: label, exact: true }).fill(b[field])
     }
-    await editor.locator('summary').filter({ hasText: /^Element design$/ }).click()
-    await design(editor.getByRole('region', { name: 'Element properties', exact: true }), true)
+    await editor.getByRole('combobox', { name: 'Theme', exact: true }).selectOption(b.theme)
+    await editor.getByRole('combobox', { name: 'Alignment', exact: true }).selectOption(b.alignment)
     await editor.getByRole('button', { name: 'Save page', exact: true }).click()
     await expect(editor.locator('.project-page-editor__save-row').getByRole('status')).toHaveText('Saved')
     expect(calls.filter(call => call.method === 'PUT')).toMatchObject([
@@ -187,9 +173,13 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
     await page.reload()
     editor = await openProject(page, ready.project_name)
     await editor.getByRole('button', { name: 'Open page', exact: true }).click()
-    await expect(editor.getByRole('textbox', { name: 'Headline', exact: true })).toHaveValue(b.headline)
-    await expect(preview).toHaveAttribute('data-theme', 'dark')
-    await expect(preview).toHaveAttribute('data-alignment', 'left')
+    await expect(editor).toBeVisible()
+    for (const [field, label] of [['label', 'Page label'], ['headline', 'Headline'], ['description', 'Description'], ['status', 'Status text']]) {
+      await expect(editor.getByRole('textbox', { name: label, exact: true })).toBeVisible()
+      await expect(editor.getByRole('textbox', { name: label, exact: true })).toHaveValue(b[field])
+    }
+    await visiblePreview(b)
+    await readback(2, b)
     expect(calls.filter(call => call.method === 'GET' && call.path === pagePath).at(-1)).toMatchObject({ status: 200, revision: 2, document: b })
     const stale = await request.put(`${ready.api_origin}${pagePath}`, {
       headers: directHeaders, maxRedirects: 0, data: { expected_revision: 1, document: a },
