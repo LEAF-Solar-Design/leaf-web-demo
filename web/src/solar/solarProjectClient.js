@@ -15,6 +15,9 @@ const MAX_ARTIFACT = 16777216
 const REF_KEYS = ['organization_id', 'project_id', 'drawing_id', 'source_version_id',
   'source_intake_sha256', 'graph_sha256', 'artifact_id', 'media_type', 'filename',
   'byte_length', 'content_sha256', 'schema', 'download']
+const SOLAREDGE_COUNTS = ['pdf_matrices', 'pdf_panels', 'matchable_grids', 'bridge_grids', 'frames',
+  'matched_frames', 'group_strings', 'bridge_strings', 'strings', 'assigned_panels', 'unassigned_panels', 'partial_strings']
+const edgeHash = (value) => typeof value === 'string' && value.length === 64 && HEX.test(value)
 const local = (reason) => ({ ok: false, status: null, reason, envelope: null })
 const utf8 = (value) => new TextEncoder().encode(value).byteLength
 const plain = (value) => value !== null && typeof value === 'object' && Object.getPrototypeOf(value) === Object.prototype
@@ -60,6 +63,27 @@ function parameters(value, binding) {
 function matches(data, binding, version = true) {
   return data?.organization_id === binding.organization_id && data?.project_id === binding.project_id &&
     data?.drawing_id === binding.drawing_id && (!version || data?.input_version_id === binding.input_version_id)
+}
+
+function solarEdgeResult(data, binding, report = false) {
+  if (!plain(data) || !matches(data, binding) ||
+      data.schema !== (report ? 'leaf.solar-project-solaredge-report-result.v1' : 'leaf.solar-project-import-source.v1') ||
+      data.kind !== (report ? 'solaredge-report' : 'solaredge-pdf') ||
+      !['source_intake_sha256', 'graph_sha256'].every((key) => edgeHash(data[key])) ||
+      typeof data.graph_project_id !== 'string' || !data.graph_project_id.trim() || data.graph_project_id.length > 255) return false
+  const ref = data[report ? 'report' : 'source']
+  if (!plain(ref) || Reflect.ownKeys(ref).length !== REF_KEYS.length || !REF_KEYS.every((key) => Object.hasOwn(ref, key)) ||
+      ref.schema !== 'leaf.solar-project-artifact-ref.v1' ||
+      !matches({ ...ref, input_version_id: ref.source_version_id }, binding) ||
+      ref.source_intake_sha256 !== data.source_intake_sha256 || ref.graph_sha256 !== data.graph_sha256 ||
+      !['artifact_id', 'content_sha256'].every((key) => edgeHash(ref[key])) ||
+      ref.media_type !== (report ? 'application/json' : 'application/pdf') ||
+      ref.filename !== (report ? 'solaredge-report.json' : 'solaredge-source.pdf') ||
+      !Number.isInteger(ref.byte_length) || ref.byte_length < 1 || ref.byte_length > MAX_ARTIFACT ||
+      ref.download !== `/api/projects/${binding.project_id}/drawings/${binding.drawing_id}/solar-artifacts/${ref.artifact_id}`) return false
+  return report ? edgeHash(data.source_artifact_id) &&
+    plain(data.counts) && SOLAREDGE_COUNTS.every((key) => Number.isSafeInteger(data.counts[key]) && data.counts[key] >= 0)
+    : Number.isInteger(data.page_count) && data.page_count >= 1 && data.page_count <= 50
 }
 
 function validCheckout(data, binding) {
@@ -368,6 +392,30 @@ export function createSolarProjectClient({ fetchImpl = (...args) => globalThis.f
         ...projectSolarIntentExtras(intent.tool, intent) })
       return request('/api/run', { scope, method: 'POST', body: JSON.stringify(built.body), headers: built.headers, signal,
         validate: (data) => typeof data?.job_id === 'string' && UUID.test(data.job_id) && data.status === 'submitted' })
+    }),
+    uploadSolarEdgePdf: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { file, signal } = options
+      assert(file instanceof Blob)
+      const size = Object.getOwnPropertyDescriptor(Blob.prototype, 'size').get.call(file)
+      assert(size > 0 && size <= MAX_ARTIFACT)
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/imports/solaredge-pdf`,
+        { scope, signal, method: 'POST', body: file, headers: { 'Content-Type': 'application/pdf' },
+          validate: (data, selected) => solarEdgeResult(data, selected) })
+    }),
+    reportSolarEdgePdf: (options = {}) => guarded((scope) => {
+      assert(plain(options))
+      const { sourceArtifactId, alignmentTolerance, selectionOrder = 'unknown', signal } = options
+      assert(edgeHash(sourceArtifactId) &&
+        typeof alignmentTolerance === 'number' && Number.isFinite(alignmentTolerance) &&
+        alignmentTolerance >= 0.000001 && alignmentTolerance <= 1000000 &&
+        ['unknown', 'recorded'].includes(selectionOrder))
+      const b = scope.binding
+      return request(`/api/projects/${b.project_id}/drawings/${b.drawing_id}/versions/${b.input_version_id}/imports/solaredge-pdf/report`,
+        { scope, signal, method: 'POST', body: JSON.stringify({ source_artifact_id: sourceArtifactId,
+          alignment_tolerance: alignmentTolerance, selection_order: selectionOrder }),
+        validate: (data, selected) => solarEdgeResult(data, selected, true) && data.source_artifact_id === sourceArtifactId })
     }),
     searchSizingModules: (options = {}) => guarded((scope) => {
       assert(plain(options))
