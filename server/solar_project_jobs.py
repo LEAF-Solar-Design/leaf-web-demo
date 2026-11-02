@@ -97,21 +97,6 @@ def submit_project_graph_job(
                 existing.get("execution_context", {}).get("parent_intake_sha256")
                 != expected_intake_sha256):
             raise project.ProjectContextError("SIP_R4_IDEMPOTENCY_CONFLICT")
-        if checkout_capability is not None and not isinstance(checkout_capability, str):
-            from project_checkout_custody import DelegatedCheckout
-            if isinstance(checkout_capability, DelegatedCheckout):
-                # A completed parent's head may advance, but custody still has to
-                # own the live checkout. Ordinary direct replay keeps its IO order.
-                try:
-                    state = project.graph_store().get_checkout(org, project_id, drawing_id)
-                    fence = checkout_capability.fence_for(tenant,
-                        project.checkout_scope(project_id, drawing_id), state)
-                    project.graph_store().verify_checkout(org, project_id, drawing_id,
-                        actor_binding_id=actor, expected_fence=fence)
-                except project.ProjectContextError:
-                    raise
-                except Exception:
-                    project.refuse("CHECKOUT_UNAVAILABLE")
         normalized = graph._parameters(SimpleNamespace(drawing_id=drawing_id), params)
         if tool_name == solve.TOOL_NAME:
             try:
