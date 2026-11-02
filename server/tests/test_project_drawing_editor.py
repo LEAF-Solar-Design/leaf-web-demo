@@ -4,7 +4,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import re
+import subprocess
 import sys
+import tempfile
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -14,6 +17,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from psycopg.types.json import Jsonb
+import psycopg
 import pytest
 
 import checkout_capability
@@ -62,16 +66,169 @@ class BytesStore:
         self.data[key] = raw
 
 
+def canonical_ci_pg():
+    """Bind the canonical disposable producer's state to this exact server.
+
+    run-all-gates intentionally strips LEAF_GATE_* flags from suite children.
+    Its injected DATABASE_URL and the producer's real state remain available.
+    Never accept a loopback DSN, CI flag or state file alone as migration authority.
+    """
+    try:
+        port = os.environ.get("LEAF_CI_PG_PORT", "54329")
+        database = os.environ.get("LEAF_CI_PG_DB", "leaf_gate")
+        if not re.fullmatch(r"[0-9]+", port) or not re.fullmatch(r"[a-z_][a-z0-9_]*", database):
+            return False
+        dsn = os.environ.get("DATABASE_URL", "")
+        # This is the exact password-free DSN emitted by start_ephemeral_postgres.sh.
+        if dsn != f"postgresql://postgres@127.0.0.1:{port}/{database}":
+            return False
+        state_path = Path(os.environ.get("LEAF_CI_PG_STATE", "/tmp/leaf-ci-postgres.state"))
+        if not state_path.is_absolute() or state_path.is_symlink():
+            return False
+        rows = state_path.read_text().splitlines()
+        if len(rows) > 3 or any("=" not in row for row in rows):
+            return False
+        state = dict(row.split("=", 1) for row in rows)
+        if len(state) != len(rows):
+            return False
+        if state.get("mode") == "native":
+            data = Path(state.get("data", ""))
+            if set(state) != {"mode", "bin", "data"} or not re.fullmatch(
+                    r"/tmp/leaf-ci-postgres\.[A-Za-z0-9]{8}", str(data)):
+                return False
+            if data.is_symlink() or data.resolve().parent != Path("/tmp").resolve():
+                return False
+            major = (data / "PG_VERSION").read_text().strip()
+            if not major.isdecimal() or int(major) < 16 or state["bin"] != f"/usr/lib/postgresql/{major}/bin":
+                return False
+            pid = (data / "postmaster.pid").read_text().splitlines()
+            if len(pid) < 4 or not pid[0].isdecimal() or pid[1] != str(data) or pid[3] != port:
+                return False
+        elif state == {"mode": "docker", "name": "leaf-ci-postgres"}:
+            result = subprocess.run(["docker", "inspect", "leaf-ci-postgres"],
+                                    capture_output=True, text=True, timeout=10, check=True)
+            container, = json.loads(result.stdout)
+            bindings = container["NetworkSettings"]["Ports"]["5432/tcp"]
+            if (not container["State"]["Running"] or container["Config"]["Image"] != "postgres:16"
+                    or bindings != [{"HostIp": "127.0.0.1", "HostPort": port}]
+                    or "POSTGRES_HOST_AUTH_METHOD=trust" not in container["Config"]["Env"]
+                    or f"POSTGRES_DB={database}" not in container["Config"]["Env"]):
+                return False
+            result = subprocess.run(["docker", "exec", "leaf-ci-postgres", "psql", "-h", "127.0.0.1",
+                                     "-U", "postgres", "-d", database, "-Atc",
+                                     "select system_identifier::text from pg_control_system()"],
+                                    capture_output=True, text=True, timeout=10, check=True)
+            system_id = result.stdout.strip()
+            if not system_id.isdecimal():
+                return False
+        else:
+            return False
+        # Read-only identity query precedes db.apply_migration(). Native data
+        # directory or Docker system identifier must match the actual producer.
+        with psycopg.connect(dsn, connect_timeout=5, autocommit=True) as connection:
+            with connection.cursor() as cur:
+                cur.execute("SELECT current_database(), current_user, current_setting('data_directory'), "
+                            "system_identifier::text FROM pg_control_system()")
+                actual_database, user, directory, actual_system_id = cur.fetchone()
+        return (actual_database == database and user == "postgres" and
+                (directory == str(data) if state["mode"] == "native" else actual_system_id == system_id))
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, psycopg.Error):
+        return False
+
+
 @pytest.fixture(scope="module")
 def private_pg():
-    # The managed bsp43_pg_probe producer refuses ambient DSNs and starts its
-    # own PG16 cluster. Never migrate a developer or live DATABASE_URL here.
-    if not os.environ.get("LEAF_E364B_PG_PARENT") or not os.environ.get("DATABASE_URL"):
-        pytest.skip("requires managed bsp43_pg_probe private PostgreSQL producer")
+    # Keep the managed producer path; ordinary CI uses its own verified native
+    # or Docker disposable producer instead of forging the managed marker.
+    managed = os.environ.get("LEAF_E364B_PG_PARENT") and os.environ.get("DATABASE_URL")
+    if not managed and not canonical_ci_pg():
+        pytest.skip("requires managed or verified canonical disposable PostgreSQL producer")
     db.reset_pool()
     db.apply_migration()
     yield
     db.reset_pool()
+
+
+@pytest.fixture
+def canonical_pg_guard(monkeypatch, tmp_path):
+    """Mirror the real producer's state; never start PG or run migrations."""
+    for key in ("DATABASE_URL", "LEAF_CI_PG_PORT", "LEAF_CI_PG_DB", "LEAF_GATE_DATABASE_URL",
+                "LEAF_GATE_REQUIRE_DATABASE", "LEAF_E364B_PG_PARENT"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("DATABASE_URL", "postgresql://postgres@127.0.0.1:54329/leaf_gate")
+    state_file = tmp_path / "leaf-ci-postgres.state"
+    monkeypatch.setenv("LEAF_CI_PG_STATE", str(state_file))
+    with tempfile.TemporaryDirectory(prefix="leaf-ci-postgres.", dir="/tmp") as root:
+        data = Path(root)
+        (data / "PG_VERSION").write_text("16\n")
+        (data / "postmaster.pid").write_text(f"12345\n{data}\n123\n54329\n{data}\n127.0.0.1\n")
+        state_file.write_text(f"mode=native\nbin=/usr/lib/postgresql/16/bin\ndata={data}\n")
+        evidence = SimpleNamespace(data=data, state_file=state_file,
+            identity=["leaf_gate", "postgres", str(data), "7384140640359123456"],
+            container={"State": {"Running": True}, "Config": {"Image": "postgres:16",
+                "Env": ["POSTGRES_HOST_AUTH_METHOD=trust", "POSTGRES_DB=leaf_gate"]},
+                "NetworkSettings": {"Ports": {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "54329"}]}}},
+            queries=[], commands=[])
+
+        @contextmanager
+        def connection(*args, **kwargs):
+            @contextmanager
+            def cursor():
+                yield SimpleNamespace(execute=evidence.queries.append, fetchone=lambda: evidence.identity)
+            yield SimpleNamespace(cursor=cursor)
+
+        def docker(command, **kwargs):
+            evidence.commands.append(command)
+            output = (json.dumps([evidence.container]) if command[1] == "inspect"
+                      else "7384140640359123456\n")
+            return subprocess.CompletedProcess(command, 0, stdout=output, stderr="")
+
+        monkeypatch.setattr(psycopg, "connect", connection)
+        monkeypatch.setattr(subprocess, "run", docker)
+        yield evidence
+
+
+@pytest.mark.parametrize("mode", ["native", "docker"])
+def test_canonical_ci_pg_guard_accepts_real_producer_shapes(canonical_pg_guard, mode):
+    proof = canonical_pg_guard
+    if mode == "docker":
+        proof.state_file.write_text("mode=docker\nname=leaf-ci-postgres\n")
+        proof.identity[2] = "/var/lib/postgresql/data"
+    assert canonical_ci_pg()
+    assert len(proof.queries) == 1 and proof.queries[0].startswith("SELECT ")
+    assert len(proof.commands) == (2 if mode == "docker" else 0)
+    assert not os.environ.get("LEAF_E364B_PG_PARENT")
+    assert not os.environ.get("LEAF_GATE_REQUIRE_DATABASE")
+
+
+@pytest.mark.parametrize("mismatch", ["ambient", "remote", "credentials", "missing_state", "duplicate_state",
+    "native_pid_port", "native_directory", "database", "docker_binding", "docker_identity"])
+def test_canonical_ci_pg_guard_refuses_unbound_servers(canonical_pg_guard, monkeypatch, mismatch):
+    proof = canonical_pg_guard
+    if mismatch == "ambient":
+        monkeypatch.setenv("DATABASE_URL", "postgresql://postgres@127.0.0.1:5432/developer")
+    elif mismatch == "remote":
+        monkeypatch.setenv("DATABASE_URL", "postgresql://postgres@database.example:54329/leaf_gate")
+    elif mismatch == "credentials":
+        monkeypatch.setenv("DATABASE_URL", "postgresql://postgres:synthetic@127.0.0.1:54329/leaf_gate")
+    elif mismatch == "missing_state":
+        proof.state_file.unlink()
+    elif mismatch == "duplicate_state":
+        proof.state_file.write_text("mode=docker\nname=leaf-ci-postgres\nmode=docker\n")
+    elif mismatch == "native_pid_port":
+        (proof.data / "postmaster.pid").write_text(f"12345\n{proof.data}\n123\n5432\n")
+    elif mismatch == "native_directory":
+        proof.identity[2] = "/var/lib/postgresql/live"
+    elif mismatch == "database":
+        proof.identity[0] = "developer"
+    else:
+        proof.state_file.write_text("mode=docker\nname=leaf-ci-postgres\n")
+        if mismatch == "docker_binding":
+            proof.container["NetworkSettings"]["Ports"]["5432/tcp"][0]["HostIp"] = "0.0.0.0"
+        else:
+            proof.identity[3] = "other-server"
+    assert not canonical_ci_pg()
+    assert all(query.startswith("SELECT ") for query in proof.queries)
 
 
 @pytest.fixture
