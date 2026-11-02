@@ -266,6 +266,8 @@ export default function ConversePanel({
   // approval is held with the one-head sentence.
   engineDirty = false,
   onBeforeWriteApproval = null,
+  prepareApprovedProjectRun = null,
+  canonicalProjectWriteTools = null,
   onCatalogChanged = null,
   consumeCatalogPublication = null,
 }) {
@@ -315,6 +317,14 @@ export default function ConversePanel({
   const writeLockedRef = useRef(writeLocked)
   const engineDirtyRef = useRef(engineDirty)
   const onBeforeWriteApprovalRef = useRef(onBeforeWriteApproval)
+  const prepareApprovedProjectRunRef = useRef(prepareApprovedProjectRun)
+  const projectContextRef = useRef(projectContext)
+  const approvalScopeRef = useRef({ sessionId, projectContext, revision: 0 })
+  if (approvalScopeRef.current.sessionId !== sessionId
+    || approvalScopeRef.current.projectContext?.project_id !== projectContext?.project_id
+    || approvalScopeRef.current.projectContext?.input_version_id !== projectContext?.input_version_id) {
+    approvalScopeRef.current = { sessionId, projectContext, revision: approvalScopeRef.current.revision + 1 }
+  }
   const sessionIdRef = useRef(sessionId)
   const onCatalogChangedRef = useRef(onCatalogChanged)
   const consumeCatalogPublicationRef = useRef(consumeCatalogPublication)
@@ -322,6 +332,8 @@ export default function ConversePanel({
   writeLockedRef.current = writeLocked
   engineDirtyRef.current = engineDirty
   onBeforeWriteApprovalRef.current = onBeforeWriteApproval
+  prepareApprovedProjectRunRef.current = prepareApprovedProjectRun
+  projectContextRef.current = projectContext
   sessionIdRef.current = sessionId
   onCatalogChangedRef.current = onCatalogChanged
   consumeCatalogPublicationRef.current = consumeCatalogPublication
@@ -861,15 +873,36 @@ export default function ConversePanel({
   // accepts no other spelling.
   const decide = async (
     confirmationId, ok, blocked = false, owningSessionId = sessionId,
-    decisionRecorded = false, isWrite = false,
+    decisionRecorded = false, isWrite = false, tool = null,
   ) => {
     if (deciding || (ok && blocked)) return
+    const requestedContext = projectContext
+    const requestedRevision = approvalScopeRef.current.revision
+    const prepare = prepareApprovedProjectRunRef.current
+    const current = () => approvalScopeRef.current.revision === requestedRevision
+      && sessionIdRef.current === owningSessionId
+      && projectContextRef.current?.project_id === requestedContext?.project_id
+      && projectContextRef.current?.input_version_id === requestedContext?.input_version_id
+      && !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current))
     setDeciding(confirmationId); setSendErr(null)
     try {
       if (ok && isWrite && !(writeLockedRef.current || engineDirtyRef.current)) onBeforeWriteApprovalRef.current?.()
       const res = await resolveApproval(
         confirmationId, owningSessionId, ok, decisionRecorded, {
-          beforeResume: () => !(ok && isWrite && (writeLockedRef.current || engineDirtyRef.current)),
+          beforeResume: async () => {
+            if (!current()) return false
+            if (!ok || !isWrite || !requestedContext
+              || (canonicalProjectWriteTools && !canonicalProjectWriteTools.has(tool))) return true
+            if (typeof prepare !== 'function') return false
+            let grant
+            try {
+              grant = await prepare({ confirmationId, sessionId: owningSessionId,
+                projectContext: requestedContext })
+            } catch { return false }
+            if (!grant) return false
+            if (!current() || !grant.isCurrent()) { await grant.revoke(); return false }
+            return true
+          },
         })
       if (res.held) {
         await refreshApprovalsRef.current?.()
@@ -939,6 +972,7 @@ export default function ConversePanel({
               approval.session_id,
               true,
               isWrite,
+              approval.tool,
             )}
           >
             {deciding === approval.confirmation_id
@@ -953,7 +987,7 @@ export default function ConversePanel({
               disabled={deciding === approval.confirmation_id || hold.held}
               title={hold.held ? hold.title : undefined}
               onClick={() => decide(
-                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite)}
+                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite, approval.tool)}
             >
               {deciding === approval.confirmation_id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
             </button>
@@ -1106,7 +1140,7 @@ export default function ConversePanel({
                 className="chip-act"
                 disabled={deciding === item.id || hold.held}
                 title={hold.held ? hold.title : undefined}
-                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite)}
+                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite, item.tool)}
               >
                 {deciding === item.id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
               </button>
