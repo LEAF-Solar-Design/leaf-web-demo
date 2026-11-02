@@ -198,6 +198,7 @@ it('R13G2A-04 drawing facts and object identity follow the canonical intake', ()
   const env = { ...base, useMemo: fn => fn(), studioGround: true, drafting: true, drawingExtents, drawingPropertyName,
     engineHistory: { undoDepth: 90 }, projectName: 'legacy', drawingName: 'legacy', mock: true,
     layerCounts: {}, toggleLayer: vi.fn(), colorForLayer: vi.fn(), onOpenStart: vi.fn() }
+  env.activeDrawingName = evaluate(decl('activeDrawingName').init, env)
   const facts = evaluate(decl('paneDrawingFacts').init.arguments[0], env)()
   expect(facts).toMatchObject({ name: 'canonical.dwg', entities: 1, layers: 1, layersShown: 1, source: 'project drawing' })
   expect(facts.undoDepth).toBeUndefined()
