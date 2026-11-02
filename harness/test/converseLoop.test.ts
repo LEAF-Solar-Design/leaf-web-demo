@@ -738,12 +738,12 @@ describe("ConverseLoop — read auto-dispatch", () => {
 
   it.each([
     ["ordinary", "pre_ack", 0, false],
-    ["ordinary", "post_ack", 1, false],
-    ["ordinary", "timeout", 1, false],
+    ["ordinary", "post_ack", 1, true],
+    ["ordinary", "timeout", 1, true],
     ["ordinary", "success", 1, true],
     ["batch_fallback", "pre_ack", 0, false],
-    ["batch_fallback", "post_ack", 1, false],
-    ["batch_fallback", "timeout", 1, false],
+    ["batch_fallback", "post_ack", 1, true],
+    ["batch_fallback", "timeout", 1, true],
     ["batch_fallback", "success", 1, true],
   ] as const)(
     "%s preserves acknowledgement cardinality for %s",
@@ -799,6 +799,94 @@ describe("ConverseLoop — read auto-dispatch", () => {
       expect(ofType(events, "turn_complete")[0]!.data).toEqual({ stop_reason: "end_turn" });
     },
   );
+
+  it.each(["ordinary", "batch_fallback"] as const)(
+    "%s resumes an accepted pending read through job_status without redispatch",
+    async (route) => {
+      const appRun = new FakeAppRunClient();
+      if (route === "batch_fallback") {
+        appRun.catalog = appRun.catalog.map((entry) => entry.name === "count-by-layer"
+          ? { ...entry, execution_class: "instant", batch_fallback: true } : entry);
+      }
+      const results: SpineToolResult[] = [];
+      let pending: Record<string, unknown> | undefined;
+      const runner: SpineConverseRunner = {
+        async *run(input) {
+          const result = pending
+            ? await input.tools.execute("job_status", { job_id: pending.job_id })
+            : await input.tools.execute("run_capability", { tool: "count-by-layer", params: {} });
+          results.push(result);
+          pending = JSON.parse(result.content);
+          yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+        },
+      };
+      const store = new FakeSessionStore();
+      const loop = new ConverseLoop({ runner, appRun, gate: new FakeGateClient(), store }, { readWaitS: 0 });
+      const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+      await sendText(loop, session, "Run the read");
+      const accepted = JSON.parse(results[0]!.content);
+      expect(results[0]!.isError).not.toBe(true);
+      expect(accepted).toMatchObject({
+        status: "submitted", pending: true, observation: "timeout",
+        next_action: { tool: "job_status", args: { job_id: accepted.job_id } },
+      });
+      expect(accepted.job_id).toEqual(expect.any(String));
+      expect(accepted.message).toContain("do not dispatch it again");
+      await sendText(loop, session, "Follow the accepted job");
+      expect(results[1]!.isError).not.toBe(true);
+      expect(JSON.parse(results[1]!.content)).toMatchObject({ job_id: accepted.job_id, status: "complete" });
+      expect(appRun.submitCalls).toHaveLength(1);
+      expect(ofType(await store.eventsAfter(session.session_id, 0), "job_linked")).toHaveLength(1);
+    },
+  );
+
+  it.each([
+    ["ordinary", "unavailable"], ["batch_fallback", "unavailable"],
+    ["ordinary", "failed"], ["batch_fallback", "failed"],
+    ["ordinary", "invalid"], ["batch_fallback", "invalid"],
+  ] as const)("%s preserves the accepted reference for %s observation", async (route, outcome) => {
+    class ObservedAppRunClient extends FakeAppRunClient {
+      reads = 0;
+      override async getJob(_tenant: string, _job: string): Promise<Record<string, unknown>> {
+        this.reads += 1;
+        if (outcome === "unavailable") {
+          if (this.reads === 1) return { status: "running" };
+          throw new Error("private transport details");
+        }
+        return { status: outcome === "invalid" ? "unexpected" : "failed" };
+      }
+    }
+    const appRun = new ObservedAppRunClient();
+    if (route === "batch_fallback") {
+      appRun.catalog = appRun.catalog.map((entry) => entry.name === "count-by-layer"
+        ? { ...entry, execution_class: "instant", batch_fallback: true } : entry);
+    }
+    const results: SpineToolResult[] = [];
+    const runner: SpineConverseRunner = {
+      async *run(input) {
+        results.push(await input.tools.execute("run_capability", { tool: "count-by-layer", params: {} }));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+      },
+    };
+    const store = new FakeSessionStore();
+    const loop = new ConverseLoop({ runner, appRun, gate: new FakeGateClient(), store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    await sendText(loop, session, "Run the read");
+    const linked = ofType(await store.eventsAfter(session.session_id, 0), "job_linked")[0]!.data;
+    const body = JSON.parse(results[0]!.content);
+    expect(body.job_id).toBe(linked.job_id);
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(results[0]!.content).not.toContain("private");
+    if (outcome === "unavailable") {
+      expect(results[0]!.isError).not.toBe(true);
+      expect(body).toMatchObject({ pending: true, status: "running", observation: "unavailable",
+        next_action: { tool: "job_status", args: { job_id: linked.job_id } } });
+    } else {
+      expect(results[0]!.isError).toBe(true);
+      expect(body).toMatchObject({ status: outcome });
+      expect(body.pending).toBeUndefined();
+    }
+  });
 
   it("replaces a malformed model read pin with the current drawing head", async () => {
     const appRun = new FakeAppRunClient();
