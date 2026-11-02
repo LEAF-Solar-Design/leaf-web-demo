@@ -498,6 +498,7 @@
     "server-search",
     "server-session-annex-store",
     "server-session-fanout",
+    "server-session-event-cas",
     "server-session-store",
     "server-session-store-postgres",
     "server-sessions-e2e",
