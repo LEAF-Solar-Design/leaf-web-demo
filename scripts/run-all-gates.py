@@ -2145,6 +2145,13 @@ def build_suites() -> List[Suite]:
               REPO / "platform", _py_pytest("tests/test_sip_r2_publication.py"), 17,
         uses_database=True, db_gated=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-project-editor-publication", "platform project editor canonical publication", "pytest",
+              REPO / "platform", _py_pytest("tests/test_project_editor_publication.py"), 14,
+              uses_database=True),
+        Suite("server-project-drawing-editor", "server project editor custody and disposable PG authority", "pytest",
+              SERVER, _py_pytest("tests/test_project_drawing_editor.py"), 25, uses_database=True),
+        Suite("server-project-editor-upload-source", "server original DXF custody before ready", "pytest",
+              SERVER, _py_pytest("tests/test_project_editor_upload_source.py"), 3, uses_database=True),
         Suite("server-sip-r2-publication", "server canonical publication readback", "pytest",
               SERVER, _py_pytest("tests/test_sip_r2_publication.py"), 10),
         Suite("server-sip-r1-context", "server canonical project context", "pytest",
