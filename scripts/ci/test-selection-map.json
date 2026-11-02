@@ -356,6 +356,7 @@
     "server-browser-project-flow",
     "server-browser-project-routes",
     "server-browser-project-authoring",
+    "server-browser-project-source-export",
     "server-project-solaredge",
     "server-project-preview-source",
     "server-glug-adoption",
