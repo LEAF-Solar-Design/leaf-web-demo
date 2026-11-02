@@ -4050,6 +4050,12 @@ export default function App() {
     setNavExpanded(true)
     if (studioShell) setBrowserPanel('studio')
   }, [studioShell, setNavExpanded, setBrowserPanel])
+  const toggleStudioToolRail = useCallback(() => {
+    if (browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded)) {
+      setBrowserPanel('none')
+      setNavExpanded(false)
+    } else openToolRail()
+  }, [browserPanel, drawerViewport, studioDrawer, navExpanded, setBrowserPanel, setNavExpanded, openToolRail])
   const browserAssetActive = studioShell && surfaceSlots.ground === 'board'
   useDockRise(projectLayout.appRef, studioShell)
   // Build routing and "Open author flow" both use setAuthorOpen. The studio
@@ -4398,7 +4404,7 @@ export default function App() {
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar',
             expanded: studioShell ? browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded) : drawerViewport ? studioDrawer === 'nav' : navExpanded,
             onClick: () => studioShell
-              ? drawerViewport && browserPanel === 'studio' && studioDrawer === 'nav' ? toggleStudioDrawer('nav') : openToolRail()
+              ? toggleStudioToolRail()
               : drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(!navExpanded) },
         ], view: null, version: null, rail: [], author: null }
     }
@@ -4561,12 +4567,12 @@ export default function App() {
           { id: 'quick-rail', dataTool: 'rail-expand', label: 'Tool rail', icon: 'sidebar', title: 'Expand the tool rail',
             expanded: studioShell ? browserPanel === 'studio' && (drawerViewport ? studioDrawer === 'nav' : navExpanded) : drawerViewport ? studioDrawer === 'nav' : navExpanded,
             onClick: () => studioShell
-              ? drawerViewport && browserPanel === 'studio' && studioDrawer === 'nav' ? toggleStudioDrawer('nav') : openToolRail()
+              ? toggleStudioToolRail()
               : drawerViewport ? toggleStudioDrawer('nav') : setNavExpanded(true) },
         ] : []),
       ],
     }
-  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
+  }, [projectMode, projectDrawing.mode, drawingIntake, studioShell, browserPanel, openToolRail, toggleStudioToolRail, drafting, profileTabs, surfaceSlots.toolbar.profile, activeRibbonTab, navExpanded, navSpine, setNavExpanded, toggleStudioDrawer, drawerViewport, studioDrawer,
     shown, drawingState, canUndo, canRedo, versionBusy, running, previewing,
     drawingMutationsBlocked, historyOpen, onUndo, onRedo, onToggleHistoryTracked, layerCounts, visibleLayers,
     toggleLayer, railFamilies, onRequestCatalogRun, writeLocked, canRunWrite, canBuild, entOf, ribbonTab, colorForLayer, paneOpen,
@@ -4644,16 +4650,27 @@ export default function App() {
   // Named apart from the version bootstrap's `drawingSummary`: a shadowing
   // name makes the build transform rename one of them and the App wiring
   // pins (src/app-wiring.test.mjs) then miss the bootstrap's pattern.
+  const activeDrawingName = projectMode ? projectDrawingName
+    : drawingPropertyName(activeIntake?.documentId, shown ? `${projectName}.dwg` : '')
+  const sourceDrawingSummary = drawingIntake?.sourceSummary
+  const drawingMetadata = sourceDrawingSummary
+    ? `${sourceDrawingSummary.entityCount} entities · ${Object.keys(sourceDrawingSummary.countsByLayer).length} layers`
+    : shown ? `${shown.polylines.length} polylines · ${shown.layers.length} layers` : ''
   const paneDrawingFacts = useMemo(() => {
     if (!(studioGround && drafting && drawingIntake)) return null
-    const layers = Array.isArray(drawingIntake.layers) ? drawingIntake.layers : []
-    const polylines = Array.isArray(drawingIntake.polylines) ? drawingIntake.polylines.length : 0
-    const inserts = Array.isArray(drawingIntake.inserts) ? drawingIntake.inserts.length : 0
-    const faces = Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
+    const source = drawingIntake.sourceSummary
+    const layers = source ? Object.keys(source.countsByLayer)
+      : Array.isArray(drawingIntake.layers) ? drawingIntake.layers : []
+    const polylines = source ? (source.countsByType.LWPOLYLINE || 0) + (source.countsByType.POLYLINE || 0)
+      : Array.isArray(drawingIntake.polylines) ? drawingIntake.polylines.length : 0
+    const inserts = source ? source.countsByType.INSERT || 0
+      : Array.isArray(drawingIntake.inserts) ? drawingIntake.inserts.length : 0
+    const faces = source ? source.countsByType['3DFACE'] || source.countsByType.FACE3D || 0
+      : Array.isArray(drawingIntake.faces3d) ? drawingIntake.faces3d.length : 0
     return {
       // Same gate and value as the document tab and the footer.
-      name: projectMode ? projectDrawingName : drawingPropertyName(shown ? `${projectName}.dwg` : '', activeIntake?.documentId),
-      entities: polylines + inserts + faces,
+      name: activeDrawingName,
+      entities: source ? source.entityCount : polylines + inserts + faces,
       polylines,
       inserts,
       faces,
@@ -4663,7 +4680,7 @@ export default function App() {
       source: projectMode ? 'project drawing' : activeIntake ? 'browser drawing' : mock ? 'sample data' : 'project drawing',
       ...(!projectMode && activeIntake && engineHistory ? engineHistory : {}),
     }
-  }, [projectMode, projectDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, shown, drawingName, projectName, visibleLayers, mock])
+  }, [projectMode, activeDrawingName, studioGround, drafting, drawingIntake, activeIntake, engineHistory, visibleLayers, mock])
 
   // W4d Slice A: the ONE engine-session mount wraps the drawing workspace,
   // so the ribbon's engine clusters and the import pane consume the same
@@ -4954,8 +4971,8 @@ export default function App() {
             onOpenProject={onOpenProject}
           />
           <span className="meta">
-            {shown
-              ? `${shown.polylines.length} polylines · ${shown.layers.length} layers`
+            {drawingMetadata
+              ? drawingMetadata
               : drawingLoadShown && (
                 <span className="meta-loading" role="status">
                   <span className="dot hollow" aria-hidden="true" />Loading drawing
@@ -5165,6 +5182,7 @@ export default function App() {
             the ground attaches on the first render none of this renders. */}
         {studioGround && createPortal(
           <SurfaceGrounds
+            canApplyLayout={canOpenCustomize}
             projectId={openProjectId || null}
             session={session}
             signedIn={signedIn}
@@ -5654,13 +5672,12 @@ export default function App() {
               {projectMode ? <>{projectDrawingName} <code>{projectSolar.scope.binding?.input_version_id}</code></> : <>
               {/* One loading voice per pane — the pulse-dot line in the viewer
                   announces loading; the title placeholder stays a muted dash. */}
-              {shown ? `${projectName}.dwg` : <span className="dim">—</span>}
-              {shown && (
+              {activeDrawingName || <span className="dim">—</span>}
+              {drawingMetadata && (
                 <span className="dim">
-                  {' · '}{shown.polylines.length} polylines
-                  {shown.inserts?.length ? ` · ${shown.inserts.length} inserts` : ''}
-                  {shown.faces3d?.length ? ` · ${shown.faces3d.length} faces` : ''}
-                  {' · '}{shown.layers.length} layers
+                  {' · '}{drawingMetadata}
+                  {!sourceDrawingSummary && shown?.inserts?.length ? ` · ${shown.inserts.length} inserts` : ''}
+                  {!sourceDrawingSummary && shown?.faces3d?.length ? ` · ${shown.faces3d.length} faces` : ''}
                 </span>
               )}
               </>}
@@ -6323,7 +6340,7 @@ export default function App() {
             the reference's Model tab, the drawing's name, and + (the project
             board). Every other surface: nothing here. */}
         {studioShell && (drafting ? (
-          <StatusTabs name={projectMode ? projectDrawingName : shown ? `${projectName}.dwg` : ''} onStart={onOpenStart} />
+          <StatusTabs name={activeDrawingName} onStart={onOpenStart} />
         ) : (
           <span className="cockpit-status-tabs" data-testid="cockpit-status-tabs">
             <span className="foot-model-tab">{surfaceSlots.ground === 'device-stage' ? 'Revision' : 'Project'}</span>

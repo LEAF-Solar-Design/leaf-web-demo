@@ -165,6 +165,7 @@ export default function SurfaceGrounds({
   iosEnabled, iosContract, revision, ship, onLaunch,
   projectId, session, signedIn, accountScope,
   browserPanel, onBrowserPanel, onSelectSurface, environmentProfiles, onDescribe, onEnterWorkspace, sampleEntry,
+  canApplyLayout = false,
 }) {
   // This component is also invoked directly by its prop-contract tests, so
   // identity memoization lives outside React while retaining useMemo semantics.
@@ -183,7 +184,7 @@ export default function SurfaceGrounds({
       <BoardGround
         {...(studioShell ? {
           browserActive: surfaceGround(surface) === 'board', browserPanel, onBrowserPanel,
-          projectId, signedIn, accountScope,
+          projectId, signedIn, accountScope, canApplyLayout,
           profile: surface, profiles: environmentProfiles, onSelect: onSelectSurface, onDescribe, onEnterWorkspace, sampleEntry,
         } : {})}
         active={boardVisible ?? surfaceGround(surface) === 'board'}

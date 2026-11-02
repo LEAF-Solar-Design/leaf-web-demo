@@ -7,8 +7,9 @@ import { BrowserArtifactContext, BrowserAssetGround } from './BrowserAssetGround
 import { loadProjectPage, saveProjectPage } from './projectPageClient.js'
 
 vi.mock('./projectPageClient.js', async importOriginal => ({ ...await importOriginal(), loadProjectPage: vi.fn(), saveProjectPage: vi.fn() }))
+import * as api from '../api.js'
 
-vi.mock('./ProjectBoardGround.jsx', () => ({ ProjectBoardGround: ({ panel, active }) => <div hidden={!active}>{panel}</div> }))
+vi.mock('./ProjectBoardGround.jsx', () => ({ ProjectBoardGround: ({ panel, active, mock }) => <div data-testid="project-board-ground" data-mock={String(mock)} hidden={!active}>{panel}</div> }))
 const auth = vi.hoisted(() => ({ configured: true, signedIn: true, listeners: new Set(), login: vi.fn() }))
 vi.mock('../auth.js', async importOriginal => ({
   ...await importOriginal(),
@@ -310,4 +311,18 @@ it('keeps phone panels inside the viewport with an internal scroller and sticky 
   expect(css).toContain('overscroll-behavior: contain')
   expect(css).toContain('position: sticky; top: 0')
   expect(css).toContain('.browser-asset-ground { position: fixed; inset: 0;')
+})
+
+it.each([
+  { signedIn: true, canApplyLayout: true, mock: false, eligible: true },
+  { signedIn: false, canApplyLayout: true, mock: false, eligible: false },
+  { signedIn: true, canApplyLayout: false, mock: false, eligible: false },
+  { signedIn: true, canApplyLayout: true, mock: true, eligible: false },
+  { signedIn: true, mock: false, eligible: false },
+])('forwards layout authority while preserving ProjectBoard mock mode: %j', ({ eligible, ...state }) => {
+  vi.spyOn(api, 'getSurfaceConfig').mockResolvedValue({ surfaces: {} })
+  render(<BrowserAssetGround {...props} profile="cad" {...state} />)
+  fireEvent.click(screen.getByRole('button', { name: 'Layout', exact: true }))
+  expect(screen.getByRole('button', { name: 'Apply layout' }).disabled).toBe(!eligible)
+  expect(screen.getByTestId('project-board-ground').dataset.mock).toBe(String(state.mock))
 })
