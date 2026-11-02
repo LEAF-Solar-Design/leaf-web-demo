@@ -35,6 +35,17 @@ afterEach(() => { for (const client of clients.splice(0)) client.dispose(); vi.u
 const init = (fetchImpl) => fetchImpl.mock.calls.at(-1)[1]
 const url = (fetchImpl) => fetchImpl.mock.calls.at(-1)[0]
 const refusal = (reason) => ({ error: { reason_code: reason, error_code: 'BAD_PARAMS', retryable: false }, detail: { preserved: true } })
+const edgeCounts = { pdf_matrices: 1, pdf_panels: 2, matchable_grids: 1, bridge_grids: 0, frames: 1,
+  matched_frames: 1, group_strings: 1, bridge_strings: 0, strings: 1, assigned_panels: 2,
+  unassigned_panels: 0, partial_strings: 0 }
+function edgeData(report = false, changes = {}) {
+  return { schema: report ? 'leaf.solar-project-solaredge-report-result.v1' : 'leaf.solar-project-import-source.v1',
+    kind: report ? 'solaredge-report' : 'solaredge-pdf', ...identity, input_version_id: V,
+    source_intake_sha256: 'd'.repeat(64), graph_sha256: 'e'.repeat(64), graph_project_id: 'design-1',
+    ...(report ? { source_artifact_id: 'a'.repeat(64), counts: edgeCounts } : { page_count: 1 }),
+    [report ? 'report' : 'source']: artifact({ media_type: report ? 'application/json' : 'application/pdf',
+      filename: report ? 'solaredge-report.json' : 'solaredge-source.pdf' }), ...changes }
+}
 function artifact(changes = {}) {
   const artifactId = 'c'.repeat(64)
   return { ...identity, source_version_id: V, source_intake_sha256: 'd'.repeat(64), graph_sha256: 'e'.repeat(64),
@@ -44,6 +55,67 @@ function artifact(changes = {}) {
 }
 
 describe('project Solar transport and lifecycle', () => {
+  it('uploads immutable PDF bytes to the captured canonical version without creating a run', async () => {
+    const data = edgeData(), { client, fetchImpl } = setup(data)
+    const file = new File(['%PDF-1.7'], 'layout.pdf', { type: 'application/pdf' })
+    expect(await client.uploadSolarEdgePdf({ file })).toMatchObject({ ok: true, data })
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/drawings/${D}/versions/${V}/imports/solaredge-pdf`)
+    expect(init(fetchImpl)).toMatchObject({ method: 'POST', body: file,
+      headers: { Authorization: 'Bearer synthetic', 'Content-Type': 'application/pdf', 'X-Org-Id': O, 'X-Project-Id': P } })
+    expect(init(fetchImpl).headers).not.toHaveProperty('X-Checkout-Capability')
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+  })
+
+  it('reports on a canonical immutable artifact without legacy version coercion or catalog fields', async () => {
+    const data = edgeData(true), { client, fetchImpl } = setup(data)
+    expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 0.5, selectionOrder: 'recorded' })).ok).toBe(true)
+    expect(url(fetchImpl)).toBe(`https://api.test/api/projects/${P}/drawings/${D}/versions/${V}/imports/solaredge-pdf/report`)
+    expect(JSON.parse(init(fetchImpl).body)).toEqual({ source_artifact_id: 'a'.repeat(64), alignment_tolerance: 0.5, selection_order: 'recorded' })
+  })
+
+  it('refuses malformed or foreign canonical SolarEdge producers', async () => {
+    const { client, fetchImpl } = setup()
+    for (const data of [edgeData(false, { schema: 'leaf.solar-import-source.v1', source_version: 3 }),
+      edgeData(false, { input_version_id: J }), edgeData(false, { project_id: J }), edgeData(false, { page_count: 51 }),
+      edgeData(false, { source: { ...edgeData().source, source_version_id: J } }),
+      edgeData(false, { source: { ...edgeData().source, graph_sha256: 'a'.repeat(64) } })]) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect((await client.uploadSolarEdgePdf({ file: new File(['%PDF'], 'layout.pdf') })).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+    for (const data of [edgeData(true, { source_artifact_id: 'b'.repeat(64) }),
+      edgeData(true, { counts: { ...edgeCounts, assigned_panels: 1.5 } }),
+      edgeData(true, { report: { ...edgeData(true).report, filename: 'other.json' } })]) {
+      fetchImpl.mockResolvedValueOnce(response(data))
+      expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 1 })).reason).toBe('SIP_R7_RESPONSE_INVALID')
+    }
+  })
+
+  it('validates SolarEdge PDF and report limits before transport', async () => {
+    const { client, fetchImpl } = setup()
+    for (const file of [null, { size: 4 }, new File([], 'empty.pdf'), new Blob([new Uint8Array(16777217)])]) {
+      expect((await client.uploadSolarEdgePdf({ file })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    for (const change of [{ sourceArtifactId: 'wrong' }, { alignmentTolerance: 0 }, { alignmentTolerance: Infinity }, { selectionOrder: 'other' }]) {
+      expect((await client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 1, ...change })).reason).toBe('SIP_R7_REQUEST_INVALID')
+    }
+    expect(fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('discards late PDF and report results when the selected version or authority changes', async () => {
+    const { client, fetchImpl } = setup()
+    const upload = deferred()
+    fetchImpl.mockReturnValueOnce(upload.promise)
+    const pending = client.uploadSolarEdgePdf({ file: new File(['%PDF'], 'layout.pdf') })
+    client.setScope({ ...binding, input_version_id: J }, 'session-1')
+    expect(init(fetchImpl).signal.aborted).toBe(true)
+    upload.resolve(response(edgeData()))
+    expect((await pending).reason).toBe('SIP_R7_SCOPE_STALE')
+    client.setScope(binding, 'session-1')
+    fetchImpl.mockImplementationOnce(() => new Promise(() => {}))
+    const report = client.reportSolarEdgePdf({ sourceArtifactId: 'a'.repeat(64), alignmentTolerance: 1 })
+    client.setScope(binding, 'session-2')
+    expect((await report).reason).toBe('SIP_R7_SCOPE_STALE')
+  })
   it('S1-121 clears a release error after a successful checkout reread', async () => {
     const { client, fetchImpl } = setup(acquired())
     await client.acquireCheckout()

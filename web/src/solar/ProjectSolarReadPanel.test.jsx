@@ -121,6 +121,25 @@ const replaceRow = (props, tool) => ({ ...props, tool, projectCatalog: {
 } })
 
 describe('project Solar read ownership', () => {
+  it('reviews paged SolarEdge tracking on the selected historical version without a run', async () => {
+    const name = 'solar-solaredge-tracking-read'
+    const tracking = { schema: 'leaf.solar-project-solaredge-tracking-read.v1', accepted: true, labels_only: true,
+      counts: { strings: 1 }, section: 'strings', page: { offset: 2, limit: 2, total: 3 }, items: [{ panel_refs: ['p1'] }] }
+    const data = { ...resultFor(name), head_version_id: '55555555-5555-4555-8555-555555555555',
+      is_head: false, current_required: false, output: tracking, output_bytes: Buffer.byteLength(JSON.stringify(tracking)) }
+    const h = harness({ name, schema: { type: 'object', properties: {
+      section: { type: 'string', default: 'strings' }, offset: { type: 'integer', default: 2 }, limit: { type: 'integer', default: 2 },
+    } }, read: async () => ({ ok: true, data: { result: data } }) })
+    render(<ProjectSolarReadPanel {...h.props} />)
+    clickRead()
+    await screen.findByTestId('solar-read-result')
+    expect(h.projectClient.readSolar).toHaveBeenCalledWith({ tool: name,
+      params: { section: 'strings', offset: 2, limit: 2, drawing_id: B.drawing_id },
+      catalogDigest: D, current: false, signal: expect.any(AbortSignal) })
+    assertNoRuns(h.projectClient)
+    expect(h.save).not.toHaveBeenCalled()
+  })
+
   it('R13E-18 string data uses R7 readSolar and renders R12 output', async () => {
     const fetchImpl = vi.fn(async () => new Response(JSON.stringify({ result: resultFor('solar-string-data') }),
       { status: 200, headers: { 'Content-Type': 'application/json' } }))
