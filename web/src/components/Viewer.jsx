@@ -932,6 +932,13 @@ const Viewer = forwardRef(function Viewer(
 
     const sceneState = {
       intake: activeIntake, drawingKey: sceneDrawingKey,
+      renderStats: {
+        paths: polylines.length,
+        layers: Array.isArray(activeIntake.layers) ? activeIntake.layers.length
+          : new Set([...layerGroups.keys(), ...insertLayerGroups.keys(), ...faceLayerGroups.keys()]).size,
+        markerReferences: nInserts,
+        omitted: blocks.truncated + (activeIntake.truncated || 0),
+      },
       scene, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
@@ -1076,7 +1083,8 @@ const Viewer = forwardRef(function Viewer(
 
   useImperativeHandle(ref, () => ({
     subscribeCamera: (listener) => channel().subscribe(listener),
-    getDrawingScene: () => ({ ...desiredSceneRef.current, ready: sceneReady() }),
+    getDrawingScene: () => ({ ...desiredSceneRef.current, ready: sceneReady(),
+      renderStats: sceneReady() ? stateRef.current.renderStats : null }),
     canSetFocusMarker: (bounds) => sceneReady() && validObjectBounds(bounds),
     setFocusMarker,
     fit: () => stateRef.current?.fitToBounds(),

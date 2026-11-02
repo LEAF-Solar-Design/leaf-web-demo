@@ -849,17 +849,20 @@ describe('CockpitStatus', () => {
   it('writes unprojected cursor coordinates and scale at frame rate, clears on leave, tears down', async () => {
     const ground = document.createElement('div')
     document.body.appendChild(ground)
+    const shown = { polylines: [1, 2, 3], layers: [1] }
     const viewer = {
       unproject: vi.fn((x, y) => ({ x: x / 10, y: -y / 10 })),
       getPose: vi.fn(() => ({ zoom: 1, worldPerPixel: 0.25 })),
+      getDrawingScene: () => ({ ready: true, intake: shown,
+        renderStats: { paths: 3, layers: 1, markerReferences: 0, omitted: 0 } }),
     }
     const { unmount } = render(
-      <CockpitStatus ground={ground} viewerRef={{ current: viewer }} shown={{ polylines: [1, 2, 3], layers: [1] }} selectedHandle="A1" />,
+      <CockpitStatus ground={ground} viewerRef={{ current: viewer }} shown={shown} selectedHandle="A1" />,
     )
     const status = screen.getByTestId('cockpit-status')
     const [x, y] = status.querySelectorAll('.cockpit-coord b')
     expect(x.textContent).toBe('—')
-    expect(status.textContent).toContain('3 rendered paths · 1 layers')
+    expect(status.textContent).toContain('3 rendered paths · 1 layer')
     expect(status.textContent).toContain('sel A1')
 
     move(ground, 123.4, 50)
@@ -881,6 +884,36 @@ describe('CockpitStatus', () => {
     await nextFrame()
     expect(viewer.unproject).toHaveBeenCalledTimes(1)
     ground.remove()
+  })
+
+  it('reports built block paths and incomplete preview limits without counting source rows', () => {
+    const shown = { polylines: [], inserts: [{ handle: 'A100' }], layers: ['Panels'] }
+    const viewerRef = { current: { getDrawingScene: () => ({ ready: true, intake: shown,
+      renderStats: { paths: 2, layers: 1, markerReferences: 1, omitted: 3 } }) } }
+    render(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
+    const text = screen.getByTestId('cockpit-status').textContent
+    expect(text).toContain('2 rendered paths · 1 layer')
+    expect(text).toContain('1 block reference shown as markers')
+    expect(text).toContain('preview limited')
+    expect(text).not.toContain('0 rendered paths')
+  })
+
+  it('waits for the matching lazy viewer scene and rejects stale counts', () => {
+    const shown = { polylines: [], layers: ['Panels'] }
+    const viewerRef = { current: null }
+    const view = render(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
+    expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
+    const stats = { paths: 2, layers: 1, markerReferences: 0, omitted: 0 }
+    let scene = { ready: true, intake: { ...shown }, renderStats: stats }
+    viewerRef.current = { getDrawingScene: () => scene }
+    view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
+    expect(screen.getByTestId('cockpit-status').textContent).not.toContain('2 rendered paths')
+    scene = { ready: false, intake: shown, renderStats: stats }
+    view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
+    expect(screen.getByTestId('cockpit-status').textContent).toContain('Drawing preview not ready')
+    scene = { ready: true, intake: shown, renderStats: stats }
+    view.rerender(<CockpitStatus viewerRef={viewerRef} shown={shown} />)
+    expect(screen.getByTestId('cockpit-status').textContent).toContain('2 rendered paths · 1 layer')
   })
 
   it('reads "no selection" with nothing selected and holds "—" without a viewer', async () => {

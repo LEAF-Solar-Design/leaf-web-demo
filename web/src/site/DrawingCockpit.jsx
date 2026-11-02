@@ -610,13 +610,22 @@ export function StatusToggles() {
 export function CockpitStatus({ ground, viewerRef, shown = null, selectedHandle = null, canvasSelector = null }) {
   const refs = useRef({ x: { current: null }, y: { current: null }, scale: { current: null } }).current
   useCursorReadout(ground, viewerRef, refs, canvasSelector)
+  // App repaints when the lazy Viewer reports scene readiness. Read that
+  // built scene instead of expanding blocks again or counting source rows.
+  const scene = viewerRef?.current?.getDrawingScene?.()
+  const stats = scene?.ready && scene.intake === shown ? scene.renderStats : null
   return (
     <span className="cockpit-status" data-testid="cockpit-status">
       <span className="cockpit-coord">X <b ref={(el) => { refs.x.current = el }}>—</b></span>
       <span className="cockpit-coord">Y <b ref={(el) => { refs.y.current = el }}>—</b></span>
       <span className="cockpit-scale"><b ref={(el) => { refs.scale.current = el }}>—</b></span>
       {shown && (
-        <span className="cockpit-count">{shown.polylines.length} rendered paths · {shown.layers.length} layers</span>
+        <span className="cockpit-count">
+          {stats ? <>{stats.paths} rendered paths · {stats.layers} {stats.layers === 1 ? 'layer' : 'layers'}
+            {stats.markerReferences > 0 && <> · {stats.markerReferences} block {stats.markerReferences === 1 ? 'reference shown' : 'references shown'} as markers</>}
+            {stats.omitted > 0 && <> · preview limited</>}
+          </> : 'Drawing preview not ready'}
+        </span>
       )}
       <span className="cockpit-sel" data-selected={selectedHandle ? 'true' : 'false'}>
         {selectedHandle ? `sel ${selectedHandle}` : 'no selection'}
