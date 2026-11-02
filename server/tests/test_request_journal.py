@@ -313,6 +313,45 @@ def _recoverable(text="first", classifier_hint=None):
     }
 
 
+def test_project_selection_is_part_of_request_digest_and_conflict_identity(journal):
+    project = "22222222-2222-4222-8222-222222222222"
+    version = "44444444-4444-4444-8444-444444444444"
+    first = {"text": "read", "project_context": {"project_id": project, "input_version_id": version}}
+    second = {"text": "read", "project_context": {"project_id": project,
+              "input_version_id": "55555555-5555-4555-8555-555555555555"}}
+    request_id = str(uuid.uuid4())
+    args = dict(request_id=request_id, tenant_id="tenant-a", drawing_id="drawing-a",
+                session_id="session-a", principal_key="auth0|alice")
+    row, inserted = request_journal.admit_request(**args, digest=request_journal.payload_digest(first))
+    assert inserted
+    assert request_journal.payload_digest(first) != request_journal.payload_digest(second)
+    with pytest.raises(request_journal.RequestConflict):
+        request_journal.admit_request(**args, digest=request_journal.payload_digest(second))
+    assert journal.rows[request_id]["payload_digest"] == row["payload_digest"]
+
+
+def test_durable_queue_recovers_the_frozen_selected_version(journal):
+    import project_execution_context
+    binding = {"schema": project_execution_context.SCHEMA,
+        "organization_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "22222222-2222-4222-8222-222222222222",
+        "drawing_id": "33333333-3333-4333-8333-333333333333",
+        "input_version_id": "44444444-4444-4444-8444-444444444444", "intake_sha256": "a" * 64}
+    request_id, _row, _ = _admit(journal)
+    recoverable = {**_recoverable(), project_execution_context.KEY: binding}
+    assert request_journal.queue_request(request_id, recoverable)
+    binding["input_version_id"] = "55555555-5555-4555-8555-555555555555"
+    claimed = request_journal.claim_next_queued_and_turn(lease_seconds=30, stale_after_s=30)
+    assert claimed["request_id"] == request_id
+    assert claimed["recoverable_json"][project_execution_context.KEY]["input_version_id"] == "44444444-4444-4444-8444-444444444444"
+
+
+def test_recoverable_queue_refuses_malformed_project_execution_binding():
+    import project_execution_context
+    with pytest.raises(project_execution_context.ContextError):
+        request_journal.validate_recoverable_payload({**_recoverable(), project_execution_context.KEY: {"project_id": "forged"}})
+
+
 def test_migration_sequence_is_collision_free_and_manifest_ordered():
     migrations = sorted((REPO_ROOT / "platform" / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"))
     names = [path.name for path in migrations]
@@ -577,7 +616,8 @@ def test_active_counts_are_tenant_and_drawing_scoped(journal):
     }
 
 
-def test_durable_kicker_dispatches_claimed_payload_once(monkeypatch):
+@pytest.mark.parametrize("with_project_context", [False, True])
+def test_durable_kicker_dispatches_claimed_payload_once(monkeypatch, with_project_context):
     request_id = str(uuid.uuid4())
     claims = [{
         "request_id": request_id, "turn_id": "turn-1", "tenant_id": "tenant-a",
@@ -588,6 +628,13 @@ def test_durable_kicker_dispatches_claimed_payload_once(monkeypatch):
             "entitlement_elevated": False,
         },
     }, None]
+    binding = {"schema": "leaf.project-execution-context.v1",
+        "organization_id": "11111111-1111-4111-8111-111111111111",
+        "project_id": "22222222-2222-4222-8222-222222222222",
+        "drawing_id": "33333333-3333-4333-8333-333333333333",
+        "input_version_id": "44444444-4444-4444-8444-444444444444", "intake_sha256": "a" * 64}
+    if with_project_context:
+        claims[0]["recoverable_json"]["project_execution_context"] = binding
     monkeypatch.setattr(request_journal, "enabled", lambda: True)
     monkeypatch.setattr(
         request_journal, "claim_next_queued_and_turn", lambda **_kw: claims.pop(0),
@@ -603,6 +650,10 @@ def test_durable_kicker_dispatches_claimed_payload_once(monkeypatch):
     assert calls[0][1]["request_id"] == request_id
     assert calls[0][1]["journal_claimed"] is True
     assert calls[0][1]["text"] == "recover me"
+    if with_project_context:
+        assert calls[0][1]["project_execution_context"] == binding
+    else:
+        assert "project_execution_context" not in calls[0][1]
 
 
 def test_terminal_retry_returns_stored_result_without_dispatch(monkeypatch):
