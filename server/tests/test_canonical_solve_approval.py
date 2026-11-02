@@ -17,6 +17,37 @@ TOOL = "solar-solve-proposal"
 CONTEXT = {"frame_ref": "frame-1", "expected_rev": 17, "phase": "initial"}
 
 
+def test_solve_policy_has_exact_non_skippable_entitlement_and_fallback(tmp_path):
+    import agent_policy
+    shipped = agent_policy.load_policy()
+    fallback = agent_policy.load_policy(tmp_path / "missing.json")
+    action = shipped.actions["run_solve_tool"]
+    assert action == fallback.actions["run_solve_tool"]
+    assert action.required_capability == "solve"
+    assert action.policy == "always-confirm" and action.tenant_tightenable is False
+    assert action.cost_class == "leaf_cloud_solve"
+    assert action.dispatch == {"kind": "app_api", "routes": ["POST /api/run"]}
+    assert shipped.actions["submit_live_solve"].cost_class == "aps_usd"
+
+
+@pytest.mark.parametrize("change", ["none", "missing-context", "extra-context", "bad-rev", "other-tool"])
+def test_solve_policy_closes_approved_context(change):
+    import agent_policy
+    from jsonschema import Draft7Validator
+    action = agent_policy.load_policy().actions["run_solve_tool"]
+    args = {"tool": TOOL, "params": {}, "dwg": DRAWING, **PINS,
+            "solve_context": deepcopy(CONTEXT)}
+    if change == "missing-context":
+        args.pop("solve_context")
+    elif change == "extra-context":
+        args["solve_context"]["extra"] = True
+    elif change == "bad-rev":
+        args["solve_context"]["expected_rev"] = True
+    elif change == "other-tool":
+        args["tool"] = "solar-settings"
+    assert Draft7Validator(action.args_schema).is_valid(args) is (change == "none")
+
+
 @pytest.fixture
 def solve(lane, monkeypatch):
     tool = solar_tools.trusted_record(TOOL)

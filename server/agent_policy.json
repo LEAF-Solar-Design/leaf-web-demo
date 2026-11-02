@@ -1079,6 +1079,99 @@
       ],
       "cost_class": "write"
     },
+    "run_solve_tool": {
+      "description": "Request a Leaf cloud Solar proposal for the selected project. Every solve requires a fresh approval; it does not change the drawing.",
+      "rung": 4,
+      "required_capability": "solve",
+      "policy": "always-confirm",
+      "tenant_tightenable": false,
+      "dispatch": {
+        "kind": "app_api",
+        "routes": [
+          "POST /api/run"
+        ]
+      },
+      "args_schema": {
+        "type": "object",
+        "properties": {
+          "tool": {
+            "type": "string",
+            "const": "solar-solve-proposal"
+          },
+          "params": {
+            "type": "object"
+          },
+          "dwg": {
+            "type": "string"
+          },
+          "catalog_digest": {
+            "type": "string"
+          },
+          "drawing_version": {
+            "type": "integer"
+          },
+          "expected_drawing_head": {
+            "type": "integer"
+          },
+          "catalog_commit": {
+            "type": "string"
+          },
+          "effective_catalog_digest": {
+            "type": "string"
+          },
+          "tool_manifest_sha256": {
+            "type": "string"
+          },
+          "confirmation_id": {
+            "type": "string"
+          },
+          "solve_context": {
+            "type": "object",
+            "properties": {
+              "frame_ref": {
+                "type": "string",
+                "minLength": 1
+              },
+              "expected_rev": {
+                "type": "integer",
+                "minimum": 0
+              },
+              "phase": {
+                "type": "string",
+                "enum": [
+                  "initial",
+                  "background"
+                ]
+              }
+            },
+            "required": [
+              "frame_ref",
+              "expected_rev",
+              "phase"
+            ],
+            "additionalProperties": false
+          }
+        },
+        "required": [
+          "tool",
+          "params",
+          "dwg",
+          "catalog_digest",
+          "catalog_commit",
+          "effective_catalog_digest",
+          "tool_manifest_sha256",
+          "solve_context"
+        ],
+        "additionalProperties": false
+      },
+      "rate_limit_category": "high",
+      "timeout_s": 600,
+      "audit_extra": [
+        "tool",
+        "dwg"
+      ],
+      "cost_class": "leaf_cloud_solve"
+    },
     "submit_live_solve": {
       "description": "Dispatch a live APS run (real USD; R4). Broker USD-cap preflight still fires underneath.",
       "rung": 4,
