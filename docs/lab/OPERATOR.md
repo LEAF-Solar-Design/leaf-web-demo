@@ -128,7 +128,7 @@ After a crash or suspension, expired leases resume through `lease_takeover`.
 The new lease fences the former owner and skips already committed block values.
 Recovery waits for lease expiry; do not delete leases or edit fences manually.
 Inspect `GET /api/lab/runs/{run_id}` and cursor pages from
-`GET /api/lab/runs/{run_id}/events?after_seq=-1&limit=100` (limit 1–500).
+`GET /api/lab/runs/{run_id}/events?after_seq=-1&limit=100` (limit 1 to 500).
 Use the final sequence as the next `after_seq`.
 
 Cancel stuck runs with `POST /api/lab/runs/{run_id}/cancel`. Queued runs cancel
@@ -156,7 +156,7 @@ EMF output directly during staging operation and recovery.
 Use fetch with `Authorization: Bearer ...` for
 `GET /api/lab/stream/runs?runs=<run_id>[,<run_id>...]&after_seq=-1`.
 Native EventSource cannot supply this header. Query credentials (`token`,
-`jwt`, `ticket`, `access_token`) are refused. Subscribe to 1–8 distinct runs;
+`jwt`, `ticket`, `access_token`) are refused. Subscribe to 1 to 8 distinct runs;
 each must belong to the caller. Keep the last sequence for each run and send
 `Last-Event-ID: <run_id>:<seq>,<run_id>:<seq>` on reconnect. These per-run
 cursors override the shared `after_seq` default.
@@ -210,7 +210,7 @@ APS, drawing.write, solve or cloud-proposal); canonical UUID tenant identity
 binding; a seed catalog tool and matching drawing input; the tenant's current
 provisioned tier and required entitlement; the daily jobs window; the sandbox
 seconds ledger; then durable submission. The drawing setting must contain
-exactly `project_id`, `drawing_id` (strings of 1–200 characters), and
+exactly `project_id`, `drawing_id` (strings of 1 to 200 characters), and
 `dwg_version` (an integer at least 1, never a boolean).
 
 Adapter refusal codes use the `lab_tool_` prefix: `effect_refused`,
