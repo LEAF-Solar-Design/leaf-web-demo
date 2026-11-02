@@ -10,7 +10,7 @@ export const SPINE_TOOL_NAMES = [
   "author_tool", "author_stage_status", "request_publication", "request_confirmation", "propose_overlay",
   "customize_platform", "finish_project", "project_completion_status",
   "integration_datasets", "integration_action_catalog", "integration_query",
-  "integration_save_element", "propose_project_page",
+  "integration_save_element", "propose_project_page", "inspect_project_photo",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 
@@ -34,6 +34,11 @@ import type {
 
 /** Host-only overlay authority handoff; the app resolves the active turn's actor. */
 export interface AppRunClient extends VendoredAppRunClient {
+  inspectProjectPhoto(
+    tenantId: string, sessionId: string,
+    body: import("../agent/projectPhotoInspection.js").ProjectPhotoInspectionInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>>;
   getAuthorStageStatus(tenantId: string, changeSetId: string): Promise<Record<string, unknown>>;
   proposeProjectPage(
     tenantId: string,

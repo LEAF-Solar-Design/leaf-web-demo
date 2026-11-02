@@ -5,6 +5,63 @@ import {
   HttpAppRunClient,
 } from "../src/ports/impl/appRunClient.js";
 
+describe("bounded current-project photo callback", () => {
+  const org = "11111111-1111-4111-8111-111111111111";
+  const authority = { sessionId: "app-session", turnId: "app-turn" };
+  const body = { op: "catalog" as const };
+  const client = (fetchImpl: typeof fetch) => new HttpAppRunClient({
+    baseUrl: "https://app.invalid", dispatchSecret: "private-dispatch-value", fetchImpl,
+  });
+  it("uses only the fixed callback and existing authority headers", async () => {
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", { headers: { "content-type": "application/json" } }));
+    expect(await client(fetcher).inspectProjectPhoto(org, authority.sessionId, body, authority)).toEqual({});
+    expect(fetcher).toHaveBeenCalledWith("https://app.invalid/api/sessions/app-session/materials/inspect", expect.objectContaining({
+      method: "POST", redirect: "error", body: JSON.stringify(body), headers: {
+        "content-type": "application/json", "x-tenant-id": org, "x-dispatch-secret": "private-dispatch-value",
+        "x-authority-session-id": "app-session", "x-authority-turn-id": "app-turn",
+      },
+    }));
+  });
+  it.each(["declared", "actual", "origin", "redirect", "redirected", "status", "mime", "utf8", "json", "secret"])(
+    "closes the %s response boundary with a fixed error", async kind => {
+      const bytes = kind === "actual" ? new Uint8Array(1536 * 1024 + 1) : kind === "utf8" ? new Uint8Array([255])
+        : new TextEncoder().encode(kind === "json" ? "{" : kind === "secret" ? '{"error":"private-dispatch-value"}' : "{}");
+      const response = new Response(bytes, { status: kind === "status" ? 503 : kind === "redirect" ? 302 : 200,
+        headers: { "content-type": kind === "mime" ? "image/jpeg" : "application/json",
+          ...(kind === "declared" ? { "content-length": String(1536 * 1024 + 1) } : {}) } });
+      if (kind === "origin") Object.defineProperty(response, "url", { value: "https://foreign.invalid/inspect" });
+      if (kind === "redirected") Object.defineProperty(response, "redirected", { value: true });
+      await expect(client(async () => response).inspectProjectPhoto(org, authority.sessionId, body, authority))
+        .rejects.toMatchObject({ message: "Project photo inspection unavailable." });
+      expect(response.body?.locked).toBe(false);
+    },
+  );
+  it("rejects malformed bodies and mismatched authority before any fetch", async () => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(client(fetcher).inspectProjectPhoto(org, "other", body, authority)).rejects.toThrow("Project photo inspection unavailable.");
+    await expect(client(fetcher).inspectProjectPhoto(org, authority.sessionId,
+      { ...body, project_id: "foreign" } as typeof body, authority)).rejects.toThrow("Project photo inspection unavailable.");
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+  it("cancels stalled response streams at the total 45-second deadline", async () => {
+    vi.useFakeTimers();
+    let cancelled = false;
+    let signal: AbortSignal | undefined;
+    const response = new Response(new ReadableStream<Uint8Array>({ cancel() { cancelled = true; } }),
+      { headers: { "content-type": "application/json" } });
+    try {
+      const pending = client(async (_url, init) => { signal = init?.signal as AbortSignal; return response; })
+        .inspectProjectPhoto(org, authority.sessionId, body, authority);
+      const rejected = expect(pending).rejects.toThrow("Project photo inspection unavailable.");
+      await vi.advanceTimersByTimeAsync(45000);
+      await rejected;
+      expect(signal?.aborted).toBe(true);
+      expect(cancelled).toBe(true);
+      expect(response.body?.locked).toBe(false);
+    } finally { vi.useRealTimers(); }
+  });
+});
+
 describe("bounded project portfolio proposal reader", () => {
   const body = { instruction: "Shorten", expected_revision: 7, expected_digest: "a".repeat(64) };
   const authority = { sessionId: "app-session", turnId: "app-turn" };

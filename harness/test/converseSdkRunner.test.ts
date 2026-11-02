@@ -37,6 +37,8 @@ import type {
   ToolExecutor,
 } from "../src/ports/index.js";
 import { SPINE_TOOL_NAMES } from "../src/ports/index.js";
+import { createHash } from "node:crypto";
+import { ProjectPhotoInspection, PHOTO_FAILURE } from "../src/agent/projectPhotoInspection.js";
 
 // --------------------------------------------------------------------------- //
 // The mock SDK module (mirrors the REAL shapes read from sdk.d.ts 0.3.214).
@@ -354,6 +356,63 @@ afterEach(() => {
   vi.unstubAllEnvs();
 });
 
+describe("Leaf private photo SDK projection", () => {
+  const org = "11111111-1111-4111-8111-111111111111";
+  const project = "22222222-2222-4222-8222-222222222222";
+  const material = "33333333-3333-4333-8333-333333333333";
+  async function executor(label: string): Promise<ToolExecutor> {
+    const bytes = Buffer.from([255, 216, 255, ...Buffer.from(label), 255, 217]);
+    const hash = createHash("sha256").update(bytes).digest("hex");
+    const common = { org_id: org, project_id: project, session_id: label, turn_id: label,
+      source: { project_id: project, revision: 0, digest: null }, assignment_basis: "no_saved_page" };
+    const helper = new ProjectPhotoInspection({ orgId: org, sessionId: label, turnId: label });
+    await helper.inspect({ op: "catalog" }, async () => ({ ...common, schema: "leaf.project-material-catalog.v1",
+      page_count: 1, next_cursor: null, materials: [{ material_id: material, name: "photo.jpg", media_type: "image/jpeg",
+        byte_size: bytes.length, sha256: hash, preview_sha256: hash, width: 10, height: 10,
+        created_at: "2026-11-01T00:00:00Z", assignments: [] }] }));
+    const result = await helper.inspect({ op: "preview", material_id: material, expected_preview_sha256: hash,
+      expected_revision: 0, expected_digest: null }, async () => ({ ...common, schema: "leaf.project-material-image.v1",
+      material_id: material, original_sha256: hash, preview_sha256: hash, sha256: hash, media_type: "image/jpeg",
+      byte_size: bytes.length, data: bytes.toString("base64"), assignments: [] }));
+    return { list: () => ["inspect_project_photo"], execute: async () => result };
+  }
+
+  it("projects real images through the mounted Leaf shim and isolates overlapping runs", async () => {
+    const mock = makeMockSdk([resultSuccess()]);
+    const runner = runnerWith(mock);
+    await Promise.all([collect(runner, makeInput({ tools: await executor("FIRST_PIXEL_MARKER") })),
+      collect(runner, makeInput({ tools: await executor("SECOND_PIXEL_MARKER") }))]);
+    const mounted = mock.tools.filter(tool => tool.name === "inspect_project_photo");
+    expect(mounted).toHaveLength(2);
+    const outputs = await Promise.all(mounted.map(tool => tool.handler({ op: "catalog" }, {})));
+    for (const [index, output] of outputs.entries()) {
+      const blocks = output.content as unknown as Array<{ type: string; data?: string; text?: string; mimeType?: string }>;
+      expect(blocks).toHaveLength(2);
+      expect(blocks[1]).toMatchObject({ type: "image", mimeType: "image/jpeg" });
+      expect(Buffer.from(blocks[1]!.data!, "base64").toString()).toContain(index === 0 ? "FIRST_PIXEL_MARKER" : "SECOND_PIXEL_MARKER");
+      expect(blocks[0]!.text).not.toContain(blocks[1]!.data!);
+    }
+    const permission = mock.queries[0]!.options.canUseTool as ConverseRunInput["canUseTool"];
+    expect(await permission("mcp__services__inspect_project_photo", { op: "catalog" })).toMatchObject({ behavior: "deny" });
+    expect(await permission("mcp__spine__inspect_project_photo", { op: "catalog", project_id: project })).toMatchObject({ behavior: "deny" });
+  });
+
+  it("rejects arbitrary executor envelopes, raw errors and duplicate registration", async () => {
+    for (const impl of [async () => ({ content: "RAW_ERROR_OR_BASE64", data: "PRIVATE_PIXELS" }),
+      async (): Promise<SpineToolResult> => { throw new Error("RAW_ERROR_OR_BASE64"); }]) {
+      const mock = makeMockSdk([resultSuccess()]);
+      await collect(runnerWith(mock), makeInput({ tools: makeExecutor(impl) }));
+      const tool = mock.tools.find(tool => tool.name === "inspect_project_photo")!;
+      expect(await tool.handler({ op: "catalog" }, {})).toEqual({ content: [{ type: "text", text: PHOTO_FAILURE }], isError: true });
+    }
+    const mock = makeMockSdk([resultSuccess()]);
+    await expect(collect(runnerWith(mock), makeInput({ tools: {
+      ...makeExecutor(), list: () => ["inspect_project_photo", "inspect_project_photo"],
+    } }))).rejects.toThrow("Invalid private tool catalog");
+    expect(mock.queries).toHaveLength(0);
+  });
+});
+
 // --------------------------------------------------------------------------- //
 // Env scrubbing
 // --------------------------------------------------------------------------- //
@@ -613,7 +672,7 @@ describe("ConverseSdkRunner — SDK options wiring", () => {
     expect(opts.systemPrompt).toBe("SPINE SYSTEM PROMPT");
     expect((opts.mcpServers as AnyRec).spine).toBeDefined();
     expect(mock.servers[0]!.name).toBe("spine");
-    expect(mock.tools.map((t) => t.name)).toEqual([...SPINE_TOOL_NAMES]);
+    expect(mock.tools.map((t) => t.name).sort()).toEqual([...SPINE_TOOL_NAMES].sort());
   });
 
   it.each(["claude-haiku-5-5", "claude-haiku-4-5"])("model precedence: input.model %s > constructor model", async (model) => {

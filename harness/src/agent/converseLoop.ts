@@ -16,6 +16,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
+import { ProjectPhotoInspection, photoRequest, PHOTO_FAILURE } from "./projectPhotoInspection.js";
 import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES } from "../ports/index.js";
 import {
   IntegrationClientError, integrationErrorMessage, validateIntegrationResponse,
@@ -557,7 +558,8 @@ export class ConverseLoop {
             : packet, intent);
       }
       const run = this.ports.runner.run({
-        systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text.",
+        systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
+          "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. Review privately; do not autonomously edit, save or publish photos.",
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
         ...(resumeSdkSessionId
@@ -716,6 +718,9 @@ export class ConverseLoop {
       return state.catalog ?? [];
     };
 
+    const photoInspection = new ProjectPhotoInspection({ orgId: tenantId,
+      sessionId: instant.authoritySessionId ?? "", turnId: instant.authorityTurnId ?? "" });
+
     /** A tool we cannot find in the catalog is treated as a WRITE (never fast-waited). */
     const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write"> => {
       const entry = (await catalogFor()).find((c) => c.name === toolName);
@@ -854,6 +859,8 @@ export class ConverseLoop {
           };
         case "propose_project_page":
           return { action: "propose_project_page", args: ProjectPageProposalRequest.parse(args) };
+        case "inspect_project_photo":
+          return { action: "inspect_project_photo", args: photoRequest(args) };
         case "propose_overlay":
           return {
             action: "propose_overlay",
@@ -965,6 +972,10 @@ export class ConverseLoop {
       let result: SpineToolResult;
       let pageProposalResult: Record<string, unknown> | undefined;
       try {
+        if (tool === "inspect_project_photo") {
+          args = photoRequest(args);
+          if (!instant.authoritySessionId || !instant.authorityTurnId) throw new Error(PHOTO_FAILURE);
+        }
         if (tool === "propose_project_page") {
           const parsed = ProjectPageProposalRequest.safeParse(args);
           if (!parsed.success) throw new Error("Invalid portfolio proposal request.");
@@ -1011,7 +1022,7 @@ export class ConverseLoop {
           consult = await gateConsultFor(tool, args);
           verdict = await gate.check(consult.action, consult.args, {
             tenantId, sessionId, turnId,
-            ...(tool === "propose_project_page" ? {
+            ...(tool === "propose_project_page" || tool === "inspect_project_photo" ? {
               authoritySessionId: instant.authoritySessionId, authorityTurnId: instant.authorityTurnId,
             } : {}),
           });
@@ -1028,7 +1039,9 @@ export class ConverseLoop {
             }),
           );
 
-        if (verdict.decision === "deny") {
+        if (tool === "inspect_project_photo" && verdict.decision !== "allow") {
+          result = err(PHOTO_FAILURE);
+        } else if (verdict.decision === "deny") {
           result = relayDeny(verdict.reason ?? "denied by policy");
         } else if (verdict.decision === "awaiting_approval" && !verdict.confirmation_id) {
           // ONLY the app's pending store mints approvable ids (wire contract
@@ -1088,6 +1101,11 @@ export class ConverseLoop {
           }
         } else if (hosted) {
           result = ok(JSON.stringify(hosted.result));
+        } else if (tool === "inspect_project_photo") {
+          result = await photoInspection.inspect(args, body => appRun.inspectProjectPhoto(
+            tenantId, instant.authoritySessionId!, body,
+            { sessionId: instant.authoritySessionId!, turnId: instant.authorityTurnId! },
+          ));
         } else {
           const executionArgs = tool === "run_capability"
             ? { ...args, ...consult.args }
@@ -1118,7 +1136,7 @@ export class ConverseLoop {
           );
         }
       } catch (e) {
-        result = tool === "propose_project_page"
+        result = tool === "inspect_project_photo" ? err(PHOTO_FAILURE) : tool === "propose_project_page"
           ? err("Portfolio proposal failed.")
           : isIntegrationTool(tool)
           ? err(e instanceof IntegrationClientError ? integrationErrorMessage(e.code) : integrationErrorMessage("unavailable"))
@@ -1166,6 +1184,8 @@ export class ConverseLoop {
     const tenantId = ctx.session.tenant_id;
 
     switch (tool) {
+      case "inspect_project_photo":
+        return err(PHOTO_FAILURE); // Only the per-turn witness executor may inspect.
       case "propose_project_page": {
         const body = ProjectPageProposalRequest.parse(args);
         const source = ctx.pageProposalSource;
@@ -1607,6 +1627,7 @@ function err(content: string): SpineToolResult {
 
 /** Strip an MCP server prefix (mcp__spine__catalog_search -> catalog_search). */
 function baseToolName(name: string): string {
+  if (name.endsWith("__inspect_project_photo") && name !== "mcp__spine__inspect_project_photo") return name;
   // The host-only tool belongs solely to the private spine server. Preserve
   // legacy normalization for the vendored tools without accepting an alias
   // from another MCP server for this authority-bearing action.
@@ -1735,6 +1756,7 @@ function truncate(s: string, n: number): string {
 
 /** Short HUMAN summary — never the full params (wire contract section 3). */
 function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string {
+  if (tool === "inspect_project_photo") return "inspect current project photo";
   switch (tool) {
     case "integration_datasets":
       return "discover datasets";
@@ -1972,6 +1994,7 @@ function projectPublicationResult(content: string): Record<string, unknown> | un
 }
 
 function resultSummary(tool: SpineToolName, result: SpineToolResult): string {
+  if (tool === "inspect_project_photo") return result.isError ? PHOTO_FAILURE : "Project photo inspection returned privately.";
   if (result.isError) {
     try {
       const parsed = JSON.parse(result.content) as Record<string, unknown>;

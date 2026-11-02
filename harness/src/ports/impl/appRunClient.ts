@@ -30,6 +30,7 @@ import type {
 } from "../index.js";
 import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS } from "../index.js";
 import { z } from "zod";
+import { photoRequest, PHOTO_FAILURE, PHOTO_MAX_RESPONSE, type ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
 import {
   DatasetReadV1, IntegrationActionCatalogV1, IntegrationElementV1, IntegrationRefV1,
 } from "../../vendor/mushy-author/contracts/integration.js";
@@ -283,6 +284,63 @@ export class HttpAppRunClient implements AppRunClient {
       clearTimeout(timer);
       cancel();
       try { reader?.releaseLock(); } catch { /* pending read cancelled above */ }
+    }
+  }
+
+  async inspectProjectPhoto(
+    tenantId: string, sessionId: string, input: ProjectPhotoInspectionInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    const fail = () => new AppRunClientError(PHOTO_FAILURE, 502);
+    let body: string;
+    try {
+      body = JSON.stringify(photoRequest(input));
+      const validId = (value: unknown): value is string => typeof value === "string" &&
+        value.length > 0 && value.length <= 200 && value.trim() === value && !/[\p{C}]/u.test(value);
+      if (!this.secret || !validId(sessionId) || authority?.sessionId !== sessionId || !validId(authority?.turnId) ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/.test(tenantId) ||
+          tenantId === "00000000-0000-0000-0000-000000000000") throw fail();
+    } catch { throw fail(); }
+    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/materials/inspect`;
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const cancel = () => { controller.abort(); void reader?.cancel().catch(() => {}); };
+    const deadline = new Promise<never>((_resolve, reject) => {
+      timer = setTimeout(() => { cancel(); reject(fail()); }, 45_000);
+    });
+    const work = async () => {
+      const response = await this.fetchImpl(url, {
+        method: "POST", redirect: "error", signal: controller.signal,
+        headers: { ...this.headers(tenantId), "x-authority-session-id": authority.sessionId,
+          "x-authority-turn-id": authority.turnId }, body,
+      });
+      if (controller.signal.aborted) { void response.body?.cancel().catch(() => {}); throw fail(); }
+      if (response.body) reader = response.body.getReader();
+      const length = response.headers.get("content-length");
+      if (response.status !== 200 || response.redirected || !reader ||
+          (response.url && new URL(response.url).origin !== new URL(url).origin) ||
+          !/^application\/json(?:\s*;\s*charset=utf-8)?$/i.test(response.headers.get("content-type") ?? "") ||
+          (length !== null && (!/^[0-9]+$/.test(length) || Number(length) > PHOTO_MAX_RESPONSE))) throw fail();
+      const chunks: Uint8Array[] = [];
+      let size = 0;
+      while (true) {
+        const next = await reader.read();
+        if (controller.signal.aborted) throw fail();
+        if (next.done) break;
+        size += next.value.byteLength;
+        if (size > PHOTO_MAX_RESPONSE) throw fail();
+        chunks.push(next.value);
+      }
+      const result: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks)));
+      if (!result || typeof result !== "object" || Array.isArray(result) || reflectsSecret(result, this.secret)) throw fail();
+      return result as Record<string, unknown>;
+    };
+    try { return await Promise.race([work(), deadline]); }
+    catch { throw fail(); }
+    finally {
+      clearTimeout(timer); cancel();
+      try { reader?.releaseLock(); } catch { /* pending read cancelled */ }
     }
   }
 
