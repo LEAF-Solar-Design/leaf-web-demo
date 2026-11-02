@@ -142,7 +142,7 @@ export class SpineTurnAdapter implements ConverseRunner {
 
   async *runTurn(
     input: ConverseTurnInput,
-    opts?: ConverseRunOptions,
+    opts?: ConverseRunOptions & { projectExecution?: "canonical-read" },
   ): AsyncGenerator<HarnessTurnEvent> {
     // 1. Grant FIRST, before any yield. A per-session bring-your-own credential
     //    on the wire ("mount your LLM") is used for THIS turn instead of the
@@ -333,6 +333,7 @@ export class SpineTurnAdapter implements ConverseRunner {
       priorMessages: input.messages,
       instantAssignment: opts?.instantAssignment,
       instantDrawingContext: opts?.instantDrawingContext,
+      projectExecution: opts?.projectExecution,
       authoritySessionId: input.session_id,
       authorityTurnId: input.turn_id,
       ...(this.ports.standardServicesResolver

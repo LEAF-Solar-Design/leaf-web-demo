@@ -23,6 +23,7 @@
 
 import { connect } from "node:net";
 import type { Server } from "node:http";
+import { request as httpRequest } from "node:http";
 import type { AddressInfo } from "node:net";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -195,6 +196,131 @@ describe("POST /turn - auth gate", () => {
 
     const res = await postTurn(baseUrl, validBody(), { "x-harness-secret": "correct-horse" });
     expect(res.status).toBe(200);
+  });
+});
+
+describe("POST /turn - private project execution marker", () => {
+  const secret = ["project", "route-fixture"].join("-");
+  const header = "x-leaf-project-execution";
+  type PrivateOptions = ConverseRunOptions & { projectExecution?: "canonical-read" };
+
+  function capture() {
+    const calls: Array<{ input: ConverseTurnInput; opts: PrivateOptions | undefined }> = [];
+    const runner: ConverseRunner = {
+      async *runTurn(input, opts): AsyncGenerator<HarnessTurnEvent> {
+        calls.push({ input, opts });
+        yield { type: "turn_complete", data: { stop_reason: "end_turn" } };
+      },
+    };
+    return { runner, calls };
+  }
+
+  it("forwards the exact authenticated header only through private runner options", async () => {
+    const { runner, calls } = capture();
+    const live = listen(basePorts(runner), { enabled: true, secret });
+    server = live.server;
+    const res = await postTurn(live.baseUrl, validBody(), {
+      "x-harness-secret": secret, [header]: "canonical-read",
+    });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.opts?.projectExecution).toBe("canonical-read");
+    expect(calls[0]!.input).not.toHaveProperty("projectExecution");
+    expect(calls[0]!.input).not.toHaveProperty("project_execution");
+    expect(calls[0]!.input.drawing_id).toBe("dwg-1");
+  });
+
+  it.each([false, true])("an absent marker leaves private options unset with auth=%s", async enabled => {
+    const { runner, calls } = capture();
+    const live = listen(basePorts(runner), { enabled, secret });
+    server = live.server;
+    const res = await postTurn(live.baseUrl, validBody(), enabled ? { "x-harness-secret": secret } : {});
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.opts).not.toHaveProperty("projectExecution");
+  });
+
+  it.each(["unknown", "", "canonical-read, canonical-read"])(
+    "rejects malformed marker %j before the runner", async marker => {
+      const { runner, calls } = capture();
+      const live = listen(basePorts(runner), { enabled: true, secret });
+      server = live.server;
+      const res = await postTurn(live.baseUrl, validBody(), {
+        "x-harness-secret": secret, [header]: marker,
+      });
+      expect(res.status).toBe(400);
+      expect(res.headers.get("content-type")).not.toContain("ndjson");
+      await res.text();
+      expect(calls).toHaveLength(0);
+    },
+  );
+
+  it("rejects two real duplicate marker header lines before the runner", async () => {
+    const { runner, calls } = capture();
+    const live = listen(basePorts(runner), { enabled: true, secret });
+    server = live.server;
+    const body = JSON.stringify(validBody());
+    const response = await new Promise<{ status: number | undefined; contentType: string | undefined }>((resolve, reject) => {
+      const req = httpRequest(`${live.baseUrl}/turn`, {
+        method: "POST",
+        // A raw array emits distinct header lines, rather than an object value
+        // that has already combined them before reaching the HTTP server.
+        headers: ["host", new URL(live.baseUrl).host,
+          "content-length", String(Buffer.byteLength(body)),
+          "content-type", "application/json", "x-harness-secret", secret,
+          header, "canonical-read", header, "canonical-read"],
+      }, res => {
+        res.resume();
+        res.on("end", () => resolve({ status: res.statusCode, contentType: res.headers["content-type"] }));
+        res.on("error", reject);
+      });
+      req.on("error", reject);
+      req.end(body);
+    });
+    expect(response.status).toBe(400);
+    expect(response.contentType).toContain("application/json");
+    expect(calls).toHaveLength(0);
+  });
+
+  it("refuses the marker when shared caller authentication is disabled", async () => {
+    const { runner, calls } = capture();
+    const live = listen(basePorts(runner), { enabled: false, secret });
+    server = live.server;
+    const res = await postTurn(live.baseUrl, validBody(), {
+      "x-harness-secret": secret, [header]: "canonical-read",
+    });
+    expect(res.status).toBe(400);
+    await res.text();
+    expect(calls).toHaveLength(0);
+  });
+
+  it("keeps the existing missing-secret 401 even when a project marker is supplied", async () => {
+    const { runner, calls } = capture();
+    const live = listen(basePorts(runner), { enabled: true, secret });
+    server = live.server;
+    const res = await postTurn(live.baseUrl, validBody(), { [header]: "canonical-read" });
+    expect(res.status).toBe(401);
+    expect((await res.json() as { error?: { code?: string } }).error?.code).toBe("harness_auth_required");
+    expect(calls).toHaveLength(0);
+  });
+
+  it.each([
+    { projectExecution: "canonical-read" },
+    { project_execution: "canonical-read" },
+    { context_packet: { projectExecution: "canonical-read", project_execution: "canonical-read" } },
+  ])("body data cannot mint private project options: %j", async untrusted => {
+    const { runner, calls } = capture();
+    const live = listen(basePorts(runner), { enabled: true, secret });
+    server = live.server;
+    const res = await postTurn(live.baseUrl, validBody(untrusted), { "x-harness-secret": secret });
+    expect(res.status).toBe(200);
+    await res.text();
+    expect(calls).toHaveLength(1);
+    expect(calls[0]!.opts).not.toHaveProperty("projectExecution");
+    expect(calls[0]!.input).not.toHaveProperty("projectExecution");
+    expect(calls[0]!.input).not.toHaveProperty("project_execution");
   });
 });
 

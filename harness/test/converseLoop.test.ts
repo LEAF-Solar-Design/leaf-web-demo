@@ -917,6 +917,33 @@ describe("ConverseLoop — read auto-dispatch", () => {
     });
   });
 
+  it("drops a model integer pin for a private canonical read without consulting legacy versions", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        await input.tools.execute("run_capability", {
+          tool: "count-by-layer", params: {}, dwg: "rooftop_demo", drawing_version: 123,
+        });
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "canonical-read-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const turn = await loop.handleMessage({
+      sessionId: session.session_id, tenantId: session.tenant_id,
+      text: "Count the selected version", contextPacket: PACKET,
+      projectExecution: "canonical-read", authoritySessionId: "app-session", authorityTurnId: "app-turn",
+    });
+    await turn.done;
+    expect(appRun.methodLog).not.toContain("getDrawingState");
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
+    expect(appRun.submitCalls[0]).toMatchObject({ authoritySessionId: "app-session", authorityTurnId: "app-turn" });
+    expect(gate.checks.find(c => c.action === "run_read_tool")?.args).not.toHaveProperty("drawing_version");
+  });
+
   it("uses the current drawing head instead of a model-supplied read pin", async () => {
     const appRun = new FakeAppRunClient();
     const gate = new FakeGateClient();

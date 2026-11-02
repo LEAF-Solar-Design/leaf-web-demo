@@ -155,6 +155,8 @@ export interface ConverseMessageInput {
   /** Authenticated app-only instant route, never model input. */
   instantAssignment?: InstantSessionAssignment;
   instantDrawingContext?: InstantDrawingContext;
+  /** Private authenticated transport marker; authority remains on the app back-edge. */
+  projectExecution?: "canonical-read";
   authoritySessionId?: string;
   authorityTurnId?: string;
   /** App-owned identity and lease mount for the standard-service facade. */
@@ -523,6 +525,7 @@ export class ConverseLoop {
       const tools = this.buildExecutor(session, turnId, state, emit, {
         instantAssignment: input.instantAssignment,
         instantDrawingContext: input.instantDrawingContext,
+        projectExecution: input.projectExecution,
         authoritySessionId: input.authoritySessionId,
         authorityTurnId: input.authorityTurnId,
         pageProposalSource: pageProposalSource(input.contextPacket, session.tenant_id),
@@ -691,6 +694,7 @@ export class ConverseLoop {
     instant: {
       instantAssignment?: InstantSessionAssignment;
       instantDrawingContext?: InstantDrawingContext;
+      projectExecution?: "canonical-read";
       authoritySessionId?: string;
       authorityTurnId?: string;
       pageProposalSource?: PageProposalSource;
@@ -782,9 +786,15 @@ export class ConverseLoop {
             params = { ...params, drawing_id: dwg };
           }
           let drawingPins: Record<string, unknown> = {};
+          const canonicalRead = instant.projectExecution === "canonical-read" &&
+            action === "run_read_tool" &&
+            (entry?.capabilities.includes("drawing.read") || entry?.capabilities.includes("drawing.write"));
+          if (canonicalRead && dwg !== session.drawing_id) {
+            throw new Error("project capability drawing must match the current session drawing");
+          }
           if (
-            entry?.capabilities.includes("drawing.read") ||
-            entry?.capabilities.includes("drawing.write")
+            !canonicalRead && (entry?.capabilities.includes("drawing.read") ||
+            entry?.capabilities.includes("drawing.write"))
           ) {
             const versions = await appRun.getDrawingState(tenantId, dwg, "versions");
             const head = Number(versions.head);
@@ -1079,6 +1089,12 @@ export class ConverseLoop {
           const executionArgs = tool === "run_capability"
             ? { ...args, ...consult.args }
             : args;
+          if (tool === "run_capability" && instant.projectExecution === "canonical-read" &&
+              consult.action === "run_read_tool") {
+            // The selected immutable version is resolved from the stored app turn.
+            // An omitted normalized pin must not resurrect the model's integer.
+            delete executionArgs.drawing_version;
+          }
           result = await this.dispatchAllowed(
             tool,
             executionArgs,

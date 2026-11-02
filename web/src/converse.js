@@ -309,6 +309,7 @@ function isCompletedJournalReply(res, body, requestId) {
 export async function postMessage(sessionId, {
   text, confirm, images, classifier_hint, credential_grant, queue, request_id,
   entity_scope,
+  projectContext,
   // Slice 6b hand-off identity: WHO asked for this background start. Bounded
   // and trimmed below before it can reach the wire; slice 11 is its consumer
   // (the build queue card), and nothing in this slice reads it back.
@@ -337,6 +338,14 @@ export async function postMessage(sessionId, {
   if (queue === true) payload.queue = true
   if (request_id != null) payload.request_id = request_id
   if (entity_scope !== undefined) payload.entity_scope = entity_scope
+  // A selection is a request pin for app validation, never model authority.
+  // Confirmations recover their original binding from the stored proposal.
+  if (confirm == null && projectContext != null) {
+    payload.project_context = {
+      project_id: projectContext.project_id,
+      input_version_id: projectContext.input_version_id,
+    }
+  }
   // Only a QUEUED start is a background hand-off, and only a bounded non-empty
   // string rides along: an over-long or blank value is dropped here rather
   // than posted for the server to refuse. Never logged, never echoed.
