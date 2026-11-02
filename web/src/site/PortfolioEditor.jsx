@@ -150,10 +150,21 @@ function Disclosure({ title, initiallyOpen = false, reviewRequest, children }) {
   </details>
 }
 
-export default function PortfolioEditor({ document, onChange, projectId, reviewRequest, selectedField, onSelectElement }) {
-  const [showIntake, setShowIntake] = useState(false)
+export default function PortfolioEditor(props) {
   const scope = useSyncExternalStore(subscribeActiveScope, readActiveScope, () => null)
+  return <ScopedPortfolioEditor key={`${scope}:${props.projectId}`} {...props} scope={scope} />
+}
+
+function ScopedPortfolioEditor({ document, onChange, projectId, reviewRequest, selectedField, onSelectElement, scope }) {
+  const [showIntake, setShowIntake] = useState(false)
   const { photos, error, loading, loadPhotos } = useProjectPhotos(projectId, scope)
+  const latest = useRef(null), alive = useRef(false)
+  latest.current = { document, photos }
+  useEffect(() => {
+    alive.current = true
+    const logout = subscribeBeforeLogout(() => { alive.current = false })
+    return () => { alive.current = false; logout() }
+  }, [])
   const fields = useRef(new Map())
   const target = descriptor => node => {
     const key = selectionKey(portfolioField(document, descriptor))
@@ -182,16 +193,27 @@ export default function PortfolioEditor({ document, onChange, projectId, reviewR
     return identities.current.get(item)
   }
   const newItem = item => { added.current.add(identity(item)); return item }
-  const update = action => {
-    const next = cloneDocument(document)
-    for (const field of ['categories', 'resume']) document[field].forEach((item, index) => {
+  const update = (action, source = document) => {
+    const next = cloneDocument(source)
+    for (const field of ['categories', 'resume']) source[field].forEach((item, index) => {
       identities.current.set(next[field][index], identity(item))
     })
-    action(next); onChange(next)
+    action(next); latest.current.document = next; onChange(next)
   }
   const category = (index, action) => update(next => action(next.categories[index]))
   const image = (ci, ii, action) => category(ci, next => action(next.images[ii]))
   const count = document.categories.reduce((sum, item) => sum + item.images.length, 0)
+  const addPhoto = (item, materialId, control) => {
+    if (!alive.current || !scope || !projectId || readActiveScope() !== scope || control.closest('fieldset[disabled]')) return
+    const source = latest.current.document
+    const ci = source.categories.findIndex(entry => identity(entry) === identity(item))
+    const row = latest.current.photos.find(photo => photo.material_id === materialId)
+    if (ci < 0 || !row || source.categories[ci].images.some(entry => entry.material_id === materialId)
+      || source.categories.reduce((sum, entry) => sum + entry.images.length, 0) >= 200) return
+    added.current.add(identity(item))
+    added.current.add(`${identity(item)}:${materialId}`)
+    update(next => { next.categories[ci].images.push(photoReference(row)) }, source)
+  }
   const move = (ci, ii, delta) => category(ci, next => {
     const hero = next.images[next.hero], target = ii + delta
     ;[next.images[ii], next.images[target]] = [next.images[target], next.images[ii]]
@@ -222,14 +244,15 @@ export default function PortfolioEditor({ document, onChange, projectId, reviewR
       <Field inputRef={target({ field: 'gallery.slug', gallery: item.slug })} label="Category slug" value={item.slug} limit={48} onChange={value => category(ci, next => { next.slug = value })} />
       <Field inputRef={target({ field: 'gallery.description', gallery: item.slug })} label="Category description" value={item.description} limit={1200} multiline onChange={value => category(ci, next => { next.description = value })} />
       <label><span>Hero image</span><select value={item.hero} disabled={!item.images.length} onChange={event => category(ci, next => { next.hero = Number(event.target.value) })}>{item.images.map((entry, ii) => <option key={ii} value={ii}>{entry.title || entry.alt || `Image ${ii + 1}`}</option>)}</select></label>
-      <label><span>Add project photo to {item.title || `gallery ${ci + 1}`}</span><select value="" disabled={count >= 200} onChange={event => {
-        const row = photos.find(photo => photo.material_id === event.target.value)
-        if (row) {
-          added.current.add(identity(item))
-          added.current.add(`${identity(item)}:${row.material_id}`)
-          category(ci, next => { next.images.push(photoReference(row)) })
-        }
-      }}><option value="">Choose an uploaded photo</option>{photos.filter(photo => !item.images.some(entry => entry.material_id === photo.material_id)).map(photo => <option key={photo.material_id} value={photo.material_id}>{photo.name}</option>)}</select></label>
+      <label><span>Add project photo to {item.title || `gallery ${ci + 1}`}</span><select value="" disabled={count >= 200 || !scope} onChange={event => addPhoto(item, event.target.value, event.currentTarget)}><option value="">Choose an uploaded photo</option>{photos.filter(photo => !item.images.some(entry => entry.material_id === photo.material_id)).map(photo => <option key={photo.material_id} value={photo.material_id}>{photo.name}</option>)}</select></label>
+      {photos.length > 0 && <div className="portfolio-editor__photo-picker" role="group" aria-label={`Choose photos for ${item.title || `gallery ${ci + 1}`}`}>
+        {photos.filter(photo => !item.images.some(entry => entry.material_id === photo.material_id)).map(photo => <button key={`${photo.material_id}:${photo.preview_sha256}`} type="button" className="portfolio-editor__photo-choice" disabled={count >= 200 || !scope} aria-label={`Add ${photo.name} to ${item.title || `gallery ${ci + 1}`}`} onClick={event => addPhoto(item, photo.material_id, event.currentTarget)}>
+          <Photo image={photoReference(photo)} projectId={projectId} scope={scope} />
+          <span>{photo.name}</span>
+        </button>)}
+        {photos.every(photo => item.images.some(entry => entry.material_id === photo.material_id)) && <p>All project photos are already in this gallery.</p>}
+      </div>}
+      {count >= 200 && <p role="status">The portfolio has reached its 200 photo limit. Remove a photo before adding another.</p>}
       {!loading && !photos.length && <p>Use Load project photos after uploading in Photos.</p>}
       {item.images.map((entry, ii) => <section key={entry.material_id} aria-label={`Image ${ii + 1}`}>
         <Disclosure title={`Photo ${ii + 1}: ${entry.title || entry.alt || 'Untitled photo'}`} initiallyOpen={added.current.has(`${identity(item)}:${entry.material_id}`)} reviewRequest={reviewRequest}>
