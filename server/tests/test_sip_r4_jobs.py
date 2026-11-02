@@ -409,6 +409,7 @@ def test_sip_r4_every_tool_prepared_at_admission(admission, monkeypatch):
 
 
 PREREQUISITE_REFUSALS = {
+    "solar-solaredge-accept": "ARTIFACT_NOT_FOUND",
     "solar-panel-groups": "SIZING_CONFIRMATION_REQUIRED",
     "solar-assign-equipment": "SIZING_CONFIRMATION_REQUIRED", "solar-combiners": "VALID_SETTINGS_REQUIRED",
     "solar-feeders": "VALID_SETTINGS_REQUIRED", "solar-homeruns": "EQUIPMENT_ASSIGNMENT_REQUIRED",
@@ -421,8 +422,8 @@ PREREQUISITE_REFUSALS = {
 
 def test_sip_r4_prerequisite_refusals_at_admission(admission, monkeypatch):
     # On a seeded parent at the right revision the tool's own preparation decides admission, not only the
-    # context and revision checks: ten tools refuse with the worker's own code before the insert and the
-    # entitlement read, and the three with no unmet prerequisite are admitted.
+    # context and revision checks: eleven tools refuse with the worker's own code before the insert and the
+    # entitlement read, and the remaining tools are admitted.
     a = admission
     ctx = chain(a.s, 1)[-1][2]
     for tool, code in sorted(PREREQUISITE_REFUSALS.items()):
