@@ -292,6 +292,7 @@
     "server-converse-registry",
     "server-customization-adversarial",
     "server-customization-async-stage",
+    "server-author-stage-status",
     "server-customization-authority",
     "server-customization-contract",
     "server-customization-postgres-contract",
