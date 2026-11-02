@@ -458,7 +458,7 @@ export async function approveStandardService(approvalId, argumentDigest) {
 }
 
 /**
- * Re-read the caller's hold across the approval-recording async boundary.
+ * Await the caller's hold after recording approval and before submitting its resume.
  * A held resolution leaves the approval recorded server-side, where the next
  * pending-approvals poll reports it as resume-required. Nothing is lost and
  * nothing runs until the caller permits the resume.
@@ -469,7 +469,7 @@ export async function resolveApproval(
   if (!decisionRecorded) {
     await approve(confirmationId, approved)
   }
-  if (approved && typeof beforeResume === 'function' && beforeResume() === false) {
+  if (approved && typeof beforeResume === 'function' && (await beforeResume()) === false) {
     return { held: true, recorded: true }
   }
   return postMessage(owningSessionId, {
