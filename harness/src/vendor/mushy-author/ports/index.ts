@@ -819,6 +819,13 @@ export interface InstantExecutorClient {
   ): Promise<Record<string, unknown>>;
 }
 
+/** Exact graph input for one canonical Solar proposal, separate from tool params. */
+export interface SolarSolveContext {
+  frame_ref: string;
+  expected_rev: number;
+  phase: "initial" | "background";
+}
+
 export interface SubmitRunRequest {
   tenantId: string;
   /** App-owned turn authority. The app resolves subject and tier from this
@@ -837,6 +844,8 @@ export interface SubmitRunRequest {
   catalogCommit?: string;
   effectiveCatalogDigest?: string;
   toolManifestSha256?: string;
+  /** Graph revision and frame covered by this solve's approval. */
+  solveContext?: SolarSolveContext;
   /** Fast-tool read path: hold the request open (?wait=1) up to waitTimeoutS. */
   wait?: boolean;
   waitTimeoutS?: number;

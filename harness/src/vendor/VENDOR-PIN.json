@@ -22,8 +22,8 @@
       "sha256": "5a5109ebd1669509db06e36502de30e9d02e9e028015139ff1307bdb97f072ef"
     },
     "ports/impl/converseSdkRunner.ts": {
-      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted inert action composition from 01c436437255ed81d30b2319552847395076d748; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0",
-      "sha256": "6fef3d952bbe7709a5579240a41149c1dc361c360a7fa95f8a8f07d602ea75b7"
+      "reason": "finish_project and project_completion_status spine tools plus the delivered-answer end_turn rule (rebased onto mushy-code ad209705 by AD4; upstream candidate); plus the claude-sonnet-5-5 default from mushy-code 14334d8 (retire at the next re-pin past 14334d8); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted inert action composition from 01c436437255ed81d30b2319552847395076d748; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594.",
+      "sha256": "ec27d32b11db305e3b0c72b7db9d704030f98b0abb17c9016515e0315f5e2e7d"
     },
     "ports/impl/forgeRemoteAuthority.ts": {
       "reason": "SEL-316d: initialize passes safe.directory for the bare cache when it sets the tenant origin (root-owned EFS cache under the harness uid); retire when upstream includes equivalent behavior.",
@@ -62,8 +62,8 @@
       "sha256": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691"
     },
     "ports/index.ts": {
-      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault.",
-      "sha256": "6f4c53818e22245bfb7ed5b15188bce33daa009a23874ef2f23b4e95fda56e48"
+      "reason": "AppRunClient finishProject/projectCompletionStatus and app SDK session ports (rebased onto mushy-code ad209705 by AD4; upstream candidate); three-way adopted integration tools from 9688808ab12645c21ced9b99fd4ee0f82016a6a1; three-way adopted read-only action catalog from 5d1d63245ba8ea9f03e3a4f78fb89c1019a907f0 P-182: GrantDiagnostic.backend admits vault. BSP47: three-way adopted canonical Solar solve transport from protected merged mushy-code 0bc80de1f37530aeb4cd0456643a3acffb2d9594.",
+      "sha256": "f74d2a5ae1ac0498b8ff4bf4f75c872a90a44da23667e0658a616cf788ae7165"
     }
   },
   "files": {
@@ -97,7 +97,7 @@
     "ports/impl/agentSdkTurnRunner.ts": "d2c4098b4b6d836a6e86fa962b9d235c233879585a14df69f7db3e8f1bb9f2e6",
     "ports/impl/capabilityApproval.ts": "2e0e833df4bcb5e6aa347fbd01d043ef546c486aad4ba0e2f126e6452b401372",
     "ports/impl/conversationManager.ts": "423899c87e552aef85fb8b4b14f78a25a8813284adff56fb0b32946b7032ce4e",
-    "ports/impl/converseSdkRunner.ts": "6fef3d952bbe7709a5579240a41149c1dc361c360a7fa95f8a8f07d602ea75b7",
+    "ports/impl/converseSdkRunner.ts": "ec27d32b11db305e3b0c72b7db9d704030f98b0abb17c9016515e0315f5e2e7d",
     "ports/impl/e2bAgentRunner.ts": "3d89898c95e45e366107a10faa4ea1396f6aaa74242c3c2bacf55cd1add53a94",
     "ports/impl/envScrub.ts": "fc9640a4940a4cb4756714f91144a9dd54fc188f7333aa8618c2fa8f15212f5c",
     "ports/impl/escalationOutbox.ts": "f5b33fd43b776574d1a90fdccc4adbc9dfc2d1e3f540f4f9ae07c2ba7eb4ec5b",
@@ -123,7 +123,7 @@
     "ports/impl/tenantChangeRepo.ts": "58b125b5c4c4b7aecab3351031c951cbde849a38f5b263c674e9c41ef6b1d87f",
     "ports/impl/tenantDocumentRepo.ts": "6a14af5fe958159b0dbf5594d1cb020481726c8128e4c88209be22af2527308a",
     "ports/impl/tenantRepoProvider.ts": "31647bf8936fe127a0a92b30a64861eba7f78412a0103a8a3103c15d7ba94691",
-    "ports/index.ts": "6f4c53818e22245bfb7ed5b15188bce33daa009a23874ef2f23b4e95fda56e48",
+    "ports/index.ts": "f74d2a5ae1ac0498b8ff4bf4f75c872a90a44da23667e0658a616cf788ae7165",
     "ports/integrationTools.ts": "5dd38008c3abeae5b84235c84fa5f2465f85a78110f8ef79814251e0b6dc7735",
     "ports/labDocumentPort.ts": "5af5dd550c66eceffa5321bf32b9525eac26ee9350642977010fafa4420b3578",
     "ports/modelAllowlist.ts": "0b69a3894fb7c54e06829cc3d8803bacb9502fc27a0c3d82fb66e82a2ce4fd17",
