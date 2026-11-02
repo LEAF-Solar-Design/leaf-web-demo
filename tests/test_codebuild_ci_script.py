@@ -160,6 +160,13 @@ class TestCodebuildCiScript(unittest.TestCase):
                 exec(compile(classifier, "receipt-classifier", "exec"), namespace)
                 self.assertEqual(namespace["event"], expected)
 
+    def test_gate_fails_fast_with_unbuffered_output(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        call = next(line for line in script.splitlines()
+                    if line.startswith("python scripts/run-all-gates.py "))
+        self.assertIn("--fail-fast", shlex.split(call))
+        self.assertIn('export PYTHONUNBUFFERED=1\n' + call, script)
+
     def test_workflow_commands(self):
         """Pin CodeBuild's deliberate --with-deps deviation from the workflow."""
         script = CI_PATH.read_text(encoding="utf-8")
@@ -403,7 +410,8 @@ class TestCodebuildCiScript(unittest.TestCase):
         self.assertIn('unset "${!LEAF_READSET_@}"', skipped)
         self.assertIn('INFO: read-set tracing skipped (not a tracing build)', skipped)
         self.assertIn('WARNING: trusted capture unavailable;', skipped)
-        self.assertIn('unset PYTHONSAFEPATH\npython scripts/run-all-gates.py', script)
+        self.assertRegex(script, r'unset PYTHONSAFEPATH\n(?:#[^\n]*\n)*'
+                                 r'export PYTHONUNBUFFERED=1\npython scripts/run-all-gates\.py ')
         self.assertIn('tracing_active=sys.argv[2] == "1", reporters_active=sys.argv[3] == "1"', script)
         self.assertIn('"tracing_active": detail["tracing_active"]', script)
         self.assertIn('"reporters_active": detail["reporters_active"]', script)
