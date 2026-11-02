@@ -923,7 +923,7 @@ export LEAF_GATE_REQUIRE_DATABASE=1
 echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
 gate_status=0
 unset PYTHONSAFEPATH
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
+python -u scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
 python -I -B scripts/ci/retain_failed_gate_logs.py \
   --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-failed-logs \
   || echo 'WARNING: failed gate log retention unavailable' >&2

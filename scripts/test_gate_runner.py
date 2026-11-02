@@ -276,7 +276,7 @@ def test_failed_log_retention_result_symlink_no_read(tmp_path):
 
 def test_failed_log_retention_shell_advisory_order_and_verdict():
     source = (REPO / ".codebuild/ci.sh").read_text(encoding="utf-8")
-    gate = source.index('python scripts/run-all-gates.py --jobs')
+    gate = source.index('python -u scripts/run-all-gates.py --jobs')
     capture = source.index('python -I -B scripts/ci/retain_failed_gate_logs.py')
     next_step = source.index('if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]', gate)
     block = source[capture:next_step]
@@ -5368,8 +5368,8 @@ def test_heavy_prerequisite_failure_preserves_cheap_results_and_cannot_pass(tmp_
 def test_early_feedback_shell_uses_exact_trusted_script_and_one_gate_invocation():
     source = (REPO / ".codebuild/ci.sh").read_text()
     assert 'LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"' in source
-    line = next(line for line in source.splitlines() if line.startswith("python scripts/run-all-gates.py --jobs"))
-    assert '--early-feedback' in line and '--retry 0' in line
+    line = next(line for line in source.splitlines() if line.startswith("python -u scripts/run-all-gates.py --jobs"))
+    assert '--early-feedback' in line and '--retry 0' in line and '--fail-fast' in line
     assert '--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites' in line
     assert '"${only_args[@]}"' in line
     entry = source[source.index('if [[ "${1:-}" == --heavy-prerequisites') : source.index('# Freeze policy before any candidate installation')]
