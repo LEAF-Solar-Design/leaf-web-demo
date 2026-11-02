@@ -1,0 +1,41 @@
+/* Closed header positions only. BSP3 owns width reclaim and control wrapping. */
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])[data-workspace-header="above-tools"]) {
+  --environment-strip-top: calc(var(--drawer-top, 44px) + 1px);
+}
+.studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])[data-workspace-header="below-tools"]) {
+  --environment-strip-top: calc(max(var(--drawer-top, 44px), var(--cockpit-band-bottom, 0px), var(--cockpit-stack-top, 0px)) + 1px);
+}
+@media (min-width: 1024px) {
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])[data-workspace-header="above-tools"]) .app[data-studio-shell][data-surface][data-environment-panel] .center-col {
+    padding-top: calc(var(--environment-strip-height) + 1px); box-sizing: border-box;
+  }
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])[data-workspace-header="below-tools"]) .app[data-studio-shell][data-surface][data-environment-panel] .center-col {
+    padding-top: 0;
+  }
+}
+@media (max-width: 599px), (max-width: 1023px) and (min-height: 500px) {
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])[data-workspace-header="above-tools"]) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .center-col {
+    top: var(--environment-strip-bottom);
+  }
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])[data-workspace-header="below-tools"]) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .center-col {
+    top: calc(var(--drawer-top, 44px) + 1px);
+  }
+}
+.workspace-layout-panel {
+  position: fixed; top: calc(var(--environment-strip-bottom, 96px) + 8px); right: 12px;
+  width: min(420px, calc(100vw - 24px)); max-height: calc(100dvh - var(--environment-strip-bottom, 96px) - 24px);
+  box-sizing: border-box; overflow: auto; padding: 12px; border: 1px solid var(--leaf-line);
+  border-radius: 8px; background: var(--leaf-surface); color: var(--leaf-ink); pointer-events: auto;
+  font: 13px var(--leaf-font-text);
+}
+.workspace-layout-heading, .workspace-layout-actions, .workspace-layout-panel [role="group"] { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.workspace-layout-heading { justify-content: space-between; }
+.workspace-layout-panel label { display: grid; gap: 4px; }
+.workspace-layout-panel input { width: 100%; min-width: 0; box-sizing: border-box; min-height: 44px; color: inherit; background: var(--leaf-surface); border: 1px solid var(--leaf-line); }
+.workspace-layout-panel form, .workspace-layout-actions { margin-block: 12px; }
+.workspace-layout-panel button:disabled { cursor: default; opacity: .55; }
+.workspace-layout-panel button[aria-pressed="true"] { border-color: var(--leaf-accent); }
+@media (max-width: 599px) {
+  .workspace-environment:is([data-profile="cad"], [data-profile="solar"]) .environment-strip label { font-size: 0; gap: 0; }
+  .workspace-environment:is([data-profile="cad"], [data-profile="solar"]) .environment-strip label select { width: 84px; }
+}

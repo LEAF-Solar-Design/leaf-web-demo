@@ -5827,7 +5827,9 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
   const title = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-title'))
   const titleBranch = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode', title)
   const interior = fragment => appSource.slice(fragment.openingFragment.end, fragment.closingFragment.start).replace(/\r\n/g, '\n').trim()
-  assert.equal(r13Hash(interior(titleBranch.alternate)), 'd37ef2de2b3b6c413842e7fc8f117bb71a717de5571446fe23310acf3177cd9a')
+  // BSP5 intentionally replaces sample labels with the active document's facts.
+  assert.match(interior(titleBranch.alternate), /\{activeDrawingName \|\|/)
+  assert.match(interior(titleBranch.alternate), /\{' · '\}\{drawingMetadata\}/)
   const wrap = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-wrap'))
   const status = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode' && n.consequent.type === 'JSXFragment', wrap)
   // SCB3e: the loading line must require a pending load so restoring an empty pre-bridge workspace never claims to be loading forever.
@@ -5847,6 +5849,45 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
     'solarReadResultStandalone.main-a021056e.json': 'e3c8dafa5a78cd21c7ef21f07e3a17dab34fb8ae852b972a6992302ae5ca3ae9',
     'solarSizingConductorStandalone.main-f139ceba.json': '16aa78d0485629b7485619fc88862693ad5d80ff9b6c8742cd23fb3143e8b6de',
   })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
+})
+
+it('BSP3 Tool rail closes the actual Studio panel on phone and desktop', () => {
+  for (const drawerViewport of [true, false]) {
+    const calls = []
+    const env = { browserPanel: 'studio', drawerViewport, studioDrawer: 'nav', navExpanded: true,
+      setBrowserPanel: value => calls.push(['panel', value]), setNavExpanded: value => calls.push(['nav', value]),
+      openToolRail: () => calls.push(['open']) }
+    r13Evaluate(r13Callback('toggleStudioToolRail'), env)()
+    assert.deepEqual(calls, [['panel', 'none'], ['nav', false]])
+    calls.length = 0
+    r13Evaluate(r13Callback('toggleStudioToolRail'), { ...env, browserPanel: 'none' })()
+    assert.deepEqual(calls, [['open']])
+  }
+})
+
+it('BSP5 imported drawing labels and counts follow source objects', () => {
+  const init = name => r13One(node => node.type === 'VariableDeclarator' && node.id.name === name).init
+  const label = env => r13Evaluate(init('activeDrawingName'), {
+    projectMode: false, projectDrawingName: 'project.dwg', activeIntake: null,
+    shown: { polylines: Array(2345), layers: ['Panels'] }, projectName: 'sample',
+    drawingPropertyName: (preferred, fallback) => preferred || fallback || '', ...env,
+  })
+  assert.equal(label({ activeIntake: { documentId: 'rooftop.dxf' } }), 'rooftop.dxf')
+  assert.equal(label({}), 'sample.dwg')
+  assert.equal(label({ shown: null }), '')
+  assert.equal(label({ projectMode: true, activeIntake: { documentId: 'rooftop.dxf' } }), 'project.dwg')
+  const countsByLayer = Object.fromEntries(['Roof', 'Zones', 'Obstructions', 'Panels', 'Strings', 'Inverters', 'StringLabels', 'InverterLabels'].map(layer => [layer, 1]))
+  const summary = { entityCount: 80, countsByType: { LWPOLYLINE: 74, TEXT: 6 }, countsByLayer }
+  assert.equal(r13Evaluate(init('drawingMetadata'), { sourceDrawingSummary: summary, shown: null }), '80 entities · 8 layers')
+  const drawingIntake = { sourceSummary: summary, polylines: Array(96), layers: Object.keys(countsByLayer) }
+  const facts = r13Evaluate(init('paneDrawingFacts').arguments[0], {
+    studioGround: true, drafting: true, drawingIntake, activeDrawingName: 'rooftop.dxf',
+    projectMode: false, activeIntake: { documentId: 'rooftop.dxf' }, engineHistory: { canUndo: true },
+    visibleLayers: { Panels: false }, drawingExtents: () => null, mock: true,
+  })()
+  assert.deepEqual({ name: facts.name, entities: facts.entities, polylines: facts.polylines,
+    inserts: facts.inserts, faces: facts.faces, layers: facts.layers, layersShown: facts.layersShown, canUndo: facts.canUndo },
+  { name: 'rooftop.dxf', entities: 80, polylines: 74, inserts: 0, faces: 0, layers: 8, layersShown: 7, canUndo: true })
 })
 
 it('R13G2A-12 drawing activation retains one Viewer and the existing owners', () => {
