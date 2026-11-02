@@ -255,6 +255,7 @@ function notifyCatalogPublication(env, openedSession, active, sessionRef, callba
 
 export default function ConversePanel({
   sessionId,
+  projectContext = null,
   userTurns = [],            // [{turnId, text}] — turns App dispatched into this session
   onDismiss,                 // hide the panel (the server-side turn is never cancelled)
   onLinkClaude,              // grant_required CTA -> open the Claude account panel
@@ -752,6 +753,11 @@ export default function ConversePanel({
   const send = async (nextText = input, { allowSecretOnce = false, includeAttachments = true, clearInput = true } = {}) => {
     const text = String(nextText).trim()
     if ((!text && !(includeAttachments && attachments.length)) || busy) return false
+    // Capture before reading image files or waiting for either transport try.
+    const requestedProjectContext = projectContext ? {
+      project_id: projectContext.project_id,
+      input_version_id: projectContext.input_version_id,
+    } : null
     let delivered = false
     setSending(true); setSendErr(null)
     restoreComposerFocus()
@@ -782,12 +788,15 @@ export default function ConversePanel({
         accept(await postMessage(sessionId, {
           ...(text ? { text } : {}),
           ...(images.length ? { images } : {}),
+          ...(requestedProjectContext ? { projectContext: requestedProjectContext } : {}),
           allowSecretOnce,
         }), images)
         track('conversation.message_sent', { input_kind: text ? 'typed' : 'image_only', text_len: text.length })
       } catch (e) {
         if (!shouldRetryWithQueue(classifyAgentError(e), { text, images })) throw e
-        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce }), images)
+        accept(await postMessage(sessionId, { text, queue: true, allowSecretOnce,
+          ...(requestedProjectContext ? { projectContext: requestedProjectContext } : {}),
+        }), images)
         // P2: the direct post failed (turn busy) and the queued retry landed —
         // the panel recovered the send rather than surfacing an error.
         track('conversation.recovered', { reason: 'busy_retry_queued' })

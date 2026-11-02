@@ -1972,9 +1972,12 @@ export default function App() {
   // the server a turn id that has already finished.
   const authorProjectRef = useRef(openProjectId || null)
   authorProjectRef.current = openProjectId || null
+  const conversationProjectContext = useMemo(() => openProjectId && canonicalVersionId
+    ? { project_id: openProjectId, input_version_id: canonicalVersionId }
+    : null, [openProjectId, canonicalVersionId])
   useLayoutEffect(() => {
-    setProjectContext(openProjectId || null)
-  }, [openProjectId, setProjectContext])
+    setProjectContext(openProjectId || null, canonicalVersionId || null)
+  }, [openProjectId, canonicalVersionId, setProjectContext])
   const authorAuthorityProvider = useCallback(async (description, { allowSecretOnce = false, projectId } = {}) => {
     // No entitlement pre-check here: entitlements load async, and a stage
     // click can beat them (proven by the e2e). A mint against a tenant that
@@ -6106,6 +6109,7 @@ export default function App() {
           <PersistentSeat destination={paneSeats.conversationTarget}>
           <ConversePanel
             sessionId={agentSessionId}
+            projectContext={conversationProjectContext}
             userTurns={agentTurns}
             onCatalogChanged={refreshCatalog}
             consumeCatalogPublication={catalogController.consumeCatalogPublication}
