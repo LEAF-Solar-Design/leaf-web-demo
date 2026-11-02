@@ -722,9 +722,10 @@ export class ConverseLoop {
       sessionId: instant.authoritySessionId ?? "", turnId: instant.authorityTurnId ?? "" });
 
     /** A tool we cannot find in the catalog is treated as a WRITE (never fast-waited). */
-    const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write"> => {
+    const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write" | "solve"> => {
       const entry = (await catalogFor()).find((c) => c.name === toolName);
       if (!entry) return "drawing.write";
+      if (toolName === "solar-solve-proposal" && hasServerCapability(entry, "solve")) return "solve";
       return entry.capabilities.includes("drawing.write") ? "drawing.write" : "drawing.read";
     };
 
@@ -772,12 +773,16 @@ export class ConverseLoop {
           const action =
             entry?.aps_live === true
               ? "submit_live_solve"
+              : target === "solar-solve-proposal" && hasServerCapability(entry, "solve")
+                ? "run_solve_tool"
               : entry && params.dry_run === true
                 ? "run_read_tool"
                 : !entry || entry.capabilities.includes("drawing.write")
                 ? "run_write_tool"
                 : "run_read_tool";
           const projectState = await appRun.getProjectDrawingState?.();
+          const solveContext = action === "run_solve_tool"
+            ? canonicalSolveContext(args.solve_context, projectState?.graph_revision) : undefined;
           if (projectState && ((args.dwg != null && args.dwg !== projectState.binding.drawing_id) ||
               (params.drawing_id != null && params.drawing_id !== projectState.binding.drawing_id))) {
             throw new Error("project capability drawing must match the stored app turn");
@@ -859,6 +864,7 @@ export class ConverseLoop {
               params,
               dwg,
               catalog_digest: catalogDigest,
+              ...(solveContext ? { solve_context: solveContext } : {}),
               ...drawingPins,
               ...(typeof args.confirmation_id === "string"
                 ? { confirmation_id: args.confirmation_id }
@@ -1194,7 +1200,7 @@ export class ConverseLoop {
       turnId: string;
       emit: (type: ConverseEventType, data: Record<string, unknown>) => Promise<void>;
       catalogFor: () => Promise<CapabilityEntry[]>;
-      capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write">;
+      capabilityOf: (toolName: string) => Promise<"drawing.read" | "drawing.write" | "solve">;
       invalidateCatalog: () => void;
       turnState: TurnState;
       instantAssignment?: InstantSessionAssignment;
@@ -1298,7 +1304,7 @@ export class ConverseLoop {
         }
         const capability = await ctx.capabilityOf(target);
         const drawingVersion =
-          (capability === "drawing.read" || capability === "drawing.write") &&
+          (capability === "drawing.read" || capability === "drawing.write" || capability === "solve") &&
           typeof args.drawing_version === "number" &&
           Number.isInteger(args.drawing_version) &&
           args.drawing_version >= 0
@@ -1383,18 +1389,19 @@ export class ConverseLoop {
             ...(drawingVersion !== undefined
               ? { drawingVersion }
               : {}),
-            ...(capability === "drawing.write" && Number.isInteger(expectedDrawingHead)
+            ...(capability !== "drawing.read" && Number.isInteger(expectedDrawingHead)
               ? { expectedDrawingHead }
               : {}),
-            ...(capability === "drawing.write" && typeof catalogCommit === "string"
+            ...(capability !== "drawing.read" && typeof catalogCommit === "string"
               ? { catalogCommit }
               : {}),
-            ...(capability === "drawing.write" && typeof effectiveCatalogDigest === "string"
+            ...(capability !== "drawing.read" && typeof effectiveCatalogDigest === "string"
               ? { effectiveCatalogDigest }
               : {}),
-            ...(capability === "drawing.write" && typeof toolManifestSha256 === "string"
+            ...(capability !== "drawing.read" && typeof toolManifestSha256 === "string"
               ? { toolManifestSha256 }
               : {}),
+            ...(capability === "solve" ? { solveContext: canonicalSolveContext(args.solve_context) } : {}),
             wait: false,
           });
         } catch {
@@ -1698,6 +1705,26 @@ function authorStageStatusId(args: Record<string, unknown>): string {
     throw new Error("author_stage_status requires only a canonical args.change_set_id");
   }
   return field.value;
+}
+
+/** Host catalog extensions retain their server vocabulary outside the shared tool capability union. */
+function hasServerCapability(entry: { capabilities: readonly string[] } | undefined, capability: string): boolean {
+  return entry?.capabilities.some(value => value === capability) ?? false;
+}
+
+function canonicalSolveContext(value: unknown, graphRevision?: number | null): {
+  frame_ref: string; expected_rev: number; phase: "initial" | "background";
+} {
+  const context = asRecord(value);
+  if (Object.keys(context).sort().join(",") !== "expected_rev,frame_ref,phase"
+      || typeof context.frame_ref !== "string" || !context.frame_ref
+      || typeof context.expected_rev !== "number" || !Number.isInteger(context.expected_rev)
+      || context.expected_rev < 0 || (context.phase !== "initial" && context.phase !== "background")
+      || (graphRevision !== undefined && context.expected_rev !== graphRevision)) {
+    throw new Error("Solar solve requires an exact frame, graph revision and phase");
+  }
+  return { frame_ref: context.frame_ref, expected_rev: context.expected_rev,
+    phase: context.phase as "initial" | "background" };
 }
 
 function asRecord(v: unknown): Record<string, unknown> {

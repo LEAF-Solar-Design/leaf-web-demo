@@ -351,6 +351,8 @@
     "server-project-reference-materials",
     "server-project-checkout-custody",
     "server-conversational-project-write",
+    "server-canonical-solve-approval",
+    "server-conversational-project-solve",
     "server-native-project-authoring",
     "server-native-project-routes",
     "server-browser-project-flow",

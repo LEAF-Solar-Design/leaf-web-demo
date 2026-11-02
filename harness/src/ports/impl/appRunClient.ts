@@ -756,6 +756,7 @@ export class HttpAppRunClient implements AppRunClient {
         params: req.params,
         dwg: req.dwg,
         catalog_digest: req.catalogDigest,
+        ...(req.solveContext !== undefined ? { solve_context: req.solveContext } : {}),
         ...(req.drawingVersion !== undefined ? { dwg_version: req.drawingVersion } : {}),
         ...(req.expectedDrawingHead !== undefined
           ? { expected_drawing_head: req.expectedDrawingHead }

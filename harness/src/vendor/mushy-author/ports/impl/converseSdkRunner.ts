@@ -81,6 +81,7 @@ import type {
 } from "../index.js";
 import { SPINE_TOOL_NAMES } from "../index.js";
 import { INTEGRATION_TOOL_INPUTS } from "../integrationTools.js";
+import { z as contractZ } from "zod";
 import { buildScrubbedEnv } from "./agentSdkRunner.js";
 import { composeRunnerCapabilities } from "./runnerCapabilities.js";
 import { createStandardServicesFacade } from "./standardServicesFacade.js";
@@ -130,6 +131,14 @@ function dynImport(parts: string[]): Promise<unknown> {
 
 /** The seven spine tools as mounted MCP names (server key "spine"). */
 export const SPINE_MCP_TOOL_NAMES = SPINE_TOOL_NAMES.map((n) => `mcp__spine__${n}`);
+
+// Keep the approval-bound solve input closed even when a host invokes the
+// mounted handler directly instead of relying on SDK argument validation.
+const SOLVE_CONTEXT_INPUT = contractZ.object({
+  frame_ref: contractZ.string().min(1),
+  expected_rev: contractZ.number().int().nonnegative(),
+  phase: contractZ.enum(["initial", "background"]),
+}).strict();
 
 /** Rate-limit horizon split (plan B3 / wire contract section 3 stop reasons):
  *  a 429 whose retry-after horizon exceeds this is EXHAUSTION (degraded mode),
@@ -284,6 +293,7 @@ export class ConverseSdkRunner implements SpineConverseRunner {
         params: z.record(z.unknown()).optional(),
         dwg: z.string().optional(),
         confirmation_id: z.string().optional(),
+        solve_context: SOLVE_CONTEXT_INPUT.optional(),
       },
       job_status: { job_id: z.string() },
       author_tool: {
@@ -332,6 +342,13 @@ export class ConverseSdkRunner implements SpineConverseRunner {
     };
     const tools = SPINE_TOOL_NAMES.map((name) =>
       sdk.tool(name, TOOL_DESCRIPTIONS[name], schemas[name], async (args) => {
+        if (name === "run_capability" && args.solve_context !== undefined) {
+          const parsed = SOLVE_CONTEXT_INPUT.safeParse(args.solve_context);
+          if (!parsed.success) {
+            return toResult({ content: "Invalid solve context", isError: true });
+          }
+          return toResult(await input.tools.execute(name, { ...args, solve_context: parsed.data }));
+        }
         if (Object.prototype.hasOwnProperty.call(INTEGRATION_TOOL_INPUTS, name)) {
           const schema = INTEGRATION_TOOL_INPUTS[name as keyof typeof INTEGRATION_TOOL_INPUTS];
           const parsed = schema.safeParse(args);

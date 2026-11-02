@@ -156,6 +156,19 @@ _RUN_TOOL_SCHEMA: Dict[str, Any] = {
     "additionalProperties": False,
 }
 
+_SOLVE_TOOL_SCHEMA: Dict[str, Any] = {
+    **_RUN_TOOL_SCHEMA,
+    "properties": {**_RUN_TOOL_SCHEMA["properties"],
+        "tool": {"type": "string", "const": "solar-solve-proposal"},
+        "solve_context": {"type": "object", "properties": {
+            "frame_ref": {"type": "string", "minLength": 1},
+            "expected_rev": {"type": "integer", "minimum": 0},
+            "phase": {"type": "string", "enum": ["initial", "background"]}},
+            "required": ["frame_ref", "expected_rev", "phase"], "additionalProperties": False}},
+    "required": ["tool", "params", "dwg", "catalog_digest", "catalog_commit",
+                 "effective_catalog_digest", "tool_manifest_sha256", "solve_context"],
+}
+
 _HARDCODED_DEFAULTS: Dict[str, Any] = {
     "version": 1,
     "approval_ttl_s": 300,
@@ -793,6 +806,15 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "args_schema": _RUN_TOOL_SCHEMA,
             "rate_limit_category": "medium", "timeout_s": 120,
             "audit_extra": ["tool", "dwg"], "cost_class": "write",
+        },
+        "run_solve_tool": {
+            "description": "Request a Leaf cloud Solar proposal for the selected project. Every solve requires a fresh approval; it does not change the drawing.",
+            "rung": 4, "required_capability": "solve", "policy": "always-confirm",
+            "tenant_tightenable": False,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/run"]},
+            "args_schema": _SOLVE_TOOL_SCHEMA,
+            "rate_limit_category": "high", "timeout_s": 600,
+            "audit_extra": ["tool", "dwg"], "cost_class": "leaf_cloud_solve",
         },
         "submit_live_solve": {
             "description": "Dispatch a live APS run (real USD; R4). Broker USD-cap preflight still fires underneath.",

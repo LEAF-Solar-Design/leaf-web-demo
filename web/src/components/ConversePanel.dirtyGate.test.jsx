@@ -53,9 +53,9 @@ afterEach(() => {
 
 describe('canonical project approval custody using the actual resume transport', () => {
   const projectContext = { project_id: 'project-1', input_version_id: 'version-1' }
-  const start = async (prepareApprovedProjectRun, props = {}, decision = 'Approve') => {
+  const start = async (prepareApprovedProjectRun, props = {}, decision = 'Approve', approval = WRITE_APPROVAL) => {
     useRealResolution = true
-    APPROVALS = [WRITE_APPROVAL]
+    APPROVALS = [approval]
     const calls = []
     vi.stubGlobal('fetch', vi.fn(async (path, options) => {
       calls.push({ path, body: JSON.parse(options.body) })
@@ -63,7 +63,7 @@ describe('canonical project approval custody using the actual resume transport',
     }))
     const view = render(<ConversePanel sessionId="session-1" projectContext={projectContext}
       prepareApprovedProjectRun={prepareApprovedProjectRun} {...props} />)
-    await screen.findByText(/delete-marked-panel/)
+    await screen.findByText(approval.tool)
     fireEvent.click(screen.getByRole('button', { name: decision }))
     return { ...view, calls }
   }
@@ -82,6 +82,45 @@ describe('canonical project approval custody using the actual resume transport',
     await waitFor(() => expect(calls).toHaveLength(2))
     expect(calls[1].body).toEqual({ confirm: { confirmationId: 'c1', approved: true } })
     expect(revoke).not.toHaveBeenCalled()
+  })
+
+  const solveApproval = { ...WRITE_APPROVAL, tool: 'solar-solve-proposal', capability: 'solve' }
+  const solveProps = { canonicalProjectWriteTools: new Set(['solar-solve-proposal']) }
+
+  it('canonical solve waits for private custody before its actual resume', async () => {
+    let issue
+    const pending = new Promise(resolve => { issue = resolve })
+    const prepare = vi.fn(() => pending)
+    const { calls } = await start(prepare, solveProps, 'Approve', solveApproval)
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1))
+    expect(calls).toHaveLength(1)
+    const revoke = vi.fn()
+    await act(async () => issue({ isCurrent: () => true, revoke }))
+    await waitFor(() => expect(calls).toHaveLength(2))
+    expect(calls[1].body).toEqual({ confirm: { confirmationId: 'c1', approved: true } })
+    expect(revoke).not.toHaveBeenCalled()
+  })
+
+  it('canonical solve denial never exchanges checkout custody', async () => {
+    const prepare = vi.fn()
+    const { calls } = await start(prepare, solveProps, 'Deny', solveApproval)
+    await waitFor(() => expect(calls).toHaveLength(2))
+    expect(calls[0].body).toEqual({ approved: false })
+    expect(prepare).not.toHaveBeenCalled()
+  })
+
+  it('canonical solve revokes a stale custody result without resuming', async () => {
+    let issue
+    const pending = new Promise(resolve => { issue = resolve })
+    const prepare = vi.fn(() => pending)
+    const { calls, rerender } = await start(prepare, solveProps, 'Approve', solveApproval)
+    await waitFor(() => expect(prepare).toHaveBeenCalledTimes(1))
+    rerender(<ConversePanel sessionId="session-2" projectContext={projectContext}
+      prepareApprovedProjectRun={prepare} {...solveProps} />)
+    const revoke = vi.fn()
+    await act(async () => issue({ isCurrent: () => true, revoke }))
+    await waitFor(() => expect(revoke).toHaveBeenCalledTimes(1))
+    expect(calls).toHaveLength(1)
   })
 
   it.each(['dirty', 'version', 'session', 'auth'])('holds and revokes custody after %s changes during exchange', async (change) => {

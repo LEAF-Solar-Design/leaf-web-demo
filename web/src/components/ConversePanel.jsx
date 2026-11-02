@@ -873,7 +873,7 @@ export default function ConversePanel({
   // accepts no other spelling.
   const decide = async (
     confirmationId, ok, blocked = false, owningSessionId = sessionId,
-    decisionRecorded = false, isWrite = false, tool = null,
+    decisionRecorded = false, isWrite = false, tool = null, isSolve = false,
   ) => {
     if (deciding || (ok && blocked)) return
     const requestedContext = projectContext
@@ -891,7 +891,7 @@ export default function ConversePanel({
         confirmationId, owningSessionId, ok, decisionRecorded, {
           beforeResume: async () => {
             if (!current()) return false
-            if (!ok || !isWrite || !requestedContext
+            if (!ok || !(isWrite || isSolve) || !requestedContext
               || (canonicalProjectWriteTools && !canonicalProjectWriteTools.has(tool))) return true
             if (typeof prepare !== 'function') return false
             let grant
@@ -973,6 +973,7 @@ export default function ConversePanel({
               true,
               isWrite,
               approval.tool,
+              approval.capability === 'solve',
             )}
           >
             {deciding === approval.confirmation_id
@@ -987,7 +988,8 @@ export default function ConversePanel({
               disabled={deciding === approval.confirmation_id || hold.held}
               title={hold.held ? hold.title : undefined}
               onClick={() => decide(
-                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite, approval.tool)}
+                approval.confirmation_id, true, hold.held, approval.session_id, false, isWrite, approval.tool,
+                approval.capability === 'solve')}
             >
               {deciding === approval.confirmation_id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
             </button>
@@ -1140,7 +1142,8 @@ export default function ConversePanel({
                 className="chip-act"
                 disabled={deciding === item.id || hold.held}
                 title={hold.held ? hold.title : undefined}
-                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite, item.tool)}
+                onClick={() => decide(item.id, true, hold.held, sessionId, false, isWrite, item.tool,
+                  item.capability === 'solve')}
               >
                 {deciding === item.id ? 'Sending…' : (hold.held ? hold.label : 'Approve')}
               </button>
