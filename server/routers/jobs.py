@@ -898,8 +898,10 @@ def run(req: RunRequest, wait: int = 0, persist: int = 0,
                             uuid.UUID(selected_binding["project_id"]),
                             uuid.UUID(selected_binding["input_version_id"]),
                             drawing_id=uuid.UUID(selected_binding["drawing_id"]), write=True)
-                        if (not current.binding.is_head
-                                or current.intake_sha256 != selected_binding["intake_sha256"]
+                        # These legacy pins identify the approved immutable input.
+                        # New submissions enforce head at canonical admission;
+                        # stored idempotent jobs remain replayable after publication.
+                        if (current.intake_sha256 != selected_binding["intake_sha256"]
                                 or any(pin is not None and pin != current.binding.version.seq
                                        for pin in (req.dwg_version, req.expected_drawing_head))):
                             raise ValueError("approved drawing version does not match selected project head")

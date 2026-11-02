@@ -4,6 +4,7 @@ These synthetic seams prove refusal and producer binding, not live publication.
 Private custody tests use the actual port A module after root composition.
 """
 from copy import deepcopy
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from uuid import UUID
@@ -214,6 +215,42 @@ def test_real_custody_replay_preserves_job_without_parent_or_checkout_io(lane, s
     replay = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
     assert replay.status_code == 202 and replay.json()["job_id"] == first.json()["job_id"]
     assert len(lane.a.accepted) == 1
+
+
+def test_real_custody_replay_legacy_pins_after_published_head(lane, selected, real_custody, monkeypatch):
+    first = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
+    assert first.status_code == 202, first.text
+    accepted = lane.a.accepted[0][-1]
+    existing = {"job_id": first.json()["job_id"], "deleted_at": None,
+        "submission_fingerprint": accepted["submission_fingerprint"],
+        "execution_context": accepted["execution_context"]}
+    monkeypatch.setattr(canonical_jobs, "get_project_graph_job_by_key", lambda *_a, **_k: existing)
+    # The actual harness sends both integer pins. Publication makes this exact
+    # selected input historical, but cannot invalidate the already-stored job.
+    current = lane.s.context()
+    selected.request.update(dwg_version=current.binding.version.seq,
+                            expected_drawing_head=current.binding.version.seq)
+    historical = replace(current, binding=replace(current.binding, is_head=False,
+                         head_version_id=UUID(int=999)))
+    monkeypatch.setattr(project, "resolve_context", lambda *_a, **_k: historical)
+    monkeypatch.setattr(project, "verify_at_admission", producer_cases.forbidden)
+    monkeypatch.setattr(project.graph_store(), "get_checkout", producer_cases.forbidden)
+    replay = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
+    assert replay.status_code == 202, replay.text
+    assert replay.json()["job_id"] == first.json()["job_id"]
+    assert len(lane.a.accepted) == 1
+
+
+def test_real_custody_new_legacy_pins_after_published_head_refuses(lane, selected, real_custody, monkeypatch):
+    current = lane.s.context()
+    selected.request.update(dwg_version=current.binding.version.seq,
+                            expected_drawing_head=current.binding.version.seq)
+    historical = replace(current, binding=replace(current.binding, is_head=False,
+                         head_version_id=UUID(int=999)))
+    monkeypatch.setattr(project, "resolve_context", lambda *_a, **_k: historical)
+    response = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
+    assert response.status_code == 409, response.text
+    assert not lane.a.accepted and not lane.records
 
 
 @pytest.mark.parametrize("change", ["revoked", "foreign-subject", "unapproved-params", "caller-key"])
