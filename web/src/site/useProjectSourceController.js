@@ -30,15 +30,20 @@ export function sourceMaterialProblem(row, projectId, orgId, sourceContext = 'br
   if (row.byte_size > LIMIT) return 'This original exceeds the 8 MiB source limit.'
   return null
 }
-export function sourceSelectionProblem(materials, selected, projectId, orgId, sourceContext = 'browser') {
+export function sourceSelectionProblem(materials, selected, projectId, orgId, sourceContext = 'browser', operation = 'create') {
   if (!['browser', 'native'].includes(sourceContext)) return 'Source context is unavailable.'
-  if (sourceContext === 'native' && selected.length === 0) return 'Choose one through eight TXT or JSON originals.'
+  if (sourceContext === 'native' && operation !== 'edit' && selected.length === 0) return 'Choose one through eight TXT or JSON originals.'
   if (selected.length > 8) return 'Choose at most eight originals.'
   const rows = selected.map((id) => materials.find((row) => row.material_id === id))
   if (new Set(selected).size !== selected.length || rows.some((row) => sourceMaterialProblem(row, projectId, orgId, sourceContext))) return 'Review the selected originals; some are unavailable.'
   if (sourceContext === 'native' && rows.reduce((total, row) => total + row.byte_size, 0) > 4194304) return 'Selected originals must total at most 4 MiB.'
   if (rows.reduce((total, row) => total + row.byte_size, 0) > LIMIT) return 'Selected originals must total at most 8 MiB.'
   return null
+}
+function sourceBaseCommit(candidates, projectId, sourceContext) {
+  return candidates.filter((row) => row.state === 'published' && row.project_id === projectId
+    && row.schema === `leaf.${sourceContext}-project-source.v1`)
+    .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]?.source_commit
 }
 function uuid() {
   const value = globalThis.crypto?.randomUUID?.()
@@ -154,7 +159,8 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
             || (['text/plain', 'application/json'].includes(row.media_type) && sourceMaterialProblem(row, owner.projectId, owner.orgId, owner.sourceContext)))
           publish({ materials: rows, materialsComplete: true,
             ...(preserveSelection ? {} : { selected: invalid ? [] : automatic,
-              selectionReviewed: !invalid && supported.length === automatic.length }) })
+              selectionReviewed: !invalid && supported.length === automatic.length
+                && (owner.sourceContext !== 'native' || automatic.length > 0) }) })
           return
         }
         if (!isSourceUuid(result.next_cursor) || cursors.has(result.next_cursor)) throw new Error()
@@ -190,23 +196,20 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
       if (owner.state.loading || !owner.state.sourceLoaded) throw new Error('Refresh source readback before continuing.')
       let body, text, hint
       if (action === 'stage') {
-        if (owner.sourceContext === 'native' && owner.state.candidates.some((row) => row.state === 'published')) {
-          throw new Error('iOS source currently supports creation only. Editing saved iOS source is unavailable.')
-        }
+        const base = sourceBaseCommit(owner.state.candidates, owner.projectId, owner.sourceContext)
+        const operation = base ? 'edit' : 'create'
         const requirements = owner.state.requirements
         if (!requirements.trim() || requirements.includes('\0') || new TextEncoder().encode(requirements).length > 16384) throw new Error('Enter original requirements of at most 16 KiB.')
         if (owner.state.loading || owner.state.materialsLoading || !owner.state.sourceLoaded || !owner.state.materialsComplete) throw new Error('Source or reference readback is incomplete or unavailable. Refresh it before staging.')
-        const selectionIssue = sourceSelectionProblem(owner.state.materials, owner.state.selected, owner.projectId, owner.orgId, owner.sourceContext)
+        const selectionIssue = sourceSelectionProblem(owner.state.materials, owner.state.selected, owner.projectId, owner.orgId, owner.sourceContext, operation)
         if (selectionIssue || !owner.state.selectionReviewed) throw new Error(selectionIssue || 'Review the reference selection before staging.')
         if (owner.state.unknown || owner.state.candidates.some(pending)) throw new Error('Refresh and review the existing source request first.')
-        const base = owner.state.candidates.filter((row) => row.state === 'published')
-          .sort((a, b) => Date.parse(b.updated_at) - Date.parse(a.updated_at))[0]?.source_commit
         requestId = uuid()
         const material_refs = owner.state.selected.map((id) => {
           const row = owner.state.materials.find((item) => item.material_id === id)
           return { material_id: row.material_id, sha256: row.sha256 }
         })
-        body = { source_request_id: requestId, requirements, source_operation: base ? 'edit' : 'create', material_refs,
+        body = { source_request_id: requestId, requirements, source_operation: operation, material_refs,
           ...(base ? { expected_base_commit: base } : {}) }
         text = requirements
         hint = { source: 'author_panel', purpose: 'stage_authority', browser_action: body.source_operation,
@@ -292,9 +295,10 @@ export default function useProjectSourceController({ projectId, orgId, signedIn,
     }
   }
   const state = view.owner === owner ? view : owner.state
+  const sourceOperation = sourceBaseCommit(state.candidates, projectId, sourceContext) ? 'edit' : 'create'
   return { ...state, isOpen: state.open, projectId, orgId, sourceContext,
-    createOnlyBlocked: sourceContext === 'native' && state.candidates.some((row) => row.state === 'published'),
-    selectionProblem: sourceSelectionProblem(state.materials, state.selected, projectId, orgId, sourceContext),
+    sourceOperation,
+    selectionProblem: sourceSelectionProblem(state.materials, state.selected, projectId, orgId, sourceContext, sourceOperation),
     open, close: () => { clearDownload(); publish({ open: false }) }, refresh, prepareDownload,
     refreshMaterials: () => { if (!owner.locked) void loadMaterials() },
     setRequirements: (requirements) => { if (!owner.locked) publish({ requirements }) },

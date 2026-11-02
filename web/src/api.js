@@ -104,7 +104,7 @@ function sourceBody(action, body, sourceContext) {
     || Object.keys(body).some((key) => !fields.includes(key) && !(action === 'request' && key === 'expected_base_commit'))) throw sourceUnavailable()
   if (action === 'request') {
     sourceId(body.source_request_id)
-    if (sourceContext === 'native' && (body.source_operation !== 'create' || !body.material_refs?.length
+    if (sourceContext === 'native' && body.source_operation === 'create' && (!body.material_refs?.length
       || Object.hasOwn(body, 'expected_base_commit'))) throw sourceUnavailable()
     if (typeof body.requirements !== 'string' || !body.requirements.trim() || body.requirements.includes('\0')
       || new TextEncoder().encode(body.requirements).length > 16384
