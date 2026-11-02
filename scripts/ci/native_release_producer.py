@@ -11,6 +11,7 @@ import hashlib
 import argparse
 import base64
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import nullcontext
 import importlib.util
 import os
 from pathlib import Path
@@ -413,6 +414,19 @@ def verify_git_images(images: dict, *, runner=subprocess.run) -> dict[str, str]:
     return versions
 
 
+def _prepare_authoring_source_context(root: Path, output: Path, source: str) -> None:
+    """Package only admitted Git objects, never host config or credentials."""
+    tree = subprocess.run(
+        ["git", "rev-parse", "HEAD^{tree}"], cwd=root, check=True,
+        text=True, capture_output=True, timeout=10,
+    ).stdout.strip()
+    path = root / "server/platform_source_snapshot.py"
+    namespace = {"__name__": "leaf_platform_source_snapshot", "__file__": str(path)}
+    # Loading the source must not leave bytecode in the admitted checkout.
+    exec(compile(path.read_bytes(), str(path), "exec"), namespace)
+    namespace["create_snapshot"](root, output, source, tree)
+
+
 def build_image(root: Path, service: str, source: str, build_number: int,
                 freshness: dict[str, str], metadata: Path, *,
                 solver_revision: str | None = None,
@@ -445,13 +459,20 @@ def build_image(root: Path, service: str, source: str, build_number: int,
     metadata = metadata if metadata.is_absolute() else root / metadata
     with metadata.open("x", encoding="utf-8") as stream:
         stream.write("{}")
-    if log_path is None:
-        subprocess.run(command, cwd=root, check=True, timeout=45 * 60)
-    else:
-        # Exclusive, like metadata: a retry never appends to a stale log.
-        with log_path.open("xb") as log:
-            subprocess.run(command, cwd=root, check=True, timeout=45 * 60,
-                           stdout=log, stderr=subprocess.STDOUT)
+    context = (tempfile.TemporaryDirectory(prefix="leaf-app-source-")
+               if service == "app" else nullcontext())
+    with context as scratch:
+        if service == "app":
+            snapshot = Path(scratch) / "snapshot"
+            _prepare_authoring_source_context(root, snapshot, source)
+            command[-1:-1] = ["--build-context", f"platform_source={snapshot}"]
+        if log_path is None:
+            subprocess.run(command, cwd=root, check=True, timeout=45 * 60)
+        else:
+            # Exclusive, like metadata: a retry never appends to a stale log.
+            with log_path.open("xb") as log:
+                subprocess.run(command, cwd=root, check=True, timeout=45 * 60,
+                               stdout=log, stderr=subprocess.STDOUT)
     result = json.loads(metadata.read_text(encoding="utf-8"))
     digest = result.get("containerimage.digest")
     if not isinstance(digest, str) or not re.fullmatch(r"sha256:[0-9a-f]{64}", digest):
