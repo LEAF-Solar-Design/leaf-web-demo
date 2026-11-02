@@ -677,8 +677,17 @@ export default function useJobController({
     if (readsPaused) return undefined
     let alive = true
     let timer = null
+    let inFlight = false
+    let stopped = false
     const tick = async () => {
-      if (!alive || readsPausedRef.current) return
+      if (!alive || stopped || inFlight || readsPausedRef.current) return
+      if (timer !== null) clearTimeout(timer)
+      timer = null
+      if (typeof document !== 'undefined' && document.visibilityState === 'hidden') {
+        timer = setTimeout(tick, pollIntervalMs)
+        return
+      }
+      inFlight = true
       try {
         const next = await servicesRef.current.listJobs()
         if (alive && !readsPausedRef.current) {
@@ -688,17 +697,25 @@ export default function useJobController({
       } catch (cause) {
         if (readsPausedRef.current) return
         if (alive && isUnauthorized(cause)) {
+          stopped = true
           setAuth(true)
-          if (timer) clearInterval(timer)
-          timer = null
+        }
+      } finally {
+        inFlight = false
+        if (alive && !stopped && !readsPausedRef.current) {
+          timer = setTimeout(tick, pollIntervalMs)
         }
       }
     }
+    const onVisibility = () => {
+      if (document.visibilityState === 'visible') tick()
+    }
+    if (typeof document !== 'undefined') document.addEventListener('visibilitychange', onVisibility)
     tick()
-    timer = setInterval(tick, pollIntervalMs)
     return () => {
       alive = false
-      if (timer) clearInterval(timer)
+      if (timer !== null) clearTimeout(timer)
+      if (typeof document !== 'undefined') document.removeEventListener('visibilitychange', onVisibility)
     }
   }, [mock, readsPaused, pollGeneration, pollIntervalMs, setAuth])
 
