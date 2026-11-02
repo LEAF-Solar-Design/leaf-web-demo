@@ -96,7 +96,7 @@ def test_tenant_project_foreign_actor_and_inactive_identity_are_denied(client, r
     assert client.get(f'/api/projects/{foreign_project}/reference-files', headers=headers(org, owner)).json()['materials'] == []
     assert client.get(f'/api/projects/{foreign_project}/reference-files/{created["material_id"]}/content', headers=headers(org, owner)).status_code == 404
     with db.transaction() as conn:
-        conn.execute("UPDATE identity_bindings SET status='revoked' WHERE binding_id=%s", (owner,))
+        conn.execute("UPDATE identity_bindings SET status='revoked', revoked_at=NOW() WHERE binding_id=%s", (owner,))
     assert client.get(url, headers=headers(org, owner)).status_code == 403
 
 
