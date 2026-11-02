@@ -17,7 +17,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { z } from "zod";
 import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
 import { ProjectPhotoInspection, photoRequest, PHOTO_FAILURE } from "./projectPhotoInspection.js";
-import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES } from "../ports/index.js";
+import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY, type ProjectPhotoAssignmentInput } from "../ports/index.js";
 import {
   IntegrationClientError, integrationErrorMessage, validateIntegrationResponse,
   ProjectPageProposalRequest,
@@ -560,7 +560,7 @@ export class ConverseLoop {
       }
       const run = this.ports.runner.run({
         systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
-          "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. Review privately; do not autonomously edit, save or publish photos.",
+          "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos.",
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
         ...(resumeSdkSessionId
@@ -891,6 +891,8 @@ export class ConverseLoop {
           };
         case "propose_project_page":
           return { action: "propose_project_page", args: ProjectPageProposalRequest.parse(args) };
+        case "propose_project_photo_assignments":
+          return { action: tool, args: ProjectPhotoAssignmentRequest.parse(args) };
         case "inspect_project_photo":
           return { action: "inspect_project_photo", args: photoRequest(args) };
         case "propose_overlay":
@@ -1005,6 +1007,15 @@ export class ConverseLoop {
       let result: SpineToolResult;
       let pageProposalResult: Record<string, unknown> | undefined;
       try {
+        if (tool === "propose_project_photo_assignments") {
+          args = ProjectPhotoAssignmentRequest.parse(args);
+          const source = instant.pageProposalSource;
+          const validAuthority = (id: unknown): id is string => typeof id === "string" &&
+            id.length > 0 && id.length <= 200 && id.trim() === id && !/[\p{C}]/u.test(id);
+          if (!source || source.revision !== args.expected_revision || source.digest !== args.expected_digest ||
+              !validAuthority(instant.authoritySessionId) || !validAuthority(instant.authorityTurnId) ||
+              !appRun.proposeProjectPhotoAssignments) throw new Error(PHOTO_ASSIGNMENT_FAILURE);
+        }
         if (tool === "inspect_project_photo") {
           args = photoRequest(args);
           if (!instant.authoritySessionId || !instant.authorityTurnId) throw new Error(PHOTO_FAILURE);
@@ -1055,7 +1066,7 @@ export class ConverseLoop {
           consult = await gateConsultFor(tool, args);
           verdict = await gate.check(consult.action, consult.args, {
             tenantId, sessionId, turnId,
-            ...(tool === "propose_project_page" || tool === "inspect_project_photo" ? {
+            ...(tool === "propose_project_page" || tool === "inspect_project_photo" || tool === "propose_project_photo_assignments" ? {
               authoritySessionId: instant.authoritySessionId, authorityTurnId: instant.authorityTurnId,
             } : {}),
           });
@@ -1072,7 +1083,9 @@ export class ConverseLoop {
             }),
           );
 
-        if (tool === "inspect_project_photo" && verdict.decision !== "allow") {
+        if (tool === "propose_project_photo_assignments" && verdict.decision !== "allow") {
+          result = err(PHOTO_ASSIGNMENT_FAILURE);
+        } else if (tool === "inspect_project_photo" && verdict.decision !== "allow") {
           result = err(PHOTO_FAILURE);
         } else if (verdict.decision === "deny") {
           result = relayDeny(verdict.reason ?? "denied by policy");
@@ -1134,6 +1147,12 @@ export class ConverseLoop {
           }
         } else if (hosted) {
           result = ok(JSON.stringify(hosted.result));
+        } else if (tool === "propose_project_photo_assignments") {
+          const body = ProjectPhotoAssignmentRequest.parse(args);
+          const value = await appRun.proposeProjectPhotoAssignments!(tenantId, instant.authoritySessionId!, ProjectPhotoAssignmentRequest.parse(body),
+            { sessionId: instant.authoritySessionId!, turnId: instant.authorityTurnId! });
+          pageProposalResult = validatePhotoAssignmentProposal(value, instant.pageProposalSource!, body);
+          result = pageProposalResult ? ok(PHOTO_ASSIGNMENT_SUMMARY) : err(PHOTO_ASSIGNMENT_FAILURE);
         } else if (tool === "inspect_project_photo") {
           result = await photoInspection.inspect(args, body => appRun.inspectProjectPhoto(
             tenantId, instant.authoritySessionId!, body,
@@ -1169,7 +1188,8 @@ export class ConverseLoop {
           );
         }
       } catch (e) {
-        result = tool === "inspect_project_photo" ? err(PHOTO_FAILURE) : tool === "propose_project_page"
+        result = tool === "propose_project_photo_assignments" ? err(PHOTO_ASSIGNMENT_FAILURE)
+          : tool === "inspect_project_photo" ? err(PHOTO_FAILURE) : tool === "propose_project_page"
           ? err("Portfolio proposal failed.")
           : isIntegrationTool(tool)
           ? err(e instanceof IntegrationClientError ? integrationErrorMessage(e.code) : integrationErrorMessage("unavailable"))
@@ -1184,7 +1204,7 @@ export class ConverseLoop {
         ok: !result.isError,
         summary: resultSummary(tool, result),
         ...(publicationResult ? { result: publicationResult } : {}),
-        ...(tool === "propose_project_page" && !result.isError && pageProposalResult
+        ...((tool === "propose_project_page" || tool === "propose_project_photo_assignments") && !result.isError && pageProposalResult
           ? { result: pageProposalResult } : {}),
       });
       return result;
@@ -1217,6 +1237,8 @@ export class ConverseLoop {
     const tenantId = ctx.session.tenant_id;
 
     switch (tool) {
+      case "propose_project_photo_assignments":
+        return err(PHOTO_ASSIGNMENT_FAILURE); // Only the bound per-turn executor may propose.
       case "inspect_project_photo":
         return err(PHOTO_FAILURE); // Only the per-turn witness executor may inspect.
       case "propose_project_page": {
@@ -1664,6 +1686,7 @@ function err(content: string): SpineToolResult {
 
 /** Strip an MCP server prefix (mcp__spine__catalog_search -> catalog_search). */
 function baseToolName(name: string): string {
+  if (name.endsWith("__propose_project_photo_assignments") && name !== "mcp__spine__propose_project_photo_assignments") return name;
   if (name.endsWith("__inspect_project_photo") && name !== "mcp__spine__inspect_project_photo") return name;
   // The host-only tool belongs solely to the private spine server. Preserve
   // legacy normalization for the vendored tools without accepting an alias
@@ -1861,6 +1884,8 @@ function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string
       return `change_set_id=${String(args.change_set_id ?? "?")}`;
     case "propose_project_page":
       return "portfolio text proposal for private review";
+    case "propose_project_photo_assignments":
+      return "photo assignment proposal for private review";
     case "request_confirmation":
       return `kind=${String(args.kind ?? "confirm")}`;
     case "customize_platform":
@@ -2009,6 +2034,130 @@ const pageProposalSchema = z.strictObject({
     cost_tokens: proposalCount.optional(),
   }),
 });
+
+// Optional producer design fields are closed as well. Keep the existing text
+// proposal contract unchanged; photo proposals may retain empty galleries.
+const designColor = z.string().regex(/^#[0-9a-fA-F]{6}(?![\s\S])/);
+const designAlign = z.enum(["left", "center", "right"]);
+const designFont = z.enum(["classic", "serif", "sans", "mono"]);
+const designWeight = z.enum(["regular", "medium", "bold"]);
+const designAspect = z.enum(["natural", "square", "landscape", "portrait"]);
+const designFocal = z.enum(["center", "top", "bottom", "left", "right", "top-left", "top-right", "bottom-left", "bottom-right"]);
+const designFit = z.enum(["contain", "cover"]);
+const designInt = (low: number, high: number) => z.number().int().min(low).max(high);
+const nonemptyDesign = <S extends z.ZodRawShape>(shape: S) =>
+  z.strictObject(shape).partial().refine(value => Object.keys(value).length > 0);
+const designTextShape = {
+  font: designFont, size: designInt(12, 96), weight: designWeight, color: designColor, align: designAlign,
+  lineHeight: z.number().min(1).max(2.5), letterSpacing: designInt(-1, 8),
+  italic: z.literal(true), underline: z.literal(true), hidden: z.literal(true),
+};
+const designText = nonemptyDesign(designTextShape);
+const designContainerShape = {
+  align: designAlign, columns: designInt(1, 4), mobileColumns: designInt(1, 2), gap: designInt(0, 96),
+  padding: designInt(0, 96), maxWidth: designInt(240, 1800), background: designColor, radius: designInt(0, 64),
+  borderWidth: designInt(0, 8), borderColor: designColor, shadow: z.enum(["none", "soft", "strong"]), hidden: z.literal(true),
+};
+const designContainer = nonemptyDesign(designContainerShape);
+const designStyles = (names: string[]) => nonemptyDesign(Object.fromEntries(names.map(name => [name, designText])));
+const photoAssignmentImageSchema = proposalDocumentSchema.shape.categories.element.shape.images.element.extend({
+  display: nonemptyDesign({ fit: designFit, aspect: designAspect, focal: designFocal,
+    span: designInt(1, 2), radius: designInt(0, 64), hidden: z.literal(true) }).optional(),
+  captionStyle: designText.optional(),
+});
+const photoAssignmentDocumentSchema = proposalDocumentSchema.extend({
+  appearance: nonemptyDesign({
+    font: designFont, scale: z.enum(["compact", "regular", "large"]), spacing: z.enum(["tight", "regular", "airy"]),
+    width: z.enum(["narrow", "regular", "wide"]),
+    palette: nonemptyDesign({ background: designColor, text: designColor, muted: designColor, accent: designColor }),
+    gap: designContainerShape.gap, padding: designContainerShape.padding, maxWidth: designContainerShape.maxWidth,
+    headingWeight: designWeight, align: designAlign, columns: designContainerShape.columns,
+    mobileColumns: designContainerShape.mobileColumns, imageFit: designFit, aspect: designAspect, focal: designFocal,
+  }).optional(),
+  textStyles: designStyles(["name", "headline", "introduction", "about", "aboutHeading", "contactHeading", "location", "email", "resumeHeading"]).optional(),
+  labels: nonemptyDesign({ aboutHeading: proposalText(1, 80), contactHeading: proposalText(1, 80),
+    resumeHeading: proposalText(1, 80), viewerClose: proposalText(1, 80) }).optional(),
+  nav: nonemptyDesign({ homeLabel: proposalText(1, 40), aboutLabel: proposalText(1, 40), resumeLabel: proposalText(1, 40),
+    order: z.array(z.enum(["home", "galleries", "about", "resume"])).max(4).refine(value => new Set(value).size === value.length),
+    hideHome: z.literal(true), hideAbout: z.literal(true), hideResume: z.literal(true), hidden: z.literal(true),
+    layout: z.enum(["row", "column"]), appearance: nonemptyDesign({
+      font: designFont, size: designTextShape.size, weight: designWeight, color: designColor, align: designAlign,
+      lineHeight: designTextShape.lineHeight, letterSpacing: designTextShape.letterSpacing,
+      italic: z.literal(true), underline: z.literal(true),
+    }), gap: designContainerShape.gap, padding: designContainerShape.padding, background: designColor, radius: designContainerShape.radius,
+  }).optional(),
+  resume: z.array(proposalDocumentSchema.shape.resume.element.extend({
+    layout: designContainer.optional(), headingStyle: designText.optional(),
+    entries: z.array(proposalDocumentSchema.shape.resume.element.shape.entries.element.extend({
+      layout: designContainer.optional(), textStyles: designStyles(["title", "subtitle", "dates", "description"]).optional(),
+    })).max(20),
+  })).max(8),
+  categories: z.array(proposalDocumentSchema.shape.categories.element.extend({
+    layout: designContainer.optional(), hidden: z.literal(true).optional(), navLabel: proposalText(1, 40).optional(),
+    textStyles: designStyles(["title", "description", "navigation"]).optional(),
+    images: z.array(photoAssignmentImageSchema).max(200),
+  })).min(1).max(12),
+});
+const photoAssignmentProposalSchema = z.strictObject({
+  schema: z.literal("leaf.project-photo-assignment-proposal.v1"), source: proposalSourceSchema,
+  proposed_document: photoAssignmentDocumentSchema, proposed_digest: proposalDigest,
+  changes: z.array(z.strictObject({
+    op: z.literal("assign"), material_id: proposalUuid,
+    material_name: z.string().refine(value => Array.from(value).length >= 1 && Array.from(value).length <= 1024 && !/\p{Cs}/u.test(value)),
+    gallery_slug: z.string().regex(/^[a-z][a-z0-9-]{0,47}(?![\s\S])/), gallery_title: proposalText(1, 120),
+    index: proposalCount, title: proposalText(0, 200), alt: proposalText(1, 400),
+  })).min(1).max(200),
+});
+
+/** Shape, source and operation witnesses only. The browser independently checks
+ * canonical digest and full append-only comparison against its saved document. */
+function validatePhotoAssignmentProposal(
+  value: unknown, source: PageProposalSource, request: ProjectPhotoAssignmentInput,
+): Record<string, unknown> | undefined {
+  try {
+    const raw = JSON.stringify(value);
+    if (Buffer.byteLength(raw, "utf8") > 1024 * 1024) return undefined;
+    if (!photoAssignmentProposalSchema.safeParse(value).success) return undefined;
+    const detached: unknown = JSON.parse(raw);
+    const parsed = photoAssignmentProposalSchema.safeParse(detached);
+    if (!parsed.success) return undefined;
+    const result = parsed.data;
+    if (result.source.project_id !== source.project_id || result.source.revision !== source.revision ||
+        result.source.digest !== source.digest || result.changes.length !== request.operations.length) return undefined;
+    const document = result.proposed_document;
+    if (Buffer.byteLength(JSON.stringify(document), "utf8") > 512 * 1024 ||
+        new Set(document.categories.map(category => category.slug)).size !== document.categories.length) return undefined;
+    let total = 0;
+    const references = new Map<string, string>();
+    const occurrences = new Map<string, number>();
+    for (const category of document.categories) {
+      total += category.images.length;
+      if (total > 200 || (category.images.length ? category.hero >= category.images.length : category.hero !== 0) ||
+          new Set(category.images.map(image => image.material_id)).size !== category.images.length) return undefined;
+      for (const image of category.images) {
+        const digest = `${image.sha256}:${image.preview_sha256}`;
+        if (references.has(image.material_id) && references.get(image.material_id) !== digest) return undefined;
+        references.set(image.material_id, digest);
+        occurrences.set(image.material_id, (occurrences.get(image.material_id) ?? 0) + 1);
+      }
+    }
+    const nextIndex = new Map<string, number>();
+    for (const [index, operation] of request.operations.entries()) {
+      const change = result.changes[index]!;
+      const category = document.categories.find(item => item.slug === operation.gallery_slug);
+      const image = category?.images[change.index];
+      if (!category || !image || change.material_id !== operation.material_id || change.gallery_slug !== operation.gallery_slug ||
+          change.gallery_title !== category.title || change.title !== operation.title || change.alt !== operation.alt ||
+          image.material_id !== operation.material_id || image.sha256 !== operation.sha256 ||
+          image.preview_sha256 !== operation.preview_sha256 || image.title !== operation.title || image.alt !== operation.alt ||
+          occurrences.get(operation.material_id) !== 1 ||
+          (nextIndex.has(category.slug) && nextIndex.get(category.slug) !== change.index)) return undefined;
+      nextIndex.set(category.slug, change.index + 1);
+    }
+    if (document.categories.some(category => nextIndex.has(category.slug) && nextIndex.get(category.slug) !== category.images.length)) return undefined;
+    return detached as Record<string, unknown>;
+  } catch { return undefined; }
+}
 
 /** Closed UI-only projection; full photo/source comparison remains in the browser. */
 function validatePageProposal(value: unknown, source: PageProposalSource): Record<string, unknown> | undefined {

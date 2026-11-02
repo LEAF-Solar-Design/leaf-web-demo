@@ -30,7 +30,7 @@ import type {
   ProjectPageProposalInput,
   PlatformSourceRange,
 } from "../index.js";
-import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS } from "../index.js";
+import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, type ProjectPhotoAssignmentInput } from "../index.js";
 import { z } from "zod";
 import { photoRequest, PHOTO_FAILURE, PHOTO_MAX_RESPONSE, type ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
 import {
@@ -379,14 +379,39 @@ export class HttpAppRunClient implements AppRunClient {
     tenantId: string, sessionId: string, input: ProjectPageProposalInput,
     authority: { sessionId: string; turnId: string },
   ): Promise<Record<string, unknown>> {
-    const fail = () => new AppRunClientError("Portfolio proposal request failed.", 502);
     const parsed = ProjectPageProposalRequest.safeParse(input);
+    if (!parsed.success) throw new AppRunClientError("Portfolio proposal request failed.", 502);
+    return this.boundedPageProposal(tenantId, sessionId, parsed.data, authority, "proposals", "Portfolio proposal request failed.");
+  }
+
+  async proposeProjectPhotoAssignments(
+    tenantId: string, sessionId: string, input: ProjectPhotoAssignmentInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    const parsed = ProjectPhotoAssignmentRequest.safeParse(input);
+    const validAuthorityId = (value: unknown): value is string => typeof value === "string" &&
+      value.length > 0 && value.length <= 200 && value.trim() === value && !/[\p{C}]/u.test(value);
+    if (!parsed.success || !z.string().uuid().safeParse(tenantId).success ||
+        tenantId !== tenantId.toLowerCase() || tenantId === "00000000-0000-0000-0000-000000000000" ||
+        !validAuthorityId(sessionId) || authority?.sessionId !== sessionId || !validAuthorityId(authority?.turnId)) {
+      throw new AppRunClientError(PHOTO_ASSIGNMENT_FAILURE, 502);
+    }
+    return this.boundedPageProposal(tenantId, sessionId, parsed.data, authority, "photo-assignment-proposals", PHOTO_ASSIGNMENT_FAILURE);
+  }
+
+  private async boundedPageProposal(
+    tenantId: string, sessionId: string, input: Record<string, unknown>,
+    authority: { sessionId: string; turnId: string },
+    path: "proposals" | "photo-assignment-proposals", message: string,
+  ): Promise<Record<string, unknown>> {
+    const fail = () => new AppRunClientError(message, 502);
     const validId = (value: unknown): value is string => typeof value === "string" &&
       value.length > 0 && value.length <= 200 && value.trim() === value &&
       !/[\u0000-\u001f\u007f-\u009f]/.test(value);
-    if (!parsed.success || !this.secret || !validId(sessionId) ||
+    if (!this.secret || !validId(sessionId) ||
         authority?.sessionId !== sessionId || !validId(authority?.turnId)) throw fail();
-    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/page/proposals`;
+    const url = `${this.baseUrl}/api/sessions/${encodeURIComponent(sessionId)}/page/${path}`;
+    const body = JSON.stringify(input);
     const controller = new AbortController();
     let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const cancel = () => {
@@ -403,7 +428,7 @@ export class HttpAppRunClient implements AppRunClient {
         headers: { ...this.headers(tenantId),
           "x-authority-session-id": authority.sessionId,
           "x-authority-turn-id": authority.turnId },
-        body: JSON.stringify(parsed.data),
+        body,
       });
       if (controller.signal.aborted) {
         void response.body?.cancel().catch(() => {});
