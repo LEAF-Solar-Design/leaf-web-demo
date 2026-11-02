@@ -14,6 +14,12 @@ import { createLabArtifactsClient } from '../history/labArtifactsClient.js'
 import { labValueStore } from '../runs/valueStore.js'
 
 const elkImport = vi.hoisted(() => vi.fn())
+const authLifecycle = vi.hoisted(() => ({ logouts: new Set(), stored: new Set() }))
+vi.mock('../../auth.js', async importOriginal => ({
+  ...await importOriginal(),
+  subscribeBeforeLogout: fn => { authLifecycle.logouts.add(fn); return () => authLifecycle.logouts.delete(fn) },
+  subscribeTokenStored: fn => { authLifecycle.stored.add(fn); return () => authLifecycle.stored.delete(fn) },
+}))
 vi.mock('elkjs/lib/elk.bundled.js', () => {
   elkImport()
   throw new Error('Real ELK is forbidden under Vitest')
@@ -374,6 +380,50 @@ describe('first-click live graph', () => {
     expect(labValueStore.getRun('must-not-expose')).toBeUndefined()
     expect(fetchImpl).toHaveBeenCalledTimes(1)
     localStorage.removeItem('leaf.jwt')
+  })
+
+  it.each(['active', 'unknown', 'pending'])('fences %s run state synchronously on explicit logout before provider navigation', async mode => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 8 } : { revision: 8, graph } })) })
+    client.setDocId(`logout-${mode}`)
+    const runId = `logout-${mode}-run`
+    let resolveSubmission
+    const cancelled = vi.fn()
+    const fetchImpl = vi.fn(mode === 'pending' ? () => new Promise(resolve => { resolveSubmission = resolve })
+      : mode === 'unknown' ? async () => { throw new Error('response lost') }
+        : async url => url.includes('/stream/runs') ? { ok: true, status: 200,
+          body: new ReadableStream({ start(controller) {
+            controller.enqueue(new TextEncoder().encode(`event: run\ndata: ${JSON.stringify({ run_id: runId,
+              seq: 0, kind: 'value', block_id: 'count-1', payload: { result: { data: 81 } } })}\n\n`))
+          }, cancel: cancelled }) }
+          : { ok: true, status: 202, json: async () => ({ run_id: runId, state: 'queued' }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r8' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    if (mode === 'active') await waitFor(() => expect(within(cardNamed('Count')).getByText('81')).toBeVisible())
+    else if (mode === 'unknown') await screen.findByRole('button', { name: 'Recover previous run' })
+    else await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    // auth.js publishes this before removing the token or awaiting its provider.
+    act(() => { for (const listener of authLifecycle.logouts) listener() })
+    expect(screen.queryByRole('button', { name: 'Recover previous run' })).toBeNull()
+    expect(screen.queryByText('Run outcome unknown. Retry to recover this submission.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Run saved revision r8' })).toBeDisabled()
+    if (mode === 'active') {
+      expect(within(cardNamed('Count')).queryByText('81')).toBeNull()
+      await waitFor(() => expect(cancelled).toHaveBeenCalledTimes(1))
+    }
+    if (mode === 'pending') {
+      await act(async () => resolveSubmission({ ok: true, status: 202,
+        json: async () => ({ run_id: runId, state: 'queued' }) }))
+      expect(labValueStore.getRun(runId)).toBeUndefined()
+    }
+    view.unmount()
+    act(() => { for (const listener of authLifecycle.stored) listener() })
+    if (mode === 'active') expect(cancelled).toHaveBeenCalledTimes(1)
+    if (labValueStore.getRun(runId)) labValueStore.upsertRun(runId, { state: 'finished' })
   })
 
   it('renders a worker refusal code from a 422', async () => {

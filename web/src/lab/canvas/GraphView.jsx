@@ -3,6 +3,7 @@ import { registry, withTools } from './registry.js'
 import { fetchLabTools } from './toolNodes.js'
 import { pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
+import { subscribeBeforeLogout, subscribeTokenStored } from '../../auth.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
 import { createHostProvider } from '../host/hostProvider.js'
 import { evidenceFor } from '../code/hostEvidence.js'
@@ -243,13 +244,15 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const streams = useRef(new Set())
   const mounted = useRef(false)
   const submissionIntent = useRef(null)
+  const logoutGeneration = useRef(0)
+  const explicitlySignedOut = useRef(false)
   const [outcomeUnknown, setOutcomeUnknown] = useState(false)
   const currentRunScope = () => JSON.stringify([config.apiBase, config.tenant, runAccount() || authHeaders().Authorization || '',
-    client.currentDocId(), client.state.head])
+    client.currentDocId(), client.state.head, logoutGeneration.current])
   const account = useRef(runAccount())
   const observedAccount = runAccount()
   if (observedAccount) account.current = observedAccount
-  const displayScope = JSON.stringify([config.apiBase, config.tenant, account.current, client.currentDocId(), client.state.head])
+  const displayScope = JSON.stringify([config.apiBase, config.tenant, account.current, client.currentDocId(), client.state.head, logoutGeneration.current])
   const scopeIdentity = useRef({ key: displayScope, value: {} })
   if (scopeIdentity.current.key !== displayScope) scopeIdentity.current = { key: displayScope, value: {} }
   useEffect(() => {
@@ -275,6 +278,26 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   latest.current = { document: live.draft?.document, head: client.state.head, docId: client.currentDocId() }
   useEffect(() => client.subscribe(() => refreshHead(value => value + 1)), [client])
   useEffect(() => {
+    // Lab retains its hidden views while logout awaits the provider redirect.
+    // Use the explicit lifecycle event, since a 401 must keep renewal possible.
+    const offLogout = subscribeBeforeLogout(() => {
+      logoutGeneration.current += 1
+      explicitlySignedOut.current = true
+      account.current = null
+      submissionIntent.current = null
+      streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() })
+      streams.current.clear()
+      setOutcomeUnknown(false)
+      setRunMessage('')
+      refreshHead(value => value + 1)
+    })
+    const offStored = subscribeTokenStored(() => {
+      explicitlySignedOut.current = false
+      refreshHead(value => value + 1)
+    })
+    return () => { offLogout(); offStored() }
+  }, [])
+  useEffect(() => {
     mounted.current = true
     const resumeOnFocus = () => streams.current.forEach(stream => {
       labValueStore.resumeIfAuthChanged(stream.runId)
@@ -286,7 +309,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() }); streams.current.clear()
     }
   }, [])
-  const runSnapshot = () => labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
+  const runSnapshot = () => explicitlySignedOut.current ? '' : labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
     && (run.run_scope === undefined || run.run_scope === scopeIdentity.current.value)
     && run.graph_revision === client.state.head).map(run => run.id).join(',')
   const matchingRuns = useSyncExternalStore(labValueStore.subscribeRuns, runSnapshot)
@@ -294,7 +317,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const activeRunStatus = useRunStatus(labValueStore, valueRunId)
   const localTiming = useRun(labValueStore, 'local')?.timing
   async function runSaved() {
-    if (submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
+    if (explicitlySignedOut.current || submissionPending.current || !client.state.headLoaded || client.state.head == null || !live.ready) return
     submissionPending.current = true
     setSubmitting(true); setRunMessage('')
     const { docId, head, document } = latest.current
@@ -426,7 +449,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         <section className="lab-graph-status" aria-label="Graph readiness">
           <p role="status">{validDocument ? 'Ready' : 'No valid graph'}</p>
           {live.problems.length > 0 && <ul>{live.problems.map((problem, index) => <li key={index}>{problem}</li>)}</ul>}
-          <button type="button" disabled={!validDocument || (!onRun && (!client.state.headLoaded || client.state.head == null || submitting))}
+          <button type="button" disabled={!validDocument || (!onRun && (explicitlySignedOut.current || !client.state.headLoaded || client.state.head == null || submitting))}
             aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
             {outcomeUnknown ? 'Recover previous run' : onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
