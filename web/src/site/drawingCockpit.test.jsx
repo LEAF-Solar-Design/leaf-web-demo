@@ -861,7 +861,7 @@ describe('CockpitStatus', () => {
     )
     const status = screen.getByTestId('cockpit-status')
     const [x, y] = status.querySelectorAll('.cockpit-coord b')
-    expect(x.textContent).toBe('—')
+    expect(x.textContent).toBe('N/A')
     expect(status.textContent).toContain('3 rendered paths · 1 layer')
     expect(status.textContent).toContain('sel A1')
 
@@ -916,14 +916,14 @@ describe('CockpitStatus', () => {
     expect(screen.getByTestId('cockpit-status').textContent).toContain('2 rendered paths · 1 layer')
   })
 
-  it('reads "no selection" with nothing selected and holds "—" without a viewer', async () => {
+  it('reads "no selection" with nothing selected and holds "N/A" without a viewer', async () => {
     const ground = document.createElement('div')
     document.body.appendChild(ground)
     render(<CockpitStatus ground={ground} viewerRef={{ current: null }} />)
     move(ground, 5, 5)
     await nextFrame()
     const status = screen.getByTestId('cockpit-status')
-    expect(status.querySelector('.cockpit-coord b').textContent).toBe('—')
+    expect(status.querySelector('.cockpit-coord b').textContent).toBe('N/A')
     expect(status.textContent).toContain('no selection')
     ground.remove()
   })
