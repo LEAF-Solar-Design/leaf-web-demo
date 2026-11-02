@@ -5490,6 +5490,254 @@ _SIP_EARLY_POLICY_IDS = (
 )
 
 
+@pytest.mark.parametrize("fail_fast", [False, True])
+@pytest.mark.parametrize("smoke_status", ["PASS", "FAIL", "UNAVAILABLE", "SKIP"])
+def test_service_smoke_phase_barrier_and_full_control_parity(tmp_path, monkeypatch, capsys, fail_fast, smoke_status):
+    g = _load_runner()
+    names = ["other-full-control", "web-build", "web-page-service-smoke",
+             "harness-tsc-noemit", "server-campaign-dxf-inventory"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, smoke_status if suite.id == "web-page-service-smoke" else "PASS",
+                        "-", 0.01, note="fixture diagnostics")
+    def prerequisites(*_args, **_kwargs):
+        seen.append("prerequisites")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", prerequisites)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 1, 3, fail_fast,
+        early_feedback=True, before_heavy_command=["trusted-ci"])
+    expected = ["harness-tsc-noemit", "server-campaign-dxf-inventory", "prerequisites", "web-page-service-smoke"]
+    if smoke_status == "PASS":
+        expected += ["web-build", "other-full-control"]
+        assert [r.suite.id for r in results] == names
+    else:
+        assert "heavy_started=0" in capsys.readouterr().out
+        assert next(r for r in results if r.suite.id == "web-page-service-smoke").status != "PASS"
+    assert seen == expected
+    assert set(attempts.values()) == {1}
+    assert len(seen) == len(set(seen))
+
+
+@pytest.mark.parametrize("fail_fast", [False, True])
+def test_service_smoke_early_red_collects_both_failures(tmp_path, monkeypatch, capsys, fail_fast):
+    g = _load_runner()
+    names = ["web-page-service-smoke", "web-build", "harness-tsc-noemit", "server-campaign-dxf-inventory"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "FAIL", "err", 0.01, note=f"independent error {suite.id}")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("prerequisites started"))
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 3, fail_fast,
+        early_feedback=True, before_heavy_command=["trusted-ci"])
+    assert set(seen) == set(names[2:]) and len(seen) == 2
+    assert len(results) == 2 and set(attempts.values()) == {1}
+    output = capsys.readouterr().out
+    for name in names[2:]:
+        assert f"GATE_RESULT id={name} status=FAIL" in output
+        assert f"independent error {name}" in output
+
+
+def test_service_smoke_prerequisite_failure_starts_no_service(tmp_path, monkeypatch):
+    g = _load_runner()
+    names = ["web-page-service-smoke", "web-build", "harness-tsc-noemit"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=17))
+    with pytest.raises(g.HeavyPrerequisitesFailed) as raised:
+        g.run_suites_parallel(suites, tmp_path, 2, 0, False,
+            early_feedback=True, before_heavy_command=["trusted-ci"])
+    assert raised.value.status == 17 and seen == ["harness-tsc-noemit"]
+
+
+def test_service_smoke_row_registration_is_unique_and_mandatory():
+    g = _load_runner()
+    suites = g.build_suites()
+    rows = [s for s in suites if s.id == "web-page-service-smoke"]
+    assert len(rows) == 1
+    row = rows[0]
+    assert row.cwd == g.WEB and row.timeout_s == 600
+    assert row.uses_database and row.db_gated and row.requires_linux
+    assert not row.opt_in_env and not row.db_deferred
+    assert row.id not in g._EARLY_FEEDBACK_SUITES and len(g._EARLY_FEEDBACK_SUITES) == 15
+    assert row.argv[1:] == ["--no-install", "playwright", "test", "--config", "playwright.page-service.config.mjs", "--workers=1"]
+    assert all(not any("page-service.config" in arg or "project-page.service" in arg for arg in s.argv)
+               for s in suites if s.id != row.id)
+    manifest = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text())
+    assert manifest["mandatory_suite_ids"].count(row.id) == 1
+    # The new filename cannot be collected by existing Playwright default patterns.
+    assert not re.search(r"\.(spec|test)\.", "project-page.service.mjs")
+
+
+def test_service_smoke_non_linux_row_is_unavailable_before_database_probe(tmp_path, monkeypatch):
+    g = _load_runner()
+    row = next(s for s in g.build_suites() if s.id == "web-page-service-smoke")
+    monkeypatch.setattr(g.sys, "platform", "darwin")
+    monkeypatch.setattr(g, "probe_platform_db", lambda: pytest.fail("database probe on wrong OS"))
+    result = g.run_suite(row, tmp_path)
+    assert result.status == "UNAVAILABLE"
+    assert "linux-only service smoke" in result.note
+    assert result.log_path.read_text().strip() == result.note
+
+
+@pytest.mark.parametrize("early", [False, True])
+def test_service_smoke_non_linux_row_main_fails_and_blocks_serial_heavy(tmp_path, monkeypatch, early):
+    g = _load_runner()
+    smoke = g.Suite("web-page-service-smoke", "smoke", "script", tmp_path, ["fixture"], None, requires_linux=True)
+    heavy = g.Suite("web-build", "heavy", "script", tmp_path, ["fixture"], None)
+    monkeypatch.setattr(g, "build_suites", lambda: [heavy, smoke])
+    monkeypatch.setattr(g, "migrate_gate_database", lambda _suites: None)
+    monkeypatch.setattr(g.sys, "platform", "darwin")
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("heavy child started"))
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    output = tmp_path / "result.json"
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--jobs", "1", "--retry", "0",
+        "--result-json", str(output), "--log-dir", str(tmp_path)] + (["--early-feedback"] if early else []))
+    assert g.main() == 1
+    document = json.loads(output.read_text())
+    assert document["any_fail"] is True
+    assert [(r["id"], r["status"]) for r in document["results"]] == [(smoke.id, "UNAVAILABLE")]
+
+
+def _load_page_smoke_producer():
+    spec = importlib.util.spec_from_file_location("page_smoke_producer", SCRIPTS / "page_editor_service_smoke.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+@pytest.mark.parametrize("host,database,code,marker", [
+    ("win32", "postgresql://inert", 2, "LINUX_REQUIRED"),
+    ("darwin", "", 2, "LINUX_REQUIRED"),
+    ("linux", "", 3, "DATABASE_REQUIRED"),
+    ("linux", "  ", 3, "DATABASE_REQUIRED"),
+])
+def test_producer_rejects_before_optional_imports(monkeypatch, capsys, host, database, code, marker):
+    producer = _load_page_smoke_producer()
+    monkeypatch.setattr(producer.sys, "platform", host)
+    monkeypatch.setenv("DATABASE_URL", database)
+    monkeypatch.setattr(producer, "load_package", lambda *_args: pytest.fail("optional imports reached"))
+    monkeypatch.setattr(producer, "scrubber", lambda *_args: pytest.fail("logging reached"))
+    assert producer.main([]) == code
+    assert f"PAGE_SMOKE {marker}" in capsys.readouterr().err
+
+
+def test_service_smoke_retains_redacted_producer_failure(tmp_path, monkeypatch):
+    g = _load_runner()
+    row = g.Suite("web-page-service-smoke", "smoke", "script", tmp_path, ["fixture"], None)
+    secret = "postgresql://fixture:very-private-password@127.0.0.1/smoke"
+    def child(*_args, **kwargs):
+        directory = Path(kwargs["env"]["LEAF_PAGE_SMOKE_DIR"])
+        (directory / "server.log").write_text(f"PAGE_SMOKE START_OR_RUN_FAILED\nConnection refused: {secret}\n")
+        return SimpleNamespace(returncode=1, stdout="WebServer failed to start", stderr="")
+    monkeypatch.setattr(g.subprocess, "run", child)
+    result = g.run_suite(row, tmp_path, reporting_disabled=True)
+    assert result.status == "FAIL"
+    log = result.log_path.read_text()
+    assert "Connection refused" in log and "START_OR_RUN_FAILED" in log
+    assert "very-private-password" not in log and "[redacted]" in log
+
+
+def test_service_smoke_producer_logs_startup_exception_without_stdout(tmp_path, monkeypatch, capsys):
+    producer = _load_page_smoke_producer()
+    g = _load_runner()
+    monkeypatch.setattr(producer.sys, "platform", "linux")
+    monkeypatch.setenv("DATABASE_URL", "postgresql://fixture:private-password@localhost/smoke")
+    monkeypatch.setattr(producer, "scrubber", lambda *_args: g.scrub_evidence)
+    # Avoid altering the test harness's global logging handlers.
+    monkeypatch.setattr(producer.logging, "basicConfig", lambda **_kwargs: None)
+    def fail(*_args):
+        raise RuntimeError("migration refused " + os.environ["DATABASE_URL"])
+    monkeypatch.setattr(producer, "serve", fail)
+    ready, log = tmp_path / "ready.json", tmp_path / "server.log"
+    assert producer.main(["--port", "8189", "--ready-file", str(ready), "--log-file", str(log)]) == 1
+    assert not ready.exists()
+    assert "migration refused" in log.read_text() and "private-password" not in log.read_text()
+    assert capsys.readouterr().out == ""
+
+
+def test_service_smoke_producer_mount_seed_and_atomic_ready(tmp_path, monkeypatch):
+    import asyncio
+    import uuid
+    producer = _load_page_smoke_producer()
+    ready = tmp_path / "ready.json"
+    org_id, binding_id, project_id = (uuid.uuid4() for _ in range(3))
+    calls = []
+    router = object()
+    def org(**kwargs):
+        assert isinstance(kwargs["org_id"], uuid.UUID)
+        assert kwargs["name"].startswith("Page service smoke ")
+        calls.append("org")
+        return SimpleNamespace(org_id=org_id)
+    def binding(org, provider, subject, **kwargs):
+        assert org == org_id and provider == "auth0" and uuid.UUID(subject)
+        assert kwargs == {"role": "owner"}
+        calls.append("binding")
+        return SimpleNamespace(binding_id=binding_id)
+    def project(org, actor, **kwargs):
+        assert (org, actor) == (org_id, binding_id) and uuid.UUID(kwargs["idempotency_key"])
+        calls.append("project")
+        return {"project": {"project_id": str(project_id)}}
+    class App:
+        def include_router(self, value):
+            assert value is router
+            calls.append("router")
+    class Server:
+        def __init__(self, config):
+            assert config.host == "127.0.0.1" and config.port == 8189
+            assert config.timeout_graceful_shutdown == 10
+            self.started = False
+        async def startup(self, sockets=None):
+            assert not ready.exists(), "ready must follow socket startup"
+            self.started = True
+        def run(self):
+            asyncio.run(self.startup())
+            document = json.loads(ready.read_text())
+            assert set(document) == {"schema", "api_origin", "org_id", "binding_id", "project_id", "project_name"}
+            assert document["schema"] == "leaf.page-smoke.v1"
+            assert document["api_origin"] == "http://127.0.0.1:8189"
+            assert (document["org_id"], document["binding_id"], document["project_id"]) == tuple(map(str, (org_id, binding_id, project_id)))
+            assert not list(tmp_path.glob("*.tmp"))
+            calls.append("ready")
+    monkeypatch.setattr(producer, "load_package", lambda *_args: None)
+    monkeypatch.setitem(sys.modules, "leaf_platform", SimpleNamespace(
+        db=SimpleNamespace(apply_migration=lambda: calls.append("migration"), reset_pool=lambda: calls.append("reset")),
+        store=SimpleNamespace(create_org=org, create_identity_binding=binding),
+        project_lifecycle=SimpleNamespace(create_blank_project=project)))
+    monkeypatch.setitem(sys.modules, "leaf_platform.api", SimpleNamespace(router=router))
+    monkeypatch.setitem(sys.modules, "fastapi", SimpleNamespace(FastAPI=App))
+    monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(Server=Server, Config=lambda app, **kwargs: SimpleNamespace(**kwargs)))
+    monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    producer.serve(SimpleNamespace(port=8189, ready_file=ready), time.monotonic())
+    assert os.environ["LEAF_AUTH_LIVE"] == "0"
+    assert calls == ["migration", "org", "binding", "project", "router", "ready", "reset"]
+    assert not ready.exists(), "normal shutdown must remove readiness"
+
+
+def test_service_smoke_log_scrubs_split_writes(monkeypatch):
+    import io
+    producer = _load_page_smoke_producer()
+    stream = io.StringIO()
+    monkeypatch.delenv("DATABASE_URL", raising=False)
+    log = producer.RedactedLog(stream, _load_runner().scrub_evidence)
+    log.write("password=")
+    log.write("private-value")
+    log.write("\nConnection refused\n")
+    assert "private-value" not in stream.getvalue()
+    assert "Connection refused" in stream.getvalue()
+
+
 @pytest.mark.parametrize("suite_id", _SIP_EARLY_POLICY_IDS)
 def test_sip_policy_feedback_red_blocks_heavy_without_retries(suite_id, tmp_path, monkeypatch, capsys):
     g = _load_runner()

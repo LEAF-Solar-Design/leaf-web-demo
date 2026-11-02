@@ -183,6 +183,7 @@ class Suite:
     database_skip_reasons: tuple[str, ...] = ()
     opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
     timeout_s: int = 900           # per-attempt subprocess timeout
+    requires_linux: bool = False  # unavailable, never a passing skip, elsewhere
 
 
 @dataclass
@@ -3857,6 +3858,10 @@ def build_suites() -> List[Suite]:
               "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.ios.config.mjs",
                "e2e/ios-ship-surface.spec.mjs", "--workers=1"], None),
+        Suite("web-page-service-smoke", "page editor real HTTP and PostgreSQL", "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config",
+               "playwright.page-service.config.mjs", "--workers=1"], None,
+              uses_database=True, db_gated=True, requires_linux=True, timeout_s=600),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
@@ -4848,6 +4853,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
               reporting_disabled: bool = False) -> Result:
     log_path = log_dir / (f"{suite.id}.log" if attempt == 1
                           else f"{suite.id}.retry{attempt - 1}.log")
+    if suite.requires_linux and sys.platform != "linux":
+        note = "linux-only service smoke: Linux required"
+        log_path.write_text(note + "\n", encoding="utf-8")
+        return Result(suite, "UNAVAILABLE", "unavailable", 0.0, note=note, log_path=log_path)
 
     # DB-gated suites: probe first, SKIP-with-reason when unreachable. On
     # REACHABLE, inject the resolved DSN as DATABASE_URL for the child: the
@@ -4957,6 +4966,15 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             timeout_s += PROCESS_CAPTURE_DECODE_BUDGET_S
     except Exception as exc:
         capture_evidence = {"process_capture_errors": [f"capture_setup_failed:{type(exc).__name__}"]}
+    service_env = {}
+    service_log = None
+    if suite.id in _SERVICE_SMOKE_SUITES:
+        import uuid
+        service_dir = (log_dir / f"page-service-{uuid.uuid4().hex}").resolve()
+        service_dir.mkdir(parents=True)
+        service_log = service_dir / "server.log"
+        service_env = {"LEAF_PAGE_SMOKE_DIR": str(service_dir),
+                       "LEAF_PAGE_SMOKE_PYTHON": sys.executable}
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
@@ -4968,7 +4986,7 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             spawn = run_capture_command if capture_output is not None else subprocess.run
             proc = spawn(
                 spawn_command,
-                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env},
+                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env, **service_env},
                 capture_output=True, text=True, timeout=timeout_s,
                 shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
@@ -4992,6 +5010,15 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             spawn_err = f"{type(exc).__name__}: {str(exc)[:160]}"
             out = f"[SPAWN FAILURE] {spawn_err}"
             rc = 127
+        if service_log is not None:
+            try:
+                with service_log.open("rb") as diagnostic:
+                    diagnostic.seek(0, os.SEEK_END)
+                    diagnostic.seek(max(0, diagnostic.tell() - 64000))
+                    detail = diagnostic.read().decode("utf-8", errors="replace")
+            except OSError as exc:
+                detail = f"producer log unavailable: {type(exc).__name__}"
+            out = scrub_evidence(out + "\nPAGE_SMOKE producer diagnostics\n" + detail)
         logf.write(out)
     if capture_output is not None:
         capture_evidence, rc = capture_attempt_evidence(capture_output, rc)
@@ -5571,6 +5598,9 @@ _EARLY_FEEDBACK_SUITES = frozenset({
 })
 
 
+_SERVICE_SMOKE_SUITES = frozenset({"web-page-service-smoke"})
+
+
 class HeavyPrerequisitesFailed(Exception):
     def __init__(self, status, completed):
         self.status, self.completed = status, completed
@@ -5814,15 +5844,31 @@ def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
         if early_feedback:
             print(f"EARLY_FEEDBACK GREEN checks={len(early)}", flush=True)
         if before_heavy_command:
+            prerequisite_started = time.perf_counter()
             try:
                 status = subprocess.run(before_heavy_command, cwd=REPO, check=False).returncode
             except OSError as exc:
                 print(f"heavy prerequisites could not start: {type(exc).__name__}", flush=True)
                 status = 127
+            if any(s.id in _SERVICE_SMOKE_SUITES for s in remaining):
+                print(f"SERVICE_SMOKE prerequisites_exit={status} "
+                      f"prerequisites_s={time.perf_counter() - prerequisite_started:.3f}", flush=True)
             if status:
                 raise HeavyPrerequisitesFailed(status, completed)
+        smoke = [s for s in remaining if s.id in _SERVICE_SMOKE_SUITES]
+        remaining = [s for s in remaining if s.id not in _SERVICE_SMOKE_SUITES]
+        run_lanes(smoke, log_dir, jobs, 0, False, completed, state)
+        smoke_red = next((s.id for s in smoke if completed[s.id][0].status != "PASS"), None)
+        if smoke_red is not None:
+            state["stopped_after"] = smoke_red
+            result = completed[smoke_red][0]
+            if result.status == "SKIP":
+                result.note = f"service smoke not proven (SKIP): {result.note}"
+                result.status = "FAIL"
+            print(f"SERVICE_SMOKE RED after={smoke_red} heavy_started=0", flush=True)
         prelude, rest = plan_parallel_phases(remaining)
-        run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
+        if state["stopped_after"] is None:
+            run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
         # A fail-fast red in the prelude must not start any other suite.
         if state["stopped_after"] is None:
             run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
@@ -5945,6 +5991,7 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
         "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
         "reset_authored": s.reset_authored, "db_gated": s.db_gated,
         "uses_database": s.uses_database,
+        "requires_linux": s.requires_linux,
         "database_skip_reasons": list(s.database_skip_reasons),
         "opt_in_env": s.opt_in_env, "timeout_s": s.timeout_s,
     } for s in suites]
@@ -6319,7 +6366,8 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
         "suite_ids": [s.id for s in suites],
         "results": entries,
         "executed_total": sum(e["executed"] or 0 for e in entries),
-        "any_fail": execution_failure or any(r.status == "FAIL" for r in results),
+        "any_fail": execution_failure or any(r.status == "FAIL" or
+            (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results),
         "wall_seconds": round(wall, 1),
     }
     out = Path(path)
@@ -7172,13 +7220,14 @@ def main() -> int:
     attempts_by_id: dict = {}
     wall0 = time.perf_counter()
     prerequisite_failure = 0
+    phased = args.jobs > 1 or args.early_feedback or any(s.id in _SERVICE_SMOKE_SUITES for s in suites)
     try:
-      if args.jobs > 1 or args.early_feedback:
+      if phased:
         results, attempts_by_id = run_suites_parallel(
             suites, log_dir, args.jobs, args.retry, args.fail_fast,
             early_feedback=args.early_feedback,
             before_heavy_command=args.before_heavy_command)
-      for suite in suites if args.jobs == 1 and not args.early_feedback else ():
+      for suite in suites if not phased else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         record_attempt(res, log_dir, 1)
@@ -7240,7 +7289,8 @@ def main() -> int:
             execution_failure=bool(prerequisite_failure))
 
     # EXIT 0 iff every non-skipped gate passed.
-    any_fail = any(r.status == "FAIL" for r in results)
+    any_fail = any(r.status == "FAIL" or
+                   (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results)
     return 1 if any_fail or prerequisite_failure else 0
 
 
