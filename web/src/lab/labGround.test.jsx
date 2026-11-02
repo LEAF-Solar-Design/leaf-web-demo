@@ -145,11 +145,14 @@ describe('Lab rail selection and tab visibility', () => {
     await act(async () => {})
     await findCanvas()
     expect(screen.getByRole('tab', { name: 'Lab' })).toBeInTheDocument()
-    expect(subscribe).toHaveBeenCalledTimes(1)
+    // Shared surface authority and retained GraphView each own logout cleanup.
+    // Unauthorized transport remains a single shared surface subscription.
+    expect(subscribe).toHaveBeenCalledTimes(subscribe === subscribeBeforeLogout ? 2 : 1)
     const tokenStored = subscribeTokenStored.mock.calls[0][0]
     act(() => { localStorage.setItem('leaf.jwt', 'replacement'); tokenStored('replacement') })
     expect(screen.queryByRole('tab', { name: 'Lab' })).toBeNull()
-    act(() => { subscribe.mock.calls[0][0]() })
+    // auth.js publishes logout to every listener, including run-state fencing.
+    act(() => { for (const [listener] of subscribe.mock.calls) listener() })
     expect(normalizeProductSurface('lab')).toBe(DEFAULT_PRODUCT_SURFACE)
     await act(async () => { resolveOld({ state: 'on', posture: 'local' }) })
     expect(screen.queryByRole('tab', { name: 'Lab' })).toBeNull()
