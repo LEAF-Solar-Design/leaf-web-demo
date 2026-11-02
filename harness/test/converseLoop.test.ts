@@ -38,6 +38,66 @@ const PACKET = {
 /** A confirmation id only the (fake) app gate can produce. */
 const APP_MINTED_CID = "app-minted-confirmation-1";
 
+describe("private project photo inspection", () => {
+  const org = "11111111-1111-4111-8111-111111111111";
+  const project = "22222222-2222-4222-8222-222222222222";
+  const material = "33333333-3333-4333-8333-333333333333";
+  const bytes = Buffer.from([255, 216, 255, ...Buffer.from("DISTINCTIVE_PRIVATE_PIXELS"), 255, 217]);
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const common = { org_id: org, project_id: project, session_id: "app-session", turn_id: "app-turn",
+    source: { project_id: project, revision: 0, digest: null }, assignment_basis: "no_saved_page" };
+  const previewArgs = { op: "preview", material_id: material, expected_preview_sha256: hash,
+    expected_revision: 0, expected_digest: null };
+
+  it.each(["success", "deny", "throw", "foreign", "alias", "authority"])(
+    "keeps pixels and raw errors out of durable evidence (%s)", async mode => {
+      const { projectPhotoResult, PHOTO_FAILURE } = await import("../src/agent/projectPhotoInspection.js");
+      const appRun = new FakeAppRunClient();
+      const callback = vi.spyOn(appRun, "inspectProjectPhoto").mockImplementation(async (_tenant, _session, body) => {
+        if (mode === "throw") throw new Error(`RAW_BACKEND_ERROR ${bytes.toString("base64")}`);
+        return body.op === "catalog" ? { ...common, schema: "leaf.project-material-catalog.v1", next_cursor: null, page_count: 1,
+          materials: [{ material_id: material, name: "cake.jpg", media_type: "image/jpeg", byte_size: 100,
+            sha256: "b".repeat(64), preview_sha256: hash, width: 10, height: 10,
+            created_at: "2026-11-01T00:00:00Z", assignments: [] }] }
+          : { ...common, project_id: mode === "foreign" ? org : project, schema: "leaf.project-material-image.v1",
+            material_id: material, original_sha256: "b".repeat(64), preview_sha256: hash, sha256: hash,
+            media_type: "image/jpeg", byte_size: bytes.length, data: bytes.toString("base64"), assignments: [] };
+      });
+      const gate = new FakeGateClient();
+      const check = vi.spyOn(gate, "check").mockResolvedValue({ decision: mode === "deny" ? "deny" : "allow",
+        reason: "RAW_BACKEND_ERROR" });
+      const store = new FakeSessionStore();
+      const results: SpineToolResult[] = [];
+      const runner: SpineConverseRunner = { async *run(input) {
+        expect(await input.canUseTool("mcp__services__inspect_project_photo", {})).toMatchObject({ behavior: "deny" });
+        results.push(await input.tools.execute(mode === "alias" ? "mcp__services__inspect_project_photo" : "inspect_project_photo", { op: "catalog" }));
+        results.push(await input.tools.execute("inspect_project_photo", previewArgs));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+      } };
+      const loop = new ConverseLoop({ runner, appRun, gate, store });
+      const session = await loop.createOrGetSession(org, "photos");
+      const emitted: ConverseEvent[] = [];
+      const turn = await loop.handleMessage({ sessionId: session.session_id, tenantId: org, text: "Inspect my photo",
+        contextPacket: {}, ...(mode === "authority" ? {} : { authoritySessionId: "app-session", authorityTurnId: "app-turn" }),
+        onEvent: event => emitted.push(event) });
+      await turn.done;
+      const durable = JSON.stringify([emitted, await store.eventsAfter(session.session_id, 0), results]);
+      expect(durable).not.toContain(bytes.toString("base64"));
+      expect(durable).not.toContain("RAW_BACKEND_ERROR");
+      const projected = projectPhotoResult(results[1]!);
+      if (mode === "success") {
+        expect(projected.content.some(block => block.type === "image")).toBe(true);
+        expect(check).toHaveBeenCalledWith("inspect_project_photo", previewArgs, expect.objectContaining({
+          authoritySessionId: "app-session", authorityTurnId: "app-turn" }));
+        expect(callback).toHaveBeenCalledTimes(2);
+      } else {
+        expect(projected).toEqual({ content: [{ type: "text", text: PHOTO_FAILURE }], isError: true });
+        if (["deny", "alias", "authority"].includes(mode)) expect(callback).not.toHaveBeenCalled();
+      }
+    },
+  );
+});
+
 describe("private portfolio proposal projection", () => {
   const org = "11111111-1111-4111-8111-111111111111";
   const project = "22222222-2222-4222-8222-222222222222";

@@ -75,6 +75,19 @@ function envelopeFor(tool: string): ResultEnvelope {
 }
 
 export class FakeAppRunClient implements AppRunClient {
+  readonly photoInspectionCalls: Array<{ tenantId: string; sessionId: string;
+    body: import("../../agent/projectPhotoInspection.js").ProjectPhotoInspectionInput;
+    authority: { sessionId: string; turnId: string } }> = [];
+  photoInspectionResult: Record<string, unknown> = {};
+  async inspectProjectPhoto(
+    tenantId: string, sessionId: string,
+    body: import("../../agent/projectPhotoInspection.js").ProjectPhotoInspectionInput,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<Record<string, unknown>> {
+    this.methodLog.push("inspectProjectPhoto");
+    this.photoInspectionCalls.push({ tenantId, sessionId, body, authority });
+    return structuredClone(this.photoInspectionResult);
+  }
   readonly authorStageStatusCalls: Array<{ tenantId: string; changeSetId: string }> = [];
   /** Explicit tenant-scoped producer fixtures; a missing row never invents success. */
   readonly authorStages = new Map<string, Map<string, Record<string, unknown>>>();

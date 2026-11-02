@@ -39,6 +39,29 @@ from agent_policy import PolicyError  # noqa: E402
 SHIPPED = SERVER_DIR / "agent_policy.json"
 
 
+def test_photo_inspection_closed_read_only_contract():
+    from jsonschema import Draft7Validator
+    action = agent_policy.load_policy(SHIPPED).actions["inspect_project_photo"]
+    assert (action.rung, action.required_capability, action.policy) == (0, "converse", "auto")
+    assert action.tenant_tightenable is True
+    assert action.dispatch == {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/materials/inspect"]}
+    assert action.audit_extra == ()
+    validate = Draft7Validator(action.args_schema).is_valid
+    material = "33333333-3333-4333-8333-333333333333"
+    preview = {"op": "preview", "material_id": material, "expected_preview_sha256": "a" * 64,
+               "expected_revision": 0, "expected_digest": None}
+    assert validate({"op": "catalog"})
+    assert validate(preview)
+    assert validate({"op": "catalog", "cursor": material, "expected_revision": 7, "expected_digest": "b" * 64})
+    for body in ({}, {"op": "original"}, {"op": "catalog", "cursor": material},
+                 {"op": "catalog", "project_id": material}, {"op": "catalog", "uri": "https://invalid"},
+                 {"op": "catalog", "material_id": material}, {"op": "catalog", "expected_revision": 0},
+                 {**preview, "expected_digest": "a" * 64}, {**preview, "cursor": material},
+                 {**preview, "expected_revision": 1}, {**preview, "expected_preview_sha256": "A" * 64},
+                 {**preview, "material_id": "00000000-0000-0000-0000-000000000000"}):
+        assert not validate(body), body
+
+
 def _shipped_raw() -> dict:
     return json.loads(SHIPPED.read_text(encoding="utf-8"))
 
@@ -58,7 +81,7 @@ def test_shipped_catalog_loads_with_v1_shape():
         "request_confirmation", "read_platform_state", "run_read_tool",
         "run_write_tool", "submit_live_solve", "undo_drawing_version",
         "author_tool", "request_publication", "register_tool", "customize_platform",
-        "propose_overlay", "propose_project_page", "finish_project", "read_integration_data", "save_integration_element",
+        "propose_overlay", "propose_project_page", "inspect_project_photo", "finish_project", "read_integration_data", "save_integration_element",
     }
     assert pol.rate_limits == {"low": 120, "medium": 60, "high": 10}
     assert pol.approval_ttl_s == 300

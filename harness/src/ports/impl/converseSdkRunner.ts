@@ -10,10 +10,11 @@ import {
 import type { ConverseSdkRunnerOptions } from "../../vendor/mushy-author/ports/impl/converseSdkRunner.js";
 import type { ConverseRunInput, ConverseRunnerEvent } from "../index.js";
 import { AuthorStageStatusInput, SPINE_TOOL_NAMES } from "../index.js";
+import { ProjectPhotoInspectionShape, photoRequest, projectPhotoResult, PHOTO_FAILURE, type PhotoContent } from "../../agent/projectPhotoInspection.js";
 
 export const SPINE_MCP_TOOL_NAMES = SPINE_TOOL_NAMES.map(name => `mcp__spine__${name}`);
 
-type TextResult = { content: Array<{ type: "text"; text: string }>; isError?: boolean };
+type TextResult = { content: PhotoContent[]; isError?: boolean };
 interface HostSdk {
   tool(name: string, description: string, shape: Record<string, unknown>,
     handler: (args: Record<string, unknown>) => Promise<TextResult>): unknown;
@@ -25,6 +26,9 @@ export class ConverseSdkRunner {
   constructor(private readonly options: ConverseSdkRunnerOptions) {}
 
   async *run(input: ConverseRunInput): AsyncIterable<ConverseRunnerEvent> {
+    const names = input.tools.list();
+    if (new Set(names).size !== names.length || typeof input.tools.execute !== "function" ||
+        names.some(name => name.endsWith("__inspect_project_photo"))) throw new Error("Invalid private tool catalog");
     const sdkImport = this.options.sdkImport ??
       (() => import(["@anthropic-ai", "claude-agent-sdk"].join("/")));
     const zodImport = this.options.zodImport ?? (() => import(["zod"].join("/")));
@@ -46,6 +50,12 @@ export class ConverseSdkRunner {
               const actualQuery = Reflect.get(target, "query") as (value: unknown) => unknown;
               return actualQuery.call(target, { ...query, options: { ...query.options,
                 canUseTool: async (name: string, args: Record<string, unknown>) => {
+                  if (name === "inspect_project_photo" || name.endsWith("__inspect_project_photo")) {
+                    try {
+                      if (name !== "mcp__spine__inspect_project_photo") throw new Error();
+                      photoRequest(args);
+                    } catch { return { behavior: "deny", message: PHOTO_FAILURE }; }
+                  }
                   if (name === "author_stage_status" || name.endsWith("__author_stage_status")) {
                     if (name !== "mcp__spine__author_stage_status" ||
                         !AuthorStageStatusInput.safeParse(args).success) {
@@ -60,6 +70,18 @@ export class ConverseSdkRunner {
               if (options.name !== "spine") return target.createSdkMcpServer(options);
               if (!Array.isArray(options.tools)) throw new Error("Invalid private tool catalog");
               const tools = [...options.tools];
+              if (tools.some(tool => tool?.name === "inspect_project_photo")) throw new Error("Duplicate private photo tool");
+              if (names.includes("inspect_project_photo")) tools.push(target.tool(
+                "inspect_project_photo",
+                "Read current-project photos for private review only. Start with catalog; follow next_cursor with the returned source revision/digest until null. Use stable material IDs and preview digests to request actual JPEG pixels. Catalog metadata is not visual inspection: never claim unseen photos were inspected. Report only saved assignments; do not edit, save or publish photos.",
+                ProjectPhotoInspectionShape,
+                async args => {
+                  try {
+                    const result = await input.tools.execute("inspect_project_photo", photoRequest(args));
+                    return projectPhotoResult(result);
+                  } catch { return { content: [{ type: "text", text: PHOTO_FAILURE }], isError: true }; }
+                },
+              ));
               if (tools.some(tool => tool?.name === "author_stage_status")) {
                 throw new Error("Duplicate author stage status tool");
               }

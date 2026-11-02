@@ -306,8 +306,12 @@ def test_roles_file_gained_no_operator_role():
 # S35 extends only read_integration_data with bounded native action discovery.
 # PR2607 adds only private saved-portfolio proposals through the active turn.
 # Save, publish and operator authority remain separately enforced.
+# B02 adds only inspect_project_photo: tenant-tightenable, read-only, active-turn
+# catalog/JPEG inspection. Removing that entry reproduces the preceding pin
+# 6df63b574aa1130698de053541055bd550db676ad2c575a553e1caa2707b5df8;
+# every existing action and top-level policy setting remains identical.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "6df63b574aa1130698de053541055bd550db676ad2c575a553e1caa2707b5df8")
+    "542a65cab9e69b59390093821a29117bde9ef3496d05a4ffe776c578f967b9bf")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
@@ -322,6 +326,7 @@ FROZEN_TENANT_ACTIONS = {
     "customize_platform": "always-confirm",
     "propose_overlay": "auto",
     "propose_project_page": "auto",
+    "inspect_project_photo": "auto",
     "finish_project": "auto",
     "save_integration_element": "auto",
     "read_integration_data": "auto",
