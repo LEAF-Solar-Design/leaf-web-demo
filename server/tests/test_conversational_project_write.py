@@ -144,6 +144,7 @@ def real_custody(lane, selected, monkeypatch):
     import project_checkout_custody as custody
     c = custody_cases.lane.__wrapped__(monkeypatch)
     s = lane.s
+    selected.request["dwg"] = str(s.drawing)
     tenant = deps.TenantContext(str(s.org), subject="auth0|owner", authority_resolved=True)
     lane.principal["tenant"] = tenant
     c.tenant = tenant
@@ -164,6 +165,7 @@ def real_custody(lane, selected, monkeypatch):
     lease = project.CheckoutLease(s.org, s.project, s.drawing, "Browser", s.actor,
                                   now, now + timedelta(seconds=120), 7)
     state = project.CheckoutState(s.org, s.project, s.drawing, lease, 7, now)
+    c.state = state
     monkeypatch.setattr(deps, "find_tool", lambda name, *_a: lane.tools.get(name))
     monkeypatch.setattr(deps, "catalog_tool_digest", _MANIFEST)
     monkeypatch.setattr(deps, "catalog_tool_view", _TOOL_VIEW)
@@ -196,6 +198,28 @@ def test_real_custody_reaches_existing_canonical_producer(lane, selected, real_c
     assert accepted[5] == "checkout-custody:" + real_custody.issued["delegation_id"]
     assert accepted[-1]["execution_context"]["parent_intake_sha256"] == selected.bound["intake_sha256"]
     assert response.json()["job_id"] == str(lane.s.job)
+
+
+@pytest.mark.parametrize("released", [False, True])
+def test_real_custody_replay_checks_live_checkout_and_preserves_job(lane, selected, real_custody,
+                                                                  monkeypatch, released):
+    first = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
+    assert first.status_code == 202, first.text
+    accepted = lane.a.accepted[0][-1]
+    existing = {"job_id": first.json()["job_id"], "deleted_at": None,
+        "submission_fingerprint": accepted["submission_fingerprint"],
+        "execution_context": accepted["execution_context"]}
+    monkeypatch.setattr(canonical_jobs, "get_project_graph_job_by_key", lambda *_a, **_k: existing)
+    monkeypatch.setattr(project, "verify_at_admission", producer_cases.forbidden)
+    if released:
+        state = SimpleNamespace(**{**vars(real_custody.state), "checkout": None})
+        monkeypatch.setattr(project.graph_store(), "get_checkout", lambda *_a, **_k: state)
+    replay = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
+    if released:
+        assert replay.status_code == 403, replay.text
+    else:
+        assert replay.status_code == 202 and replay.json()["job_id"] == first.json()["job_id"]
+    assert len(lane.a.accepted) == 1
 
 
 @pytest.mark.parametrize("change", ["revoked", "foreign-subject", "unapproved-params", "caller-key"])
