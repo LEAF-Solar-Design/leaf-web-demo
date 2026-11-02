@@ -9,6 +9,61 @@ import campaign_acquisition_service as acquisition
 import campaign_release_service as runtime
 
 
+@pytest.mark.parametrize('workflow', [
+    '  Design feeder routing, parts and cost from this structured input.\n'
+    + 'Preserve every constraint and report unresolved requirements.\n' * 30 + 'Final constraint: café.  ',
+    'Deliver feeder_request.json unchanged.\nVerify the downloaded file.',
+])
+def test_compile_preserves_exact_request_without_claiming_existing_file_fulfills_it(monkeypatch, workflow):
+    from routers import campaigns
+
+    source = '{"feeders":[{"name":"F1","load":100}]}'
+    state = {'files': [{'path': 'feeder_request.json', 'content': source}]}
+    before = deepcopy(state)
+    monkeypatch.setattr(runtime, 'authority', lambda *a: ('org', 'project', 'actor'))
+    monkeypatch.setattr(campaigns, '_store', lambda: SimpleNamespace(
+        get_campaign=lambda *a: {'prompt': 'Original campaign goal'}))
+    monkeypatch.setattr(runtime, '_lifecycle', lambda: SimpleNamespace(project_snapshot=lambda *a: state))
+    finish = {'delivery_profile': 'cad_file', 'intended_user': 'Project owner',
+              'workflow': workflow, 'artifact_refs': ['feeder_request.json']}
+    contract = runtime.compile_finish('tenant', 'project', 'campaign', finish)
+
+    assert contract['requested_workflow'] == workflow
+    assert finish['workflow'] == workflow
+    assert contract['workflow'] != workflow
+    assert contract['scope_classification'] == {
+        'version': 1, 'capability': 'existing_artifact_delivery',
+        'requested_workflow_status': 'unverified'}
+    assert contract['selected_artifact'] == runtime.delivery.validate_bytes('feeder_request.json', source.encode())
+    assert len(contract['required_checks']) == 5
+    assert not any(key in contract for key in ('web_recipe', 'transform_recipe', 'cad_recipe'))
+    assert state == before
+
+
+@pytest.mark.parametrize('adapter', ['web', 'transform', 'cad'])
+def test_compile_preserves_requested_workflow_for_specialized_adapters(monkeypatch, adapter):
+    from routers import campaigns
+
+    workflow = 'Make CSV output.\nKeep the requested scope.'
+    artifact = runtime.delivery.validate_bytes('records.csv', b'name\nExample\n')
+    recipe = {'source_artifact': {'path': 'records.json'}}
+    state = {'files': [{'path': 'records.json', 'content': '[{"name":"Example"}]'}]}
+    monkeypatch.setattr(runtime, 'authority', lambda *a: ('org', 'project', 'actor'))
+    monkeypatch.setattr(campaigns, '_store', lambda: SimpleNamespace(
+        get_campaign=lambda *a: {'prompt': 'Original campaign goal'}))
+    monkeypatch.setattr(runtime, '_lifecycle', lambda: SimpleNamespace(project_snapshot=lambda *a: state))
+    monkeypatch.setattr(runtime.dxf_inventory, 'requested', lambda *a: adapter == 'cad')
+    monkeypatch.setattr(runtime.dxf_inventory, 'compile_recipe', lambda *a: (artifact, recipe))
+    monkeypatch.setattr(runtime.web_release, 'compile_recipe', lambda *a: (artifact, recipe))
+    contract = runtime.compile_finish('tenant', 'project', 'campaign', {
+        'delivery_profile': 'web_tool' if adapter == 'web' else 'cad_file',
+        'intended_user': 'Project owner', 'workflow': workflow, 'artifact_refs': ['records.json']})
+
+    assert contract['requested_workflow'] == workflow
+    assert contract[adapter + '_recipe'] == recipe
+    assert 'scope_classification' not in contract
+
+
 @pytest.mark.parametrize('failure', ['budget', 'ordinary', 'invalid_file'])
 def test_advance_records_failure_before_waiting_with_recovery_action(monkeypatch, failure):
     org, project, campaign, release_id, actor = [str(uuid.uuid4()) for _ in range(5)]
