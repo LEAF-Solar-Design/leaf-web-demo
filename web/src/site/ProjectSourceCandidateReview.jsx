@@ -26,10 +26,10 @@ export default function ProjectSourceCandidateReview({ controller }) {
       <div className="clone-dialog-head" style={{ flexShrink: 0 }}><span className="clone-dialog-title">{title}</span>
         <button type="button" className="chip-act" onClick={c.close}>Close</button></div>
       <div style={{ overflowY: 'auto', minHeight: 0, padding: 12 }}>
-        {native && <><p>iOS source supports creation only. Choose one through eight nonempty TXT or JSON project originals, at most 1 MiB each and 4 MiB total.</p>
+        {native && <><p>Creating iOS source requires one through eight nonempty TXT or JSON project originals, at most 1 MiB each and 4 MiB total.</p>
+          <p>Editing saved iOS source can use existing project source and data with no new originals. Review the selection explicitly; edits may select zero through eight new originals within the same limits.</p>
           <p>Only selected text or JSON references are used. Retained movies are unavailable to this source adapter; a transcript is a text reference, not video processing.</p>
-          <p>iOS app build, package, simulator/device runtime and delivery remain pending. Source download is unavailable.</p>
-          {c.createOnlyBlocked && <p role="status">iOS source currently supports creation only. Editing saved iOS source is unavailable.</p>}</>}
+          <p>iOS app build, package, simulator/device runtime and delivery remain pending. Source download is unavailable.</p></>}
         <label>Original requirements
           <textarea tabIndex={0} aria-label="Original requirements" value={frozen && row ? displayedIntent?.requirements || '' : c.requirements} readOnly={c.busy || frozen}
             onChange={(event) => c.setRequirements(event.target.value)} rows={5} style={{ width: '100%', boxSizing: 'border-box' }} />
@@ -47,10 +47,10 @@ export default function ProjectSourceCandidateReview({ controller }) {
             </label>{problem && <p>{problem}</p>}</div>
           })}
           {c.selectionProblem && <p role="alert">{c.selectionProblem}</p>}
-          {!c.selectionReviewed && c.materialsComplete && <><p>{native ? 'Review the selection and choose supported TXT or JSON originals within the limits.' : 'The originals need a reviewed selection. Choose supported originals within the limits or explicitly continue with the brief only.'}</p>
+          {!c.selectionReviewed && c.materialsComplete && <><p>{native ? (c.sourceOperation === 'edit' ? 'Review the selection. Use no new originals to keep the existing project source and data, or choose supported TXT or JSON originals within the limits.' : 'Review the selection and choose supported TXT or JSON originals within the limits.') : 'The originals need a reviewed selection. Choose supported originals within the limits or explicitly continue with the brief only.'}</p>
             <button type="button" onClick={c.reviewSelection}>Use this reference selection</button></>}
         </fieldset>
-        {displayedIntent?.referenceNames && <p>Selected originals: {displayedIntent.referenceNames.join(', ') || 'None (plain brief)'}</p>}
+        {displayedIntent?.referenceNames && <p>Selected originals: {displayedIntent.referenceNames.join(', ') || (native && displayedIntent.source_operation === 'edit' ? 'None (existing source and data)' : 'None (plain brief)')}</p>}
         <button type="button" className="chip-act" disabled={disabled || frozen} onClick={c.refreshMaterials}>Refresh references</button>
         {c.candidates.length > 1 && <div aria-label="Saved source requests">{c.candidates.map((item, index) =>
           <button key={item.source_request_id} type="button" disabled={disabled || c.unknown} onClick={() => c.selectCandidate(item.source_request_id)}>
@@ -74,8 +74,8 @@ export default function ProjectSourceCandidateReview({ controller }) {
         <div className="clone-dialog-actions" style={{ display: 'flex', flexWrap: 'wrap', gap: 8 }}>
           {!native && <button type="button" className="chip-act" disabled={disabled || c.unknown || !c.sourceLoaded || !exportable}
             onClick={() => c.prepareDownload(witness)}>Prepare source download</button>}
-          <button type="button" className="chip-act" onClick={() => c.stage()} disabled={disabled || c.createOnlyBlocked || c.unknown || !c.sourceLoaded || !c.materialsComplete || !c.selectionReviewed || !!c.selectionProblem || !c.requirements.trim() || frozen}>Stage source</button>
-          {c.secretRefusal?.overridable && <button type="button" disabled={disabled || c.createOnlyBlocked} onClick={() => c.stage({ allowSecretOnce: true })}>Send anyway</button>}
+          <button type="button" className="chip-act" onClick={() => c.stage()} disabled={disabled || c.unknown || !c.sourceLoaded || !c.materialsComplete || !c.selectionReviewed || !!c.selectionProblem || !c.requirements.trim() || frozen}>Stage source</button>
+          {c.secretRefusal?.overridable && <button type="button" disabled={disabled || (native && (c.unknown || !c.sourceLoaded || !c.materialsComplete || !c.selectionReviewed || !!c.selectionProblem || frozen))} onClick={() => c.stage({ allowSecretOnce: true })}>Send anyway</button>}
           <button type="button" className="chip-act" disabled={disabled || !reviewable} onClick={() => c.confirm(witness)}>Confirm changes</button>
           <button type="button" className="chip-act" disabled={disabled || c.unknown || row?.state !== 'publishing'} onClick={() => c.recover(witness)}>Recover</button>
           <button type="button" className="chip-act" disabled={disabled || !reviewable} onClick={() => c.reject(witness)}>Reject</button>

@@ -30,7 +30,7 @@ describe('iOS source review', () => {
   { material_id: REQUEST, project_id: PROJECT, org_id: ORG, actor_binding_id: ORG,
     name: 'Teacher movie.mov', media_type: 'video/quicktime', byte_size: 55000000, sha256: 'f'.repeat(64) }]
 
-  it('shows truthful source-only phases, retained movie and create-only limits with no export affordance', async () => {
+  it('native_edit_ui shows create and edit guidance, retained movie and enabled saved-source editing', async () => {
     const fetch = vi.fn(async (url) => response(String(url).includes('/reference-files') ? { materials, next_cursor: null } : [native()]))
     vi.stubGlobal('fetch', fetch)
     const startAgentTurn = vi.fn()
@@ -44,20 +44,21 @@ describe('iOS source review', () => {
     expect(screen.getByRole('checkbox', { name: 'Authentic transcript.txt' })).toBeChecked()
     expect(screen.getByRole('checkbox', { name: 'Teacher movie.mov' })).toBeDisabled()
     expect(screen.getByText('Retained project material; unavailable for this source adapter.')).toBeVisible()
-    expect(screen.getByText(/Editing saved iOS source is unavailable/)).toBeVisible()
-    expect(screen.getByRole('button', { name: 'Stage source' })).toBeDisabled()
+    expect(screen.getByText(/Editing saved iOS source can use existing project source and data with no new originals/)).toBeVisible()
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Stage source' })).toBeEnabled())
     expect(screen.queryByRole('button', { name: 'Prepare source download' })).not.toBeInTheDocument()
     expect(screen.queryByRole('link')).not.toBeInTheDocument()
     expect(fetch.mock.calls.some(([url]) => String(url).includes('/export'))).toBe(false)
     expect(startAgentTurn).not.toHaveBeenCalled()
   })
 
-  it('requires a supported original and retains modal keyboard behavior', async () => {
+  it('native_edit_ui requires a supported original for create and retains modal keyboard behavior', async () => {
     vi.stubGlobal('fetch', vi.fn(async (url) => response(String(url).includes('/reference-files') ? { materials: [], next_cursor: null } : [])))
     render(<Host startAgentTurn={vi.fn()} sourceContext="native" />)
     const opener = screen.getByRole('button', { name: 'Build source' })
     opener.focus(); fireEvent.click(opener)
     await screen.findByText('Choose one through eight TXT or JSON originals.')
+    fireEvent.click(screen.getByRole('button', { name: 'Use this reference selection' }))
     expect(screen.getByRole('button', { name: 'Stage source' })).toBeDisabled()
     expect(screen.queryByText(/continue with the brief only/)).not.toBeInTheDocument()
     expect(screen.queryByRole('button', { name: 'Prepare source download' })).not.toBeInTheDocument()
@@ -66,6 +67,65 @@ describe('iOS source review', () => {
     fireEvent.keyDown(close, { key: 'Escape' })
     expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
     expect(opener).toHaveFocus()
+  })
+
+  it('native_edit_ui explicitly reviews zero new originals, stages an edit once and fences pending review', async () => {
+    let durable = native()
+    const posts = []
+    vi.stubGlobal('fetch', vi.fn(async (url, init = {}) => {
+      if (String(url).includes('/reference-files')) return response({ materials: [materials[1]], next_cursor: null })
+      if (init.method === 'POST') {
+        posts.push({ url: String(url), ...init })
+        durable = { ...native('awaiting_confirmation'), source_request_id: JSON.parse(init.body).source_request_id }
+      }
+      return response(String(url).endsWith('/requests') && init.method !== 'POST' ? [durable] : durable)
+    }))
+    const startAgentTurn = vi.fn(async () => ({ session_id: 'edit-session', turn_id: 'edit-turn' }))
+    render(<Host startAgentTurn={startAgentTurn} sourceContext="native" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    await screen.findByText('Private source saved')
+    const stage = screen.getByRole('button', { name: 'Stage source' })
+    expect(stage).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: 'Teacher movie.mov' })).toBeDisabled()
+    fireEvent.click(screen.getByRole('button', { name: 'Use this reference selection' }))
+    await waitFor(() => expect(stage).toBeEnabled())
+    act(() => { fireEvent.click(stage); fireEvent.click(stage) })
+    await screen.findByText('Source ready for review')
+    expect(posts).toHaveLength(1)
+    expect(JSON.parse(posts[0].body)).toEqual({ source_request_id: expect.any(String),
+      requirements: 'Create a quiet reading page.', source_operation: 'edit', material_refs: [], expected_base_commit: 'c'.repeat(40) })
+    expect(startAgentTurn).toHaveBeenCalledTimes(1)
+    expect(startAgentTurn.mock.calls[0][1]).toMatchObject({ browser_action: 'edit', source_profile: 'ios-swiftui-xcodegen-v1',
+      expected_base_commit: 'c'.repeat(40), material_refs: [] })
+    expect(stage).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Confirm changes' })).toBeEnabled()
+    expect(screen.getByText('Candidate version 1')).toBeVisible()
+    expect(screen.getByText(`Candidate digest: ${'a'.repeat(64)}`)).toBeVisible()
+    expect(screen.getByText('Sources/ContentView.swift')).toBeVisible()
+    expect(screen.queryByRole('link')).not.toBeInTheDocument()
+  })
+
+  it('native_edit_ui disables staging and confirmation after a stale edit has an unknown readback', async () => {
+    const fetch = vi.fn(async (url, init = {}) => {
+      if (String(url).includes('/reference-files')) return response({ materials, next_cursor: null })
+      if (init.method === 'POST') return new Response('{}', { status: 409 })
+      if (String(url).includes('/requests/')) return new Response('{}', { status: 404 })
+      return response([native()])
+    })
+    vi.stubGlobal('fetch', fetch)
+    const startAgentTurn = vi.fn(async () => ({ session_id: 'edit-session', turn_id: 'edit-turn' }))
+    render(<Host startAgentTurn={startAgentTurn} sourceContext="native" />)
+    fireEvent.click(screen.getByRole('button', { name: 'Build source' }))
+    const stage = screen.getByRole('button', { name: 'Stage source' })
+    await waitFor(() => expect(stage).toBeEnabled())
+    fireEvent.click(stage)
+    await screen.findByText('Publication outcome unknown. Refresh the original request.')
+    expect(stage).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Confirm changes' })).toBeDisabled()
+    expect(screen.getByRole('checkbox', { name: 'Authentic transcript.txt' })).toBeChecked()
+    expect(screen.getByText('Original request: Create a quiet reading page.')).toBeVisible()
+    expect(fetch.mock.calls.filter(([, init]) => init?.method === 'POST')).toHaveLength(1)
+    expect(startAgentTurn).toHaveBeenCalledTimes(1)
   })
 
   it('closes and clears the prior profile review, then reads the proper durable history on return', async () => {

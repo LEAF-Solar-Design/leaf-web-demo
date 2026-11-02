@@ -343,14 +343,114 @@ describe('Native source through the real API', () => {
     expect(JSON.parse(h.calls.find((call) => call.method === 'POST').body).material_refs).toHaveLength(4)
   })
 
-  it('refuses published Native edits before minting a turn or creating a request', async () => {
+  it.each([false, true])('native_edit_ui stages from published Native exact base once (new originals: %s)', async (withOriginal) => {
     const h = nativeSetup({ saved: [nativeRow({ state: 'published' })], materials: [transcript()] })
     await open(h)
-    expect(h.result.current.createOnlyBlocked).toBe(true)
+    if (!withOriginal) act(() => h.result.current.toggleMaterial(OTHER))
+    expect(h.result.current.sourceOperation).toBe('edit')
+    expect(h.result.current.selectionProblem).toBeNull()
+    await act(async () => { await Promise.all([h.result.current.stage(), h.result.current.stage()]) })
+    const posts = h.calls.filter((call) => call.method === 'POST')
+    expect(posts).toHaveLength(1)
+    const body = JSON.parse(posts[0].body)
+    expect(body).toEqual({ source_request_id: expect.any(String), requirements: brief, source_operation: 'edit',
+      expected_base_commit: 'c'.repeat(40), material_refs: withOriginal ? [{ material_id: OTHER, sha256: 'e'.repeat(64) }] : [] })
+    expect(posts[0].url).toBe(`/api/projects/${PROJECT}/native/source/requests`)
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(1)
+    expect(h.startAgentTurn).toHaveBeenCalledWith(brief, { source: 'author_panel', purpose: 'stage_authority',
+      browser_action: 'edit', source_request_id: body.source_request_id, material_refs: body.material_refs,
+      expected_base_commit: body.expected_base_commit, source_profile: 'ios-swiftui-xcodegen-v1' },
+    { allowSecretOnce: false, requireImmediateTurn: true })
+    const witness = h.result.current.candidate
+    await act(async () => { await h.result.current.confirm({ ...witness, version: witness.version + 1 }) })
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(1)
+    await act(async () => { await h.result.current.confirm(witness) })
+    expect(JSON.parse(h.calls.find((call) => call.url.endsWith('/confirm')).body)).toEqual({
+      receipt_digest: witness.receipt_digest, expected_version: witness.version, confirmation_id: expect.any(String) })
+  })
+
+  it.each([false, true])('native_edit_ui requires explicit empty selection review and permits it only for edits (published: %s)', async (published) => {
+    const h = nativeSetup({ saved: published ? [nativeRow({ state: 'published' })] : [] })
+    await open(h)
+    expect(h.result.current.selectionReviewed).toBe(false)
     await act(async () => { await h.result.current.stage() })
-    expect(h.result.current.error).toMatch(/creation only/)
     expect(h.startAgentTurn).not.toHaveBeenCalled()
+    act(() => h.result.current.reviewSelection())
+    expect(h.result.current.selectionProblem).toEqual(published ? null : 'Choose one through eight TXT or JSON originals.')
+    await act(async () => { await h.result.current.stage() })
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(published ? 1 : 0)
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(published ? 1 : 0)
+  })
+
+  it('native_edit_ui preserves the exact stale Native base and originals after 409 with no redispatch', async () => {
+    let id
+    const h = nativeSetup({ saved: [nativeRow({ state: 'published' })], materials: [transcript()], fetcher: (url, init) => {
+      // Main may have advanced through another profile; only the own-profile source is an edit base.
+      if (init.method === 'POST') { id = JSON.parse(init.body).source_request_id; return reply({ error: 'stale main' }, 409) }
+      if (url.includes('/requests/')) return reply({}, 404)
+      return undefined
+    } })
+    await open(h)
+    await act(async () => { await h.result.current.stage() })
+    expect(h.result.current.unknown).toBe(true)
+    expect(h.result.current.error).toMatch(/Refresh the original request/)
+    expect(h.result.current.intent).toMatchObject({ source_request_id: id, source_operation: 'edit', expected_base_commit: 'c'.repeat(40),
+      material_refs: [{ material_id: OTHER, sha256: 'e'.repeat(64) }], referenceNames: ['Authentic transcript.txt'] })
+    expect(h.result.current.selected).toEqual([OTHER])
+    expect(h.result.current.materials).toEqual([transcript()])
+    await act(async () => { await h.result.current.stage(); await h.result.current.refresh(); await h.result.current.stage() })
+    expect(h.result.current.unknown).toBe(true)
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(1)
+    expect(h.calls.filter((call) => call.method === 'POST')).toHaveLength(1)
+    expect(h.calls.filter((call) => call.url.endsWith(`/native/source/requests/${id}`)).length).toBeGreaterThanOrEqual(2)
+    expect(h.calls.every((call) => call.url.includes('/native/source/') || call.url.includes('/reference-files'))).toBe(true)
+  })
+
+  it.each(['account', 'project', 'profile'])('native_edit_ui fences late edit POST after %s replacement', async (change) => {
+    const gate = deferred()
+    let id
+    const h = nativeSetup({ saved: [nativeRow({ state: 'published' })], materials: [transcript()], fetcher: (url, init) => {
+      if (init.method === 'POST') { id = JSON.parse(init.body).source_request_id; return gate.promise }
+      return undefined
+    } })
+    await open(h)
+    let staging
+    act(() => { staging = h.result.current.stage() })
+    await waitFor(() => expect(id).toBeTruthy())
+    if (change === 'account') act(() => { signIn('replacement'); notifyActiveScopeChanged() })
+    if (change === 'project') h.rerender({ ...h.props, projectId: OTHER })
+    if (change === 'profile') h.rerender({ ...h.props, sourceContext: 'browser' })
+    await act(async () => { gate.resolve(reply(nativeRow({ source_request_id: id }))); await staging })
+    expect(h.result.current.candidate).toBeNull()
+    expect(h.result.current.intent).toBeNull()
+    expect(h.result.current.isOpen).toBe(false)
+    expect(h.calls.some((call) => call.url.includes('/requests/'))).toBe(false)
+  })
+
+  it.each(['account', 'project', 'profile'])('native_edit_ui does not dispatch an edit after %s changes during authority minting', async (change) => {
+    const gate = deferred()
+    const h = nativeSetup({ saved: [nativeRow({ state: 'published' })], materials: [transcript()], mint: () => gate.promise })
+    await open(h)
+    let staging
+    act(() => { staging = h.result.current.stage() })
+    expect(h.startAgentTurn).toHaveBeenCalledTimes(1)
+    if (change === 'account') act(() => { signIn('replacement'); notifyActiveScopeChanged() })
+    if (change === 'project') h.rerender({ ...h.props, projectId: OTHER })
+    if (change === 'profile') h.rerender({ ...h.props, sourceContext: 'browser' })
+    await act(async () => { gate.resolve(AUTHORITY); await staging })
     expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
+    expect(h.result.current.intent).toBeNull()
+  })
+
+  it.each([{ schema: 'leaf.browser-project-source.v1' }, { project_id: OTHER }])(
+    'native_edit_ui refuses foreign published readback as an edit base: %j', async (overrides) => {
+      const h = nativeSetup({ saved: [nativeRow({ state: 'published', ...overrides })], materials: [transcript()] })
+      await open(h)
+      await act(async () => { await h.result.current.stage() })
+      expect(h.result.current.sourceLoaded).toBe(false)
+      expect(h.result.current.candidates).toEqual([])
+      expect(h.startAgentTurn).not.toHaveBeenCalled()
+      expect(h.calls.some((call) => call.method === 'POST')).toBe(false)
   })
 
   it('reads the original Native ID after an unknown outcome without another model turn', async () => {

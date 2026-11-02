@@ -100,13 +100,70 @@ describe('Native project source real API transport', () => {
 
   it.each([
     { material_refs: [] }, { material_refs: Array(9).fill({ material_id: MATERIAL, sha256: 'e'.repeat(64) }) },
-    { source_operation: 'edit', expected_base_commit: 'b'.repeat(40) }, { expected_base_commit: 'b'.repeat(40) },
+    { source_operation: 'edit' }, { expected_base_commit: 'b'.repeat(40) },
     { actor_id: ORG }, { requirements: 'x'.repeat(16385) },
-  ])('refuses invalid Native create shapes without network: %j', async (overrides) => {
+  ])('native_edit_ui refuses invalid Native create and missing edit base shapes without network: %j', async (overrides) => {
     const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
     await expect(stageProjectSource(PROJECT, { ...body(), ...overrides }, options())).rejects.toThrow()
     expect(fetch).not.toHaveBeenCalled()
   })
+
+  it.each([false, true])('native_edit_ui sends exact Native edit base, references and authority headers (new originals: %s)', async (withOriginal) => {
+    const fetch = vi.fn(async () => reply(row())); vi.stubGlobal('fetch', fetch)
+    const edit = { ...body(), source_operation: 'edit', expected_base_commit: 'b'.repeat(40),
+      material_refs: withOriginal ? body().material_refs : [] }
+    expect(await stageProjectSource(PROJECT, edit, options({ materialMetadata: withOriginal ? [metadata()] : [] }))).toEqual(row())
+    expect(fetch).toHaveBeenCalledTimes(1)
+    const [url, init] = fetch.mock.calls[0]
+    expect(String(url)).toBe(`/api/projects/${PROJECT}/native/source/requests`)
+    expect(JSON.parse(init.body)).toEqual(edit)
+    expect(init).toMatchObject({ method: 'POST', cache: 'no-store', redirect: 'error', headers: {
+      Authorization: expect.stringMatching(/^Bearer /), 'Content-Type': 'application/json',
+      'X-Authority-Session-Id': authority.session_id, 'X-Authority-Turn-Id': authority.turn_id } })
+  })
+
+  it.each([undefined, null, '', 'b'.repeat(39), 'b'.repeat(41), 'B'.repeat(40), 'g'.repeat(40)])(
+    'native_edit_ui rejects invalid exact edit bases before network: %j', async (expected_base_commit) => {
+      const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+      await expect(stageProjectSource(PROJECT, { ...body(), source_operation: 'edit', expected_base_commit, material_refs: [] },
+        options({ materialMetadata: [] }))).rejects.toThrow()
+      expect(fetch).not.toHaveBeenCalled()
+    })
+
+  it.each([
+    { material_refs: [], materialMetadata: [metadata()] },
+    { material_refs: body().material_refs, materialMetadata: [] },
+    { material_refs: body().material_refs, materialMetadata: [metadata({ media_type: 'image/png' })] },
+    { material_refs: body().material_refs, materialMetadata: [metadata({ project_id: MATERIAL })] },
+    { material_refs: body().material_refs, materialMetadata: [metadata({ sha256: 'f'.repeat(64) })] },
+    { material_refs: [body().material_refs[0], body().material_refs[0]], materialMetadata: [metadata(), metadata()] },
+  ])('native_edit_ui rejects mismatched edit material metadata: %j', async ({ material_refs, materialMetadata }) => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(stageProjectSource(PROJECT, { ...body(), source_operation: 'edit', expected_base_commit: 'b'.repeat(40), material_refs },
+      options({ materialMetadata }))).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each(['scope', 'secret'])('native_edit_ui retains edit %s guard before network', async (guard) => {
+    const opts = options({ materialMetadata: [] })
+    const edit = { ...body(), source_operation: 'edit', expected_base_commit: 'b'.repeat(40), material_refs: [] }
+    if (guard === 'scope') signIn('replacement')
+    else edit.requirements = `api_key: ${'x'.repeat(24)}`
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(stageProjectSource(PROJECT, edit, opts)).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it.each([['browser', 'create'], ['browser', 'edit'], ['native', 'create']])(
+    'native_edit_ui preserves %s %s request parity', async (sourceContext, source_operation) => {
+      const value = row({ schema: `leaf.${sourceContext}-project-source.v1` })
+      const fetch = vi.fn(async () => reply(value)); vi.stubGlobal('fetch', fetch)
+      const request = { ...body(), source_operation, material_refs: sourceContext === 'browser' ? [] : body().material_refs,
+        ...(source_operation === 'edit' ? { expected_base_commit: 'b'.repeat(40) } : {}) }
+      await stageProjectSource(PROJECT, request, options({ sourceContext, ...(sourceContext === 'native' ? { materialMetadata: [metadata()] } : {}) }))
+      expect(String(fetch.mock.calls[0][0])).toBe(`/api/projects/${PROJECT}/${sourceContext}/source/requests`)
+      expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual(request)
+    })
 
   it.each([{ byte_size: 1048577 }, { byte_size: 0 }, { byte_size: -1 }, { media_type: 'video/quicktime' },
     { project_id: MATERIAL }, { sha256: 'f'.repeat(64) }, { name: '' }])('checks supplied reference metadata: %j', async (overrides) => {
