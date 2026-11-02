@@ -4,10 +4,11 @@ import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, w
 import type { Server } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHarness } from "../src/server.js";
 import { PROJECT_SOURCE_SCAFFOLD } from "../src/agent/projectSourceAuthoring.js";
+import { nativeProjectSourceProfile } from "../src/agent/nativeProjectSourceProfile.js";
 import { ProjectRepositoryEditCoordinator, type StagedProjectRepositoryEdit } from "../src/agent/projectRepositoryEditCoordinator.js";
 import { TenantRepoProviderImpl, type PgTenantRepoLeaseCoordinator } from "../src/ports/impl/tenantRepoProvider.js";
 import { TenantChangeRepo } from "../src/vendor/mushy-author/ports/impl/tenantChangeRepo.js";
@@ -29,6 +30,8 @@ const common = { tenant_id: authority.tenantId, organization_id: authority.organ
 const hash = (value: Buffer | string) => createHash("sha256").update(value).digest("hex");
 const raw = '{"nested":{"zero":0,"nothing":null,"items":[{"name":"Pear"},{"name":"Apple"}]}}\n';
 const page = 'import data from "../public/data/nested/items.json";\nexport default function Page() { return <main>{data.nested.items.map(x => <p key={x.name}>{x.name}</p>)}</main>; }\n';
+const nativeProfile = nativeProjectSourceProfile(authority.projectId);
+const swift = 'import SwiftUI\nstruct ContentView: View { var body: some View { List(["Pear", "Apple"], id: \\.self) { Text($0) } } }\n';
 function git(dir: string, args: string[]): string {
   return execFileSync("git", args, { cwd: dir, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim();
 }
@@ -73,7 +76,7 @@ describe("mounted first source author transaction with real private Git", () => 
     coordination = {
       recordStaged: vi.fn(async (request: Parameters<ProjectRepositoryEditCoordination["recordStaged"]>[0]) => {
         receipt = request.receipt; receiptDigest = request.receipt_digest;
-        return { contract, action: "record_staged", edit_id: editId, state: "staged", version: 1 } as const;
+        return { contract, action: "record_staged", edit_id: request.receipt.edit_id, state: "staged", version: 1 } as const;
       }),
       authorizePublish: vi.fn(async (request: Parameters<ProjectRepositoryEditCoordination["authorizePublish"]>[0]) => {
         if (confirmed || request.confirmation_id !== actor || request.actor_binding_id !== actor || request.receipt_digest !== receiptDigest) throw new Error("confirmation denied");
@@ -121,6 +124,159 @@ describe("mounted first source author transaction with real private Git", () => 
     expect(coordination.recordStaged).not.toHaveBeenCalled();
     expect(coordination.authorizePublish).not.toHaveBeenCalled();
   }
+  function seed(files: Record<string, string>) {
+    const work = join(root, "work");
+    for (const [path, content] of Object.entries(files)) {
+      mkdirSync(dirname(join(work, path)), { recursive: true });
+      writeFileSync(join(work, path), content);
+    }
+    git(work, ["add", "."]);
+    git(work, ["-c", "user.name=test", "-c", "user.email=test@leaf.invalid", "commit", "-qm", "baseline"]);
+    git(bare, ["fetch", work, "main:main"]);
+    base = git(bare, ["rev-parse", "main"]);
+  }
+  function nativeEditor() {
+    edit.mockImplementation(async input => {
+      expect(input.context).toContain(nativeProfile.context);
+      expect(input.context).toContain("Resources/Input/nested/items.json");
+      expect(readFileSync(join(input.repoDir, "Resources/Input/nested/items.json"), "utf8")).toBe(raw);
+      writeFileSync(join(input.repoDir, "Sources/ContentView.swift"), swift);
+      return { summary: "private native", changedFiles: ["deliberate-lie"] };
+    });
+  }
+
+  it("stages exact native scaffold, resource bytes and new Swift, then requires explicit publication", async () => {
+    nativeEditor();
+    const publish = vi.spyOn(TenantChangeRepo.prototype, "publishToMainObserved");
+    const response = await post({ ...body(), source_profile: nativeProfile.id });
+    expect(response.status).toBe(200);
+    const staged = await response.json() as StagedProjectRepositoryEdit;
+    const head = staged.receipt.staged_head_commit;
+    const bytes = (path: string) => execFileSync("git", ["show", `${head}:${path}`], { cwd: bare });
+    expect(staged.receipt.contract).toBe("leaf.project-repository-edit.v2");
+    expect(git(bare, ["rev-parse", `refs/leaf/changes/${editId}`])).toBe(head);
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+    expect(bytes("Sources/ContentView.swift")).toEqual(Buffer.from(swift));
+    expect(bytes("Resources/Input/nested/items.json")).toEqual(Buffer.from(raw));
+    for (const [path, content] of Object.entries(nativeProfile.scaffold)) expect(bytes(path)).toEqual(Buffer.from(content));
+    expect(bytes("project.yml").toString()).toContain(`private.leaf.project.p${authority.projectId.replace(/-/g, "")}`);
+    expect(bytes("PROMPT.md").toString()).toBe("Protected seed\n");
+    expect(bytes(".leaf/source-seed.json").toString()).toBe('{"seed":true}\n');
+    expect(staged.receipt.changed_paths).toEqual([...Object.keys(nativeProfile.scaffold), "Sources/ContentView.swift", "Resources/Input/nested/items.json"].sort());
+    const diff = execFileSync("git", ["-c", "diff.algorithm=myers", "-c", "diff.indentHeuristic=false", "diff", "--no-ext-diff", "--no-textconv", "--no-renames",
+      "--binary", "--full-index", "--no-color", "--src-prefix=a/", "--dst-prefix=b/", "--unified=3", base, head, "--"], { cwd: bare });
+    expect(staged.receipt.diff_digest).toBe(hash(diff));
+    expect(publish).not.toHaveBeenCalled();
+    const request = { ...common, confirmation_id: actor, receipt_digest: staged.receiptDigest, expected_version: 1, transition_key: "publish" };
+    expect((await post(request, "publish")).status).toBe(200);
+    expect((await post(request, "publish")).status).toBe(409);
+    expect(git(bare, ["rev-parse", "main"])).toBe(head);
+    expect(publish).toHaveBeenCalledTimes(1);
+  });
+
+  it("passes different native requirements and CSV data to the generic editor", async () => {
+    const requirements = "Create a quantity calculator using the supplied prices.";
+    const csv = "name,price\nBolt,2.75\n";
+    const calculator = 'import SwiftUI\nstruct ContentView: View { @State private var quantity = 0; var body: some View { VStack { Stepper("Quantity", value: $quantity); Text(String(Double(quantity) * 2.75)) } } }\n';
+    edit.mockImplementation(async input => {
+      expect(input.instruction).toBe(requirements);
+      expect(readFileSync(join(input.repoDir, "Resources/Input/prices.csv"), "utf8")).toBe(csv);
+      writeFileSync(join(input.repoDir, "Sources/ContentView.swift"), calculator);
+      return { summary: "done", changedFiles: [] };
+    });
+    const response = await post({ ...body(), source_profile: nativeProfile.id, requirements, instruction_digest: hash(requirements), material: [material("prices.csv", csv)] });
+    expect(response.status).toBe(200);
+    const staged = await response.json() as StagedProjectRepositoryEdit;
+    expect(execFileSync("git", ["show", `${staged.receipt.staged_head_commit}:Sources/ContentView.swift`], { cwd: bare }).toString()).toBe(calculator);
+    expect(execFileSync("git", ["show", `${staged.receipt.staged_head_commit}:Resources/Input/prices.csv`], { cwd: bare }).toString()).toBe(csv);
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+  });
+
+  it.each([null, 1, false, {}, [], "", "unknown", "IOS-SWIFTUI-XCODEGEN-V1"])("rejects unsupported profile %j before grants", async source_profile => {
+    expect((await post({ ...body(), source_profile })).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); expect(oauth.getGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it("explicit web choice has the same tree and evidence as the default", async () => {
+    const implicit = await post(body());
+    expect(implicit.status).toBe(200);
+    const first = await implicit.json() as StagedProjectRepositoryEdit;
+    const explicit = await post({ ...body(), source_profile: "web-next-static-v1", edit_id: "77777777-7777-4777-8777-777777777777" });
+    expect(explicit.status).toBe(200);
+    const second = await explicit.json() as StagedProjectRepositoryEdit;
+    expect(second.receipt.staged_tree).toBe(first.receipt.staged_tree);
+    expect(second.receipt.diff_digest).toBe(first.receipt.diff_digest);
+    expect(edit).toHaveBeenCalledTimes(2);
+  });
+
+  it.each([true, false])("preserves the other platform baseline when native=%s", async native => {
+    const baseline = native
+      ? { ...PROJECT_SOURCE_SCAFFOLD, "app/page.tsx": page, "public/data/nested/items.json": raw }
+      : { ...nativeProfile.scaffold, "Sources/ContentView.swift": swift, "Resources/Input/nested/items.json": raw };
+    seed(baseline);
+    if (native) nativeEditor();
+    const response = await post({ ...body(), source_profile: native ? nativeProfile.id : "web-next-static-v1" });
+    expect(response.status).toBe(200);
+    const staged = await response.json() as StagedProjectRepositoryEdit;
+    for (const [path, content] of Object.entries(baseline)) {
+      expect(execFileSync("git", ["show", `${staged.receipt.staged_head_commit}:${path}`], { cwd: bare })).toEqual(Buffer.from(content));
+    }
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+  });
+
+  it.each([true, false])("rejects changed-profile replay of an already staged edit when native=%s", async native => {
+    if (native) nativeEditor();
+    expect((await post({ ...body(), source_profile: native ? nativeProfile.id : "web-next-static-v1" })).status).toBe(200);
+    const head = git(bare, ["rev-parse", `refs/leaf/changes/${editId}`]);
+    expect((await post({ ...body(), source_profile: native ? "web-next-static-v1" : nativeProfile.id })).status).toBe(409);
+    expect(edit).toHaveBeenCalledTimes(1); expect(oauth.acquireGrant).toHaveBeenCalledTimes(1);
+    expect(coordination.recordStaged).toHaveBeenCalledTimes(1);
+    expect(git(bare, ["rev-parse", `refs/leaf/changes/${editId}`])).toBe(head);
+    expect(git(bare, ["rev-parse", "main"])).toBe(base);
+  });
+
+  it.each([true, false])("rejects changes to the other platform baseline when native=%s", async native => {
+    const otherPath = native ? "app/page.tsx" : "Sources/ContentView.swift";
+    seed({ [otherPath]: native ? page : swift });
+    edit.mockImplementation(async input => {
+      writeFileSync(join(input.repoDir, native ? "Sources/ContentView.swift" : "app/page.tsx"), native ? swift : page);
+      writeFileSync(join(input.repoDir, otherPath), "changed");
+      return { summary: "done", changedFiles: [] };
+    });
+    expect((await post({ ...body(), source_profile: native ? nativeProfile.id : "web-next-static-v1" })).status).toBe(409);
+    unchanged();
+  });
+
+  it.each(["Sources/old.swift", "sources/old.swift", "PROJECT.YML", "resources/input/NESTED/items.json", "Resources/Input"])("rejects native collision %s before grants", async path => {
+    seed({ [path]: "existing\n" });
+    expect((await post({ ...body(), source_profile: nativeProfile.id })).status).toBe(409);
+    expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
+  });
+
+  it.each(["missing", "empty", "web", "scaffold", "app", "material", "baseline", "delete", "entitlements", "scripts", "dependencies", "extra", "symlink", "executable", "file-limit", "count-limit", "total-limit"])("rejects native %s output using actual Git evidence", async mode => {
+    edit.mockImplementation(async input => {
+      const dir = input.repoDir, product = "Sources/ContentView.swift";
+      if (mode !== "missing") writeFileSync(join(dir, product), mode === "empty" ? " \n" : swift);
+      const extra: Record<string, string> = { web: "app/page.tsx", scaffold: "project.yml", app: "Sources/LeafProjectApp.swift",
+        material: "Resources/Input/nested/items.json", baseline: "PROMPT.md", entitlements: "Sources/entitlements.swift",
+        scripts: "Sources/scripts/run.swift", dependencies: "Sources/Package.swift", extra: "output.txt" };
+      if (extra[mode]) { mkdirSync(dirname(join(dir, extra[mode])), { recursive: true }); writeFileSync(join(dir, extra[mode]), "changed"); }
+      if (mode === "delete") rmSync(join(dir, ".leaf/source-seed.json"));
+      if (mode === "symlink") symlinkSync(join(dir, "Resources/Input/nested/items.json"), join(dir, "Sources/Link.swift"));
+      if (mode === "executable") {
+        if (process.platform !== "win32") chmodSync(join(dir, product), 0o755);
+        else { git(dir, ["add", product]); git(dir, ["update-index", "--chmod=+x", product]); }
+      }
+      if (mode === "file-limit") writeFileSync(join(dir, product), "x".repeat(1048577));
+      if (mode === "count-limit" || mode === "total-limit") {
+        for (let i = 0; i < (mode === "count-limit" ? 64 : 5); i++) writeFileSync(join(dir, `Sources/File${i}.swift`), "x".repeat(mode === "count-limit" ? 1 : 900000));
+      }
+      return { summary: "done", changedFiles: [] };
+    });
+    expect((await post({ ...body(), source_profile: nativeProfile.id })).status).toBe(409);
+    expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 0 }, stop_reason: "error" });
+    unchanged();
+  });
 
   it("commits exact nested material and scaffold, binds actual binary evidence, and publishes only once with confirmation", async () => {
     const publish = vi.spyOn(TenantChangeRepo.prototype, "publishToMainObserved");
@@ -204,7 +360,10 @@ describe("mounted first source author transaction with real private Git", () => 
       { ...original, material: Array.from({ length: 5 }, (_, i) => material(`${i}.txt`, "x".repeat(900000))) },
       ...["../x.json", "https://example/x.json", "CON.json", ".env.txt", "app.tsx", ".git/config.txt", "credentials.json"].map(path => ({ ...original, material: [{ ...first, path }] })),
     ];
-    for (const request of invalid) expect((await post(request)).status).toBe(409);
+    for (const request of invalid) {
+      expect((await post(request)).status).toBe(409);
+      expect((await post({ ...request, source_profile: nativeProfile.id })).status).toBe(409);
+    }
     expect(edit).not.toHaveBeenCalled(); expect(oauth.acquireGrant).not.toHaveBeenCalled(); unchanged();
   });
 
@@ -241,7 +400,7 @@ describe("mounted first source author transaction with real private Git", () => 
     expect(oauth.settleGrant).toHaveBeenCalledWith(authority.tenantId, "lease", { usage: { cost_tokens: 19 }, stop_reason: "end_turn" });
   });
 
-  it.each(["noop", "failure", "control", "untracked", "ignored", "scaffold", "material", "delete", "symlink", "wrong-path", "empty", "executable"])("rejects %s model output and settles the grant", async mode => {
+  it.each(["noop", "failure", "control", "untracked", "ignored", "scaffold", "material", "delete", "symlink", "wrong-path", "native", "empty", "executable"])("rejects %s model output and settles the grant", async mode => {
     edit.mockImplementation(async input => {
       const dir = input.repoDir;
       if (mode === "failure") throw new Error("MODEL PRIVATE ERROR test-only");
@@ -255,6 +414,7 @@ describe("mounted first source author transaction with real private Git", () => 
       if (mode === "delete") rmSync(join(dir, ".leaf/source-seed.json"));
       if (mode === "symlink") symlinkSync(join(dir, "public/data/nested/items.json"), join(dir, "app/link.ts"));
       if (mode === "wrong-path") { rmSync(join(dir, "app/page.tsx")); writeFileSync(join(dir, "app/page.jsx"), page); }
+      if (mode === "native") { mkdirSync(join(dir, "Sources")); writeFileSync(join(dir, "Sources/ContentView.swift"), swift); }
       if (mode === "executable") {
         if (process.platform !== "win32") chmodSync(join(dir, "app/page.tsx"), 0o755);
         else { git(dir, ["add", "app/page.tsx"]); git(dir, ["update-index", "--chmod=+x", "app/page.tsx"]); }
