@@ -173,3 +173,28 @@ it.each(['close', 'crash', 'surface', 'bridge unmount'])('real engine %s restore
   })
   expect(h.objects().index.drawingKey).toBe('console:a')
 })
+
+// APS/DXF producer shape: raw WCS insertion point, radians, kind-based children.
+const serverBlocks = () => ({
+  polylines: [],
+  blocks: { Fixture: { base: [10, 20, 0], count: 1, complete: true,
+    children: [{ kind: 'LINE', layer: '0', pts: [[10, 20, 0], [14, 22, 0]] }] } },
+  inserts: [{ handle: 'A100', name: 'Fixture', layer: 'Panels', x: 100, y: 200, z: 0,
+    rot: Math.PI / 2, scale: [-2, 3, 1], nrm: [0, 0, 1] }],
+})
+const blockBounds = { minX: 94, minY: 192, maxX: 100, maxY: 200 }
+
+it('Find resolves a server INSERT and focuses its projected bounds in the original scene without changing selection', () => {
+  const intake = serverBlocks(), before = structuredClone(intake)
+  const index = buildDrawingObjectIndex({ drawingKey: 'project:version', intake })
+  const { api, get } = setup(index)
+  const match = get().index.resolve('go to A100')
+  expect(match.status).toBe('unique')
+  expect(api.getDrawingScene().intake).toBe(intake)
+  act(() => { expect(get().focus(match.matches[0].id)).toEqual({ ok: true }) })
+  expect(api.frame).toHaveBeenLastCalledWith(blockBounds)
+  expect(api.setFocusMarker).toHaveBeenLastCalledWith(blockBounds)
+  expect(get().focusId).toBe('h:A100')
+  expect(get().selectedHandles).toEqual(['B'])
+  expect(intake).toEqual(before)
+})

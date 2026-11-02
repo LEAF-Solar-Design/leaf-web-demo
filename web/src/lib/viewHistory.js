@@ -1,3 +1,5 @@
+import { projectServerBlocks } from '../cadedit/engineIntake.js'
+
 // The drawing viewer's navigation history (S3, navigation profile rules R4
 // "Exit: Back versus Up" and R13 "Restore complete navigation state").
 //
@@ -13,7 +15,8 @@
 export const VIEW_HISTORY_LIMIT = 50
 
 /** World bounds {minX, minY, maxX, maxY} of every entity on one layer of an intake: polyline `pts`, insert
- *  `pt` and 3D face `p1..p4`, the same sources the Viewer fits to (Viewer.jsx). One pass per entity list, no
+ *  fallback `pt`, projected server block children and 3D face `p1..p4`. Complete blocks use their
+ *  child layers rather than an insertion marker. One pass per entity list, no
  *  allocation per point. A zero width or height is padded to 1 unit so a single point still frames. Null for
  *  a null layer, a missing intake, or a layer with no geometry. Lives here, not in viewerMath.js, so the main
  *  chunk never imports three.js (the Viewer is lazy). */
@@ -28,7 +31,11 @@ export function layerBounds(intake, layer) {
     if (p[1] > maxY) maxY = p[1]
   }
   for (const pl of intake.polylines || []) if (pl?.layer === layer) for (const p of pl.pts || []) grow(p)
-  for (const ins of intake.inserts || []) if (ins?.layer === layer) grow(ins.pt)
+  const blocks = projectServerBlocks(intake)
+  for (const pl of blocks.polylines) if (pl.layer === layer) for (const p of pl.pts) grow(p)
+  for (const ins of blocks.inserts) {
+    if (ins?.layer === layer && (intake.source === 'engine' || intake.source === 'bridge' || ins.incomplete !== false)) grow(ins.pt)
+  }
   for (const f of intake.faces3d || []) {
     if (f?.layer !== layer) continue
     grow(f.p1); grow(f.p2); grow(f.p3); grow(f.p4)
