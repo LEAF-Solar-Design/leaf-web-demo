@@ -600,6 +600,43 @@ def test_failed_suite_evidence_reports_no_matching_error(tmp_path):
         _evidence_result(g, log)])
 
 
+@pytest.mark.parametrize("marker", ["\u2718 26", "x 26", "1)"])
+def test_failed_suite_evidence_playwright_failure_beats_passing_policy_title(tmp_path, marker):
+    g = _load_runner()
+    log = tmp_path / "panels.log"
+    failure = f"  {marker} [chromium] \u203a e2e/actual.spec.mjs:42:3 \u203a selected project"
+    log.write_text(
+        "  \u2713 25 e2e/recovery-controls.spec.mjs:241:3 a failed policy read (10s)\n"
+        + failure + "\nError: locator.click: Test timeout of 120000ms exceeded.\n"
+        + "waiting for getByRole('button', {name: 'Save'})\n"
+        + "[WebServer] Circular dependency between chunks with runtime\n" * 80,
+        encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: " + failure
+    assert any("locator.click" in line for line in lines)
+    assert any("getByRole" in line for line in lines)
+    assert not any("[WebServer]" in line for line in lines)
+
+
+def test_failed_suite_evidence_does_not_call_a_passing_policy_case_an_error(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "passing-title.log"
+    log.write_text("  \u2713 25 e2e/policy.spec.mjs:2:3 refused upload after failed read\n",
+                   encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: none matched"
+
+
+def test_failed_suite_evidence_retains_real_server_errors_and_scrubs_them(tmp_path):
+    g = _load_runner()
+    log = tmp_path / "startup.log"
+    log.write_text("[WebServer] compiling\n[WebServer] Error: failed to start token=private\n",
+                   encoding="utf-8")
+    lines = g.failed_suite_evidence([_evidence_result(g, log)])
+    assert lines[1] == "  first error: [WebServer] Error: failed to start token=[redacted]"
+    assert "private" not in "\n".join(lines)
+
+
 @pytest.mark.parametrize("path_kind", ["missing", "absent", "unreadable"])
 def test_failed_suite_evidence_handles_unavailable_logs(tmp_path, path_kind):
     g = _load_runner()

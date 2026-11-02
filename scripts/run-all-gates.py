@@ -6699,11 +6699,23 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
             block = [heading, "  log is unavailable"]
         else:
             header = re.compile(r"^\$ (?:attempt \d+ @ |\(cwd=)")
+            # Dev-server progress/warnings can bury the browser failure. Keep
+            # genuine server errors, but exclude ordinary WebServer chatter.
+            server_error = re.compile(
+                r"(?i)(?:error:|exception:|traceback|fatal\b|failed to|could not|unhandled)")
             lines = [line for line in scrub_evidence(text).splitlines()
-                     if not header.match(line)]
-            first = next((line for line in strip_ansi(text).splitlines() if re.search(
+                     if not header.match(line) and not (
+                         line.lstrip().startswith('[WebServer]')
+                         and not server_error.search(line))]
+            playwright_failure = re.compile(r"^\s*(?:[\u2718\u00d7x]\s+\d+\b|\d+\)\s+)")
+            spec_path = re.compile(r"\S+\.spec\.[cm]?[jt]sx?(?::\d+){1,2}\b")
+            # Passing titles can contain words such as 'failed' or 'refused'.
+            # Prefer an actual Playwright failure marker with its source path.
+            first = next((line for line in lines if playwright_failure.search(line)
+                          and spec_path.search(line)), None)
+            first = first or next((line for line in lines if re.search(
                 r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b",
-                line) and not header.match(line)), "none matched")
+                line) and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), "none matched")
             nonempty = [line for line in lines if line.strip()]
             tail = nonempty[-tail_lines:] if tail_lines > 0 else []
             block = [heading, f"  first error: {scrub_evidence(first)[:400]}", "  tail:"]
