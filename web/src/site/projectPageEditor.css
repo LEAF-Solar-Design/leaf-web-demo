@@ -112,3 +112,10 @@
 .project-page-editor__proposal-review dl { margin: 0; font-size: 13px; line-height: 1.5; }
 .project-page-editor__proposal-review dt { font-weight: 600; margin-top: 8px; }
 .project-page-editor__proposal-review dd { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.project-page__content { max-width: var(--design-width, 48rem); display: flex; flex-direction: column; gap: var(--design-spacing, 0); }
+.project-page .project-page__headline { font-size: calc(clamp(2.5rem,8vw,5.5rem) * var(--design-scale, 1)); }
+.project-page__label, .project-page__status { font-family: var(--design-font, Arial, sans-serif); }
+.project-page__content { width: min(100%, var(--design-width, 48rem)); gap: var(--design-gap, var(--design-spacing, 0)); }
+.project-page__label, .project-page__status { font-size: calc(.875rem * var(--design-scale, 1)); }
+.project-page__description { font-size: calc(clamp(1rem, 2.5vw, 1.25rem) * var(--design-scale, 1)); }
+.project-page__status { color: var(--design-accent, var(--page-muted)); }

@@ -143,11 +143,11 @@ async function installBackend(page) {
 }
 
 async function openProject(page) {
-  await page.getByRole('button', { name: 'Open project or material', exact: true }).click()
+  await page.getByRole('button', { name: 'Project', exact: true }).click()
   const sidebar = page.getByRole('region', { name: 'Project sidebar', exact: true })
   const projects = sidebar.getByRole('region', { name: 'Workspace projects', exact: true })
   await projects.getByRole('button', { name: PROJECT.name, exact: true }).click({ timeout: 30_000 })
-  await page.getByRole('button', { name: 'Open project or material', exact: true }).click()
+  await page.getByRole('button', { name: 'Project', exact: true }).click()
   const editor = sidebar.getByRole('region', { name: 'Page editor', exact: true })
   await expect(editor).toBeVisible()
   return editor
@@ -310,8 +310,8 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     expect(css).toContain('.portfolio-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))')
     expect(css).toContain('.portfolio .portfolio-grid[data-gallery-layout="single"]{grid-template-columns:minmax(0,1fr)}')
     expect(css).toContain('@media(max-width:600px){.portfolio-grid{grid-template-columns:minmax(0,1fr)}')
-    expect(files['app/Gallery.jsx'].toString()).toContain('data-gallery-layout={galleryLayout || \'grid\'}')
-    expect(files['app/[slug]/page.jsx'].toString()).toContain('<Gallery images={c.images} galleryLayout={page.galleryLayout}/>')
+    expect(files['app/Gallery.jsx'].toString()).toMatch(/data-gallery-layout=\{page\.galleryLayout\s*\|\|\s*'grid'\}/)
+    expect(files['app/[slug]/page.jsx'].toString()).toContain('<Gallery page={page} category={c}/>')
     expect(JSON.parse(files['package.json'].toString()).dependencies.next).toBeTruthy()
 
     await layout().scrollIntoViewIfNeeded()
@@ -455,6 +455,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await expect(preview.getByRole('heading', { name: original.headline, exact: true })).toBeVisible()
     await page.getByRole('button', { name: 'Project', exact: true }).click()
     await page.getByRole('button', { name: 'Close Project', exact: true }).click()
+    await page.locator('.canvas-toolbar').getByRole('button', { name: 'Edit', exact: true }).click()
     const editHeadline = preview.getByRole('button', { name: 'Edit headline', exact: true })
     await editHeadline.scrollIntoViewIfNeeded()
     await expect(editHeadline).toBeVisible()
@@ -800,6 +801,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     await page.goto('/app?surface=browser')
     let editor = await openProject(page)
     await editor.getByRole('button', { name: 'Create a page', exact: true }).click()
+    await page.locator('.canvas-toolbar').getByRole('button', { name: 'Edit', exact: true }).click()
     const preview = page.locator('[data-ground="browser-asset"] .project-page')
     const editHeadline = preview.getByRole('button', { name: 'Edit headline', exact: true })
     await expect(editHeadline).toHaveText('Coming soon')
@@ -844,6 +846,7 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 1000 }], ['ph
     editor = await openProject(page)
     await expect(page.locator('[data-ground="browser-asset"] .project-page')).toHaveCount(0)
     await editor.getByRole('button', { name: 'Open page', exact: true }).click()
+    await page.locator('.canvas-toolbar').getByRole('button', { name: 'Edit', exact: true }).click()
     await expect(editHeadline).toHaveText('Something sweet is on the way.')
     await editHeadline.click()
     await expect(editor.getByRole('textbox', { name: 'Headline', exact: true })).toBeFocused()
