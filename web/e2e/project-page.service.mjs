@@ -135,6 +135,15 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
     await expect(preview).toHaveAttribute('data-theme', document.theme)
     await expect(preview).toHaveAttribute('data-alignment', document.alignment)
   }
+  const openSidebarForHeadline = async editor => {
+    // Opening a saved page activates its preview in View mode and dismisses
+    // Project. Enter Edit before preview selection can reopen the Sidebar.
+    await toolbar.getByRole('button', { name: 'Edit', exact: true }).click()
+    await expect(toolbar.getByRole('button', { name: 'Edit', exact: true })).toHaveAttribute('aria-pressed', 'true')
+    await preview.getByRole('button', { name: 'Edit headline', exact: true }).click()
+    await expect(editor).toBeVisible()
+    await expect(editor.getByRole('textbox', { name: 'Headline', exact: true })).toBeFocused()
+  }
   try {
     await page.goto('/app?surface=browser')
     let editor = await openProject(page, ready.project_name)
@@ -163,8 +172,7 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
     await readback(1, a)
     expect(calls.filter(call => call.method === 'GET' && call.path === pagePath).at(-1)).toMatchObject({ status: 200, revision: 1, document: a })
     await style('sidebar')
-    await preview.getByRole('button', { name: 'Edit headline', exact: true }).click()
-    await expect(editor.getByRole('textbox', { name: 'Headline', exact: true })).toBeFocused()
+    await openSidebarForHeadline(editor)
     for (const [field, label] of [['label', 'Page label'], ['headline', 'Headline'], ['description', 'Description'], ['status', 'Status text']]) {
       await editor.getByRole('textbox', { name: label, exact: true }).fill(b[field])
     }
@@ -180,14 +188,15 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
     await page.reload()
     editor = await openProject(page, ready.project_name)
     await editor.getByRole('button', { name: 'Open page', exact: true }).click()
-    await expect(editor).toBeVisible()
+    await visiblePreview(b)
+    await readback(2, b)
+    expect(calls.filter(call => call.method === 'GET' && call.path === pagePath).at(-1)).toMatchObject({ status: 200, revision: 2, document: b })
+    // Keep the persisted style: do not select Sidebar again after reload.
+    await openSidebarForHeadline(editor)
     for (const [field, label] of [['label', 'Page label'], ['headline', 'Headline'], ['description', 'Description'], ['status', 'Status text']]) {
       await expect(editor.getByRole('textbox', { name: label, exact: true })).toBeVisible()
       await expect(editor.getByRole('textbox', { name: label, exact: true })).toHaveValue(b[field])
     }
-    await visiblePreview(b)
-    await readback(2, b)
-    expect(calls.filter(call => call.method === 'GET' && call.path === pagePath).at(-1)).toMatchObject({ status: 200, revision: 2, document: b })
     const stale = await request.put(`${ready.api_origin}${pagePath}`, {
       headers: directHeaders, maxRedirects: 0, data: { expected_revision: 1, document: a },
     })
