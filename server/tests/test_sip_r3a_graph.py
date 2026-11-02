@@ -460,7 +460,7 @@ def test_sip_r3a_legacy_bytes():
         "schema_version": 1, "source_intake_sha256": source_hash, "units": deepcopy(UNITS)}}) == "ec73fc8a161f512cf3b8c554f4227b6f7547727a80f238e38b4f989f56b6b52c"
 
 
-# W1C-3 adds commit; fifteen supported tools, four creation tools.
+# SolarEdge acceptance joins the sixteen supported tools; four create entities.
 def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
     for name in ("run_project_graph_seed", "run_project_graph_commit", "project_graph_commit_provenance"):
         sentinel = object()
@@ -468,7 +468,8 @@ def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
         assert getattr(local, name)("forwarded") is sentinel
     assert adapter.SUPPORTED_TOOLS == {"solar-settings", "solar-panels-from-drawing",
         "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
-        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve"}
+        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve",
+        "solar-solaredge-accept"}
     root = Path(local.__file__).parent
     worker = (root / "canonical_worker.py").read_text(encoding="utf-8")
     assert "if tool_name in solar_project_graph.SUPPORTED_TOOLS:" in worker
