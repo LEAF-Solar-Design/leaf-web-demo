@@ -1,11 +1,7 @@
 import { useLayoutEffect, useRef, useState, version } from 'react'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { STUDIO_DRAWING_OCCLUDERS } from './drawingOccluders.js'
-import WorkspaceLayoutAsk from '../components/WorkspaceLayoutAsk.jsx'
-import { useSurfaceContract } from './useSurfaceContract.js'
-import { headerPosition, layoutProfile } from './workspaceLayout.js'
 import './workspaceEnvironment.css'
-import './workspaceLayout.css'
 
 // Next supplies React 19 while standalone consumers still use React 18.
 export const INERT_VALUE = Number(version.split('.')[0]) >= 19 ? true : ''
@@ -18,20 +14,7 @@ export const ENVIRONMENT_OCCLUDERS = Object.freeze([
 
 // Session memory belongs to this mounted authority scope, never to storage.
 export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', profiles = [], onSelect,
-  panel = 'none', onPanel, hasContent = false, activation = 0, sampleEntry, chooseRequest = 0, onEnter, onDescribe, onSignIn,
-  mock = true, canApplyLayout = false, children }) {
-  const contract = useSurfaceContract(profile, mock)
-  const committedHeader = headerPosition(contract?.toolbar?.workspaceHeader)
-  const layoutScope = JSON.stringify([scopeKey, profile])
-  const [layout, setLayout] = useState(() => ({ scope: layoutScope, open: false, preview: null }))
-  const activeLayout = layout.scope === layoutScope ? layout : { open: false, preview: null }
-  const effectiveHeader = headerPosition(activeLayout.preview ?? committedHeader)
-  const closeLayout = () => setLayout(current => current.scope === layoutScope && current.busy
-    ? current : { scope: layoutScope, open: false, preview: null })
-  useLayoutEffect(closeLayout, [layoutScope])
-  // The ribbon's existing resize listener republishes its moved band edge.
-  useLayoutEffect(() => { window.dispatchEvent(new Event('resize')) }, [effectiveHeader])
-  useEscapeOwner('workspace-layout', activeLayout.open, closeLayout, { layer: 'sheet' })
+  panel = 'none', onPanel, hasContent = false, activation = 0, sampleEntry, chooseRequest = 0, onEnter, onDescribe, onSignIn, children }) {
   const [memory, setMemory] = useState(() => ({ scopeKey, entered: {} }))
   if (memory.scopeKey !== scopeKey) setMemory({ scopeKey, entered: {} })
   const entered = memory.scopeKey === scopeKey && memory.entered[profile] === true
@@ -93,7 +76,7 @@ export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', pr
     viewport.current?.focus()
   }, [entered, panel, profile])
   return <>
-    <section className="workspace-environment" data-profile={profile} data-workspace-header={effectiveHeader} data-entered={entered ? 'true' : 'false'} aria-label={`${profile} environment`}>
+    <section className="workspace-environment" data-profile={profile} data-entered={entered ? 'true' : 'false'} aria-label={`${profile} environment`}>
       <div ref={viewport} tabIndex={-1} role="region" className="environment-focus" aria-label={`${profile} workspace`} />
       <div className="environment-backdrop" aria-hidden="true">{profile === 'ios' && <div className="environment-phone" />}</div>
       <div ref={chooser} className="environment-chooser" aria-hidden={entered ? 'true' : undefined} inert={entered ? INERT_VALUE : undefined}>
@@ -117,12 +100,7 @@ export default function WorkspaceEnvironment({ scopeKey, profile = 'browser', pr
         }}>Choose</button>
         <button ref={studioToggle} type="button" aria-expanded={panel === 'studio'} aria-controls="project-workspace-activity"
           onClick={() => panel === 'studio' ? close() : enter('studio')}>Studio</button>
-        {layoutProfile(profile) && <button type="button" aria-expanded={activeLayout.open} onClick={() => activeLayout.open ? closeLayout() : setLayout({ scope: layoutScope, open: true, preview: null })}>Layout</button>}
       </nav>
-      {layoutProfile(profile) && activeLayout.open && <WorkspaceLayoutAsk key={layoutScope} scopeKey={scopeKey} profile={profile}
-        mock={mock} canApplyLayout={canApplyLayout} position={committedHeader} onClose={closeLayout}
-        onBusyChange={busy => setLayout(current => current.scope === layoutScope ? { ...current, busy } : current)}
-        onPreview={preview => setLayout(current => current.scope === layoutScope ? { ...current, preview } : current)} />}
     </section>
     <div id="environment-project-panel" className="browser-project-panel" hidden={panel !== 'project'}
       inert={panel !== 'project' ? INERT_VALUE : undefined} role="region" aria-label="Project sidebar">

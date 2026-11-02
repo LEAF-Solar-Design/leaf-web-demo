@@ -230,17 +230,15 @@ async function exercisePhoneViewControls(page, info, phase) {
   await expect(page.locator('.viewer-title')).toContainText('cat.dwg')
   await exercisePhoneOverview(page, info, phase)
   const toolRail = page.getByRole('button', { name:'Tool rail', exact:true })
-  const studio = page.getByRole('region', { name:'Studio sidebar', exact:true })
   await expect(toolRail).toHaveAttribute('aria-expanded', 'false')
   await toolRail.click()
   await expect(toolRail).toHaveAttribute('aria-expanded', 'true')
-  await expect(studio).toBeVisible()
   await toolRail.click()
   await expect(toolRail).toHaveAttribute('aria-expanded', 'false')
-  await expect(studio).toBeHidden()
   await exercisePhoneOverview(page, info, `${phase}-rail-closed`)
   await page.getByRole('navigation', { name:'Workspace controls', exact:true })
     .getByRole('button', { name:'Studio', exact:true }).click()
+  const studio = page.getByRole('region', { name:'Studio sidebar', exact:true })
   await expect(studio).toBeVisible()
   await studio.getByRole('button', { name:'Close Studio', exact:true }).click()
   await expect(studio).toBeHidden()
@@ -282,13 +280,14 @@ async function expectDraftingBands(page, info, phase) {
       header:rect('header.top'), ribbon:rect('#drafting-ribbon'), toolbar:rect('.viewer-toolbar'),
       controls:rect('.environment-strip'), command:rect('.bar-dock') }
   })
-  // The workspace header precedes drafting tools, including a wrapped phone header.
+  // The ribbon and toolbar flow below the measured, potentially wrapped header.
+  // Navigation clearing the toolbar alone does not prove those bands are usable.
   await info.attach(`${phase}-initial-geometry`, { body:JSON.stringify(await measure(), null, 2), contentType:'application/json' })
   // Wait for the existing ResizeObservers to publish the active profile's band.
   await expect.poll(async () => {
     const g = await measure()
-    return g.controls.y >= g.header.bottom && g.ribbon.y >= g.controls.bottom
-      && g.toolbar.y >= g.ribbon.bottom
+    return g.ribbon.y >= g.header.bottom && g.toolbar.y >= g.ribbon.bottom
+      && g.controls.y >= Math.max(g.header.bottom, g.ribbon.bottom, g.toolbar.bottom)
       && g.controls.bottom <= g.command.y
   }).toBe(true)
   const geometry = await measure()
@@ -296,13 +295,8 @@ async function expectDraftingBands(page, info, phase) {
   expect(geometry.scroll).toBeLessThanOrEqual(geometry.width)
   expect(geometry.controls.x).toBe(0)
   expect(geometry.controls.width).toBe(geometry.width)
-  expect(geometry.controls.y).toBeGreaterThanOrEqual(geometry.header.bottom)
-  expect(geometry.ribbon.y).toBeGreaterThanOrEqual(geometry.controls.bottom)
+  expect(geometry.ribbon.y).toBeGreaterThanOrEqual(geometry.header.bottom)
   expect(geometry.toolbar.y).toBeGreaterThanOrEqual(geometry.ribbon.bottom)
-  if (geometry.width >= 1024) {
-    expect(geometry.ribbon.right).toBeGreaterThanOrEqual(geometry.width - 1)
-    expect(geometry.toolbar.right).toBeGreaterThanOrEqual(geometry.width - 1)
-  }
   for (const b of [geometry.header, geometry.ribbon, geometry.toolbar, geometry.controls, geometry.command]) {
     expect(b.width).toBeGreaterThan(0)
     expect(b.height).toBeGreaterThan(0)
@@ -316,44 +310,6 @@ async function expectDraftingBands(page, info, phase) {
   await expectCenterHit(page.locator('.bar-command-line .bar-field'))
 }
 
-async function exerciseHeaderLayoutPreview(page, info, phase) {
-  const controls = page.getByRole('navigation', { name:'Workspace controls', exact:true })
-  const layout = controls.getByRole('button', { name:'Layout', exact:true })
-  await expectCenterHit(layout)
-  await layout.click()
-  const panel = page.getByRole('region', { name:'Workspace layout', exact:true })
-  await expect(panel).toBeVisible()
-  const below = panel.getByRole('button', { name:'Below tools', exact:true })
-  await below.scrollIntoViewIfNeeded()
-  await expectCenterHit(below)
-  await below.click()
-  await expect(page.locator('.workspace-environment')).toHaveAttribute('data-workspace-header', 'below-tools')
-  const measure = () => page.evaluate(() => {
-    const rect = selector => {
-      const b = document.querySelector(selector).getBoundingClientRect()
-      return { x:b.x, y:b.y, right:b.right, bottom:b.bottom }
-    }
-    return { width:innerWidth, header:rect('header.top'), ribbon:rect('#drafting-ribbon'),
-      toolbar:rect('.viewer-toolbar'), controls:rect('.environment-strip'), command:rect('.bar-dock') }
-  })
-  await expect.poll(async () => {
-    const g = await measure()
-    return g.ribbon.y >= g.header.bottom && g.toolbar.y >= g.ribbon.bottom
-      && g.controls.y >= g.toolbar.bottom && g.controls.bottom <= g.command.y
-  }).toBe(true)
-  await info.attach(`${phase}-layout-below-geometry`, { body:JSON.stringify(await measure(), null, 2), contentType:'application/json' })
-  await page.screenshot({ path:info.outputPath(`${phase}-layout-below.png`) })
-  const cancel = panel.getByRole('button', { name:'Cancel preview', exact:true })
-  await cancel.scrollIntoViewIfNeeded()
-  await expectCenterHit(cancel)
-  await cancel.click()
-  await expect(page.locator('.workspace-environment')).toHaveAttribute('data-workspace-header', 'above-tools')
-  await panel.getByRole('button', { name:'Close layout', exact:true }).click()
-  await expect(panel).toHaveCount(0)
-  await expect(page.getByRole('region', { name:'Studio sidebar', exact:true })).toBeHidden()
-  await expectDraftingBands(page, info, `${phase}-layout-cancelled`)
-}
-
 for (const [size, viewport] of [['desktop', { width: 1440, height: 709 }], ['phone', { width: 390, height: 844 }]]) {
   test(`fresh workspace header opens and dismisses Projects at ${size}`, async ({ page }, info) => {
     page.setDefaultTimeout(15_000)
@@ -361,8 +317,6 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 709 }], ['pho
     const mutations = await backend(page)
     await page.goto('/app?surface=browser')
     const environment = page.locator('.workspace-environment')
-    // Next loads the workspace as a separate client chunk after the route shell.
-    await expect(environment).toBeVisible({ timeout:15_000 })
     const chooser = page.locator('.environment-chooser')
     const projects = page.getByRole('button', { name:/^Projects: change project\./ })
     const picker = page.locator('.proj-menu[role="menu"]')
@@ -477,9 +431,9 @@ for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['pho
   })
 }
 
-for (const [size, viewport] of [['desktop', { width: 1543, height: 884 }], ['wide-desktop', { width: 1600, height: 1000 }], ['short-desktop', { width: 1280, height: 480 }], ['phone', { width: 390, height: 844 }]]) {
+for (const [size, viewport] of [['desktop', { width: 1440, height: 900 }], ['wide-desktop', { width: 1600, height: 1000 }], ['phone', { width: 390, height: 844 }]]) {
   test(`docked workspace chrome remains usable at ${size}`, async ({ page }, info) => {
-    test.setTimeout(size === 'phone' ? 180_000 : 120_000)
+    test.setTimeout(120_000)
     page.setDefaultTimeout(15_000)
     await page.setViewportSize(viewport)
     const mutations = await backend(page)
@@ -534,7 +488,6 @@ for (const [size, viewport] of [['desktop', { width: 1543, height: 884 }], ['wid
       await close.click()
     }
     await expectDraftingBands(page, info, 'solar')
-    await exerciseHeaderLayoutPreview(page, info, 'solar')
     await expectPopulatedSolar(page, info, size === 'phone')
     if (size === 'phone') await exercisePhoneViewControls(page, info, 'solar')
     await controls.getByRole('combobox', { name:'Workspace profile', exact:true }).selectOption('cad')
@@ -556,7 +509,6 @@ for (const [size, viewport] of [['desktop', { width: 1543, height: 884 }], ['wid
     await expect(manage).toHaveAttribute('aria-selected', 'true')
     await expect(environment).toHaveAttribute('data-entered', 'true')
     await expectDraftingBands(page, info, 'cad-manage')
-    await exerciseHeaderLayoutPreview(page, info, 'cad-manage')
     if (size === 'phone') await exercisePhoneViewControls(page, info, 'cad-manage')
     await page.screenshot({ path:info.outputPath(`docked-${size}-cad-manage.png`) })
     const more = ribbon.getByRole('button', { name:'More panels', exact:true })
@@ -619,48 +571,3 @@ for (const [size, viewport] of [['desktop', { width: 1543, height: 884 }], ['wid
     expect(mutations.filter(request => /\/api\/(run|drawings\/.*\/(undo|redo|intake)|projects\/.*\/versions)/.test(request))).toEqual([])
   })
 }
-
-test('phone Objects disclosure clears view controls', async ({ page }, info) => {
-  test.setTimeout(90_000)
-  page.setDefaultTimeout(15_000)
-  await page.setViewportSize({ width:390, height:844 })
-  const mutations = await backend(page)
-  await page.goto('/app?surface=cad')
-  const controls = page.getByRole('navigation', { name:'Workspace controls', exact:true })
-  const studio = page.getByRole('region', { name:'Studio sidebar', exact:true })
-  for (const profile of ['cad', 'solar']) {
-    await controls.getByRole('combobox', { name:'Workspace profile', exact:true }).selectOption(profile)
-    await controls.getByRole('button', { name:'Studio', exact:true }).click()
-    await studio.getByRole('button', { name:'Close Studio', exact:true }).click()
-    await expect(studio).toBeHidden()
-    await expect(page.locator('.viewer-title')).toContainText('cat.dwg')
-    const mode = page.locator('.cockpit-view-mode')
-    const objects = page.locator('.drawing-objects-panel')
-    const summary = objects.locator('summary')
-    await expect(mode).toBeVisible()
-    await expect(objects).not.toHaveAttribute('open', '')
-    const geometry = await page.evaluate(() => {
-      const mode = document.querySelector('.cockpit-view-mode')
-      const summary = document.querySelector('.drawing-objects-panel > summary')
-      const box = el => {
-        const b = el.getBoundingClientRect()
-        return { x:b.x, y:b.y, right:b.right, bottom:b.bottom, width:b.width, height:b.height }
-      }
-      const a = box(mode), b = box(summary)
-      const hit = (el, r) => { const target = document.elementFromPoint(r.x + r.width / 2, r.y + r.height / 2); return target === el || el.contains(target) }
-      return { mode:a, objects:b, overlaps:a.x < b.right && a.right > b.x && a.y < b.bottom && a.bottom > b.y,
-        modeCenterHit:hit(mode, a), objectsCenterHit:hit(summary, b) }
-    })
-    console.log(`${profile} Objects/view geometry: ${JSON.stringify(geometry)}`)
-    await page.screenshot({ path:info.outputPath(`${profile}-objects-view.png`) })
-    expect(geometry.overlaps).toBe(false)
-    for (const control of [mode, summary, page.getByRole('combobox', { name:'Find in drawing', exact:true }), page.locator('.drawing-find-submit')]) await expectCenterHit(control)
-    await summary.click()
-    await expect(objects).toHaveAttribute('open', '')
-    await expectCenterHit(mode)
-    await expectCenterHit(summary)
-    await summary.click()
-    await expect(objects).not.toHaveAttribute('open', '')
-  }
-  expect(mutations.filter(request => /\/api\/(run|drawings\/.*\/(undo|redo|intake)|projects\/.*\/versions)/.test(request))).toEqual([])
-})

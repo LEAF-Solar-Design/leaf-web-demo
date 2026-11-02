@@ -345,43 +345,6 @@ describe('SSD1-24C canvas marquee', () => {
 })
 
 describe('EngineDocumentView (W4f slice A0)', () => {
-  it('keeps source facts and imported identity through move, undo, close and reopen', async () => {
-    mount()
-    const text = { id: '26', type: 'TEXT', layer: 'Labels', text: 'A', height: 1, vertices: [[0, 0]] }
-    const entities = [LINE, text]
-    await openAndLoad(entities, 'roof.dxf')
-    const original = onShown.mock.lastCall[0]
-    expect(original.sourceSummary).toEqual({ entityCount: 2, countsByType: { LINE: 1, TEXT: 1 }, countsByLayer: { Panels: 1, Labels: 1 } })
-    expect(original.polylines).toHaveLength(3)
-    const moved = [{ ...LINE, vertices: [[5, 0, 0], [105, 50, 0]] }, text]
-    workers[0].emit({ type: 'editApplied', op: 'move', ok: true, entities: moved, entityCount: 2, bytes: new Uint8Array([49]), byteLength: 1 })
-    expect(onShown.mock.lastCall[0]).toMatchObject({ documentId: 'roof.dxf', sourceSummary: original.sourceSummary })
-    act(() => sessionActions.undo())
-    workers[0].emit({ type: 'documentLoaded', documentId: 'roof.dxf', entities, entityCount: 2, unsupported: [] })
-    expect(onShown.mock.lastCall[0]).toMatchObject({ documentId: 'roof.dxf', sourceSummary: original.sourceSummary })
-    expect(onShown.mock.lastCall[0].polylines).toEqual(original.polylines)
-    act(() => sessionActions.reset())
-    expect(onShown).toHaveBeenLastCalledWith(null)
-    expect(viewer.applyVersion).toHaveBeenLastCalledWith(null)
-    await openAndLoad(entities, 'roof.dxf')
-    expect(onShown.mock.lastCall[0]).toMatchObject({ documentId: 'roof.dxf', sourceSummary: original.sourceSummary })
-  })
-
-  it('publishes the engine total when it differs from or updates without the projection list', () => {
-    const session = { engineParsed: true, documentId: 'roof.dxf', entities: [LINE], entityCount: 3,
-      undoDepth: 0, redoDepth: 0, selectedId: '', actions: { select: vi.fn() } }
-    vi.spyOn(engineSessionContext, 'useEngineSessionContext').mockImplementation(() => ({ session, highlightedIds: [] }))
-    const viewerRef = { current: { applyVersion: vi.fn() } }
-    const onShown = vi.fn()
-    const tree = () => <EngineDocumentView viewerRef={viewerRef} onShown={onShown} />
-    const view = render(tree())
-    expect(onShown.mock.lastCall[0].sourceSummary.entityCount).toBe(3)
-    session.entityCount = 4
-    view.rerender(tree())
-    expect(onShown.mock.lastCall[0].sourceSummary.entityCount).toBe(4)
-    expect(onShown.mock.lastCall[0].polylines).toHaveLength(1)
-  })
-
   it('row21 reapplies the retained dirty starter after the Viewer seats console intake', async () => {
     const session = { engineParsed: true, documentId: 'solar-starter.dxf', dirty: true, entities: [LINE], undoDepth: 1, redoDepth: 0, selectedId: '', actions: { select: vi.fn() } }
     vi.spyOn(engineSessionContext, 'useEngineSessionContext').mockImplementation(() => ({ session, highlightedIds: [] }))

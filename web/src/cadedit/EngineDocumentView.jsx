@@ -138,7 +138,7 @@ export default function EngineDocumentView({ viewerRef = null, consoleIntake = n
       pendingCreationRef.current = null
     }
     const pendingStatusChanged = pendingCreationRef.current && previous.status !== session.status
-    if (lastRef.current !== entities || previous.documentId !== documentId || previous.entityCount !== session.entityCount) {
+    if (lastRef.current !== entities || previous.documentId !== documentId) {
       if (previous.documentId === documentId && session.undoDepth > previous.undoDepth
         && lastRef.current) {
         const ids = new Set()
@@ -151,7 +151,7 @@ export default function EngineDocumentView({ viewerRef = null, consoleIntake = n
       }
       lastRef.current = entities
       intakeRef.current = {
-        ...engineIntake(entities, documentId, entities?.blocks, session.entityCount),
+        ...engineIntake(entities, documentId),
         layers: Array.from(new Set(entities.map((entity) => entity.layer || '0'))),
       }
       viewer.applyVersion(intakeRef.current)
@@ -167,10 +167,10 @@ export default function EngineDocumentView({ viewerRef = null, consoleIntake = n
       if (added) createdResult = { documentId, handle: hexHandle(added.id), kind: added.kind || added.type || 'entity' }
       pendingCreationRef.current = null
     }
-    historyRef.current = { documentId, entityCount: session.entityCount, undoDepth: session.undoDepth, redoDepth: session.redoDepth, status: session.status }
+    historyRef.current = { documentId, undoDepth: session.undoDepth, redoDepth: session.redoDepth, status: session.status }
     onShown?.(intakeRef.current, { undoDepth: session.undoDepth, redoDepth: session.redoDepth, createdResult })
     return undefined
-  }, [viewerRef, entities, documentId, onShown, highlightedIds, session.entityCount, session.undoDepth, session.redoDepth, session.selectedId, session.status])
+  }, [viewerRef, entities, documentId, onShown, highlightedIds, session.undoDepth, session.redoDepth, session.selectedId, session.status])
   // Viewer clears its override when the console intake seats. Run after all
   // passive effects so a retained engine document remains the visible drawing.
   const consoleIntakeRef = useRef(consoleIntake)

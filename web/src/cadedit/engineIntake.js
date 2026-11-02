@@ -542,7 +542,7 @@ export function expandBlockReference(insert, definition) {
   return { polylines, complete }
 }
 
-export function engineIntake(entities, documentId = '', catalogue = entities?.blocks, sourceEntityCount = null) {
+export function engineIntake(entities, documentId = '', catalogue = entities?.blocks) {
   const polylines = []
   const inserts = []
   let points = 0
@@ -551,22 +551,10 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
   const list = Array.isArray(entities) ? entities : Array.isArray(entities?.entities) ? entities.entities : []
   const blocks = Array.isArray(catalogue) ? catalogue : []
   const definitions = new Map(blocks.map((b) => [String(b.name).toUpperCase(), b]))
-  const countsByType = new Map()
-  const countsByLayer = new Map()
-  let sourceCount = 0
   // One pass for the drawing's extent (every vertex, plus a circle's or
   // arc's radius), so a POINT marker is sized to what the drawing spans.
   let minX = Infinity; let minY = Infinity; let maxX = -Infinity; let maxY = -Infinity
   for (const entity of list) {
-    // Count original objects before render expansion or omission. A text,
-    // dimension or block can produce many paths without becoming more objects.
-    if (entity && typeof entity === 'object' && !Array.isArray(entity)) {
-      const type = typeof entity.type === 'string' && entity.type ? entity.type : 'UNKNOWN'
-      const layer = typeof entity.layer === 'string' && entity.layer ? entity.layer : '0'
-      sourceCount += 1
-      countsByType.set(type, (countsByType.get(type) || 0) + 1)
-      countsByLayer.set(layer, (countsByLayer.get(layer) || 0) + 1)
-    }
     const verts = Array.isArray(entity?.vertices) ? entity.vertices : []
     const r = (entity?.type === 'CIRCLE' || entity?.type === 'ARC') && finite(entity.radius) && entity.radius > 0 ? entity.radius : 0
     for (const v of verts) {
@@ -657,12 +645,7 @@ export function engineIntake(entities, documentId = '', catalogue = entities?.bl
     members: (group.memberIds || []).map(hexHandle),
   }))
   const diagnostics = { truncated, omittedDimensions, incompleteInserts: inserts.filter((insert) => insert.incomplete).length }
-  const sourceSummary = {
-    entityCount: Number.isSafeInteger(sourceEntityCount) && sourceEntityCount >= 0 ? sourceEntityCount : sourceCount,
-    countsByType: Object.fromEntries(countsByType),
-    countsByLayer: Object.fromEntries(countsByLayer),
-  }
-  return { source: 'engine', documentId: String(documentId || ''), sourceSummary, polylines, inserts, blocks, groups, faces3d: [], points, truncated, diagnostics }
+  return { source: 'engine', documentId: String(documentId || ''), polylines, inserts, blocks, groups, faces3d: [], points, truncated, diagnostics }
 }
 
 export function projectionWarning(diagnostics) {

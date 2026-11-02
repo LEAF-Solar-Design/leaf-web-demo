@@ -8,14 +8,6 @@ import { describe, expect, it } from 'vitest'
 import { countEntitiesByLayer } from './layerCounts.js'
 
 describe('countEntitiesByLayer', () => {
-  it('prefers original object counts over glyph paths and block expansion', () => {
-    const shown = { layers: ['Panels', 'Labels', 'Blocks', 'Hidden', 'Empty'],
-      polylines: [{ layer: 'Labels' }, { layer: 'Labels' }, { layer: 'Blocks' }, { layer: 'Blocks' }],
-      inserts: [{ layer: 'Blocks' }],
-      sourceSummary: { countsByLayer: { Panels: 64, Labels: 6, Blocks: 1, Hidden: 1 } } }
-    expect(countEntitiesByLayer(shown)).toEqual({ Panels: 64, Labels: 6, Blocks: 1, Hidden: 1, Empty: 0 })
-  })
-
   it('seeds every known layer to 0 before counting', () => {
     const shown = { layers: ['Roof', 'Blocks', 'Surfaces'], polylines: [], inserts: [], faces3d: [] }
     expect(countEntitiesByLayer(shown)).toEqual({ Roof: 0, Blocks: 0, Surfaces: 0 })

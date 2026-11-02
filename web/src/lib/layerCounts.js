@@ -9,14 +9,6 @@
 // concatenated array; both produce the same counts), so no caller-differing
 // option is needed.
 export function countEntitiesByLayer(shown) {
-  // Engine intake paths include glyph contours and expanded block children.
-  // Its source summary counts the actual objects, including unrendered kinds.
-  if (shown?.sourceSummary?.countsByLayer) {
-    return Object.fromEntries([
-      ...(shown.layers || []).map((layer) => [layer, 0]),
-      ...Object.entries(shown.sourceSummary.countsByLayer),
-    ])
-  }
   const counts = {}
   for (const layer of shown?.layers || []) counts[layer] = 0
   for (const polyline of shown?.polylines || []) counts[polyline.layer] = (counts[polyline.layer] || 0) + 1

@@ -120,16 +120,6 @@ it('passes sampleEntry through to the browser ground by identity', () => {
   expect(browserProps.mock.lastCall[0].sampleEntry).toBe(sampleEntry)
 })
 
-it('forwards explicit layout eligibility to the Studio ground and defaults to denied', () => {
-  const { rerender } = render(<SurfaceGrounds surface="cad" studioShell />)
-  expect(browserProps.mock.lastCall[0].canApplyLayout).toBe(false)
-  rerender(<SurfaceGrounds surface="cad" studioShell canApplyLayout />)
-  expect(browserProps.mock.lastCall[0].canApplyLayout).toBe(true)
-  browserProps.mockClear()
-  rerender(<SurfaceGrounds surface="cad" canApplyLayout />)
-  expect(browserProps).not.toHaveBeenCalled()
-})
-
 it('keeps shell fallbacks named and ground recovery free of reloads', () => {
   const site = readFileSync(resolve(process.cwd(), 'src/site/SiteRoot.jsx'), 'utf8')
   const grounds = readFileSync(resolve(process.cwd(), 'src/site/SurfaceGrounds.jsx'), 'utf8')
