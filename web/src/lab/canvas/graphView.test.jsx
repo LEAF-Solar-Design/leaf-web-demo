@@ -317,8 +317,63 @@ describe('first-click live graph', () => {
     fireEvent.click(run)
     await waitFor(() => expect(within(cardNamed('Count')).getByText('73')).toBeVisible())
     expect(fetchImpl.mock.calls[0][0]).toBe(`${config.apiBase}/api/lab/runs`)
-    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ doc_id: 'run-matching', graph_revision: 4 })
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual({ doc_id: 'run-matching', graph_revision: 4,
+      submission_id: expect.stringMatching(/^v1\.[0-9]{13}\.[0-9a-f]{32}$/), reconcile_only: false })
     expect(labValueStore.getBlock('canvas-stream', 'count-1').value.result.data).toBe(73)
+  })
+
+  it('recovers a lost response with the same intent and streams the existing run, then allows a new deliberate run', async () => {
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 6 } : { revision: 6, graph } })) })
+    client.setDocId('recover-lost')
+    const fetchImpl = vi.fn().mockRejectedValueOnce(new Error('lost response'))
+      .mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ run_id: 'recovered-lost', state: 'queued' }) })
+      .mockResolvedValueOnce({ ok: true, status: 200, body: new ReadableStream({ start(controller) {
+        controller.enqueue(new TextEncoder().encode('event: run\ndata: {"run_id":"recovered-lost","seq":0,"kind":"finished","payload":{}}\n\n'))
+        controller.close()
+      } }) })
+      .mockResolvedValueOnce({ ok: true, status: 202, json: async () => ({ run_id: 'deliberate-next', state: 'finished' }) })
+    vi.stubGlobal('fetch', fetchImpl)
+    render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r6' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    const recover = await screen.findByRole('button', { name: 'Recover previous run' })
+    await waitFor(() => expect(recover).toBeEnabled())
+    fireEvent.click(recover)
+    await waitFor(() => expect(labValueStore.getRun('recovered-lost')?.state).toBe('finished'))
+    const first = JSON.parse(fetchImpl.mock.calls[0][1].body)
+    const retry = JSON.parse(fetchImpl.mock.calls[1][1].body)
+    expect(retry).toEqual({ ...first, reconcile_only: true })
+    expect(fetchImpl.mock.calls[2][0]).toContain('/stream/runs?runs=recovered-lost')
+    fireEvent.click(screen.getByRole('button', { name: 'Run saved revision r6' }))
+    await waitFor(() => expect(labValueStore.getRun('deliberate-next')).toBeDefined())
+    expect(JSON.parse(fetchImpl.mock.calls[3][1].body).submission_id).not.toBe(first.submission_id)
+  })
+
+  it('discards an in-flight run result after the signed-in account changes', async () => {
+    const token = sub => `e30.${btoa(JSON.stringify({ sub }))}.test`
+    localStorage.setItem('leaf.jwt', token('first-account'))
+    const provider = hostProvider(), graph = graphOf(provider, ['host-source', 'count'])
+    const client = createLabArtifactsClient({ fetchImpl: vi.fn(async url => ({ ok: true,
+      json: async () => url.endsWith('/head') ? { revision: 7 } : { revision: 7, graph } })) })
+    client.setDocId('account-change')
+    let resolveSubmission
+    const fetchImpl = vi.fn(() => new Promise(resolve => { resolveSubmission = resolve }))
+    vi.stubGlobal('fetch', fetchImpl)
+    const view = render(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    const run = await screen.findByRole('button', { name: 'Run saved revision r7' })
+    await waitFor(() => expect(run).toBeEnabled())
+    fireEvent.click(run)
+    await waitFor(() => expect(fetchImpl).toHaveBeenCalledTimes(1))
+    localStorage.setItem('leaf.jwt', token('second-account'))
+    view.rerender(<GraphView client={client} provider={provider} initialDocument={graph} />)
+    await act(async () => resolveSubmission({ ok: true, status: 202,
+      json: async () => ({ run_id: 'must-not-expose', state: 'queued' }) }))
+    expect(labValueStore.getRun('must-not-expose')).toBeUndefined()
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    localStorage.removeItem('leaf.jwt')
   })
 
   it('renders a worker refusal code from a 422', async () => {

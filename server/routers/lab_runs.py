@@ -28,6 +28,8 @@ def _call(function, *args, **kwargs):
         return function(*args, **kwargs)
     except ledger.NotFound:
         raise HTTPException(404, detail="lab_run_not_found") from None
+    except store.SubmissionConflict as error:
+        raise HTTPException(409, detail=error.code) from None
     except TooLarge:
         raise HTTPException(409, detail="lab_run_queue_full") from None
     except (GraphRefused, InvalidGraph) as error:
@@ -37,6 +39,8 @@ def _call(function, *args, **kwargs):
 
 
 def _create(tenant, body):
+    if "submission_id" in body and body["submission_id"] is None:
+        raise InvalidGraph("invalid_lab_submission_id")
     if (not isinstance(body["doc_id"], str) or not body["doc_id"]
             or type(body["graph_revision"]) is not int or body["graph_revision"] < 1):
         raise InvalidGraph("invalid_lab_run_fields")
@@ -59,14 +63,16 @@ def _create(tenant, body):
     row = store.create(str(tenant), body["doc_id"], uuid.uuid4().hex,
                        body["graph_revision"], artifact["sha256"], OPS_REVISION,
                        graph_digest({}), "lab-worker.v1", _source_revision(os.environ) or "unknown",
-                       registry_digest=store.registry_digest())
+                       registry_digest=store.registry_digest(),
+                       submission_id=body.get("submission_id"), authority=_actor(tenant),
+                       reconcile_only=body.get("reconcile_only", False))
     return {"run_id": row["run_id"], "state": row["state"]}
 
 
 @router.post("", status_code=202)
 async def create(request: Request, tenant=Depends(deps.require_tenant)):
     _admit(tenant, "build")
-    body = await _body(request, ("doc_id", "graph_revision"))
+    body = await _body(request, ("doc_id", "graph_revision"), optional=("submission_id", "reconcile_only"))
     return await run_in_threadpool(_call, _create, tenant, body)
 
 

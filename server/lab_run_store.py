@@ -19,6 +19,32 @@ MAX_EVENTS = 10000
 MAX_QUEUED_PER_TENANT = 16
 MAX_ACTIVE_PER_TENANT = 4
 _PIN = re.compile(r"[A-Za-z0-9._:-]{1,128}")
+_SUBMISSION = re.compile(r"v1\.([0-9]{13})\.[0-9a-f]{32}")
+SUBMISSION_TTL = timedelta(hours=24)
+
+
+class SubmissionConflict(Exception):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
+def submission_run_id(tenant, authority, submission_id):
+    """Closed timestamp/random intent, bound to server-resolved authority.
+
+    No schema change: the primary key is the intent slot and existing immutable
+    columns are its fingerprint. Retain these rows for the entire retry window.
+    Graph pins include drawing project identity; Lab has no project column.
+    """
+    match = _SUBMISSION.fullmatch(submission_id) if isinstance(submission_id, str) else None
+    if match is None:
+        raise InvalidGraph("invalid_lab_submission_id")
+    issued = datetime.fromtimestamp(int(match[1]) / 1000, timezone.utc)
+    age = _now() - issued
+    if age < -timedelta(minutes=5) or age >= SUBMISSION_TTL:
+        raise SubmissionConflict("lab_submission_expired")
+    identity = json.dumps([tenant, authority, submission_id], separators=(",", ":"))
+    return "s1." + hashlib.sha256(identity.encode()).hexdigest()
 _SQLITE_SCHEMA = """
 CREATE TABLE IF NOT EXISTS lab_runs (
  tenant_id TEXT NOT NULL, doc_id TEXT NOT NULL, run_id TEXT NOT NULL,
@@ -191,7 +217,8 @@ def release_stream(tenant, principal, stream_id):
 
 
 def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
-           input_digest, adapter_revision, build_revision, *, registry_digest=None):
+           input_digest, adapter_revision, build_revision, *, registry_digest=None,
+           submission_id=None, authority=None, reconcile_only=False):
     for value in (doc_id, run_id, graph_sha256, ops_revision, input_digest, adapter_revision, build_revision):
         _pin(value)
     if type(graph_revision) is not int or graph_revision < 1:
@@ -199,8 +226,28 @@ def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
     digest = globals()["registry_digest"]()
     if registry_digest is not None and _pin(registry_digest) != digest:
         raise InvalidGraph("lab_registry_digest_mismatch")
+    if type(reconcile_only) is not bool or (reconcile_only and submission_id is None):
+        raise InvalidGraph("invalid_lab_submission_recovery")
+    if submission_id is not None:
+        if not isinstance(authority, str) or not authority:
+            raise InvalidGraph("invalid_lab_submission_authority")
+        run_id = submission_run_id(tenant, authority, submission_id)
 
     def operation(sql):
+        if submission_id is not None:
+            # Recheck time after acquiring the tenant transaction lock.
+            submission_run_id(tenant, authority, submission_id)
+            existing = _row(sql, tenant, run_id)
+            if existing is not None:
+                expected = (doc_id, graph_revision, graph_sha256, digest, ops_revision,
+                            input_digest, adapter_revision, build_revision)
+                fields = ("doc_id", "graph_revision", "graph_sha256", "registry_digest",
+                          "ops_revision", "input_digest", "adapter_revision", "build_revision")
+                if tuple(existing[key] for key in fields) != expected:
+                    raise SubmissionConflict("lab_submission_mismatch")
+                return dict(existing)
+            if reconcile_only:
+                raise SubmissionConflict("lab_submission_missing")
         queued = sql.execute("SELECT COUNT(*) AS count FROM lab_runs WHERE tenant_id=? AND state='queued'",
                              (tenant,)).fetchone()["count"]
         if queued >= MAX_QUEUED_PER_TENANT:
@@ -546,13 +593,17 @@ def sweep(now):
                    sql.execute("SELECT DISTINCT tenant_id FROM lab_runs").fetchall()])
     for tenant in tenants:
         def operation(sql):
-            rows = sql.execute("SELECT run_id,doc_id FROM lab_runs WHERE tenant_id=?"
+            rows = sql.execute("SELECT run_id,doc_id,state,created_at FROM lab_runs WHERE tenant_id=?"
                                " ORDER BY created_at DESC,run_id DESC", (tenant,)).fetchall()
             counts = {}
             for row in rows:
                 doc = row["doc_id"]
                 counts[doc] = counts.get(doc, 0) + 1
                 if counts[doc] > 50:
+                    if row["run_id"].startswith("s1.") and (
+                            row["state"] in {"queued", "running"}
+                            or _date(now) - _date(row["created_at"]) < SUBMISSION_TTL + timedelta(minutes=5)):
+                        continue
                     sql.execute("DELETE FROM lab_runs WHERE tenant_id=? AND run_id=?", (tenant, row["run_id"]))
             sql.execute("DELETE FROM lab_run_events WHERE tenant_id=? AND created_at<?", (tenant, cutoff))
             sql.execute("UPDATE lab_runs SET event_count=(SELECT COUNT(*) FROM lab_run_events e"

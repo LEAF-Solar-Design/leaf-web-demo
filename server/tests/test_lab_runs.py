@@ -45,6 +45,38 @@ def create(rig):
     return rig.http.post("/api/lab/runs", json={"doc_id": "doc", "graph_revision": 1})
 
 
+def test_submission_recovery_rechecks_admission_and_authority(rig, monkeypatch):
+    from test_lab_run_store import intent_id
+    body = {"doc_id": "doc", "graph_revision": 1, "submission_id": intent_id()}
+    response = rig.http.post("/api/lab/runs", json=body)
+    assert response.status_code == 202, response.text
+    body["reconcile_only"] = True
+    monkeypatch.setattr(store, "MAX_QUEUED_PER_TENANT", 0)
+    recovered = rig.http.post("/api/lab/runs", json=body)
+    assert recovered.json() == response.json()
+    monkeypatch.setenv("LEAF_BUILD_REVISION", "different")
+    mismatch = rig.http.post("/api/lab/runs", json=body)
+    assert mismatch.status_code == 409
+    assert mismatch.json()["detail"] == "lab_submission_mismatch"
+    monkeypatch.setenv("LEAF_BUILD_REVISION", "abc1234")
+    rig.registry.clear()
+    refused = rig.http.post("/api/lab/runs", json=body)
+    assert refused.status_code == 422
+    rig.context.tier = "free"
+    denied = rig.http.post("/api/lab/runs", json=body)
+    assert denied.status_code == 403
+
+
+def test_submission_missing_and_invalid_are_explicit(rig):
+    from test_lab_run_store import intent_id
+    body = {"doc_id": "doc", "graph_revision": 1, "submission_id": intent_id(), "reconcile_only": True}
+    response = rig.http.post("/api/lab/runs", json=body)
+    assert response.status_code == 409
+    assert response.json()["detail"] == "lab_submission_missing"
+    body["submission_id"] = None
+    assert rig.http.post("/api/lab/runs", json=body).status_code == 422
+
+
 def test_create_pins_and_public_row(rig):
     response = create(rig)
     assert response.status_code == 202, response.text

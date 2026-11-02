@@ -14,7 +14,7 @@ import AfterSavePanel from '../history/AfterSavePanel.jsx'
 import { createAfterSaveClient } from '../history/afterSaveClient.js'
 import { canonicalJSON } from '../contract.js'
 import { labValueStore, terminalState, useBlockValue, useRun, useRunStatus } from '../runs/valueStore.js'
-import { openRunStream, submitRun } from '../runs/runStream.js'
+import { newSubmissionId, openRunStream, submitRun } from '../runs/runStream.js'
 import { formatLabRoute } from '../labRoute.js'
 import { readController } from '../changes/controller.js'
 import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
@@ -24,6 +24,14 @@ import TestsKeepersRail from '../changes/TestsKeepersRail.jsx'
 const displayContexts = new WeakMap()
 
 const wallTime = () => Date.now()
+// Display partition only. The server verifies authority on every request.
+function runAccount() {
+  try {
+    const token = authHeaders().Authorization?.split(' ')[1]
+    const payload = token?.split('.')[1]
+    return payload ? JSON.parse(atob(payload.replaceAll('-', '+').replaceAll('_', '/'))).sub || null : null
+  } catch { return null }
+}
 const tick = () => performance.now()
 const summary = value => value.error ? `error: ${value.error.code}`
   : value.data === null ? 'null' : Array.isArray(value.data) ? `${value.data.length} rows`
@@ -234,6 +242,23 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const submissionPending = useRef(false)
   const streams = useRef(new Set())
   const mounted = useRef(false)
+  const submissionIntent = useRef(null)
+  const [outcomeUnknown, setOutcomeUnknown] = useState(false)
+  const currentRunScope = () => JSON.stringify([config.apiBase, config.tenant, runAccount() || authHeaders().Authorization || '',
+    client.currentDocId(), client.state.head])
+  const account = useRef(runAccount())
+  const observedAccount = runAccount()
+  if (observedAccount) account.current = observedAccount
+  const displayScope = JSON.stringify([config.apiBase, config.tenant, account.current, client.currentDocId(), client.state.head])
+  const scopeIdentity = useRef({ key: displayScope, value: {} })
+  if (scopeIdentity.current.key !== displayScope) scopeIdentity.current = { key: displayScope, value: {} }
+  useEffect(() => {
+    submissionIntent.current = null
+    setOutcomeUnknown(false)
+    setRunMessage('')
+    streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() })
+    streams.current.clear()
+  }, [displayScope])
   const latest = useRef(null)
   const saveHintId = useId()
   const draftBaseline = useRef(null)
@@ -262,6 +287,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     }
   }, [])
   const runSnapshot = () => labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
+    && (run.run_scope === undefined || run.run_scope === scopeIdentity.current.value)
     && run.graph_revision === client.state.head).map(run => run.id).join(',')
   const matchingRuns = useSyncExternalStore(labValueStore.subscribeRuns, runSnapshot)
   const valueRunId = matchingRuns.split(',')[0] || 'local'
@@ -272,8 +298,9 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     submissionPending.current = true
     setSubmitting(true); setRunMessage('')
     const { docId, head, document } = latest.current
+    const scope = currentRunScope()
     try {
-      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
+      if (!submissionIntent.current?.unknown && !labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
       const saved = await client.revision(docId, head)
       if (!mounted.current) return
       if (!saved.ok) {
@@ -284,15 +311,34 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         || canonicalJSON(saved.graph) !== canonicalJSON(latest.current.document)) {
         setRunMessage('Save before running'); return
       }
-      if (!labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
-      const result = await submitRun({ docId, graphRevision: head })
-      if (!mounted.current) return
+      if (!submissionIntent.current?.unknown && !labValueStore.canAddRun()) { setRunMessage('Too many active runs (20). Wait for one to finish.'); return }
+      if (scope !== currentRunScope()) return
+      let intent = submissionIntent.current
+      if (!intent || intent.scope !== scope) intent = { scope, id: newSubmissionId(), unknown: false }
+      submissionIntent.current = intent
+      const result = await submitRun({ docId, graphRevision: head, submissionId: intent.id,
+        reconcileOnly: intent.unknown })
+      if (!mounted.current || scope !== currentRunScope()) return
       if (!result.ok) {
-        setRunMessage(result.status === 401 ? 'Sign in again' : result.status === 409 ? 'Run queue full'
+        if (result.outcomeUnknown) {
+          intent.unknown = true
+          setOutcomeUnknown(true)
+          setRunMessage('Run outcome unknown. Retry to recover this submission.')
+          return
+        }
+        if (!intent.unknown) submissionIntent.current = null
+        setRunMessage(result.status === 401 ? 'Sign in again' : result.detail === 'lab_run_queue_full' ? 'Run queue full'
+          : result.detail === 'lab_submission_mismatch' ? 'Submission intent changed. Recovery refused.'
+          : result.detail === 'lab_submission_missing' ? 'Previous submission was not found. Start a new run explicitly.'
+          : result.detail === 'lab_submission_expired' ? 'Submission recovery expired. Start a new run explicitly.'
           : typeof result.detail === 'string' ? result.detail : result.detail?.code || 'Run unavailable')
         return
       }
-      labValueStore.upsertRun(result.runId, { state: result.state, graph_revision: head, doc_id: docId })
+      submissionIntent.current = null
+      setOutcomeUnknown(false)
+      labValueStore.upsertRun(result.runId, { state: result.state, graph_revision: head, doc_id: docId,
+        run_scope: scopeIdentity.current.value })
+      if ([...streams.current].some(stream => stream.runId === result.runId)) return
       const stream = openRunStream({ runIds: [result.runId], store: labValueStore })
       stream.runId = result.runId
       const stop = stream.stop
@@ -306,7 +352,15 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
         }
       })
       streams.current.add(stream)
-    } catch { if (mounted.current) setRunMessage('Run unavailable') }
+    } catch {
+      if (mounted.current && scope === currentRunScope()) {
+        if (submissionIntent.current) {
+          submissionIntent.current.unknown = true
+          setOutcomeUnknown(true)
+        }
+        setRunMessage('Run outcome unknown. Retry to recover this submission.')
+      }
+    }
     finally { submissionPending.current = false; if (mounted.current) setSubmitting(false) }
   }
   useEffect(() => {
@@ -375,7 +429,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           <button type="button" disabled={!validDocument || (!onRun && (!client.state.headLoaded || client.state.head == null || submitting))}
             aria-describedby={!onRun && client.state.head == null ? saveHintId : undefined}
             onClick={() => { if (validDocument) { if (onRun) onRun(validDocument); else void runSaved() } }}>
-            {onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
+            {outcomeUnknown ? 'Recover previous run' : onRun || client.state.head == null ? 'Run graph' : `Run saved revision r${client.state.head}`}</button>
+          {outcomeUnknown && <button type="button" disabled={submitting} onClick={() => {
+            submissionIntent.current = null; setOutcomeUnknown(false); setRunMessage('')
+          }}>Start a new deliberate run</button>}
           <a href={formatLabRoute({ view: 'test-trade', params: route?.params ?? {} })}
             onClick={(event) => {
               if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return
