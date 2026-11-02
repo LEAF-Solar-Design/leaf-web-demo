@@ -176,8 +176,12 @@ class TestCodebuildCiScript(unittest.TestCase):
         gate_runs = [call for call in invocations
                      if "--verify-shard-results" not in call and "--verify-gate-proof" not in call]
         self.assertEqual(gate_runs, [invocations[0]])
-        for flag in ("--retry 1", "--result-json", "--log-dir"):
+        for flag in ("--retry 0", "--early-feedback", "--result-json", "--log-dir"):
             self.assertIn(flag, invocations[0])
+        self.assertNotIn("--retry 1", gate_runs[0])
+        self.assertIn('LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"', script)
+        self.assertIn('--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites',
+                      gate_runs[0])
         shard_start = script.index(
             'if [[ "${CI_SHARD_MODE:-all}" == shard && ${#only_args[@]} == 0 ]]; then\n')
         shard_end = script.index('\nfi\n', shard_start)
