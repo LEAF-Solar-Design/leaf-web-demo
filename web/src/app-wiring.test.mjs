@@ -5828,7 +5828,8 @@ it('R13G2A-11 standalone arms and captures retain their predecessor bytes', () =
   const titleBranch = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode', title)
   const interior = fragment => appSource.slice(fragment.openingFragment.end, fragment.closingFragment.start).replace(/\r\n/g, '\n').trim()
   // BSP5 intentionally replaces sample labels with the active document's facts.
-  assert.match(interior(titleBranch.alternate), /\{activeDrawingName \|\|/)
+  assert.equal(r13Find(node => node.type === 'LogicalExpression' && node.operator === '||'
+    && node.left.type === 'Identifier' && node.left.name === 'activeDrawingName', titleBranch.alternate).length, 1)
   assert.match(interior(titleBranch.alternate), /\{' · '\}\{drawingMetadata\}/)
   const wrap = r13One(node => node.type === 'JSXElement' && node.openingElement.attributes.some(a => a.name?.name === 'className' && a.value?.value === 'viewer-wrap'))
   const status = r13One(n => n.type === 'ConditionalExpression' && n.test.name === 'projectMode' && n.consequent.type === 'JSXFragment', wrap)
