@@ -124,7 +124,7 @@ def permit_clock():
     return time.clock_gettime(time.CLOCK_MONOTONIC)
 
 def checked(argv, timeout=30, cwd=None):
-    capture = (argv in (['/usr/bin/xcodebuild','-version'], ['/opt/homebrew/bin/xcodegen','--version'],
+    capture = (argv in (['/usr/bin/xcodebuild','-version'], ['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version'],
                          ['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version']) or
                argv[0].endswith('leaf-storage') or
                (argv[:2]==['/usr/bin/xcrun','simctl'] and argv[2] in ('list','listapps')))
@@ -399,7 +399,8 @@ derived.mkdir(mode=0o700,exist_ok=False)
 project_name='LeafProject' if native else 'Portfolio'
 expected_bundle=('private.leaf.project.p'+p['descriptor']['project_id'].replace('-','')) if native else 'com.example.portfolio'
 if native:
-    effect(['/opt/homebrew/bin/xcodegen','generate','--spec','project.yml'],60,project)
+    # Fixed executable on the managed Mac; never resolve a tenant path or PATH shim.
+    effect(['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml'],60,project)
 effect(['/usr/bin/xcodebuild','-project',project_name+'.xcodeproj','-scheme',project_name,
         '-sdk','iphonesimulator','-destination','generic/platform=iOS Simulator','-configuration','Debug',
         '-derivedDataPath',str(derived),'-disableAutomaticPackageResolution',
@@ -431,7 +432,7 @@ if native:
         'sdk':'iphonesimulator','app_tree_sha256':hashlib.sha256(_native_json(app_manifest)).hexdigest(),
         'file_count':len(app_manifest),'xcodegen_exit_code':0,
         'xcode_version':tool(['/usr/bin/xcodebuild','-version']),
-        'xcodegen_version':tool(['/opt/homebrew/bin/xcodegen','--version']),
+        'xcodegen_version':tool(['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version']),
         'sdk_version':tool(['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version'])}
     (source/'sdk-build.json').write_text(json.dumps(build_artifact,sort_keys=True,separators=(',',':')))
 udid=p['udid']

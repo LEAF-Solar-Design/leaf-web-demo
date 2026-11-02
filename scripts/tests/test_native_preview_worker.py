@@ -149,7 +149,7 @@ def test_native_recovery_projection_preserves_source_and_rejects_drift(native_pa
         reconciliation.settled_failure_status(worker.encode(dict(job_id=JOB,status='failed',**dict(identity,source_commit='f'*40))),claim)
 
 
-@pytest.mark.parametrize('fail_install',[False,True])
+@pytest.mark.parametrize('fail_install',[False,True,'xcodegen-unavailable'])
 def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(native_package,tmp_path,capsys,fail_install):
     raw,job=native_package
     owned,derived,internal=tmp_path/'owned',tmp_path/'derived',tmp_path/'internal'
@@ -160,11 +160,12 @@ def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(nati
     def checked(argv,timeout=30,cwd=None):
         commands.append(argv)
         if argv==['/usr/bin/xcodebuild','-version']:return b'Xcode fixture\nBuild fixture'
-        if argv==['/opt/homebrew/bin/xcodegen','--version']:return b'fixture version'
+        if argv==['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version']:return b'fixture version'
         if argv==['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version']:return b'26.0'
-        if argv[0]=='/opt/homebrew/bin/xcodegen':
-            assert argv==['/opt/homebrew/bin/xcodegen','generate','--spec','project.yml']
+        if argv[0]=='/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen':
+            assert argv==['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml']
             assert cwd==owned/'source'
+            if fail_install=='xcodegen-unavailable':raise FileNotFoundError('fixed managed XcodeGen unavailable')
         elif argv[0]=='/usr/bin/xcodebuild':
             assert argv[argv.index('-project')+1]=='LeafProject.xcodeproj'
             assert argv[argv.index('-scheme')+1]=='LeafProject'
@@ -189,6 +190,12 @@ def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(nati
     namespace=dict(base64=base64,hashlib=hashlib,io=io,json=json,plistlib=plistlib,zipfile=zipfile,
         time=types.SimpleNamespace(sleep=lambda _:None),sys=types.SimpleNamespace(stdin=io.StringIO(json.dumps(payload))),
         roots=lambda _:(owned,derived,internal),permitted=lambda _:None,checked=checked,application_inventory=plistlib.loads)
+    if fail_install=='xcodegen-unavailable':
+        with pytest.raises(FileNotFoundError,match='fixed managed XcodeGen unavailable'):
+            exec(mac.native_remote_policy()+mac.DRIVER,namespace)
+        assert commands==[['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml']]
+        assert not (owned/'sdk-build.json').exists() and not (owned/'install-owned').exists()
+        return
     if fail_install:
         with pytest.raises(RuntimeError,match='after SDK build'):
             exec(mac.native_remote_policy()+mac.DRIVER,namespace)
@@ -202,7 +209,10 @@ def test_native_driver_generates_fixed_project_builds_and_hashes_copied_app(nati
     manifest={str(p.relative_to(copied)):hashlib.sha256(p.read_bytes()).hexdigest() for p in copied.rglob('*') if p.is_file()}
     assert artifact['app_tree_sha256']==hashlib.sha256(worker._native_json(manifest)).hexdigest()
     worker.validate_native_artifact(artifact,job['descriptor'])
-    assert commands.index(['/opt/homebrew/bin/xcodegen','generate','--spec','project.yml']) < next(i for i,c in enumerate(commands) if '-project' in c)
+    assert commands.index(['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml']) < next(i for i,c in enumerate(commands) if '-project' in c)
+    assert ['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version'] in commands
+    capture=next(node for node in ast.parse(mac.REMOTE_COMMON).body if isinstance(node,ast.FunctionDef) and node.name=='checked').body[0]
+    assert eval(compile(ast.Expression(capture.value),'<capture>','eval'),{'argv':['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version']}) is True
     assert (owned/'install-owned').read_text()==bundle
 
 
