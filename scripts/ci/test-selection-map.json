@@ -345,6 +345,7 @@
     "server-g1a-canonical-e2e",
     "server-project-proof-identity",
     "server-project-material-images",
+    "server-project-material-inspection",
     "server-project-preview-source",
     "server-glug-adoption",
     "server-glug-executor",
