@@ -220,6 +220,62 @@ async def propose_project_page(
         return fail(503, "Portfolio proposal service is unavailable.")
 
 
+@router.post("/api/sessions/{session_id}/page/photo-assignment-proposals")
+async def propose_project_photo_assignments(session_id: str, request: Request):
+    import project_photo_assignment_proposal as proposals
+
+    headers = {"Cache-Control": "private, no-store"}
+
+    def fail(status):
+        exc = proposals.ProposalError(status)
+        return JSONResponse({"code": exc.code, "detail": str(exc)}, status_code=status, headers=headers)
+
+    try:
+        # Keep header failures inside this route's fixed private error envelope.
+        if (not request.headers.get('x-tenant-id')
+                or not deps._dispatch_secret_ok(request.headers.get('x-dispatch-secret'))):
+            return fail(403)
+        tenant = _page_proposal_tenant(request)
+        authority_session_id = request.headers.get('X-Authority-Session-Id')
+        turn_id = request.headers.get('X-Authority-Turn-Id')
+        scope = await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id)
+        raw = bytearray()
+        async for chunk in request.stream():
+            if len(raw) + len(chunk) > proposals.MAX_INPUT_BYTES:
+                return fail(413)
+            raw.extend(chunk)
+        body = proposals.parse_request(bytes(raw))
+        if await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id) != scope:
+            return fail(403)
+        result = await run_in_threadpool(proposals.propose, tenant, session_id, authority_session_id, turn_id, body)
+        if await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id) != scope:
+            return fail(403)
+        response = JSONResponse(result, headers=headers)
+        if len(response.body) > proposals.MAX_RESPONSE_BYTES:
+            return fail(422)
+        if await run_in_threadpool(proposals.authority, tenant, session_id, authority_session_id, turn_id) != scope:
+            return fail(403)
+        return response
+    except proposals.ProposalError as exc:
+        return fail(exc.status)
+    except HTTPException as exc:
+        return fail(503 if exc.status_code >= 500 else 403)
+    except platform_link.ProjectSessionForbidden:
+        return fail(403)
+    except LookupError:
+        return fail(404)
+    except Exception as exc:  # noqa: BLE001 - never expose storage or identity diagnostics
+        lifecycle = sys.modules.get('leaf_platform.project_lifecycle')
+        if lifecycle is not None:
+            if isinstance(exc, lifecycle.LifecycleForbidden):
+                return fail(403)
+            if isinstance(exc, lifecycle.LifecycleConflict):
+                return fail(409)
+            if isinstance(exc, lifecycle.LifecycleUnavailable):
+                return fail(404)
+        return fail(503)
+
+
 @router.post("/api/sessions/{session_id}/materials/inspect")
 async def inspect_project_materials(
     session_id: str, request: Request,
