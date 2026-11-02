@@ -17,6 +17,7 @@ import solar_project_graph as graph
 import turn_runner
 
 PINS = ("catalog_digest", "catalog_commit", "effective_catalog_digest", "tool_manifest_sha256")
+SOLVE_TOOL = "solar-solve-proposal"
 _SEAL = object()
 
 
@@ -84,9 +85,12 @@ def _approval(tenant, confirmation_id, session_id, *, consumed=None):
     if (not approval or approval.get("tenant_id") != str(tenant)
             or approval.get("session_id") != session_id or approval.get("decided") is not True
             or approval.get("approved") is not True or approval.get("decided_by") != subject
-            or approval.get("kind") != "run_capability" or approval.get("capability") != "drawing.write"
+            or approval.get("kind") != "run_capability"
             or _time(approval.get("expires_at")) <= time.time()
             or (consumed is not None and approval.get("consumed") is not consumed)):
+        _deny()
+    solve = approval.get("tool") == SOLVE_TOOL
+    if approval.get("capability") != ("solve" if solve else "drawing.write"):
         _deny()
     session = session_store.get_session(session_id)
     if platform_link.require_project_session_access(session, tenant, write=True) is None:
@@ -103,7 +107,8 @@ def _approval(tenant, confirmation_id, session_id, *, consumed=None):
         _unavailable()
     if (status != "ok" or not record or record.get("tenant_id") != str(tenant)
             or record.get("granted") is not True or record.get("denied") is not False
-            or record.get("decided_by") != subject or record.get("action") != "run_write_tool"
+            or record.get("decided_by") != subject
+            or record.get("action") != ("run_solve_tool" if solve else "run_write_tool")
             or _time(record.get("expires_at")) <= time.time()
             or (consumed is True and "consumed_at" not in record)):
         _deny()
@@ -126,6 +131,21 @@ def _approval(tenant, confirmation_id, session_id, *, consumed=None):
     pin = customization_service.effective_catalog_pin(str(tenant)) or deps.base_catalog_pin(deps.all_tools(str(tenant)))
     if any(args[k] != pin[k] for k in ("catalog_commit", "effective_catalog_digest")):
         _deny()
+    if solve:
+        solve_context = args.get("solve_context")
+        if (type(solve_context) is not dict
+                or set(solve_context) != {"frame_ref", "expected_rev", "phase"}
+                or not isinstance(solve_context["frame_ref"], str) or not solve_context["frame_ref"]
+                or type(solve_context["expected_rev"]) is not int or solve_context["expected_rev"] < 0
+                or solve_context["phase"] not in ("initial", "background")):
+            _deny()
+        verified = project.resolve_context(tenant, UUID(binding["project_id"]),
+            UUID(binding["input_version_id"]), drawing_id=UUID(binding["drawing_id"]), write=True)
+        selected = graph.resolve_project_graph_context(verified).graph
+        if (verified.intake_sha256 != binding["intake_sha256"] or not isinstance(selected, dict)
+                or type(selected.get("rev")) is not int
+                or selected["rev"] != solve_context["expected_rev"]):
+            _deny()
     return approval, binding, args, str(actor), min(_time(approval["expires_at"]), _time(record["expires_at"]))
 
 
