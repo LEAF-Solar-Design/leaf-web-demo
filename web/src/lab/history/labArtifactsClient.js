@@ -3,6 +3,7 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { humanizeError } from '../../errorHumanize.js'
 
 export const SAVED_REVISION_EVENT = 'leaf.lab.saved-revision'
+export const GRAPH_DOC_KEY = 'leaf.lab.graph-doc.v1'
 export const MSG_LAB_TOO_LARGE = 'This document is too large to save.'
 export const MSG_LAB_STORAGE_FULL = 'This save is over the Lab storage limit.'
 export function isValidDocId(id) {
@@ -14,8 +15,20 @@ function identifier(id) {
 const initial = () => ({ head: null, published: null, revisions: [], lastSaved: null, conflict: null,
   events: [], saveTimes: [], requestTimes: [], restoredGraph: null, restoredKey: 0, headLoaded: false, headLookupFailed: false })
 
-export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.fetch(...args), now = Date.now } = {}) {
-  let docId = 'strategy'
+export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.fetch(...args), now = Date.now, storage = null } = {}) {
+  let remembered = null
+  if (storage) try {
+    const value = storage.getItem(GRAPH_DOC_KEY)
+    if (typeof value === 'string' && value.length <= 512) {
+      const parsed = JSON.parse(value)
+      if (parsed && typeof parsed === 'object' && isValidDocId(parsed.doc_id)) remembered = parsed.doc_id
+    }
+  } catch {}
+  let docId = remembered || 'strategy'
+  let reopened = false
+  function remember(id) {
+    if (storage) try { storage.setItem(GRAPH_DOC_KEY, JSON.stringify({ doc_id: id })) } catch {}
+  }
   let generation = 0, writeSeq = 0, readSeq = 0, operation = 0
   let applied = { head: 0, revisions: 0 }
   const state = initial()
@@ -57,6 +70,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
     const revision = kind === 'publish' ? row.new_head : row.revision
     const detail = { doc_id: id, revision, sha256: row.sha256, kind, at: now() }
     if (current(token)) {
+      if (kind === 'save' || kind === 'restore') remember(id)
       writeSeq += 1
       update({ events: [...state.events, detail].slice(-20), head: maximum(state.head, revision),
         ...(state.lastSaved && state.lastSaved.revision > revision ? {} : { lastSaved: { revision, sha256: row.sha256, at: detail.at, graph: row.graph ?? state.lastSaved?.graph } }),
@@ -78,11 +92,25 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
   return {
     state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     currentDocId: () => docId,
+    rememberedDocId: () => remembered,
+    async reopenRemembered() {
+      if (remembered === null || reopened || docId !== remembered) return { state: 'none' }
+      reopened = true
+      const token = this.beginGraphOperation()
+      const head = await this.head(remembered)
+      if (!this.isCurrentOperation(token)) return { state: 'superseded' }
+      if ((head.ok && head.revision == null) || head.status === 404) return { state: 'empty' }
+      if (!head.ok) return { state: 'failed', detail: head.detail }
+      const row = await this.revision(remembered, head.revision)
+      if (!this.isCurrentOperation(token)) return { state: 'superseded' }
+      if (!row.ok || !row.graph) return { state: 'failed', detail: row.detail || 'No saved graph.' }
+      return { state: 'ready', docId: remembered, revision: head.revision, graph: row.graph, token }
+    },
     currentGeneration: () => generation,
     beginGraphOperation: () => ({ ...capture(docId), operation: ++operation }),
     isCurrentOperation: token => current(token) && token.operation === operation,
     captureMine(graph) { if (state.conflict && !state.conflict.captured) update({ conflict: { ...state.conflict, mine: JSON.parse(JSON.stringify(graph)), captured: true } }) },
-    setDocId(id) { identifier(id); if (id !== docId) { generation += 1; operation += 1; writeSeq = 0; readSeq = 0; applied = { head: 0, revisions: 0 }; docId = id; update({ ...initial(), restoredKey: state.restoredKey + 1 }) } },
+    setDocId(id) { identifier(id); if (id !== docId) { generation += 1; operation += 1; writeSeq = 0; readSeq = 0; applied = { head: 0, revisions: 0 }; docId = id; remember(id); update({ ...initial(), restoredKey: state.restoredKey + 1 }) } },
     takeGraph(graph) { operation += 1; update({ restoredGraph: graph, restoredKey: state.restoredKey + 1 }) },
     async save(id, graph, expectedHead) {
       identifier(id)
@@ -144,4 +172,8 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
   }
 }
 
-export const labArtifactsClient = createLabArtifactsClient()
+function browserStorage() {
+  try { return globalThis.localStorage || null } catch { return null }
+}
+
+export const labArtifactsClient = createLabArtifactsClient({ storage: browserStorage() })

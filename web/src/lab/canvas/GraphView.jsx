@@ -230,6 +230,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const live = useLiveGraph({ provider, registry: toolEntries, revision: supplied ? revision : localRevision, artifacts: client })
   const [, refreshHead] = useState(0)
   const [runMessage, setRunMessage] = useState('')
+  const [reopenMessage, setReopenMessage] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const submissionPending = useRef(false)
   const streams = useRef(new Set())
@@ -261,6 +262,24 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
       streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() }); streams.current.clear()
     }
   }, [])
+  useEffect(() => {
+    if (!opened) return
+    client.reopenRemembered?.().then(result => {
+      if (!mounted.current) return
+      if (result.state === 'ready') {
+        const pristine = latest.current.document == null || draftBaseline.current === null
+          || canonicalJSON(latest.current.document) === draftBaseline.current
+        if (pristine && client.isCurrentOperation(result.token)) {
+          client.takeGraph(result.graph)
+          setReopenMessage(`Reopened ${result.docId} r${result.revision}`)
+        } else if (!pristine) {
+          setReopenMessage(`Saved graph ${result.docId} r${result.revision} was not reopened because the canvas has edits. Choose Open to load it.`)
+        }
+      } else if (result.state === 'failed') {
+        setReopenMessage(`Could not reopen ${client.currentDocId()}: ${result.detail || 'unavailable'}`)
+      }
+    })
+  }, [client, opened])
   const runSnapshot = () => labValueStore.getRuns().filter(run => run.id !== 'local' && run.doc_id === client.currentDocId()
     && run.graph_revision === client.state.head).map(run => run.id).join(',')
   const matchingRuns = useSyncExternalStore(labValueStore.subscribeRuns, runSnapshot)
@@ -385,6 +404,7 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
             }}>Test trade evidence</a>
           {!onRun && client.state.head == null && <p id={saveHintId}>Save this graph before running it</p>}
           {runMessage && <p role="status">{runMessage}</p>}
+          {reopenMessage && <p role="status">{reopenMessage}</p>}
           {activeRunStatus.endsWith('/auth_expired') && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>
         <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
