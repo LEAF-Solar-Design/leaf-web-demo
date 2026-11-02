@@ -725,7 +725,7 @@ export class ConverseLoop {
     const capabilityOf = async (toolName: string): Promise<"drawing.read" | "drawing.write" | "solve"> => {
       const entry = (await catalogFor()).find((c) => c.name === toolName);
       if (!entry) return "drawing.write";
-      if (toolName === "solar-solve-proposal" && entry.capabilities.includes("solve")) return "solve";
+      if (toolName === "solar-solve-proposal" && hasServerCapability(entry, "solve")) return "solve";
       return entry.capabilities.includes("drawing.write") ? "drawing.write" : "drawing.read";
     };
 
@@ -773,7 +773,7 @@ export class ConverseLoop {
           const action =
             entry?.aps_live === true
               ? "submit_live_solve"
-              : target === "solar-solve-proposal" && entry?.capabilities.includes("solve")
+              : target === "solar-solve-proposal" && hasServerCapability(entry, "solve")
                 ? "run_solve_tool"
               : entry && params.dry_run === true
                 ? "run_read_tool"
@@ -1705,6 +1705,11 @@ function authorStageStatusId(args: Record<string, unknown>): string {
     throw new Error("author_stage_status requires only a canonical args.change_set_id");
   }
   return field.value;
+}
+
+/** Host catalog extensions retain their server vocabulary outside the shared tool capability union. */
+function hasServerCapability(entry: { capabilities: readonly string[] } | undefined, capability: string): boolean {
+  return entry?.capabilities.some(value => value === capability) ?? false;
 }
 
 function canonicalSolveContext(value: unknown, graphRevision?: number | null): {
