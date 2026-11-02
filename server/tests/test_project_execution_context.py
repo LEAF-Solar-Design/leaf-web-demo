@@ -210,3 +210,54 @@ def test_turn_start_persists_binding_and_emits_only_constant_sidecar(custody, mo
     assert context.KEY not in payload
     assert "project_context" not in payload
     assert relays[0][context.KEY] == BOUND
+
+
+@pytest.fixture()
+def assistant_state(custody, monkeypatch):
+    import solar_project_graph
+    session, calls = custody
+    monkeypatch.setattr(solar_project_context, "resolve_context", lambda *_a, **_k: SimpleNamespace(
+        binding=SimpleNamespace(organization_id=UUID(ORG), project_id=UUID(PROJECT),
+            drawing_id=UUID(DRAWING), input_version_id=UUID(VERSION),
+            head_version_id=UUID(VERSION), is_head=True, version=SimpleNamespace(seq=3)),
+        intake_sha256="a" * 64, intake={"polylines": [{"layer": "Panels", "geometry": "private"}]}))
+    monkeypatch.setattr(solar_project_graph, "_companion", lambda _i: {"rev": 17})
+    return session
+
+
+def test_private_assistant_state_reuses_active_turn_and_projects_no_geometry(assistant_state, monkeypatch):
+    from routers import agent
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "synthetic")
+    request = agent.ProjectDrawingStateRequest(tenant_id=ORG, session_id="session-1", turn_id="turn-1")
+    assert agent.internal_project_drawing_state(request, None).status_code == 401
+    response = agent.internal_project_drawing_state(request, "synthetic")
+    assert response.status_code == 200
+    value = json.loads(response.body)
+    assert value["binding"] == BOUND
+    assert value["revision"] == 3
+    assert value["graph_revision"] == 17
+    assert value["summary"] == {"entity_total": 1, "layers": [{"name": "Panels", "count": 1}]}
+    assert "geometry" not in response.body.decode()
+    assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.mark.parametrize("change", [{"tenant_id": OTHER}, {"active_turn_id": "other"},
+    {"turn_started_at": 0}])
+def test_private_assistant_state_refuses_bad_stored_authority(assistant_state, monkeypatch, change):
+    from routers import agent
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "synthetic")
+    assistant_state.update(change)
+    response = agent.internal_project_drawing_state(agent.ProjectDrawingStateRequest(
+        tenant_id=ORG, session_id="session-1", turn_id="turn-1"), "synthetic")
+    assert response.status_code == 403
+    assert "binding" not in json.loads(response.body)
+
+
+def test_private_assistant_unbound_is_explicit_and_project_missing_pin_refuses(assistant_state, monkeypatch):
+    from routers import agent
+    monkeypatch.setenv("LEAF_APP_DISPATCH_SECRET", "synthetic")
+    monkeypatch.setattr(session_store, "turn_started_data", lambda *_a: {})
+    request = agent.ProjectDrawingStateRequest(tenant_id=ORG, session_id="session-1", turn_id="turn-1")
+    assert agent.internal_project_drawing_state(request, "synthetic").status_code == 409
+    assistant_state.update(project_id=None, org_id=None)
+    assert json.loads(agent.internal_project_drawing_state(request, "synthetic").body) == {"binding": None}

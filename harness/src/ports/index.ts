@@ -32,8 +32,20 @@ import type {
   TenantRepoProvider as VendoredTenantRepoProvider,
 } from "../vendor/mushy-author/ports/index.js";
 
+export interface ProjectDrawingState {
+  binding: { schema: "leaf.project-execution-context.v1"; organization_id: string;
+    project_id: string; drawing_id: string; input_version_id: string; intake_sha256: string };
+  revision: number;
+  graph_revision: number | null;
+  head_version_id: string;
+  is_head: boolean;
+  summary: Record<string, unknown>;
+}
+
 /** Host-only overlay authority handoff; the app resolves the active turn's actor. */
 export interface AppRunClient extends VendoredAppRunClient {
+  forTurn?(authority: { tenantId: string; sessionId: string; turnId: string }): AppRunClient;
+  getProjectDrawingState?(): Promise<ProjectDrawingState | null>;
   inspectProjectPhoto(
     tenantId: string, sessionId: string,
     body: import("../agent/projectPhotoInspection.js").ProjectPhotoInspectionInput,

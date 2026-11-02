@@ -134,3 +134,33 @@ def approval_payload(payload, binding):
     if binding is not None:
         result[KEY] = validate_binding(binding)
     return result if result or payload is not None else None
+
+
+def drawing_state(session_id, turn_id, tenant):
+    """Revalidate stored authority and project only bounded immutable source facts."""
+    value = resolve_turn_binding(session_id, turn_id, tenant)
+    if value is None:
+        return {"binding": None}
+    import solar_project_context
+    current = solar_project_context.resolve_context(
+        tenant, UUID(value["project_id"]), UUID(value["input_version_id"]),
+        drawing_id=UUID(value["drawing_id"]), write=False)
+    binding = current.binding
+    if current.intake_sha256 != value["intake_sha256"]:
+        raise ContextError("project_execution_context_changed")
+    revision = binding.version.seq
+    if type(revision) is not int or revision < 1:
+        raise ContextError("project_execution_context_invalid")
+    import solar_project_graph
+    graph = solar_project_graph._companion(current.intake)
+    graph_revision = None if graph is None else graph["rev"]
+    layers = {}
+    for kind in ("polylines", "inserts", "faces3d"):
+        for entity in current.intake.get(kind) or []:
+            name = str(entity.get("layer", "0"))[:200]
+            layers[name] = layers.get(name, 0) + 1
+    ranked = sorted(layers.items(), key=lambda row: (-row[1], row[0]))
+    return {"binding": value, "revision": revision, "graph_revision": graph_revision,
+            "head_version_id": str(binding.head_version_id), "is_head": binding.is_head,
+            "summary": {"entity_total": sum(layers.values()),
+                        "layers": [{"name": name, "count": count} for name, count in ranked[:32]]}}
