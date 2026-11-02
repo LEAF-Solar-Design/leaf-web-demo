@@ -50,6 +50,8 @@ import { AuthorLoop, AuthorLoopError } from "./agent/authorLoop.js";
 import { PortfolioProposalError, PortfolioProposalService, type PortfolioProposalRequest } from "./agent/portfolioProposal.js";
 import { CAMPAIGN_SOURCE_BODY_LIMIT, dispatchCampaignSource, type CampaignSourceService } from "./agent/campaignSourceIntegration.js";
 import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditSettlementUnavailable } from "./agent/projectRepositoryEditCoordinator.js";
+import { authorProjectSource, type ProjectSourceAuthorDependencies } from "./agent/projectSourceAuthoring.js";
+import { SdkRepoEditor } from "./vendor/mushy-author/ports/impl/repoEditRunner.js";
 import { redactTokens } from "./redact.js";
 import { createFileStoreProbe, createReadinessCheck } from "./storeReadiness.js";
 import type { StoreReadiness } from "./storeReadiness.js";
@@ -818,6 +820,7 @@ export interface Harness {
 export function createHarness(ports: HarnessPorts, opts?: {
   auth?: HarnessAuthConfig;
   projectRepositoryEdits?: CampaignSourceService;
+  projectSourceAuthoring?: ProjectSourceAuthorDependencies;
   portfolioProposals?: Pick<PortfolioProposalService, "propose">;
   standardServicesApproval?: {
     dispatchSecret: string;
@@ -1192,6 +1195,32 @@ export function createHarness(ports: HarnessPorts, opts?: {
           return send(res, 409, { error: { code: "worker_run_not_active", message: "worker run not active" } });
         }
         return send(res, 200, binding);
+      }
+
+      if (method === "POST" && path === "/internal/project-repository-source/author") {
+        const requiredAuth = harnessAuthDenial(req, { ...auth, enabled: true });
+        if (requiredAuth) return send(res, 401, requiredAuth);
+        res.setHeader("cache-control", "no-store");
+        if (!authoredExecutionEnabled() || !opts?.projectRepositoryEdits || !opts.projectSourceAuthoring) {
+          return send(res, 503, { error: { code: "source_unavailable", message: "source is unavailable" } });
+        }
+        const controller = new AbortController();
+        const abort = () => { if (!res.writableEnded) controller.abort(); };
+        req.once("aborted", abort);
+        res.once("close", abort);
+        const timer = setTimeout(() => controller.abort(), 240000);
+        try {
+          const body = await readJsonBody(req, CAMPAIGN_SOURCE_BODY_LIMIT, true, false, true);
+          const staged = await authorProjectSource(opts.projectRepositoryEdits, opts.projectSourceAuthoring,
+            body, authorityHeader(req, "x-tenant-id"), controller.signal);
+          return send(res, 200, staged);
+        } catch {
+          return send(res, 409, { error: { code: "source_conflict", message: "source transaction failed" } });
+        } finally {
+          clearTimeout(timer);
+          req.removeListener("aborted", abort);
+          res.removeListener("close", abort);
+        }
       }
 
       if (method === "POST" && ["stage", "publish", "recover"].some(action =>
@@ -1861,7 +1890,8 @@ export async function startReal(port = 8130): Promise<Server> {
     coordination: new ProjectRepositoryEditCoordinationClient({ baseUrl: appUrl, dispatchSecret }),
   }) : undefined;
   const server = createHarness(ports, {
-    ...(projectRepositoryEdits ? { projectRepositoryEdits } : {}),
+    ...(projectRepositoryEdits ? { projectRepositoryEdits,
+      projectSourceAuthoring: { oauth, editor: new SdkRepoEditor({ maxTurns: 24, maxWallTimeMs: 240000 }) } } : {}),
     portfolioProposals: new PortfolioProposalService({ oauth }),
     readiness,
   }).listen(port);
