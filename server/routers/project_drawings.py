@@ -19,7 +19,8 @@ router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/solar-reads|drawings/[^/]+/solar-artifacts/[^/]+)/?$")
+    r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?)|"
+    r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
     "SIP_R1_INVALID_BINDING": (400, False), "SIP_R1_CONTEXT_NOT_FOUND": (404, False),
@@ -185,12 +186,26 @@ def release_route(project_id: UUID, drawing_id: UUID, tenant=Depends(deps.requir
 # These output endpoints share only the existing context and response helpers.
 import json
 from starlette.responses import Response
+from starlette.concurrency import run_in_threadpool
 import solar_project_admission as output_policy
 import solar_project_artifacts as output_artifacts
 import solar_project_read as output_reads
+import solar_project_solaredge as project_solaredge
 from solar_design_graph import GraphValidationError
 
 _OUTPUT_FAILURES = {
+    "IMPORT_MEDIA_TYPE_REFUSED": (415, "Use a PDF source."),
+    "REPORT_MEDIA_TYPE_REFUSED": (415, "Use a JSON report request."),
+    "IMPORT_PDF_TOO_LARGE": (413, "The PDF exceeds the source size limit."),
+    "REPORT_REQUEST_TOO_LARGE": (413, "The report request is too large."),
+    "REPORT_REQUEST_INVALID": (400, "The report request is invalid."),
+    "IMPORT_QUOTA_EXCEEDED": (429, "This version has reached its source limit."),
+    "IMPORT_STORE_UNAVAILABLE": (503, "Project source storage is unavailable."),
+    "IMPORT_WRITES_DRAINED": (503, "Project source creation is temporarily unavailable."),
+    "REPORT_WRITES_DRAINED": (503, "Project report creation is temporarily unavailable."),
+    "REPORT_BUSY": (503, "The PDF parser is busy. Try again shortly."),
+    "REPORT_PARSE_TIMEOUT": (503, "The PDF could not be parsed within the time limit."),
+    "REPORT_PARSE_UNAVAILABLE": (503, "The PDF parser is unavailable."),
     "project_execution_disabled": (409, "Project Solar outputs are not enabled on this server."),
     "SIP_R6_INVALID_REQUEST": (400, "Project Solar read request is invalid."),
     "SIP_R6_REQUEST_TOO_LARGE": (413, "Project Solar read request is too large."),
@@ -212,17 +227,23 @@ _OUTPUT_FAILURES = {
 }
 _INVALID_ARTIFACT = frozenset(("ARTIFACT_TOO_LARGE", "ARTIFACT_FILENAME_INVALID",
     "ARTIFACT_CONTENT_MISMATCH", "ARTIFACT_INVALID", "ARTIFACT_MEDIA_TYPE_REFUSED"))
+_INVALID_SOURCE = frozenset(("IMPORT_PDF_EMPTY", "IMPORT_NOT_A_PDF", "IMPORT_PDF_MALFORMED",
+    "IMPORT_PDF_ENCRYPTED", "IMPORT_PDF_NO_PAGES", "IMPORT_PDF_TOO_MANY_PAGES"))
 
 
 def _output_failure(reason):
-    if reason in _INVALID_ARTIFACT:
+    if reason in _INVALID_SOURCE:
+        status, message = 400, "The source PDF is invalid."
+    elif reason in _INVALID_ARTIFACT:
         status, message = 500, "The Solar read produced an invalid artifact."
     elif reason in _OUTPUT_FAILURES:
         status, message = _OUTPUT_FAILURES[reason]
     else:
         status, message = 409, "The Solar read was refused for this version."
     code = ErrorCode.INTERNAL if status >= 500 else ErrorCode.BAD_PARAMS
-    retry = reason in ("ARTIFACT_STORE_UNAVAILABLE", "ARTIFACT_WRITES_DRAINED")
+    retry = reason in ("ARTIFACT_STORE_UNAVAILABLE", "ARTIFACT_WRITES_DRAINED",
+        "IMPORT_STORE_UNAVAILABLE", "IMPORT_WRITES_DRAINED", "REPORT_WRITES_DRAINED",
+        "REPORT_BUSY", "REPORT_PARSE_TIMEOUT", "REPORT_PARSE_UNAVAILABLE")
     body = err_envelope(code, message, retry)
     body["error"]["reason_code"] = reason
     return JSONResponse(content=body, status_code=status, headers=_NO_STORE)
@@ -293,6 +314,61 @@ def solar_read_route(project_id: str, drawing_id: str, input_version_id: str,
         return output_reads.run_project_read(tenant, proj, drawing, version, body["tool"],
             body.get("params", {}), catalog_digest=body["catalog_digest"], current=body.get("current", False))
     return _output_dispatch(operation)
+
+
+async def _project_solaredge_body(request, *, report):
+    if not output_policy.project_runs_enabled():
+        raise GraphValidationError("project_execution_disabled")
+    media = "application/json" if report else "application/pdf"
+    if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != media:
+        raise GraphValidationError("REPORT_MEDIA_TYPE_REFUSED" if report else "IMPORT_MEDIA_TYPE_REFUSED")
+    maximum = (project_solaredge.reports.MAX_REPORT_REQUEST_BYTES if report
+               else project_solaredge.sources.MAX_IMPORT_PDF_BYTES)
+    too_large = "REPORT_REQUEST_TOO_LARGE" if report else "IMPORT_PDF_TOO_LARGE"
+    raw = bytearray()
+    async for chunk in request.stream():
+        if len(raw) + len(chunk) > maximum:
+            raise GraphValidationError(too_large)
+        raw.extend(chunk)
+    if not report:
+        return bytes(raw)
+    try:
+        return json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=service._object_pairs,
+            parse_constant=service._nonfinite, parse_float=service._json_float)
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise GraphValidationError("REPORT_REQUEST_INVALID") from None
+
+
+async def _project_solaredge_request(request, tenant, project_id, drawing_id,
+                                    input_version_id, org_header, project_header, *, report):
+    try:
+        proj, drawing, version = _output_scope(tenant, project_id, drawing_id,
+            org_header, project_header, input_version_id)
+        body = await _project_solaredge_body(request, report=report)
+    except (GraphValidationError, service.ProjectContextError) as exc:
+        def refused():
+            raise exc
+        # The exception variable is cleared after the except suite.
+        return _output_dispatch(refused)
+    operation = project_solaredge.build_report if report else project_solaredge.import_source
+    return await run_in_threadpool(_output_dispatch,
+        lambda: operation(tenant, proj, drawing, version, body))
+
+
+@router.post("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/imports/solaredge-pdf")
+async def project_solaredge_source_route(project_id: str, drawing_id: str, input_version_id: str,
+        request: Request, tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
+    return await _project_solaredge_request(request, tenant, project_id, drawing_id,
+        input_version_id, x_org_id, x_project_id, report=False)
+
+
+@router.post("/api/projects/{project_id}/drawings/{drawing_id}/versions/{input_version_id}/imports/solaredge-pdf/report")
+async def project_solaredge_report_route(project_id: str, drawing_id: str, input_version_id: str,
+        request: Request, tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[str] = Header(default=None), x_project_id: Optional[str] = Header(default=None)):
+    return await _project_solaredge_request(request, tenant, project_id, drawing_id,
+        input_version_id, x_org_id, x_project_id, report=True)
 
 
 @router.get("/api/projects/{project_id}/drawings/{drawing_id}/solar-artifacts/{artifact_id}")

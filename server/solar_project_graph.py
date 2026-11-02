@@ -258,7 +258,10 @@ def _candidate(context, tool, params, initialized, job_id, *, conn=None, trusted
         trusted["candidate"] = commit_candidate(context, trusted_proposal, conn=conn)
     if not initialized and tool not in ("solar-settings", "solar-panels-from-drawing", SIZING_TOOL):
         require_project_sizing(context, conn=conn)
-    if _global_sizing(tool, params) and conn is not None:
+    if tool == "solar-solaredge-accept":
+        from solar_project_solaredge import accept
+        after = accept(context, builtin_params)
+    elif _global_sizing(tool, params) and conn is not None:
         after = _stored_sizing_graph(context, job_id, conn)
     else:
         after = _run_builtin(context, tool, copy.deepcopy(base if initialized else before),
