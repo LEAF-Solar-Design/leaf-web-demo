@@ -106,7 +106,7 @@ class WebPageTemplateTests(unittest.TestCase):
             names = archive.namelist()
             self.assertEqual(len(names), len(set(names)))
             self.assertEqual(set(names), {"package.json", "page.json", "app/page.jsx", "app/layout.jsx",
-                                          "app/globals.css", "next.config.mjs", ".gitignore", "README.md",
+                                          "app/globals.css", "app/design.js", "next.config.mjs", ".gitignore", "README.md",
                                           "source-manifest.json"})
             manifest = json.loads(archive.read("source-manifest.json"))
             self.assertEqual(manifest["schema"], "leaf.project-page-source.v1")
@@ -151,7 +151,8 @@ class WebPageTemplateTests(unittest.TestCase):
     def test_export_uses_shared_preset_css(self):
         with zipfile.ZipFile(io.BytesIO(template.source_archive(document(), 1))) as archive:
             css = archive.read("app/globals.css").decode()
-            self.assertTrue(css.endswith(template.PAGE_CSS))
+            self.assertTrue(css.endswith(template.PAGE_CSS + template.DESIGN_CSS))
+            self.assertEqual(archive.read("app/design.js").decode(), template.DESIGN_JS)
             for color in ["#faf5ee", "#463027", "#755d4e", "#ffffff", "#202020", "#666666", "#201c1a", "#c4b99f"]:
                 self.assertIn(color, css)
             self.assertIn('data-alignment="left"', css)
@@ -384,24 +385,186 @@ class PortfolioLayoutTests(unittest.TestCase):
                     if native:
                         swift = files['Portfolio/PortfolioApp.swift'].decode()
                         self.assertIn('let galleryLayout: String?', swift)
-                        self.assertIn('galleryLayout: portfolio.document.galleryLayout', swift)
                         home, gallery = swift.split('struct GalleryView: View', 1)
-                        self.assertIn('private let columns = [GridItem(.adaptive(minimum: 240), spacing: 24)]', home)
+                        self.assertIn('let legacyCount = adaptive ? max(1, Int((width + horizontalGap) / (240 + horizontalGap))) : 1', home)
+                        self.assertIn('columns: document.appearance?.columns', home)
                         self.assertIn('galleryLayout == "single"', gallery)
-                        self.assertIn('? [GridItem(.flexible(), spacing: 24)]', gallery)
-                        self.assertIn(': [GridItem(.adaptive(minimum: 240), spacing: 24)]', gallery)
-                        self.assertIn('LazyVGrid(columns: columns', gallery)
+                        self.assertIn('category.layout?.columns ?? document.appearance?.columns ?? (document.galleryLayout == "single" ? 1 : nil)', gallery)
+                        self.assertIn('adaptive: true', gallery)
+                        self.assertIn('DesignGrid(columns:', gallery)
                     else:
                         route = files['app/[slug]/page.jsx'].decode()
-                        self.assertIn('<Gallery images={c.images} galleryLayout={page.galleryLayout}', route)
+                        self.assertIn('<Gallery page={page} category={c}', route)
                         viewer = files['app/Gallery.jsx'].decode()
-                        self.assertIn('Gallery({images,galleryLayout})', viewer)
-                        self.assertIn("data-gallery-layout={galleryLayout || 'grid'}", viewer)
+                        self.assertIn('Gallery({page,category})', viewer)
+                        self.assertIn("data-gallery-layout={page.galleryLayout||'grid'}", viewer)
+                        self.assertIn("c?.layout?.columns??page.appearance?.columns??(c&&page.galleryLayout==='single'?1:2)", files['app/design.js'].decode())
                         self.assertNotIn('data-gallery-layout', files['app/page.jsx'].decode())
                         css = files['app/globals.css'].decode()
                         self.assertIn('.portfolio .portfolio-grid[data-gallery-layout="single"]{grid-template-columns:minmax(0,1fr)}', css)
                         self.assertIn('grid-template-columns:repeat(2,minmax(0,1fr))', css)
                         self.assertIn('@media(max-width:600px){.portfolio-grid{grid-template-columns:minmax(0,1fr)}', css)
+
+
+class EnvironmentDesignSchemaTests(unittest.TestCase):
+    def test_portfolio_optional_families_roundtrip_without_default_injection(self):
+        value = portfolio_document()
+        value['appearance'] = {'font': 'mono', 'columns': 4, 'mobileColumns': 2, 'palette': {'background': '#AbCdEF'}}
+        value['textStyles'] = {'headline': {'size': 96, 'lineHeight': 2.5, 'letterSpacing': -1, 'italic': True}}
+        value['nav'] = {'order': ['resume', 'home'], 'hidden': True, 'appearance': {'color': '#ABCDEF'}}
+        value['labels'] = {'aboutHeading': 'About me', 'viewerClose': 'Back'}
+        value['categories'][0].update(hidden=True, navLabel='Bakes', layout={'hidden': True, 'gap': 0},
+                                      textStyles={'navigation': {'size': 12}})
+        value['categories'][0]['images'][0].update(display={'fit': 'cover', 'focal': 'bottom-right', 'span': 2},
+                                                  captionStyle={'underline': True})
+        value['resume'] = [{'heading': 'Experience', 'headingStyle': {'font': 'serif'}, 'layout': {'padding': 96},
+                            'entries': [{'title': 'Chef', 'subtitle': '', 'dates': '', 'description': '',
+                                         'layout': {'columns': 2}, 'textStyles': {'title': {'weight': 'bold'}}}]}]
+        for name in ('portfolio_page_template', 'portfolio_ios_template', 'web_page_template'):
+            producer = portfolio_producer(name)
+            with self.subTest(producer=name):
+                result = producer.validate_document(value)
+                self.assertEqual(result, value)
+                result['appearance']['palette']['background'] = '#000000'
+                self.assertEqual(value['appearance']['palette']['background'], '#AbCdEF')
+
+    def test_optional_fields_reject_unknown_malformed_and_unsafe_values(self):
+        cases = [('appearance', {}), ('appearance', {'columns': True}), ('appearance', {'columns': 1.5}),
+                 ('appearance', {'columns': 5}), ('appearance', {'mobileColumns': 3}),
+                 ('appearance', {'palette': {}}), ('appearance', {'palette': {'text': '#fff'}}),
+                 ('appearance', {'arbitraryCSS': 'display:none'}), ('textStyles', {'headline': {}}),
+                 ('textStyles', {'headline': {'size': None}}), ('textStyles', {'headline': {'size': False}}),
+                 ('textStyles', {'headline': {'italic': False}}), ('textStyles', {'headline': {'lineHeight': float('inf')}}),
+                 ('textStyles', {'missing': {'size': 12}}), ('nav', {'order': ['home', 'home']}),
+                 ('nav', {'order': ['external']}), ('nav', {'appearance': {'hidden': True}}),
+                 ('labels', {'viewerClose': 'https://example.com'}), ('labels', {'aboutHeading': None})]
+        for name in ('portfolio_page_template', 'portfolio_ios_template', 'web_page_template'):
+            producer = portfolio_producer(name)
+            for key, config in cases:
+                value = portfolio_document()
+                value[key] = config
+                with self.subTest(producer=name, key=key, config=config), self.assertRaises(ValueError):
+                    producer.validate_document(value)
+
+    def test_plain_page_optional_data_is_detached_and_bounded(self):
+        value = document(appearance={'font': 'mono', 'padding': 0, 'palette': {'accent': '#ABCDEF'}},
+                         textStyles={'status': {'hidden': True}, 'headline': {'size': 96}})
+        result = template.validate_document(value)
+        self.assertEqual(result, value)
+        result['appearance']['font'] = 'serif'
+        self.assertEqual(value['appearance']['font'], 'mono')
+        for config in ({}, {'align': 'left'}, {'padding': True}, {'padding': 97}, {'palette': None}):
+            with self.subTest(config=config), self.assertRaises(ValueError):
+                template.validate_document(document(appearance=config))
+
+    def test_configured_next_source_is_data_independent_and_keeps_original_bindings(self):
+        producer = portfolio_producer('portfolio_page_template')
+        value = portfolio_document()
+        image = value['categories'][0]['images'][0]
+        previews = {image['material_id']: b'optimized preview fixture'}
+        configured = json.loads(json.dumps(value))
+        configured['appearance'] = {'columns': 4, 'font': 'mono', 'palette': {'background': '#123456'}}
+        configured['categories'][0]['images'][0]['display'] = {'fit': 'cover', 'focal': 'top-left'}
+        archives = []
+        for page in (value, configured):
+            with zipfile.ZipFile(io.BytesIO(producer.source_archive(page, 7, previews, template.PACKAGE_VERSIONS))) as archive:
+                archives.append({path: archive.read(path) for path in archive.namelist()})
+        for path in archives[0]:
+            if path not in ('portfolio.json', 'source-manifest.json'):
+                self.assertEqual(archives[0][path], archives[1][path], path)
+        self.assertEqual(json.loads(archives[1]['portfolio.json']), configured)
+        self.assertIn(b'photoStyle(image.display,page.appearance)', archives[1]['app/Gallery.jsx'])
+        self.assertIn(b'textStyle(e.textStyles?.title)', archives[1]['app/resume/page.jsx'])
+
+
+
+    def test_configured_native_archive_consumes_design_and_is_data_independent(self):
+        producer = portfolio_producer('portfolio_ios_template')
+        original = portfolio_document()
+        configured = json.loads(json.dumps(original))
+        configured['appearance'] = {'font': 'mono', 'scale': 'large', 'headingWeight': 'bold',
+                                    'spacing': 'airy', 'width': 'wide', 'align': 'right',
+                                    'columns': 4, 'mobileColumns': 2, 'gap': 0, 'padding': 8,
+                                    'maxWidth': 900, 'imageFit': 'cover', 'aspect': 'portrait',
+                                    'focal': 'bottom-right', 'palette': {'background': '#ABCDEF',
+                                    'text': '#123456', 'muted': '#234567', 'accent': '#345678'}}
+        style = {'font': 'serif', 'size': 36, 'weight': 'medium', 'color': '#AbCdEf',
+                 'align': 'center', 'lineHeight': 2, 'letterSpacing': 3,
+                 'italic': True, 'underline': True}
+        box = {'columns': 2, 'mobileColumns': 2, 'gap': 8, 'padding': 4,
+               'maxWidth': 600, 'align': 'center', 'background': '#123456',
+               'radius': 8, 'borderWidth': 2, 'borderColor': '#234567', 'shadow': 'strong'}
+        configured['textStyles'] = {key: dict(style) for key in
+            ('name', 'headline', 'introduction', 'about', 'aboutHeading', 'contactHeading', 'location', 'email', 'resumeHeading')}
+        configured['labels'] = {'aboutHeading': 'About the baker', 'contactHeading': 'Get in touch',
+                                'resumeHeading': 'Work history', 'viewerClose': 'Back to gallery'}
+        configured['nav'] = {'order': ['resume', 'galleries', 'about', 'home'], 'layout': 'column',
+                             'homeLabel': 'Work', 'aboutLabel': 'Contact', 'resumeLabel': 'Experience',
+                             'appearance': dict(style), 'gap': 4, 'padding': 6, 'radius': 8, 'background': '#ABCDEF'}
+        category = configured['categories'][0]
+        category.update(layout=dict(box), navLabel='Gallery', textStyles={key: dict(style) for key in ('title', 'description', 'navigation')})
+        category['images'][0].update(display={'fit': 'cover', 'aspect': 'square', 'focal': 'top-right', 'radius': 12, 'span': 2},
+                                     captionStyle=dict(style))
+        configured['resume'] = [{'heading': 'Experience', 'headingStyle': dict(style), 'layout': dict(box),
+            'entries': [{'title': 'Chef', 'subtitle': 'Bakery', 'dates': '2026', 'description': 'Pastry',
+                         'layout': dict(box), 'textStyles': {key: dict(style) for key in ('title', 'subtitle', 'dates', 'description')}}]}]
+        mid = original['categories'][0]['images'][0]['material_id']
+        files = []
+        for value in (original, configured):
+            with zipfile.ZipFile(io.BytesIO(producer.source_archive(value, 7, {mid: b'optimized preview fixture'}))) as archive:
+                files.append({path: archive.read(path) for path in archive.namelist()})
+        data_path = 'Portfolio/PortfolioContent/portfolio.json'
+        self.assertEqual(json.loads(files[1][data_path]), configured)
+        for path in files[0]:
+            if path not in (data_path, 'source-manifest.json'):
+                self.assertEqual(files[0][path], files[1][path], path)
+        swift = files[1]['Portfolio/PortfolioApp.swift'].decode()
+        # These pin real consumer sites, not just optional Decodable declarations.
+        for consumer in ('style?.size', 'style?.font', 'style?.weight', 'style?.color',
+                         'style?.align', 'style?.lineHeight', 'style?.letterSpacing',
+                         'style?.italic', 'style?.underline', 'style?.hidden',
+                         'value?.padding', 'value?.maxWidth', 'value?.background', 'value?.radius',
+                         'value?.borderColor', 'value?.borderWidth', 'value?.shadow',
+                         'photo.display?.fit', 'photo.display?.aspect', 'photo.display?.focal',
+                         'photo.display?.span', 'photo.display?.radius', 'photo.display?.hidden',
+                         'nav.groups', 'nav.layout', 'nav.gap', 'nav.padding', 'nav.radius',
+                         'nav.background', 'nav.homeLabel', 'nav.aboutLabel', 'nav.resumeLabel',
+                         'nav.hideHome', 'nav.hideAbout', 'nav.hideResume', 'nav.hidden',
+                         'category.textStyles?', 'section.headingStyle', 'entry.textStyles?',
+                         'document.labels?["viewerClose"]', 'document.appearance?.mobileColumns'):
+            self.assertIn(consumer, swift)
+        self.assertIn('@ScaledMetric(relativeTo: .body)', swift)
+        self.assertNotIn('.dynamicTypeSize(', swift)
+        self.assertIn('Text(verbatim: value)', swift)
+        self.assertIn('case "top-right": return .topTrailing', swift)
+        self.assertIn('case "bottom-left": return .bottomLeading', swift)
+        self.assertIn('view[PhotoSpan.self]', swift)
+        self.assertIn('layoutValue(key: PhotoSpan.self', swift)
+        self.assertEqual(configured['categories'][0]['images'][0]['sha256'], original['categories'][0]['images'][0]['sha256'])
+
+    def test_nested_design_bounds_and_closed_keys_agree_across_all_producers(self):
+        cases = [
+            (('categories', 0, 'layout'), {'gap': -1}),
+            (('categories', 0, 'layout'), {'maxWidth': 1801}),
+            (('categories', 0, 'layout'), {'padding': False}),
+            (('categories', 0, 'layout'), {'imageFit': 'cover'}),
+            (('categories', 0, 'images', 0, 'display'), {'focal': 'north'}),
+            (('categories', 0, 'images', 0, 'display'), {'span': 3}),
+            (('categories', 0, 'images', 0, 'display'), {'hidden': False}),
+            (('categories', 0, 'images', 0, 'captionStyle'), {'lineHeight': float('nan')}),
+            (('categories', 0, 'images', 0, 'captionStyle'), {'letterSpacing': -2}),
+            (('categories', 0, 'images', 0, 'captionStyle'), {'size': 97}),
+        ]
+        for name in ('portfolio_page_template', 'portfolio_ios_template', 'web_page_template'):
+            producer = portfolio_producer(name)
+            for path, invalid in cases:
+                value = portfolio_document()
+                node = value
+                for key in path[:-1]:
+                    node = node[key]
+                node[path[-1]] = invalid
+                with self.subTest(producer=name, path=path, invalid=invalid), self.assertRaises(ValueError):
+                    producer.validate_document(value)
 
 
 if __name__ == '__main__':

@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, useSyncExternalStore } from 'react'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
+import { subscribeBeforeLogout } from '../auth.js'
 import { listProjectPhotos, readProjectPhotoPreview, uploadProjectPhoto } from '../projects/api.js'
 import { humanizeError } from '../errorHumanize.js'
 import './photoMaterialIntake.css'
@@ -8,13 +9,13 @@ const message = error => humanizeError(error?.message || 'Photos could not be lo
 const mergeRows = (rows, added) => [...new Map([...rows, ...added].map(row => [row.material_id, row])).values()]
 
 // Remount every local byte, request and object URL when authority changes.
-export default function PhotoMaterialIntake({ projectId }) {
+export default function PhotoMaterialIntake({ projectId, onUploaded }) {
   const scope = useSyncExternalStore(subscribeActiveScope, readActiveScope, () => null)
   if (!projectId || !scope) return <p>Sign in and open a project to add photos.</p>
-  return <PhotoSession key={`${scope}:${projectId}`} projectId={projectId} scope={scope} />
+  return <PhotoSession key={`${scope}:${projectId}`} projectId={projectId} scope={scope} onUploaded={onUploaded} />
 }
 
-function PhotoSession({ projectId, scope }) {
+function PhotoSession({ projectId, scope, onUploaded }) {
   const [photos, setPhotos] = useState([])
   const [previews, setPreviews] = useState({})
   const [queue, setQueue] = useState([])
@@ -62,12 +63,15 @@ function PhotoSession({ projectId, scope }) {
     live.current = true
     abort.current = new AbortController()
     void load()
-    return () => {
+    const clear = () => {
       live.current = false
       abort.current.abort()
       for (const url of urls.current.values()) URL.revokeObjectURL(url)
       urls.current.clear()
+      setPhotos([]); setPreviews({}); setQueue([]); setBusy(false); setLoading(false)
     }
+    const logout = subscribeBeforeLogout(clear)
+    return () => { clear(); logout() }
   }, [projectId, scope])
 
   const run = async items => {
@@ -77,6 +81,7 @@ function PhotoSession({ projectId, scope }) {
     setError('')
     setQueue(items)
     const update = (index, state, detail = '') => setQueue(previous => previous.map((item, i) => i === index ? { ...item, state, detail } : item))
+    let uploaded = false
     try {
       for (let index = 0; index < items.length && current(); index++) {
         const item = items[index]
@@ -86,6 +91,7 @@ function PhotoSession({ projectId, scope }) {
           const result = await uploadProjectPhoto(projectId, item.file, options())
           if (!current()) break
           setPhotos(previous => mergeRows(previous, [result.material]))
+          uploaded = true
           update(index, 'ready')
           await preview(result.material)
         } catch (cause) {
@@ -95,7 +101,7 @@ function PhotoSession({ projectId, scope }) {
       }
     } finally {
       running.current = false
-      if (current()) setBusy(false)
+      if (current()) { setBusy(false); if (uploaded) onUploaded?.() }
     }
   }
   const choose = event => {

@@ -10,3 +10,25 @@
 .studio-shell .browser-project-panel .studio-ground-board { position: relative; inset: auto; width: 100%; height: auto; min-height: 320px; background: transparent; }
 .studio-shell .browser-project-panel .ground-desk { position: relative; inset: auto !important; width: auto !important; height: auto !important; margin: 0; padding: 12px; transform: none; visibility: visible; overflow: visible; }
 .studio-shell .browser-project-panel .ground-tiles { display: grid; grid-template-columns: minmax(0, 1fr); overflow: visible; }
+.canvas-toolbar, .canvas-settings, .canvas-properties { background: var(--leaf-surface, #fff); color: var(--leaf-ink, #202020); font: 14px/1.5 Arial, sans-serif; }
+.canvas-toolbar { position: sticky; top: 0; z-index: 4; display: flex; flex-wrap: wrap; gap: 8px; padding: 8px; border-bottom: 1px solid var(--leaf-line, #bbb); }
+.canvas-toolbar button, .canvas-settings button, .canvas-properties button, .element-inspector button { min-height: 44px; padding: 8px 12px; color: inherit; background: var(--leaf-surface, #fff); border: 1px solid var(--leaf-line, #bbb); border-radius: 4px; }
+.canvas-settings { position: sticky; top: 0; z-index: 5; padding: 16px; }
+.canvas-settings select, .element-inspector input, .element-inspector select, .element-inspector textarea { box-sizing: border-box; width: 100%; max-width: 100%; min-height: 44px; font: inherit; color: var(--leaf-ink, #202020); background: var(--leaf-surface, #fff); }
+.element-inspector, .element-properties { display: grid; gap: 12px; min-width: 0; }
+.element-inspector label { display: grid; gap: 4px; }
+.element-inspector fieldset { min-width: 0; }
+.element-inspector input[type="checkbox"] { width: 44px; }
+.canvas-properties { position: absolute; top: 0; right: 0; bottom: 0; width: 320px; overflow: auto; padding: 12px; box-sizing: border-box; z-index: 5; }
+.browser-asset-viewport[data-inspector] { padding-right: 320px; box-sizing: border-box; }
+.canvas-inline-text { display: block; box-sizing: border-box; width: 100%; min-height: 44px; resize: vertical; font: inherit; letter-spacing: inherit; line-height: inherit; text-align: inherit; color: inherit; background: transparent; border: 1px dashed currentColor; }
+.canvas-inline-text { scroll-margin-top: 160px; scroll-margin-bottom: 48vh; }
+.browser-asset-viewport [data-element] { scroll-margin-top: calc(var(--canvas-toolbar-height, 160px) + 12px); scroll-margin-bottom: 48vh; }
+.browser-asset-viewport[data-inspector] > .portfolio { width: 100%; }
+.canvas-properties fieldset { min-width: 0; }
+.canvas-properties .portfolio-editor :is(input, textarea, select) { width: 100%; min-width: 0; min-height: 44px; box-sizing: border-box; font: inherit; color: var(--leaf-ink, #202020); background: var(--leaf-surface, #fff); }
+.canvas-properties .portfolio-editor label { display: grid; gap: 4px; }
+@media(max-width:899px) {
+  .browser-asset-viewport[data-inspector] { padding-right: 0; padding-bottom: 45vh; }
+  .canvas-properties { position: fixed; top: auto; bottom: 0; left: 0; right: 0; width: 100%; height: 45vh; max-height: 45vh; }
+}

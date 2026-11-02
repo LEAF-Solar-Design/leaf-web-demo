@@ -5,25 +5,29 @@ import { downloadProjectPageSource, loadProjectPage, saveProjectPage, validatePa
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
 import { emptyPortfolio, importPortfolio } from './portfolioDocument.js'
 import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
+import { cloneDocument, selectionIdentity, singleFieldChange } from './portfolioEdits.js'
+import { appearanceStyle, textStyle } from './pageDesign.js'
+import ElementInspector, { InlineText } from './ElementInspector.jsx'
 import './projectPageEditor.css'
 
 const EMPTY_PAGE = { label: 'Your page', headline: 'Coming soon', description: '', status: '', theme: 'cream', alignment: 'center' }
 const TEXT_FIELDS = [['label', 'Page label', 120], ['headline', 'Headline', 240], ['description', 'Description', 1200], ['status', 'Status text', 80]]
 const stable = value => JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item) ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)
-const equalDocument = (left, right) => left && right && (left.schema || right.schema ? stable(left) === stable(right) : Object.keys(EMPTY_PAGE).every(key => left[key] === right[key]))
+const equalDocument = (left, right) => left && right && stable(left) === stable(right)
 
-export function PagePreview({ document, onSelectField, projectId }) {
+export function PagePreview({ document, onSelectField, projectId, onInlineChange, onSelectElement, selectedElement }) {
   if (!document) return null
-  if (document.schema === 'leaf.portfolio.v1') return <PortfolioPreview document={document} projectId={projectId} onSelectField={onSelectField} />
-  const text = field => onSelectField
+  if (document.schema === 'leaf.portfolio.v1') return <PortfolioPreview document={document} projectId={projectId} onSelectField={onSelectField} onInlineChange={onInlineChange} onSelectElement={onSelectElement} selectedElement={selectedElement} />
+  const text = field => onInlineChange ? <InlineText document={document} path={[field]} label={field} limit={TEXT_FIELDS.find(([key]) => key === field)[2]} onChange={onInlineChange} onSelect={() => onSelectElement?.(`${selectionIdentity(document)}:textStyles.${field}`)} /> : onSelectField
     ? <button type="button" className="project-page__edit" aria-label={`Edit ${field}`} onClick={() => onSelectField(field)}>{document[field]}</button>
     : document[field]
-  return <main className="project-page" data-theme={document.theme} data-alignment={document.alignment}>
+  const design = field => textStyle(onInlineChange && selectedElement === `${selectionIdentity(document)}:textStyles.${field}` ? { ...document.textStyles?.[field], hidden: undefined } : document.textStyles?.[field])
+  return <main className="project-page" data-element={`${selectionIdentity(document)}:appearance`} data-theme={document.theme} data-alignment={document.alignment} style={appearanceStyle(document.appearance)}>
     <div className="project-page__content">
-      <p className="project-page__label">{text('label')}</p>
-      <h1 className="project-page__headline">{text('headline')}</h1>
-      {document.description && <p className="project-page__description">{text('description')}</p>}
-      {document.status && <p className="project-page__status">{text('status')}</p>}
+      <p className="project-page__label" data-element={`${selectionIdentity(document)}:textStyles.label`} style={design('label')}>{text('label')}</p>
+      <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
+      {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
+      {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
     </div>
   </main>
 }
@@ -32,7 +36,7 @@ export default function ProjectPageEditor(props) {
   return <ScopedPageEditor key={JSON.stringify([props.projectId || null, props.accountScope || null])} {...props} />
 }
 
-function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, incomingProposal }) {
+function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selectedField, incomingProposal, selectedElement, onSelectElement }) {
   const [draft, setDraft] = useState(null)
   const [saved, setSaved] = useState(null)
   const [busy, setBusy] = useState(null)
@@ -43,7 +47,14 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
   const [reviewRequest, setReviewRequest] = useState(0)
   const [instruction, setInstruction] = useState('')
   const [proposal, setProposal] = useState(null)
+  const [localElement, setLocalElement] = useState(null)
   const sourceSnapshot = useRef(null)
+  const history = useRef({ past: [], future: [], key: null, time: 0 })
+  const sessionActions = useRef({})
+  const session = useRef(null)
+  if (!session.current) session.current = Object.fromEntries(['change', 'save', 'reload', 'open', 'undo', 'redo', 'discard'].map(key => [key, (...args) => {
+    if (live.current) return sessionActions.current[key]?.(...args)
+  }]))
   const intake = useRef(null)
   const actionRow = useRef(null)
   const editor = useRef(null)
@@ -92,6 +103,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
       setProposal(null)
       setInstruction('')
       setDraft(null)
+      sourceSnapshot.current = { saved: null, draft: null }
+      history.current = { past: [], future: [], key: null, time: 0 }
       setSaved(null)
       setError(null)
       setBusy(null)
@@ -136,22 +149,27 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
   }, [draft !== null])
 
   const show = document => preview.current?.({ document, name: document.name || document.label || 'Page' })
+  const replaceDraft = (document, savedPage = sourceSnapshot.current.saved) => {
+    history.current = { past: [], future: [], key: null, time: 0 }
+    sourceSnapshot.current = { draft: document, saved: savedPage }
+    setDraft(document)
+  }
   const create = () => {
     if (!enabled || operation.current) return
     const document = { ...EMPTY_PAGE }
     setProposal(null); setInstruction('')
-    setDraft(document); setSaved(null); setError(null); setNotice('')
+    replaceDraft(document, null); setSaved(null); setError(null); setNotice('')
     show(document)
   }
   const createPortfolio = () => {
     if (!enabled || operation.current) return
     const document = emptyPortfolio()
     setProposal(null); setInstruction('')
-    setDraft(document); setError(null); setNotice('')
+    replaceDraft(document); setError(null); setNotice('')
     show(document)
   }
   const perform = async (kind, action) => {
-    if (!enabled || operation.current) return
+    if (!live.current || !enabled || operation.current) return
     const controller = new AbortController()
     operation.current = controller
     setBusy(kind); setError(null); setNotice('')
@@ -168,7 +186,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
     const page = await loadProjectPage(projectId, { signal })
     if (!current()) return
     if (!page) { setNotice('No saved page yet. Choose Create a page to begin.'); return }
-    setSaved(page); setDraft(page.document)
+    setSaved(page); replaceDraft(page.document, page)
     show(page.document)
   })
   const importContent = event => {
@@ -181,15 +199,20 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
       setProposal(null)
       const document = await importPortfolio(file, projectId, { signal, expectedScope })
       if (!current() || readActiveScope() !== expectedScope) return
-      setDraft(document); show(document)
+      replaceDraft(document); show(document)
       setNotice('Portfolio imported as an unsaved draft. Review it, then Save page.')
     })
   }
-  const save = () => perform('saving', async (signal, current) => {
-    const page = await saveProjectPage(projectId, draft, saved?.revision || 0, { signal })
+  const save = () => !error?.conflict && perform('saving', async (signal, current) => {
+    const snapshot = sourceSnapshot.current
+    if (!snapshot.draft || error?.conflict) return
+    const page = await saveProjectPage(projectId, snapshot.draft, snapshot.saved?.revision || 0, { signal })
     if (!current()) return
-    setSaved(page); setDraft(page.document)
-    show(page.document)
+    // Retain the exact draft object and its ephemeral selection identities on save.
+    const accepted = equalDocument(page.document, snapshot.draft) ? { ...page, document: snapshot.draft } : page
+    sourceSnapshot.current = { saved: accepted, draft: snapshot.draft }
+    setSaved(accepted); setDraft(snapshot.draft)
+    show(snapshot.draft)
   })
   const download = (target = 'web') => perform('exporting', async (signal, current) => {
     const revision = saved.revision
@@ -208,13 +231,37 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
       ? 'Native SwiftUI source downloaded from this saved portfolio. Open the Xcode project to build it. This does not install or publish an app.'
       : 'Next.js source downloaded. See the included README to run it independently.')
   })
-  const change = (field, value) => {
-    setProposal(null)
-    const document = { ...draft, [field]: value }
-    setDraft(document); setNotice('')
-    show(document)
+  const changePortfolio = (document, options = {}) => {
+    if (!live.current || !enabled || operation.current || !document) return
+    const before = sourceSnapshot.current.draft
+    const coalesceKey = Object.hasOwn(options, 'coalesceKey') ? options.coalesceKey : singleFieldChange(before, document)
+    if (equalDocument(before, document)) return
+    const now = Date.now(), stack = history.current
+    if (before && (!coalesceKey || stack.key !== coalesceKey || now - stack.time > 1500)) {
+      stack.past.push(before)
+      if (stack.past.length > 50) stack.past.shift()
+    }
+    stack.future = []; stack.key = coalesceKey; stack.time = now
+    sourceSnapshot.current = { ...sourceSnapshot.current, draft: document }
+    setProposal(null); setDraft(document); setNotice(''); show(document)
   }
-  const changePortfolio = document => { setProposal(null); setDraft(document); setNotice(''); show(document) }
+  const change = (field, value) => {
+    const document = cloneDocument(sourceSnapshot.current.draft)
+    document[field] = value
+    changePortfolio(document, { coalesceKey: field })
+  }
+  const travel = direction => {
+    if (!live.current || !enabled || operation.current) return
+    const stack = history.current, source = direction === 'undo' ? stack.past : stack.future
+    if (!source.length) return
+    const destination = direction === 'undo' ? stack.future : stack.past
+    destination.push(sourceSnapshot.current.draft)
+    if (destination.length > 50) destination.shift()
+    const document = source.pop()
+    stack.key = null
+    sourceSnapshot.current = { ...sourceSnapshot.current, draft: document }
+    setProposal(null); setDraft(document); setNotice(''); show(document)
+  }
   const proposalBlocked = !enabled || Boolean(busy) || dirty || Boolean(validation) || !saved || Boolean(error?.conflict) || Boolean(native?.active)
   useEffect(() => {
     if (!incomingProposal) return
@@ -273,10 +320,19 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
       || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
     const document = proposal.document
     portfolioTextChanges(saved.document, document)
-    setProposal(null); setDraft(document); show(document)
+    changePortfolio(cloneDocument(document, sourceSnapshot.current.draft), { coalesceKey: null })
     setNotice('Review the draft, then Save page.')
   }
   const state = busy === 'saving' ? 'Saving…' : dirty ? 'Unsaved changes' : saved ? 'Saved' : ''
+  sessionActions.current = { change: changePortfolio, save, reload: open, open,
+    undo: () => travel('undo'), redo: () => travel('redo'),
+    discard: () => { if (sourceSnapshot.current.saved) changePortfolio(cloneDocument(sourceSnapshot.current.saved.document), { coalesceKey: null }) },
+  }
+  useEffect(() => {
+    onSession?.({ session: session.current, document: draft, state: { enabled, dirty, busy, validation,
+      canUndo: history.current.past.length > 0, canRedo: history.current.future.length > 0,
+      savedRevision: saved?.revision, conflict: Boolean(error?.conflict), error: error?.message, notice, status: state } })
+  }, [draft, saved, enabled, dirty, busy, validation, error, notice, onSession])
   const proposalNotice = notice && /^(?:No text changes proposed\.|Review the draft, then Save page\.|Proposal generation cancelled\.|Proposal discarded\.)/.test(notice)
 
   const observeNative = async (session, submit = false) => {
@@ -408,7 +464,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, selectedField, i
       </div>}
       <fieldset disabled={Boolean(busy) || !enabled}>
         <legend className="project-page-editor__legend">Page content</legend>
-        {draft.schema === 'leaf.portfolio.v1' ? <PortfolioEditor document={draft} onChange={changePortfolio} projectId={projectId} reviewRequest={reviewRequest} selectedField={enabled ? selectedField : null} /> : <>{TEXT_FIELDS.map(([field, label, limit]) => <label key={field} htmlFor={`${id}-${field}`}>
+        <details><summary>Element design</summary><ElementInspector document={draft} selected={selectedElement ?? localElement} onSelect={onSelectElement || setLocalElement} onChange={changePortfolio} /></details>
+        {draft.schema === 'leaf.portfolio.v1' ? <PortfolioEditor document={draft} onChange={changePortfolio} projectId={projectId} reviewRequest={reviewRequest} selectedField={enabled ? selectedField : null} onSelectElement={onSelectElement || setLocalElement} /> : <>{TEXT_FIELDS.map(([field, label, limit]) => <label key={field} htmlFor={`${id}-${field}`} onFocus={() => (onSelectElement || setLocalElement)(`${selectionIdentity(draft)}:textStyles.${field}`)}>
           <span>{label}</span>
           {field === 'description'
             ? <textarea id={`${id}-${field}`} ref={node => { fields.current[field] = node }} value={draft[field]} maxLength={limit} rows={4} onChange={event => change(field, event.target.value)} />
