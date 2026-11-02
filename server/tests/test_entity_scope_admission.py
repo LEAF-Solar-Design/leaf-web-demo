@@ -11,7 +11,9 @@ import agent_audit
 import agent_policy
 import deps
 import entity_scope
+import project_execution_context
 import session_store
+import turn_runner
 from routers import agent as agent_router
 from routers import jobs as jobs_router
 
@@ -315,10 +317,26 @@ def test_run_refuses_scoped_canonical_paths(session, run_env, path):
 def test_run_scoped_supported_tools_behave_like_unscoped(session, run_env, tool):
     start(session, {}, "unscoped")
     start(session, {"entity_scope": BINDING}, "scoped")
+    assert session_store.try_begin_turn(session, "unscoped", 60, tier="demo")
     ordinary = run_env.run(tool, authority(session, "unscoped"))
+    session_store.end_turn(session, "unscoped")
+    assert session_store.try_begin_turn(session, "scoped", 60, tier="demo")
     scoped = run_env.run(tool, authority(session, "scoped"))
     assert scoped.status_code == ordinary.status_code
     assert scoped.status_code < 500
     assert scoped.json().get("reason_code") == ordinary.json().get("reason_code")
     if tool["name"] != "solar-solve-proposal":
         assert scoped.status_code == 202
+
+
+@pytest.mark.parametrize("state", ["missing", "expired"])
+def test_run_scoped_write_requires_current_turn_authority(session, run_env, monkeypatch, state):
+    start(session, {"entity_scope": BINDING})
+    if state == "expired":
+        assert session_store.try_begin_turn(session, "turn-1", 60, tier="demo")
+        started = session_store.get_session(session)["turn_started_at"]
+        monkeypatch.setattr(project_execution_context.time, "time",
+                            lambda: started + turn_runner.turn_max_s() + 1)
+    tool = {"name": "scope-write", "capabilities": ["drawing.write"]}
+    refused(run_env, run_env.run(tool, authority(session)), 403,
+            "project_turn_authority_required")

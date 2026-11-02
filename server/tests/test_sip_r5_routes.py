@@ -795,8 +795,10 @@ def test_sip_r5_solver_and_generic_read_isolation(lane, monkeypatch):
     ordinary = {"name": "ordinary-read", "capabilities": ["drawing.read"], "default_params": {}}
     lane.tools[ordinary["name"]] = ordinary
     reads = []
-    monkeypatch.setattr(route, "_run_project_read", lambda *args:
-        reads.append(args) or route.JSONResponse(status_code=200, content={"ok": True}))
+    def project_read(*args, persist=False, idempotency_key=None, selected_binding=None):
+        reads.append((args, persist, idempotency_key, selected_binding))
+        return route.JSONResponse(status_code=200, content={"ok": True})
+    monkeypatch.setattr(route, "_run_project_read", project_read)
     for enabled in (False, True):
         if enabled:
             monkeypatch.setenv("LEAF_SOLAR_PROJECT_RUN_ENABLED", "1")
@@ -813,6 +815,8 @@ def test_sip_r5_solver_and_generic_read_isolation(lane, monkeypatch):
             assert route._access_error(rec, lane.tenant, rec["job_id"]) is None
             assert len(lane.calls) == before
     assert len(calls) == len(reads) == 2
+    assert all((persist, key, binding) == (False, "key", None)
+               for _args, persist, key, binding in reads)
     ctx = campaign_cases.completion_context()
     ctx["tenant_id"] = ctx["org_id"]
     caller = deps.TenantContext(ctx["org_id"], tier="hosted_pro", subject="campaign-reader")
