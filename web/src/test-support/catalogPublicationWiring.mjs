@@ -96,6 +96,8 @@ export function shellWiring(source, shell, owner, extra = {}) {
     boardConversation: false, setProjectPane: noop, setClaudeOpen: noop, setRightView: noop,
     onAttachAgentJob: noop, refreshJobs: noop, closeStartForChange: noop, attachJob: noop,
     engineDirty: false, writeLocked: false, projectMode: false,
+    // Publication fixtures have no selected canonical project or write owner.
+    projectSolar: { ready: false, projectClient: null },
     ...extra,
   }
   const bind = (node) => {
@@ -115,6 +117,21 @@ export function shellWiring(source, shell, owner, extra = {}) {
     bind(actions)
     bind(declaration('tools'))
     bind(declaration('railFamilies'))
+    // The panel also receives approval capabilities. Bind the actual App
+    // callback body in this explicitly unscoped frame, rather than replacing
+    // an approval boundary with a permissive/no-op fixture callback.
+    const approval = declaration('prepareApprovedProjectRun')
+    constant(approval)
+    assert.equal(approval.init.type, 'CallExpression')
+    assert.equal(approval.init.callee.name, 'useCallback')
+    assert.equal(approval.init.arguments[0].type, 'ArrowFunctionExpression')
+    scope.prepareApprovedProjectRun = evaluate(text(approval.init.arguments[0]), scope)
+    const allowlists = tree.program.body.filter(node => node.type === 'VariableDeclaration'
+      && node.declarations.some(item => item.id.name === 'PROJECT_SOLAR_SUPPORTED_TOOLS'))
+    assert.equal(allowlists.length, 1, 'one production canonical tool allowlist')
+    assert.equal(allowlists[0].kind, 'const')
+    const allowlist = allowlists[0].declarations.find(item => item.id.name === 'PROJECT_SOLAR_SUPPORTED_TOOLS')
+    scope.PROJECT_SOLAR_SUPPORTED_TOOLS = evaluate(text(allowlist.init), scope)
   } else {
     assert.equal(scope.catalog, owner)
     assert.equal(text(declaration('tools').init), 'catalog.state')
