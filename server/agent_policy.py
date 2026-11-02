@@ -960,6 +960,37 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             },
             "rate_limit_category": "medium", "timeout_s": 60, "audit_extra": [],
         },
+        "propose_project_photo_assignments": {
+            "description": "Propose photo assignments for private review in the active project conversation. Does not save or publish; source, role and text validation remain with the producer.",
+            "rung": 2, "required_capability": "converse",
+            "policy": "auto", "tenant_tightenable": True,
+            "dispatch": {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/photo-assignment-proposals"]},
+            "args_schema": {
+                "type": "object", "additionalProperties": False,
+                "properties": {
+                    "expected_revision": {"type": "integer", "minimum": 1, "maximum": 2147483647},
+                    "expected_digest": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
+                    "operations": {
+                        "type": "array", "minItems": 1, "maxItems": 200,
+                        "items": {
+                            "type": "object", "additionalProperties": False,
+                            "properties": {
+                                "op": {"const": "assign"},
+                                "material_id": {"type": "string", "pattern": "^(?!00000000-0000-0000-0000-000000000000(?![\\s\\S]))[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\\s\\S])"},
+                                "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
+                                "preview_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}(?![\\s\\S])"},
+                                "gallery_slug": {"type": "string", "pattern": "^[a-z][a-z0-9-]{0,47}(?![\\s\\S])"},
+                                "title": {"type": "string", "minLength": 0, "maxLength": 200},
+                                "alt": {"type": "string", "minLength": 1, "maxLength": 400},
+                            },
+                            "required": ["op", "material_id", "sha256", "preview_sha256", "gallery_slug", "title", "alt"],
+                        },
+                    },
+                },
+                "required": ["expected_revision", "expected_digest", "operations"],
+            },
+            "rate_limit_category": "medium", "timeout_s": 60, "audit_extra": [],
+        },
         "propose_overlay": {
             "description": "T1 runtime overlay: open a PENDING colour/copy preview for THIS session (server/overlay_propose.py). Writes one session-scoped row, changes nothing another user can see, and expires by lease. Deliberately `auto`: the proposal is the cheap half, and the irreversible half is the operator tap that applies it to the tenant, which carries its own CAS witness and audit row. Requiring a confirmation here would buy nothing and cost the immediacy the tier exists for.",
             "rung": 2, "required_capability": "converse",
