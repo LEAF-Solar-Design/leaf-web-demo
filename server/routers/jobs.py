@@ -296,8 +296,9 @@ def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
         **({"strict": True} if is_demo_context(tenant_id) else {}))
 
 
-def _capability_access(rec, tenant, *, write=False):
+def _capability_access(rec, tenant, *, write=False, binding=None, bound_tenant_id=None):
     """Authorize with the verified caller and stored project on every observation."""
+    access_options = {"binding": binding} if binding is not None else {}
     actor = resolve_demo_actor(tenant)
     if actor is not None:
         if rec is None:
@@ -312,12 +313,14 @@ def _capability_access(rec, tenant, *, write=False):
     context = rec.get("execution_context")
     if isinstance(context, dict) and context.get("schema") == "leaf.solar-project-graph-job.v1":
         if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
-                or rec.get("tenant_id") != _bound_tenant_id(tenant)
+                or rec.get("tenant_id") != (bound_tenant_id if bound_tenant_id is not None
+                                             else _bound_tenant_id(tenant))
                 or (actor is None and rec.get("org_id") != rec.get("tenant_id"))):
             raise LookupError("job unavailable")
         org_id = uuid.UUID(str(rec.get("org_id")))
         project_id = uuid.UUID(str(rec.get("project_id")))
-        org = jobs.platform_link.require_project_access(tenant, project_id, write=write)
+        org = jobs.platform_link.require_project_access(tenant, project_id, write=write,
+                                                       **access_options)
         if str(org) != str(org_id):
             raise LookupError("job unavailable")
         return
@@ -332,20 +335,24 @@ def _capability_access(rec, tenant, *, write=False):
         from campaign_capability_job import validate_context
     context = validate_context(rec[kinds[0]])
     if (not isinstance(tenant, deps.TenantContext) or not tenant.subject
-            or rec.get("tenant_id") != _bound_tenant_id(tenant)
+            or rec.get("tenant_id") != (bound_tenant_id if bound_tenant_id is not None
+                                         else _bound_tenant_id(tenant))
             or rec.get("tenant_id") != context["tenant_id"]
             or rec.get("org_id") != context["org_id"]
             or rec.get("project_id") != context["project_id"]
             or rec.get("tool") != context["tool_name"]):
         raise LookupError("job unavailable")
-    org = jobs.platform_link.require_project_access(tenant, rec["project_id"], write=write)
+    org = jobs.platform_link.require_project_access(tenant, rec["project_id"], write=write,
+                                                   **access_options)
     if str(org) != rec["org_id"]:
         raise LookupError("job unavailable")
 
 
-def _access_error(rec, tenant, job_id, *, write=False):
+def _access_error(rec, tenant, job_id, *, write=False, binding=None, bound_tenant_id=None):
     try:
-        _capability_access(rec, tenant, write=write)
+        options = ({"binding": binding, "bound_tenant_id": bound_tenant_id}
+                   if binding is not None else {})
+        _capability_access(rec, tenant, write=write, **options)
     except DemoActorRefused:
         return _demo_refusal()
     except DemoActorUnavailable:
@@ -1388,19 +1395,29 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
             return error_response(ErrorCode.INTERNAL, "job store unavailable",
                                   retryable=True, status_code=503)
     try:
+        access_options = {}
         if actor is not None:
+            bound_tenant_id = actor.server_tenant
             canonical = jobs.platform_link.list_canonical_jobs(actor.server_tenant, limit=limit, strict=True)
             legacy = jobs.list_jobs(actor.server_tenant, limit)
         else:
-            canonical = jobs.platform_link.list_canonical_jobs(_bound_tenant_id(tenant), limit=limit)
-            legacy = jobs.list_jobs(_bound_tenant_id(tenant), limit)
+            if deps.auth_live() and isinstance(tenant, deps.TenantContext) and tenant.subject:
+                # Fresh once for THIS response, including project membership checks.
+                # A context marker or a prior request's binding is not authority.
+                binding = jobs.platform_link.resolve_caller_binding(tenant)
+                bound_tenant_id = str(binding.platform_tenant_id) if binding is not None else str(tenant)
+                if binding is not None:
+                    access_options = {"binding": binding, "bound_tenant_id": bound_tenant_id}
+            else:
+                bound_tenant_id = _bound_tenant_id(tenant)
+            canonical = jobs.platform_link.list_canonical_jobs(bound_tenant_id, limit=limit)
+            legacy = jobs.list_jobs(bound_tenant_id, limit)
         visible = []
         seen = set()
         for rec in canonical + legacy:
             if jobs.job_store_mode() == "postgres" and rec in canonical:
                 rec = jobs._pg_store.linked_capability_job(
-                    str(rec["job_id"]),
-                    actor.server_tenant if actor is not None else _bound_tenant_id(tenant)) or rec
+                    str(rec["job_id"]), bound_tenant_id) or rec
             if actor is not None:
                 # The entry lookup already validated this actor's live membership.
                 if (rec.get("tenant_id") != actor.server_tenant
@@ -1408,8 +1425,8 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
                         or str(rec.get("project_id")) != str(actor.project_id)
                         or rec["job_id"] in seen):
                     continue
-            elif (rec.get("tenant_id") != _bound_tenant_id(tenant)
-                    or _access_error(rec, tenant, rec["job_id"]) is not None
+            elif (rec.get("tenant_id") != bound_tenant_id
+                    or _access_error(rec, tenant, rec["job_id"], **access_options) is not None
                     or rec["job_id"] in seen):
                 continue
             visible.append(rec)

@@ -1093,3 +1093,207 @@ def test_c1a_real_tool_exception(lane, monkeypatch):
     assert body["project_context"]["organization_id"] == str(O1)
     assert body["project_context"]["input_version_id"] == str(V2)
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.fixture
+def job_list_binding_lane(monkeypatch):
+    """Real deps/list/membership helpers with counted synthetic storage edges."""
+    import auth
+    import tenancy
+    from starlette.requests import Request
+    from test_campaign_capability_job import context as capability_context
+
+    calls = {"binding": [], "membership": [], "mirror": [], "lists": []}
+    state = SimpleNamespace(
+        binding=SimpleNamespace(platform_tenant_id=O1, binding_id=UUID(int=3)),
+        error=None, denied=set(), records=[], legacy=[], linked={})
+    subject = "auth0|job-list-synthetic-reader"
+    def resolve(provider, value):
+        assert (provider, value) == ("auth0", subject)
+        calls["binding"].append(value)
+        if state.error:
+            raise state.error
+        return state.binding
+    store = SimpleNamespace(resolve_active_identity_binding=resolve,
+                            get_org=lambda org: SimpleNamespace(status="active", tier="hosted_pro"))
+    monkeypatch.setattr(platform_link, "platform_store", lambda: store)
+    monkeypatch.setattr(platform_link, "_load_platform", lambda: (store, None, None))
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(auth, "verify_platform_token", lambda authorization: {"sub": subject, "roles": []})
+    monkeypatch.setattr(auth, "extract_tenant_claims", lambda payload:
+                        {"tenant_id": str(state.binding.platform_tenant_id), "tier": "hosted_pro"})
+    monkeypatch.setattr(deps, "admin_elevated_tier", lambda claimed, actor, tier: tier)
+    monkeypatch.setattr(tenancy, "get_store", lambda: SimpleNamespace(resolve_workspace=lambda org: None))
+    def caller():
+        request = Request({"type": "http", "method": "GET", "path": "/api/jobs",
+                           "headers": [(b"authorization", b"Bearer synthetic-fixture-only")]})
+        tenant = deps.require_tenant(request, x_tenant_id=None,
+            authorization="Bearer synthetic-fixture-only", x_dispatch_secret=None,
+            x_guest_session=None, x_demo_session=None)
+        assert tenant.authority_resolved and len(calls["binding"]) == 1
+        calls["binding"].clear()
+        return tenant
+    def role(org, project, binding_id, *, write):
+        assert org == state.binding.platform_tenant_id and binding_id == state.binding.binding_id
+        calls["membership"].append((str(project), write))
+        if str(project) in state.denied:
+            raise project_lifecycle.LifecycleForbidden("synthetic revoked membership")
+    monkeypatch.setattr(project_lifecycle, "require_project_role", role)
+    monkeypatch.setattr(platform_link, "require_project_access", _REAL_ACCESS)
+    def seed(count, kind):
+        state.records, state.linked = [], {}
+        for index in range(count):
+            org = str(state.binding.platform_tenant_id)
+            rec = {"job_id": str(UUID(int=10000 + index)), "tenant_id": org,
+                   "org_id": org, "project_id": str(UUID(int=1000 + index)),
+                   "tool": "count-by-layer", "status": "running", "progress": "running",
+                   "result": None, "error": None, "elapsed_ms": 0}
+            if kind == "graph":
+                rec["execution_context"] = {"schema": "leaf.solar-project-graph-job.v1"}
+            else:
+                context = capability_context()
+                context.update(tenant_id=org, org_id=org, project_id=rec["project_id"])
+                rec.update(tool=context["tool_name"], capability_provenance=context)
+            state.linked[rec["job_id"]] = rec
+            state.records.append({key: deepcopy(value) for key, value in rec.items()
+                                  if key != "capability_provenance"})
+    def canonical(tenant, *, limit, **kwargs):
+        calls["lists"].append(("canonical", tenant, limit, kwargs))
+        return deepcopy(state.records)
+    def legacy(tenant, limit):
+        calls["lists"].append(("legacy", tenant, limit, {}))
+        return deepcopy(state.legacy)
+    def mirror(job, tenant):
+        calls["mirror"].append((job, tenant))
+        return deepcopy(state.linked[job])
+    monkeypatch.setattr(route.jobs.platform_link, "list_canonical_jobs", canonical)
+    monkeypatch.setattr(route.jobs, "list_jobs", legacy)
+    monkeypatch.setattr(route.jobs, "job_store_mode", lambda: "postgres")
+    monkeypatch.setattr(route.jobs, "_pg_store", SimpleNamespace(linked_capability_job=mirror))
+    return SimpleNamespace(state=state, calls=calls, caller=caller, seed=seed, subject=subject)
+
+
+@pytest.mark.parametrize("count", [0, 1, 20])
+@pytest.mark.parametrize("kind", ["graph", "capability"])
+def test_job_list_reuses_one_fresh_binding_with_actual_membership(job_list_binding_lane, count, kind):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(count, kind)
+    result = route.list_jobs(20, tenant)
+    assert len(result["jobs"]) == count
+    assert len(lane.calls["binding"]) == 1
+    assert len(lane.calls["membership"]) == len(lane.calls["mirror"]) == count
+    assert all(not write for project, write in lane.calls["membership"])
+    assert all(tenant_id == str(O1) for _source, tenant_id, _limit, _kwargs in lane.calls["lists"])
+    print("BSP34_COUNT=" + json.dumps({"kind": kind, "records": count,
+          "handlerBindingCalls": len(lane.calls["binding"]),
+          "membershipCalls": len(lane.calls["membership"]), "returned": len(result["jobs"])}))
+
+
+@pytest.mark.parametrize("kind", ["graph", "capability"])
+def test_job_list_retains_per_record_membership_denial(job_list_binding_lane, kind):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(20, kind)
+    lane.state.denied.add(str(UUID(int=1007)))
+    result = route.list_jobs(20, tenant)
+    assert len(result["jobs"]) == 19
+    assert str(UUID(int=10007)) not in {row["job_id"] for row in result["jobs"]}
+    assert len(lane.calls["binding"]) == 1 and len(lane.calls["membership"]) == 20
+
+
+def test_job_list_binding_does_not_survive_a_request(job_list_binding_lane):
+    lane = job_list_binding_lane
+    first = lane.caller()
+    lane.seed(1, "graph")
+    assert len(route.list_jobs(20, first)["jobs"]) == 1
+    assert len(lane.calls["binding"]) == 1
+    lane.calls["binding"].clear()
+    lane.state.binding = SimpleNamespace(platform_tenant_id=O2, binding_id=UUID(int=4))
+    second = lane.caller()
+    lane.seed(1, "capability")
+    assert str(second) == str(O2)
+    assert len(route.list_jobs(20, second)["jobs"]) == 1
+    assert len(lane.calls["binding"]) == 1
+    assert [tenant for _kind, tenant, _limit, _options in lane.calls["lists"]] == [str(O1)] * 2 + [str(O2)] * 2
+
+
+def test_job_list_forged_resolved_marker_keeps_server_namespace(job_list_binding_lane):
+    lane = job_list_binding_lane
+    forged = deps.TenantContext(str(O2), org_id=str(O2), tier="hosted_pro",
+                               subject=lane.subject, authority_resolved=True)
+    lane.seed(1, "graph")
+    assert route.list_jobs(20, forged)["jobs"] == []
+    assert len(lane.calls["binding"]) == 1
+    assert [tenant for _kind, tenant, _limit, _options in lane.calls["lists"]] == [str(O1)] * 2
+    assert lane.calls["membership"] == []
+
+
+@pytest.mark.parametrize("failure", ["revoked", "unavailable"])
+def test_job_list_refuses_missing_binding_or_store_failure(job_list_binding_lane, failure):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    if failure == "revoked":
+        lane.state.binding = None
+        assert route.list_jobs(20, tenant)["jobs"] == []
+        assert [value for _kind, value, _limit, _options in lane.calls["lists"]] == [str(tenant)] * 2
+    else:
+        lane.state.error = RuntimeError("synthetic binding store unavailable")
+        with pytest.raises(RuntimeError, match="synthetic binding store unavailable"):
+            route.list_jobs(20, tenant)
+        assert lane.calls["lists"] == []
+    assert len(lane.calls["binding"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["graph", "capability"])
+def test_job_list_keeps_foreign_org_and_provenance_fences(job_list_binding_lane, kind):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(1, kind)
+    rec = next(iter(lane.state.linked.values()))
+    rec["org_id"] = str(O2)
+    if kind == "capability":
+        rec["capability_provenance"]["org_id"] = str(O2)
+    assert route.list_jobs(20, tenant)["jobs"] == []
+    assert len(lane.calls["binding"]) == 1
+    rec["tenant_id"] = str(O2)
+    assert route.list_jobs(20, tenant)["jobs"] == []
+    assert len(lane.calls["binding"]) == 2
+
+
+def test_job_list_keeps_duplicates_and_limit(job_list_binding_lane):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(20, "graph")
+    lane.state.legacy = [deepcopy(next(iter(lane.state.linked.values())))]
+    result = route.list_jobs(1, tenant)
+    assert len(result["jobs"]) == 1
+    assert len(lane.calls["binding"]) == 1 and len(lane.calls["membership"]) == 21
+    assert all(limit == 1 for _source, _tenant, limit, _kwargs in lane.calls["lists"])
+
+
+def test_single_job_observation_defaults_still_resolve_fresh(job_list_binding_lane):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(1, "capability")
+    rec = next(iter(lane.state.linked.values()))
+    assert route._access_error(rec, tenant, rec["job_id"]) is None
+    assert len(lane.calls["binding"]) == 2 and len(lane.calls["membership"]) == 1
+    lane.state.binding = None
+    assert route._access_error(rec, tenant, rec["job_id"]).status_code == 404
+    assert len(lane.calls["binding"]) == 4 and len(lane.calls["membership"]) == 1
+
+
+def test_job_list_keeps_auth_off_and_demo_paths(job_list_binding_lane, monkeypatch):
+    lane = job_list_binding_lane
+    monkeypatch.setattr(deps, "auth_live", lambda: False)
+    lane.state.legacy = [{"job_id": "legacy", "tenant_id": "standalone", "status": "running"}]
+    assert route.list_jobs(20, "standalone")["jobs"][0]["job_id"] == "legacy"
+    assert lane.calls["binding"] == []
+    actor = SimpleNamespace(server_tenant="demo-owned", org_id=O1, project_id=P1)
+    monkeypatch.setattr(route, "is_demo_context", lambda tenant: tenant == "demo")
+    monkeypatch.setattr(route, "resolve_demo_actor", lambda tenant: actor)
+    lane.state.legacy = [{"job_id": "demo-job", "tenant_id": "demo-owned", "status": "running",
+                          "org_id": str(O1), "project_id": str(P1)}]
+    assert route.list_jobs(20, "demo")["jobs"][0]["job_id"] == "demo-job"
+    assert lane.calls["binding"] == lane.calls["membership"] == []
