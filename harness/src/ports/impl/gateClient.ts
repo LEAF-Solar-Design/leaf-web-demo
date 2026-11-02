@@ -33,6 +33,46 @@ export interface HttpGateClientOptions {
 
 const GATE_PATH = "/internal/agent/gate";
 
+function diagnosticProperty(value: unknown, key: string): unknown {
+  try {
+    return typeof value === "object" && value !== null
+      ? (value as Record<string, unknown>)[key]
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function logTransportFailure(error: unknown, startedAt: number, deadlineMs: number): void {
+  try {
+    const name = diagnosticProperty(error, "name");
+    const exceptionClass = typeof name === "string"
+      && ["Error", "TypeError", "AbortError", "TimeoutError"].includes(name)
+      ? name : "unknown";
+    const codes = [
+      "ECONNREFUSED", "ECONNRESET", "ETIMEDOUT", "ENOTFOUND", "EAI_AGAIN",
+      "ENETUNREACH", "EHOSTUNREACH", "EPIPE", "UND_ERR_CONNECT_TIMEOUT",
+      "UND_ERR_HEADERS_TIMEOUT", "UND_ERR_BODY_TIMEOUT", "UND_ERR_SOCKET",
+      "CERT_HAS_EXPIRED", "DEPTH_ZERO_SELF_SIGNED_CERT", "SELF_SIGNED_CERT_IN_CHAIN",
+      "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "ERR_TLS_CERT_ALTNAME_INVALID",
+    ];
+    const directCode = diagnosticProperty(error, "code");
+    const causeCode = diagnosticProperty(diagnosticProperty(error, "cause"), "code");
+    const networkCode = [directCode, causeCode].find(
+      (code): code is string => typeof code === "string" && codes.includes(code),
+    ) ?? "unknown";
+    console.error(JSON.stringify({
+      event: "gate_transport_failure",
+      exceptionClass,
+      networkCode,
+      elapsedMs: Math.max(0, Math.round(performance.now() - startedAt)),
+      deadlineMs,
+    }));
+  } catch {
+    // Diagnostics must never interfere with the fail-closed gate result.
+  }
+}
+
 function isDecision(v: unknown): v is GateDecision {
   return v === "allow" || v === "deny" || v === "awaiting_approval";
 }
@@ -56,8 +96,11 @@ export class HttpGateClient implements GateClient {
     ctx: GateCheckContext,
   ): Promise<GateCheckResult> {
     let res: Response;
+    let transportStarted = false;
+    let startedAt = 0;
     try {
-      res = await this.fetchImpl(`${this.baseUrl}${GATE_PATH}`, {
+      const url = `${this.baseUrl}${GATE_PATH}`;
+      const init: RequestInit = {
         method: "POST",
         headers: {
           "content-type": "application/json",
@@ -78,8 +121,12 @@ export class HttpGateClient implements GateClient {
           args,
         }),
         signal: AbortSignal.timeout(this.timeoutMs),
-      });
-    } catch {
+      };
+      startedAt = performance.now();
+      transportStarted = true;
+      res = await this.fetchImpl(url, init);
+    } catch (error) {
+      if (transportStarted) logTransportFailure(error, startedAt, this.timeoutMs);
       // Connection failure / timeout: FAIL CLOSED (wire contract lane spec).
       return { decision: "deny", reason: "gate_unreachable" };
     }
