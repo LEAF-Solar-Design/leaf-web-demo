@@ -1831,7 +1831,8 @@ describe('C4-1b publication shell bindings', () => {
       controller: { consumeCatalogPublication: (...args) => { calls.claim.push(args); return true } },
     }
     const author = (...args) => { calls.author.push(args) }
-    return { value, calls, extra: { onPublishAuthor: author, publishAuthoredTool: author } }
+    return { value, calls, extra: { onPublishAuthor: author, publishAuthoredTool: author,
+      conversationProjectContext: null } }
   }
   // Both bindings are pinned with no conversation yet and with one turn already sent: the panel
   // receives the history either way, and neither binding may depend on it.
@@ -1844,6 +1845,7 @@ describe('C4-1b publication shell bindings', () => {
       const publication = { sessionId: 'session-1', changeSetId: 'change-1', catalogDigest: 'digest-1' }
       assert.equal(wiring.panel.sessionId, publication.sessionId)
       assert.equal(wiring.panel.userTurns, history)
+      if (shell === 'studio') assert.equal(wiring.panel.projectContext, null)
       assert.equal(wiring.panel.consumeCatalogPublication(publication), true)
       wiring.panel.onCatalogChanged(publication)
       assert.deepEqual(o.calls.claim, [[publication]])
@@ -2401,7 +2403,14 @@ describe('project board live pane wiring', () => {
     for (const name of ['useProjectLifecycle', 'getProjectLifecycle', 'getOrgIdentities', 'onLoadIdentities']) {
       assert.ok(!appSource.includes(name), `App does not own ${name}`)
     }
-    assert.ok(appSource.includes('setProjectContext(openProjectId || null)'))
+    const contextCalls = []
+    csuWalk(tree, (node) => {
+      if (node.type === 'CallExpression' && node.callee.type === 'Identifier'
+        && node.callee.name === 'setProjectContext') contextCalls.push(node)
+    })
+    assert.equal(contextCalls.length, 1)
+    assert.deepEqual(contextCalls[0].arguments.map(source),
+      ['openProjectId || null', 'canonicalVersionId || null'])
   })
   it('BI03-19 App binds the Settings action slot and eligibility inputs', () => {
     const grounds = elements('SurfaceGrounds')[0]
