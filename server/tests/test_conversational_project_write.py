@@ -200,9 +200,8 @@ def test_real_custody_reaches_existing_canonical_producer(lane, selected, real_c
     assert response.json()["job_id"] == str(lane.s.job)
 
 
-@pytest.mark.parametrize("released", [False, True])
-def test_real_custody_replay_checks_live_checkout_and_preserves_job(lane, selected, real_custody,
-                                                                  monkeypatch, released):
+def test_real_custody_replay_preserves_job_without_parent_or_checkout_io(lane, selected, real_custody,
+                                                                      monkeypatch):
     first = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
     assert first.status_code == 202, first.text
     accepted = lane.a.accepted[0][-1]
@@ -211,14 +210,9 @@ def test_real_custody_replay_checks_live_checkout_and_preserves_job(lane, select
         "execution_context": accepted["execution_context"]}
     monkeypatch.setattr(canonical_jobs, "get_project_graph_job_by_key", lambda *_a, **_k: existing)
     monkeypatch.setattr(project, "verify_at_admission", producer_cases.forbidden)
-    if released:
-        state = SimpleNamespace(**{**vars(real_custody.state), "checkout": None})
-        monkeypatch.setattr(project.graph_store(), "get_checkout", lambda *_a, **_k: state)
+    monkeypatch.setattr(project.graph_store(), "get_checkout", producer_cases.forbidden)
     replay = lane.client.post("/api/run", json=selected.request, headers=selected.headers)
-    if released:
-        assert replay.status_code == 403, replay.text
-    else:
-        assert replay.status_code == 202 and replay.json()["job_id"] == first.json()["job_id"]
+    assert replay.status_code == 202 and replay.json()["job_id"] == first.json()["job_id"]
     assert len(lane.a.accepted) == 1
 
 
