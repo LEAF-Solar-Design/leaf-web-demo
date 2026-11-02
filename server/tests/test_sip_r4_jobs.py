@@ -32,6 +32,7 @@ SIMPLE = {"expected_rev": 1}
 M = {"expected_rev": 4, "operation": "add-strings", "string_length": 2,
      "ordered_panel_refs": PANELS}
 CLEAN = {
+    "solar-solaredge-accept": {"expected_rev": 1, "report_artifact_id": "a" * 64},
     "solar-correct-string": {"expected_rev": 1, "settings_changes": {"num_mppt": 2}},
     # R3e-2: grouping joins ordinary admission; nested validation still runs in preparation.
     "solar-panel-groups": {
@@ -145,7 +146,7 @@ def submit(a, **changes):
 
 
 def test_sip_r4_membership_and_worker_choice(monkeypatch):
-    assert graph.SUPPORTED_TOOLS == ELEVEN
+    assert graph.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 16
     assert set(worker.ADAPTERS) == {worker.autofill.TOOL_NAME, worker.arlo_design.TOOL_NAME}
     assert inspect.signature(worker.run_once).parameters["tool_name"].default == worker.autofill.TOOL_NAME
     source = inspect.getsource(worker.main)

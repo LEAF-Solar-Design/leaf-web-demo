@@ -67,9 +67,9 @@ def identities(g):
     return [(entity["id"], entity["provenance"]["created_at"]) for entity in design.entities(g)]
 
 
-# W1C-3 adds commit; fifteen supported tools, four creation tools.
+# BSP23 adds tracking acceptance; sixteen supported writes, four creation tools.
 def test_sip_r3d_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 15
+    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 16
     assert adapter.CREATION_TOOLS == {
         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-panel-groups"}
     assert TOOL not in adapter.CREATION_TOOLS
