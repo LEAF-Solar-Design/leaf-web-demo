@@ -4995,3 +4995,274 @@ def test_r14f1_gate_registration():
     ids = [item.id for item in catalog]
     assert ids.index(suite.id) == ids.index("scripts-proof-project") + 1
     assert next(item for item in catalog if item.id == "scripts-proof-project").expected == 376
+
+
+def _failed_log_retention_helper():
+    spec = importlib.util.spec_from_file_location(
+        "retain_failed_gate_logs", SCRIPTS / "ci/retain_failed_gate_logs.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def _failed_log_retention_inputs(tmp_path, rows):
+    result = tmp_path / "result.json"
+    result.write_text(json.dumps({"results": rows}), encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    return result, logs, tmp_path / "retained"
+
+
+def test_failed_log_retention_fail_only_retry_identity(tmp_path):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": "green", "status": "PASS", "attempts": 2},
+        {"id": "red", "status": "FAIL", "attempts": 3,
+         "test_report": {"path": str(tmp_path / "outside-secret")}}])
+    for name, content in [("green.log", b"passing"), ("red.log", b"first stack"),
+                          ("red.retry1.log", b"middle"), ("red.retry2.log", b"last stack")]:
+        (logs / name).write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert [e["source"] for e in manifest["files"]] == ["red.retry2.log", "red.log"]
+    assert set(p.name for p in output.iterdir()) == {"red.retry2.log", "red.log", "manifest.json"}
+    for entry in manifest["files"]:
+        content = (logs / entry["source"]).read_bytes()
+        assert (output / entry["copy"]).read_bytes() == content
+        assert entry["source_sha256"] == entry["copy_sha256"] == hashlib.sha256(content).hexdigest()
+        assert entry["original_size"] == entry["copied_size"] == len(content)
+        assert entry["truncated"] is False
+    assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
+def test_failed_log_retention_identical_original(tmp_path):
+    helper = _failed_log_retention_helper()
+    args = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL", "attempts": 2}])
+    for name in ("red.log", "red.retry1.log"):
+        (args[1] / name).write_bytes(b"same stack")
+    manifest = helper.retain_failed_logs(*args)
+    assert manifest["copied_files"] == 1
+    assert manifest["files"][1]["status"] == "identical_to_latest"
+
+
+def test_failed_log_retention_missing_and_cli_diagnostics(tmp_path, capsys):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    assert helper.main(["--result", str(result), "--logs", str(logs), "--output", str(output)]) == 0
+    assert '"missing": 1' in capsys.readouterr().out
+    assert json.loads((output / "manifest.json").read_text())["files"][0]["status"] == "missing"
+    result.write_text("secret invalid JSON", encoding="utf-8")
+    assert helper.main(["--result", str(result), "--logs", str(logs), "--output", str(tmp_path / "bad")]) == 1
+    assert "secret" not in capsys.readouterr().out
+    assert not (tmp_path / "bad").exists()
+    result.unlink()
+    with pytest.raises(OSError):
+        helper.retain_failed_logs(result, logs, tmp_path / "missing")
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize("suite", ["../outside", "/outside", "a/b", "a\\b", "..", "x" * 129])
+def test_failed_log_retention_unsafe_ids(tmp_path, suite):
+    helper = _failed_log_retention_helper()
+    args = _failed_log_retention_inputs(tmp_path, [{"id": suite, "status": "FAIL"}])
+    with pytest.raises(ValueError, match="unsafe_suite_id"):
+        helper.retain_failed_logs(*args)
+    assert not args[2].exists()
+
+
+def test_failed_log_retention_symlinks_no_external_access(tmp_path, monkeypatch):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    secret = outside / "secret"
+    secret.write_bytes(b"never open me")
+    try:
+        (logs / "red.log").symlink_to(secret)
+        output.symlink_to(outside, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    real_open = helper.os.open
+    def guarded_open(path, flags, *args, **kwargs):
+        assert str(path) != str(secret)
+        assert str(path) != str(outside)
+        return real_open(path, flags, *args, **kwargs)
+    monkeypatch.setattr(helper.os, "open", guarded_open)
+    with pytest.raises(ValueError, match="output_collision"):
+        helper.retain_failed_logs(result, logs, output)
+    assert set(p.name for p in outside.iterdir()) == {"secret"}
+    output.unlink()
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["files"][0]["status"] == "rejected"
+    assert manifest["copied_files"] == 0
+    assert secret.read_bytes() == b"never open me"
+
+
+@pytest.mark.parametrize("kind", ["result", "logs", "output-parent"])
+def test_failed_log_retention_symlink_path_components(tmp_path, kind):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{"id": "red", "status": "FAIL"}])
+    link = tmp_path / "link"
+    try:
+        link.symlink_to(tmp_path, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    args = {"result_path": result, "log_dir": logs, "output_dir": output}
+    args[{"result": "result_path", "logs": "log_dir", "output-parent": "output_dir"}[kind]] = (
+        link / {"result": "result.json", "logs": "logs", "output-parent": "retained"}[kind])
+    with pytest.raises(ValueError, match="unsafe_path"):
+        helper.retain_failed_logs(**args)
+    assert not output.exists()
+
+
+def test_failed_log_retention_special_files(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": "directory", "status": "FAIL"}, {"id": "pipe", "status": "FAIL"}])
+    (logs / "directory.log").mkdir()
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(logs / "pipe.log")
+    else:
+        (logs / "pipe.log").mkdir()
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert [entry["status"] for entry in manifest["files"]] == ["rejected", "rejected"]
+    assert manifest["copied_files"] == 0
+
+
+def test_failed_log_retention_tail_and_total_budget(tmp_path):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    rows = [{"id": f"red{i}", "status": "FAIL", "attempts": 2} for i in range(10)]
+    result, logs, output = _failed_log_retention_inputs(tmp_path, rows)
+    contents = b"discard head\n" * 30000 + b"ACTIONABLE FINAL STACK\n"
+    for row in rows:
+        (logs / (row["id"] + ".retry1.log")).write_bytes(contents)
+        (logs / (row["id"] + ".log")).write_bytes(b"original")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["copied_bytes"] == helper.TOTAL_LIMIT
+    assert manifest["copied_files"] == 8
+    for entry in manifest["files"][:8]:
+        copied = (output / entry["copy"]).read_bytes()
+        assert copied == contents[-helper.FILE_LIMIT:]
+        assert entry["truncated"] and entry["original_size"] == len(contents)
+        assert entry["source_sha256"] == hashlib.sha256(contents).hexdigest()
+        assert entry["copy_sha256"] == hashlib.sha256(copied).hexdigest()
+    assert all(entry["status"] == "budget_exhausted" and entry["truncated"]
+               for entry in manifest["files"][8:])
+
+
+def test_failed_log_retention_count_cap_and_result_cap(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": f"red{i}", "status": "FAIL"} for i in range(130)])
+    for i in range(130):
+        (logs / f"red{i}.log").write_bytes(b"stack")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["copied_files"] == 128 and len(manifest["files"]) == 128
+    assert manifest["omitted_candidates"] == 2
+    result.write_bytes(b" " * (helper.RESULT_LIMIT + 1))
+    with pytest.raises(ValueError, match="result_too_large"):
+        helper.retain_failed_logs(result, logs, tmp_path / "oversize")
+    assert not (tmp_path / "oversize").exists()
+
+
+def test_failed_log_retention_no_fail_and_collision(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {"id": "green", "status": "PASS"}, {"id": "skip", "status": "SKIP"}])
+    (logs / "green.log").write_bytes(b"passing logs must not compete")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["files"] == [] and manifest["copied_bytes"] == manifest["copied_files"] == 0
+    assert [p.name for p in output.iterdir()] == ["manifest.json"]
+    original = (output / "manifest.json").read_bytes()
+    with pytest.raises(ValueError, match="output_collision"):
+        helper.retain_failed_logs(result, logs, output)
+    assert (output / "manifest.json").read_bytes() == original
+    assert (logs / "green.log").read_bytes() == b"passing logs must not compete"
+
+
+def test_failed_log_retention_no_fail_needs_no_logs(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    logs.rmdir()
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["files"] == [] and manifest["copied_files"] == 0
+    assert not logs.exists()
+
+
+@pytest.mark.parametrize("payload", [{}, {"results": {}}, {"results": [None]},
+                                    {"results": [{"id": "red", "status": "FAIL", "attempts": True}]}])
+def test_failed_log_retention_malformed_shapes(tmp_path, payload):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    result.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError):
+        helper.retain_failed_logs(result, logs, output)
+    assert not output.exists()
+
+
+def test_failed_log_retention_result_symlink_no_read(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    outside = tmp_path / "outside-result"
+    outside.write_bytes(b"secret malformed result must never be parsed")
+    result.unlink()
+    try:
+        result.symlink_to(outside)
+    except (OSError, NotImplementedError):
+        pytest.skip("symlink creation unavailable")
+    with pytest.raises((OSError, ValueError)) as caught:
+        helper.retain_failed_logs(result, logs, output)
+    assert "malformed_result" not in str(caught.value)
+    assert not output.exists()
+    assert outside.read_bytes() == b"secret malformed result must never be parsed"
+
+
+def test_failed_log_retention_shell_advisory_order_and_verdict():
+    source = (REPO / ".codebuild/ci.sh").read_text(encoding="utf-8")
+    gate = source.index('python scripts/run-all-gates.py --jobs')
+    assert source.rindex('export PYTHONUNBUFFERED=1', 0, gate) < gate
+    capture = source.index('python -I -B scripts/ci/retain_failed_gate_logs.py')
+    next_step = source.index('if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]', gate)
+    block = source[capture:next_step]
+    assert gate < capture < next_step
+    assert '|| gate_status=$?' in source[gate:capture]
+    assert '--result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs' in block
+    assert "|| echo 'WARNING: failed gate log retention unavailable' >&2" in block
+    assert "gate_status=" not in block and 'if ' not in block
+    assert source.rstrip().endswith('exit "$gate_status"')
+
+
+def test_failed_log_retention_actual_producer_size(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    # Synthetic producer-shaped result, not evidence of a live CI run.
+    payload = {"results": [{"id": "red", "status": "FAIL", "attempts": 1,
+                            "test_report": {"output": ""}}]}
+    target_bytes = 2349222
+    payload["results"][0]["test_report"]["output"] = "x" * (
+        target_bytes - len(json.dumps(payload).encode("utf-8")))
+    result.write_bytes(json.dumps(payload).encode("utf-8"))
+    assert result.stat().st_size == target_bytes
+    assert target_bytes > 2 * 1024 * 1024
+    (logs / "red.log").write_bytes(b"actionable failed stack\n")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["failed_suites"] == manifest["copied_files"] == 1
+    assert manifest["files"][0]["status"] == "copied"
+    assert (output / "red.log").read_bytes() == b"actionable failed stack\n"
+    assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
+def test_failed_log_retention_above_eight_mib_refused(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    assert helper.RESULT_LIMIT == 8 * 1024 * 1024
+    payload = {"results": [{"id": "red", "status": "FAIL",
+                            "test_report": {"output": "x" * (8 * 1024 * 1024)}}]}
+    result.write_bytes(json.dumps(payload).encode("utf-8"))
+    assert result.stat().st_size > helper.RESULT_LIMIT
+    (logs / "red.log").write_bytes(b"do not copy refused input")
+    with pytest.raises(ValueError, match="result_too_large"):
+        helper.retain_failed_logs(result, logs, output)
+    assert not output.exists()
+    assert (logs / "red.log").read_bytes() == b"do not copy refused input"
