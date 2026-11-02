@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 # BEGIN SHARD ENV
 CI_SHARD_TOTAL_N=1
 CI_SHARD_INDEX_N=0
@@ -23,6 +24,63 @@ if [[ "$shard_env_valid" != 1 ]]; then
 fi
 echo "LEAF_EVENT shard mode=$CI_SHARD_MODE index=$CI_SHARD_INDEX_N total=$CI_SHARD_TOTAL_N"
 # END SHARD ENV
+# A post-cheap-phase callback re-enters this exact trusted script, not a
+# candidate helper. Only dependency-backed heavy prerequisites run here.
+if [[ "${1:-}" == --heavy-prerequisites ]]; then
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
+echo "LEAF_T start webbundle $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 2/4 Build web bundle"
+npm run build
+echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
+echo "LEAF_T start license-fence $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 3/4 License fence self-test"
+python scripts/check_license_fence.py --self-test
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 4/4 License fence scan"
+python scripts/check_license_fence.py .
+echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
+else
+  echo "license fence: runs on shard 0"
+fi
+
+echo "LEAF_T start chromium $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 5/6 Install Chromium for browser proofs"
+# LEAF_CI_BROWSER_INSTALL_BEGIN
+# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
+# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
+# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
+# consecutive builds right here, on main and on every merge-queue group, with
+# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
+# all six mirror IPs, before a single suite ran, and every queued PR ejected
+# behind it. A fallback is honest rather than a papered-over failure because in
+# that same log every library Chromium needs read "is already the newest
+# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
+# libxrandr2, libatk*); the only packages the mirror could not serve were
+# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
+# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
+# rendered page and nothing any suite in this repo asserts. Try the OS setup
+# once, then the distinct browser-only stage; repeating the same apt failure
+# adds no evidence. A missing BROWSER BINARY is
+# still a hard failure: the last call is unguarded, so set -e fails the build.
+install_ci_browser() {
+  if "$@" install --with-deps chromium; then
+    return 0
+  fi
+  echo "WARNING: $* dependency install failed; trying the distinct browser-only stage. Browser proofs still check OS runtime usability." >&2
+  "$@" install chromium
+}
+
+install_ci_browser npx playwright
+# Install the Python producer's pinned browser with the gate interpreter too.
+install_ci_browser python -m playwright
+echo "LEAF_T end chromium $(date +%s%3N) rc=0"
+# LEAF_CI_BROWSER_INSTALL_END
+  exit 0
+fi
+
 # Freeze policy before any candidate installation, import, or test collection.
 TRUSTED_SHA=""
 HEAD_SHA=""
@@ -505,23 +563,6 @@ cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
 npm ci
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
-if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
-echo "LEAF_T start webbundle $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 2/4 Build web bundle"
-npm run build
-echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
-echo "LEAF_T start license-fence $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 3/4 License fence self-test"
-python scripts/check_license_fence.py --self-test
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 4/4 License fence scan"
-python scripts/check_license_fence.py .
-echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
-else
-  echo "license fence: runs on shard 0"
-fi
 
 echo "=== job test-gate ==="
 echo "LEAF_T start pydeps $(date +%s%3N)"
@@ -548,46 +589,7 @@ cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 4/6 Reuse web dependencies"
 # The license-fence job installed a clean web tree in this same build.
 # No intervening step changes its dependencies, so reuse that npm ci.
-echo "LEAF_T start chromium $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 5/6 Install Chromium for browser proofs"
-# LEAF_CI_BROWSER_INSTALL_BEGIN
-# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
-# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
-# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
-# consecutive builds right here, on main and on every merge-queue group, with
-# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
-# all six mirror IPs, before a single suite ran, and every queued PR ejected
-# behind it. A fallback is honest rather than a papered-over failure because in
-# that same log every library Chromium needs read "is already the newest
-# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
-# libxrandr2, libatk*); the only packages the mirror could not serve were
-# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
-# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
-# rendered page and nothing any suite in this repo asserts. Two attempts, not
-# more: each failed --with-deps costs a full apt timeout against six unreachable
-# IPs, and the fallback is what saves the build. A missing BROWSER BINARY is
-# still a hard failure: the last call is unguarded, so set -e fails the build.
-install_ci_browser() {
-  local attempt
-  for attempt in 1 2; do
-    if "$@" install --with-deps chromium; then
-      return 0
-    fi
-    if [[ "$attempt" == 1 ]]; then
-      echo "WARNING: $* dependency install failed; retrying in 5 seconds (attempt 2/2)." >&2
-      sleep 5
-    fi
-  done
-  echo "WARNING: $* dependency install failed after 2 attempts; falling back to browser-only install. OS libraries may be missing; browser proofs will check runtime usability." >&2
-  "$@" install chromium
-}
 
-install_ci_browser npx playwright
-# Install the Python producer's pinned browser with the gate interpreter too.
-install_ci_browser python -m playwright
-echo "LEAF_T end chromium $(date +%s%3N) rc=0"
-# LEAF_CI_BROWSER_INSTALL_END
 echo "LEAF_T start gate $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
@@ -921,7 +923,7 @@ export LEAF_GATE_REQUIRE_DATABASE=1
 echo "LEAF_T end postgres $(date +%s%3N) rc=$postgres_status"
 gate_status=0
 unset PYTHONSAFEPATH
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
 if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2
   gate_status=1

@@ -5024,3 +5024,187 @@ def test_r14f1_gate_registration():
     ids = [item.id for item in catalog]
     assert ids.index(suite.id) == ids.index("scripts-proof-project") + 1
     assert next(item for item in catalog if item.id == "scripts-proof-project").expected == 376
+
+
+# Early-feedback scheduler proofs use the actual runner with inert suite
+# processes. They prove ordering and reporting, not product correctness.
+def test_early_feedback_collects_all_reds_and_never_starts_heavy(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None)
+              for name in ["web-build", "harness-tsc-noemit", "server-campaign-dxf-inventory",
+                           "web-studio-panels-proof"]]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "FAIL", "err", 0.01, note="fixture type/contract error")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: pytest.fail("heavy setup started"))
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 3, True,
+                                             early_feedback=True,
+                                             before_heavy_command=["trusted-ci", "--heavy-prerequisites"])
+    assert set(seen) == {"harness-tsc-noemit", "server-campaign-dxf-inventory"}
+    assert len(seen) == 2 and all(n == 1 for n in attempts.values())
+    assert all(r.status == "FAIL" for r in results)
+    output = capsys.readouterr().out
+    assert "GATE_RESULT id=harness-tsc-noemit status=FAIL" in output
+    assert "GATE_RESULT id=server-campaign-dxf-inventory status=FAIL" in output
+    assert "heavy_started=0" in output
+
+
+def test_early_feedback_healthy_catalog_parity_and_dependency_barrier(tmp_path, monkeypatch):
+    g = _load_runner()
+    names = ["web-studio-panels-proof", "harness-tsc-noemit", "web-build",
+             "server-campaign-dxf-inventory", "other-full-control"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    argv = ["/trusted/base/ci.sh", "--heavy-prerequisites"]
+    def prerequisites(command, **kwargs):
+        assert command == argv and kwargs == {"cwd": g.REPO, "check": False}
+        seen.append("heavy-prerequisites")
+        return SimpleNamespace(returncode=0)
+    monkeypatch.setattr(g.subprocess, "run", prerequisites)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 1, 0, True,
+                                             early_feedback=True, before_heavy_command=argv)
+    assert [r.suite.id for r in results] == names
+    assert set(attempts) == set(names) and set(attempts.values()) == {1}
+    assert len(seen) == len(names) + 1
+    assert max(seen.index(name) for name in g._EARLY_FEEDBACK_SUITES if name in names) < seen.index("heavy-prerequisites")
+    assert seen.index("heavy-prerequisites") < seen.index("web-build")
+    assert seen.index("web-build") < seen.index("web-studio-panels-proof")
+
+
+def test_early_failure_is_visible_while_another_cheap_check_is_running(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    failed = threading.Event()
+    release = threading.Event()
+    slow = g.Suite("server-campaign-dxf-inventory", "slow cheap", "script", tmp_path, ["fixture"], None)
+    fast = g.Suite("harness-tsc-noemit", "fast red", "script", tmp_path, ["fixture"], None)
+    def run(suite, *_args, **_kwargs):
+        if suite.id == slow.id:
+            assert release.wait(5), "test did not release second cheap check"
+            return g.Result(suite, "PASS", "-", 0.01)
+        failed.set()
+        return g.Result(suite, "FAIL", "err", 0.01, note="actionable fixture.ts type error")
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    thread = threading.Thread(target=lambda: g.run_suites_parallel([slow, fast], tmp_path, 2, 0, True,
+                                                                  early_feedback=True))
+    thread.start()
+    try:
+        assert failed.wait(5)
+        deadline = time.monotonic() + 5
+        output = ""
+        while "GATE_RESULT id=harness-tsc-noemit status=FAIL" not in output and time.monotonic() < deadline:
+            output += capsys.readouterr().out
+            time.sleep(0.01)
+        assert "actionable fixture.ts type error" in output
+        assert thread.is_alive(), "report must precede the other cheap check finishing"
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+
+
+def test_heavy_prerequisite_failure_preserves_cheap_results_and_cannot_pass(tmp_path, monkeypatch):
+    g = _load_runner()
+    cheap = g.Suite("harness-tsc-noemit", "cheap", "script", tmp_path, ["fixture"], None)
+    heavy = g.Suite("web-build", "heavy", "script", tmp_path, ["fixture"], None)
+    seen = []
+    def run(suite, *_args, **_kwargs):
+        seen.append(suite.id)
+        return g.Result(suite, "PASS", "-", 0.01)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=17))
+    with pytest.raises(g.HeavyPrerequisitesFailed) as raised:
+        g.run_suites_parallel([heavy, cheap], tmp_path, 2, 0, True,
+                              early_feedback=True, before_heavy_command=["trusted-ci"])
+    assert raised.value.status == 17
+    assert seen == [cheap.id]
+    assert raised.value.completed[cheap.id][0].status == "PASS"
+
+
+def test_early_feedback_shell_uses_exact_trusted_script_and_one_gate_invocation():
+    source = (REPO / ".codebuild/ci.sh").read_text()
+    assert 'LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"' in source
+    line = next(line for line in source.splitlines() if line.startswith("python scripts/run-all-gates.py --jobs"))
+    assert '--early-feedback' in line and '--retry 0' in line
+    assert '--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites' in line
+    assert '"${only_args[@]}"' in line
+    entry = source[source.index('if [[ "${1:-}" == --heavy-prerequisites') : source.index('# Freeze policy before any candidate installation')]
+    assert 'npm run build' in entry and 'check_license_fence.py --self-test' in entry
+    assert 'install_ci_browser npx playwright' in entry and 'install_ci_browser python -m playwright' in entry
+    assert 'for attempt in 1 2' not in entry
+    assert entry.count('"$@" install --with-deps chromium') == 1
+    assert entry.count('"$@" install chromium') == 1
+
+
+
+def test_early_feedback_heavy_setup_failure_main_writes_partial_evidence_not_green(tmp_path, monkeypatch):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None)
+              for name in ["harness-tsc-noemit", "web-build"]]
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "AUTHORED_TOOLS", tmp_path / "authored_tools.json")
+    monkeypatch.setattr(g, "migrate_gate_database", lambda _suites: "")
+    monkeypatch.setattr(g, "run_suite_guarded", lambda suite, *_args, **_kwargs:
+                        g.Result(suite, "PASS", "-", 0.01))
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", lambda *_args, **_kwargs: SimpleNamespace(returncode=17))
+    output = tmp_path / "result.json"
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--early-feedback", "--jobs", "1",
+                                     "--result-json", str(output), "--log-dir", str(tmp_path),
+                                     "--before-heavy-command", "trusted-ci"])
+    assert g.main() == 1
+    document = json.loads(output.read_text())
+    assert len(document["results"]) == 1
+    assert document["results"][0]["id"] == "harness-tsc-noemit"
+    assert document["results"][0]["status"] == "PASS"
+    assert document["any_fail"] is True
+
+
+
+def test_early_feedback_actual_trusted_heavy_entry_preserves_producers(tmp_path):
+    g = _load_runner()
+    bash = g._bash()
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (tmp_path / "web").mkdir()
+    trace = tmp_path / "trace.log"
+    for name in ("npm", "npx", "python"):
+        script = bins / name
+        script.write_text("#!/usr/bin/env bash\n"
+                          "printf '%s %s\\n' \"$(basename \"$0\")\" \"$*\" >> \"$FIXTURE_TRACE\"\n"
+                          "if [[ \"${FIXTURE_FAIL_OS:-0}\" == 1 && \"$*\" == *'install --with-deps chromium' ]]; then exit 19; fi\n",
+                          encoding="utf-8", newline="\n")
+        script.chmod(0o755)
+    def shell_path(path):
+        text = path.resolve().as_posix()
+        return "/" + text[0].lower() + text[2:] if os.name == "nt" else text
+    def run(shard=None, fail_os=False):
+        trace.unlink(missing_ok=True)
+        env = dict(os.environ, CODEBUILD_SRC_DIR=shell_path(tmp_path), FIXTURE_BIN=shell_path(bins),
+                   FIXTURE_TRACE=shell_path(trace), CI_SCRIPT=shell_path(REPO / ".codebuild/ci.sh"),
+                   FIXTURE_FAIL_OS=str(int(fail_os)))
+        for key in ("CI_SHARD_TOTAL", "CI_SHARD_INDEX"):
+            env.pop(key, None)
+        if shard is not None:
+            env.update(CI_SHARD_TOTAL="2", CI_SHARD_INDEX=str(shard))
+        result = subprocess.run([bash, "--noprofile", "--norc", "-c",
+                                 'export PATH="$FIXTURE_BIN:$PATH"; exec bash "$CI_SCRIPT" --heavy-prerequisites'],
+                                env=env, capture_output=True, text=True, timeout=15)
+        assert result.returncode == 0, result.stdout + result.stderr
+        return trace.read_text().splitlines()
+    license_checks = ["npm run build", "python scripts/check_license_fence.py --self-test",
+                      "python scripts/check_license_fence.py ."]
+    browsers = ["npx playwright install --with-deps chromium", "python -m playwright install --with-deps chromium"]
+    assert run() == license_checks + browsers
+    assert run(shard=1) == browsers
+    assert run(fail_os=True) == license_checks + [browsers[0], "npx playwright install chromium",
+                                               browsers[1], "python -m playwright install chromium"]
