@@ -261,16 +261,26 @@ describe("POST /turn - private project execution marker", () => {
     const { runner, calls } = capture();
     const live = listen(basePorts(runner), { enabled: true, secret });
     server = live.server;
+    const markerLines: string[] = [];
+    live.server.prependListener("request", req => {
+      for (let index = 0; index < req.rawHeaders.length; index += 2) {
+        if (req.rawHeaders[index]?.toLowerCase() === header) {
+          markerLines.push(req.rawHeaders[index + 1]!);
+        }
+      }
+    });
     const body = JSON.stringify(validBody());
     const response = await new Promise<{ status: number | undefined; contentType: string | undefined }>((resolve, reject) => {
       const req = httpRequest(`${live.baseUrl}/turn`, {
         method: "POST",
-        // A raw array emits distinct header lines, rather than an object value
-        // that has already combined them before reaching the HTTP server.
-        headers: ["host", new URL(live.baseUrl).host,
-          "content-length", String(Buffer.byteLength(body)),
-          "content-type", "application/json", "x-harness-secret", secret,
-          header, "canonical-read", header, "canonical-read"],
+        // Node emits each custom-header array value as a separate wire line.
+        // Assert the received raw lines below, rather than relying on merging.
+        headers: {
+          host: new URL(live.baseUrl).host,
+          "content-length": String(Buffer.byteLength(body)),
+          "content-type": "application/json", "x-harness-secret": secret,
+          [header]: ["canonical-read", "canonical-read"],
+        },
       }, res => {
         res.resume();
         res.on("end", () => resolve({ status: res.statusCode, contentType: res.headers["content-type"] }));
@@ -281,6 +291,7 @@ describe("POST /turn - private project execution marker", () => {
     });
     expect(response.status).toBe(400);
     expect(response.contentType).toContain("application/json");
+    expect(markerLines).toEqual(["canonical-read", "canonical-read"]);
     expect(calls).toHaveLength(0);
   });
 
