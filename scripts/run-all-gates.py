@@ -3742,6 +3742,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_reconcile_authority_source_schema.py"), 7),
         Suite("server-request-journal", "server tests/test_request_journal.py", "pytest", SERVER,
               _py_pytest("tests/test_request_journal.py"), 22),
+        Suite("server-project-execution-context", "server tests/test_project_execution_context.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_execution_context.py"), 20),
         Suite("server-roles", "server tests/test_roles.py", "pytest", SERVER,
               _py_pytest("tests/test_roles.py"), 22),
         Suite("server-sample-dxf-asset", "server tests/test_sample_dxf_asset.py", "pytest", SERVER,

@@ -568,13 +568,22 @@ def _resolve_project_read_context(tenant, headers, req, params):
         tenant, project_id, version_id, drawing_id=drawing_id, write=False)
 
 
-def _run_project_read(tool, tenant, headers, req, params):
+def _run_project_read(tool, tenant, headers, req, params, *, persist=False,
+                      idempotency_key=None, selected_binding=None):
     import solar_project_context
     import tool_loader
     from routers import project_drawings
 
     try:
         context = _resolve_project_read_context(tenant, headers, req, params)
+        if selected_binding is not None and (
+            str(context.binding.organization_id) != selected_binding["organization_id"]
+            or str(context.binding.project_id) != selected_binding["project_id"]
+            or str(context.binding.drawing_id) != selected_binding["drawing_id"]
+            or str(context.binding.input_version_id) != selected_binding["input_version_id"]
+            or context.intake_sha256 != selected_binding["intake_sha256"]
+        ):
+            raise ValueError("selected project execution context changed")
         org_id = context.binding.organization_id
         jobs.platform_link.platform_store()
         import leaf_platform.entitlements as platform_entitlements
@@ -603,9 +612,34 @@ def _run_project_read(tool, tenant, headers, req, params):
                               status_code=400 if "required" in message else 409)
     except Exception:
         return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
-    env = tool_loader.run_tool_dynamic(
-        tool, context.intake, params, aps_live=False, da=None,
-        tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
+    def execute_read():
+        return tool_loader.run_tool_dynamic(
+            tool, context.intake, params, aps_live=False, da=None,
+            tenant_id=str(tenant) if is_demo_context(tenant) else str(org_id))
+
+    if persist:
+        try:
+            record = jobs.platform_link.run_project_read_job(
+                tenant, context, {**tool, "catalog_digest": req.catalog_digest},
+                params, idempotency_key, execute_read)
+        except jobs.platform_link.CanonicalEntitlementDenied as exc:
+            return exc.response
+        except jobs.platform_link.ProjectSessionForbidden:
+            return error_response(ErrorCode.FORBIDDEN, "project access denied",
+                                  retryable=False, status_code=403)
+        except solar_project_context.ProjectContextError as exc:
+            def refusal():
+                raise exc
+            return project_drawings._dispatch(refusal)
+        except ValueError as exc:
+            return error_response(ErrorCode.BAD_PARAMS, str(exc), retryable=False,
+                                  status_code=400 if "required" in str(exc) else 409)
+        except Exception:
+            return project_drawings._dispatch(lambda: solar_project_context.refuse("STORE_UNAVAILABLE"))
+        return JSONResponse(status_code=202, content=record,
+                            headers={"Cache-Control": "no-store"})
+
+    env = execute_read()
     body = {
         key: env[key]
         for key in (
@@ -659,7 +693,8 @@ def _checkout_identity(tenant_id: Any, drawing_id: str,
 
 
 @router.post("/api/run")
-def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_tenant),
+def run(req: RunRequest, wait: int = 0, persist: int = 0,
+        tenant_id: Any = Depends(deps.require_tenant),
         x_org_id: Optional[str] = Header(default=None),
         x_project_id: Optional[str] = Header(default=None),
         idempotency_key: Optional[str] = Header(default=None, alias="Idempotency-Key"),
@@ -774,17 +809,56 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
             retryable=False, tool=req.tool, status_code=409,
         )
 
+    def scoped_project_refusal():
+        return JSONResponse(status_code=403, content=with_envelope_fields({
+            "error": error_obj(ErrorCode.FORBIDDEN, entity_scope.SCOPED_MUTATION_MESSAGE,
+                               retryable=False),
+            "reason_code": entity_scope.SCOPED_MUTATION_REASON,
+        }))
+
+    # Preserve the existing entity-scope refusal before resolving new project custody.
     if binding is not None and (
         (tool.get("name") in capability_catalog.SOLAR_CAPABILITIES
          and capability_catalog.capability_adapter(tool.get("name")) != capability_catalog.CLOUD_PROPOSAL_ADAPTER)
         or tool.get("canonical_only")
         or x_org_id is not None or x_project_id is not None
     ):
-        return JSONResponse(status_code=403, content=with_envelope_fields({
-            "error": error_obj(ErrorCode.FORBIDDEN, entity_scope.SCOPED_MUTATION_MESSAGE,
-                               retryable=False),
-            "reason_code": entity_scope.SCOPED_MUTATION_REASON,
-        }))
+        return scoped_project_refusal()
+
+    selected_binding = None
+    if session_id is not None and any(
+        cap in ("drawing.read", "drawing.write") for cap in tool.get("capabilities", [])
+    ):
+        import project_execution_context
+        try:
+            selected_binding = project_execution_context.resolve_turn_binding(
+                session_id, turn_id, tenant_id)
+        except project_execution_context.ContextError as exc:
+            return JSONResponse(status_code=exc.status_code, content=with_envelope_fields({
+                "error": error_obj(
+                    ErrorCode.FORBIDDEN if exc.status_code == 403 else ErrorCode.BAD_PARAMS,
+                    exc.code, retryable=False),
+                "reason_code": exc.code,
+            }))
+        if selected_binding is not None:
+            if binding is not None:
+                return scoped_project_refusal()
+            if not _is_project_read_tool(tool):
+                return error_response(
+                    ErrorCode.BAD_PARAMS, "selected project execution requires a canonical read tool",
+                    retryable=False, status_code=409)
+            if (req.dwg not in (selected_binding["drawing_id"], selected_binding["input_version_id"])
+                    or (isinstance(x_project_id, str)
+                        and x_project_id != selected_binding["project_id"])
+                    or (isinstance(x_org_id, str)
+                        and x_org_id != selected_binding["organization_id"])):
+                return error_response(ErrorCode.BAD_PARAMS, "selected project drawing conflicts with request",
+                                      retryable=False, status_code=409)
+            x_org_id = selected_binding["organization_id"]
+            x_project_id = selected_binding["project_id"]
+            # Legacy integer pins cannot substitute for the stored selected UUID.
+            req = req.model_copy(update={"dwg": selected_binding["input_version_id"],
+                                         "dwg_version": None, "expected_drawing_head": None})
 
     if (solar_project_admission.project_runs_enabled()
             and (isinstance(x_org_id, str) or isinstance(x_project_id, str))
@@ -826,7 +900,10 @@ def run(req: RunRequest, wait: int = 0, tenant_id: Any = Depends(deps.require_te
     params.update(req.params or {})
 
     if isinstance(x_project_id, str) and x_project_id and _is_project_read_tool(tool):
-        return _run_project_read(tool, tenant_id, (x_org_id, x_project_id), req, params)
+        return _run_project_read(
+            tool, tenant_id, (x_org_id, x_project_id), req, params,
+            persist=persist == 1 or selected_binding is not None,
+            idempotency_key=idempotency_key, selected_binding=selected_binding)
 
     # An authored tool that declares the W1 graph intake is pinned and anonymous
     # exactly like the trusted read kind; only the broker's execution differs.

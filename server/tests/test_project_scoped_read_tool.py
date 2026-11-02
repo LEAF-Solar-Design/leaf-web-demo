@@ -375,6 +375,74 @@ def _real_read_job(lane, *, version=V2, key="read-once", params=None, calls=None
         lane.memory.tenant, context, tool, params, key, callback or execute)
 
 
+def _selected_turn(lane, monkeypatch, version=V1, *, selected=True):
+    import time
+    import session_store
+    import project_execution_context
+
+    session = {"session_id": "selected-session", "tenant_id": str(O1),
+               "org_id": str(O1), "project_id": str(P1), "drawing_id": "rooftop_demo",
+               "active_turn_id": "selected-turn", "turn_started_at": time.time()}
+    frozen = project_execution_context.freeze(
+        lane.memory.tenant, session,
+        {"project_id": str(P1), "input_version_id": str(version)})
+    monkeypatch.setattr(session_store, "get_session", lambda sid: session if sid == "selected-session" else None)
+    monkeypatch.setattr(session_store, "turn_started_data", lambda sid, tid, tenant: (
+        {project_execution_context.KEY: frozen} if selected else {})
+        if (sid, tid, tenant) == ("selected-session", "selected-turn", str(O1)) else None)
+    return {"X-Authority-Session-Id": "selected-session",
+            "X-Authority-Turn-Id": "selected-turn", "Idempotency-Key": "selected-once"}
+
+
+@pytest.mark.parametrize("version", [V1, V2])
+def test_c02_api_persists_exact_stored_selection_and_matching_retry(lane, read_job_store, monkeypatch, version):
+    from leaf_platform import store
+    headers = _selected_turn(lane, monkeypatch, version)
+    calls = []
+    actual_run = tool_loader.run_tool_dynamic
+
+    def execute(*args, **kwargs):
+        calls.append(True)
+        return actual_run(*args, **kwargs)
+
+    monkeypatch.setattr(tool_loader, "run_tool_dynamic", execute)
+    first = request(lane, headers=headers, dwg=str(D1), dwg_version=999)
+    second = request(lane, headers=headers, dwg=str(D1), dwg_version=999)
+    assert first.status_code == second.status_code == 202, first.text
+    job = first.json()
+    assert job["job_id"] == second.json()["job_id"] and calls == [True]
+    assert job["result"]["result"]["layers"] == layers(lane, version)
+    board = [row.to_dict() for row in store.list_jobs(O1, P1)]
+    assert len(board) == 1 and board[0]["job_id"] == job["job_id"]
+    assert board[0]["input_version_id"] == str(version)
+    assert board[0]["result"]["project_context"]["drawing_id"] == str(D1)
+
+
+@pytest.mark.parametrize("conflict", ["drawing", "project", "organization", "missing", "store"])
+def test_c02_api_cannot_fall_back_from_selected_project(lane, read_job_store, monkeypatch, conflict):
+    import session_store
+    headers = _selected_turn(lane, monkeypatch, selected=conflict != "missing")
+    changes = {"dwg": str(D2 if conflict == "drawing" else D1)}
+    if conflict == "project":
+        headers["X-Project-Id"] = str(P2)
+    elif conflict == "organization":
+        headers["X-Org-Id"] = str(O2)
+    elif conflict == "store":
+        monkeypatch.setattr(session_store, "get_session", lambda _sid: None)
+    response = request(lane, headers=headers, **changes)
+    assert response.status_code == (403 if conflict == "store" else 409), response.text
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_c02_selected_turn_preserves_entity_scope_boundary(lane, read_job_store, monkeypatch):
+    headers = _selected_turn(lane, monkeypatch)
+    monkeypatch.setattr(route.entity_scope, "resolve_turn_binding", lambda *_: {"entity_scope": "stored"})
+    response = request(lane, headers=headers, dwg=str(D1))
+    assert response.status_code == 403
+    assert response.json()["reason_code"] == route.entity_scope.SCOPED_MUTATION_REASON
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
 @pytest.mark.parametrize("version", [V1, V2], ids=["historical", "selected-head"])
 def test_c02_real_persisted_read_and_project_board_tuple(lane, read_job_store, version):
     from leaf_platform import store
