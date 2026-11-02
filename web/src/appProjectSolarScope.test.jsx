@@ -88,7 +88,12 @@ const initialContext = catalogCall.node.arguments[0].properties.find((prop) => p
 const catalogDeclaration = nodes((node) => node.type === 'VariableDeclarator' && node.init === catalogCall.node)[0].parent
 const contextEffect = nodes((node) => node.type === 'CallExpression' && node.callee.name === 'useEffect'
   && text(node.arguments[0]).includes('...(ENV_SOLAR_SETTINGS_FORM ? solarSettingsScope({'))[0].node
-const ownerSource = source.slice(declaration('catalogRunContext').parent.start, declaration('catalogServices').parent.end)
+const editorDeclaration = nodes((node) => node.type === 'VariableDeclarator'
+  && node.id.type === 'ArrayPattern' && node.id.elements[0]?.name === 'projectEditorTarget')[0]
+// Run the actual Solar owner and context effect without pulling the separate
+// canonical editor/undo hooks into this Solar-only extracted component.
+const ownerSource = source.slice(declaration('catalogRunContext').parent.start, editorDeclaration.parent.start)
+  + source.slice(declaration('projectSolarAccountScope').parent.start, declaration('catalogServices').parent.end)
 const intents = Function(`return ${text(declaration('PROJECT_SOLAR_INTENTS').node.init)}`)()
 
 // Execute the actual App declarations, initial context and context effect. Only
