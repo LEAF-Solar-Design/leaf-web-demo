@@ -434,31 +434,36 @@ function readJsonBody(
       if (!raw) return resolve({});
       try {
         const body: unknown = JSON.parse(raw);
-        if (uniqueNestedKeys) {
+        if (uniqueFlatStringKeys && (!isRecord(body) || Object.values(body).some(value => typeof value !== "string"))) {
+          throw new Error("expected a flat string object");
+        }
+        if (uniqueNestedKeys || uniqueFlatStringKeys) {
+          // JSON.parse already checked syntax. Walk each token once, skipping
+          // string values without decoding them (material can be many MiB).
           const stack: (Set<string> | null)[] = [];
-          for (const token of raw.matchAll(/"(?:[^"\\]|\\.)*"|[{}\[\]]/g)) {
-            const value = token[0];
+          for (let i = 0; i < raw.length; i++) {
+            const value = raw[i];
             if (value === "{") stack.push(new Set());
             else if (value === "[") stack.push(null);
             else if (value === "}" || value === "]") stack.pop();
-            else if (/^\s*:/.test(raw.slice(token.index! + value.length))) {
-              const keys = stack[stack.length - 1];
-              const key = JSON.parse(value) as string;
-              if (!keys || keys.has(key)) throw new Error("duplicate JSON key");
-              keys.add(key);
+            else if (value === '"') {
+              const start = i++;
+              while (i < raw.length && raw[i] !== '"') {
+                if (raw[i] === "\\") i++;
+                i++;
+              }
+              const end = i + 1;
+              let next = end;
+              while (raw[next] === " " || raw[next] === "\t" || raw[next] === "\r" || raw[next] === "\n") next++;
+              if (raw[next] === ":") {
+                const keys = stack[stack.length - 1];
+                const key = JSON.parse(raw.slice(start, end)) as string;
+                if (!keys || keys.has(key)) throw new Error("duplicate JSON key");
+                keys.add(key);
+              }
+              i = next - 1;
             }
           }
-        }
-        if (uniqueFlatStringKeys) {
-          if (!isRecord(body) || Object.values(body).some(value => typeof value !== "string")) {
-            throw new Error("expected a flat string object");
-          }
-          // Tokenize complete strings so escaped quotes in values cannot look
-          // like keys. JSON.parse has already checked syntax; in a flat object,
-          // more raw keys than parsed keys means a duplicate, including escapes.
-          const keys = [...raw.matchAll(/"(?:[^"\\]|\\.)*"/g)]
-            .filter(match => /^\s*:/.test(raw.slice(match.index! + match[0].length)));
-          if (keys.length !== Object.keys(body).length) throw new Error("duplicate JSON key");
         }
         resolve(body as Record<string, unknown>);
       } catch (e) {
@@ -1221,7 +1226,7 @@ export function createHarness(ports: HarnessPorts, opts?: {
         res.once("close", abort);
         const timer = setTimeout(() => controller.abort(), 240000);
         try {
-          const body = await readJsonBody(req, CAMPAIGN_SOURCE_BODY_LIMIT, true, false, true);
+          const body = await readJsonBody(req, 12 * 1024 * 1024, true, false, true);
           const staged = await authorProjectSource(opts.projectRepositoryEdits, opts.projectSourceAuthoring,
             body, authorityHeader(req, "x-tenant-id"), controller.signal);
           return send(res, 200, staged);
