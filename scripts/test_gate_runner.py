@@ -577,6 +577,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
             ("src/cad/engineWasmHarness.realwasm.test.js", 1),
             ("src/cadedit/cadEditSurface.test.jsx", 16),
             ("src/cad/engineBatchAtomic.test.js", 12),
+            ("src/cad/engineBatchAtomic.test.js", 13),
         )
         assert suite.kind == "vitest" and suite.cwd == g.WEB
         assert suite.timeout_s == 900
@@ -2261,6 +2262,34 @@ def test_exact_vitest_file_and_skip_count_allowlist_passes(tmp_path):
     result = g.run_suite(suite, tmp_path)
 
     assert result.status == "PASS"
+
+
+@pytest.mark.parametrize(("path", "skipped", "status"), (
+    ("src/cad/engineBatchAtomic.test.js", 12, "PASS"),
+    ("src/cad/engineBatchAtomic.test.js", 13, "PASS"),
+    ("src/cad/engineBatchAtomic.test.js", 14, "FAIL"),
+    ("src/cad/unexpected.test.js", 13, "FAIL"),
+))
+def test_known_native_vitest_skip_counts_are_exact(tmp_path, path, skipped, status):
+    g = _load_runner()
+    output = (
+        f"{path} ({skipped + 1} tests | {skipped} skipped)\n"
+        f"Tests 1 passed | {skipped} skipped\n"
+    )
+    suite = g.Suite(
+        "vitest-native-skip", "vitest native skip", "vitest", SCRIPTS,
+        [sys.executable, "-c", f"print({output!r})"], 1,
+        allowed_vitest_skips=(
+            ("src/cad/engineBatchAtomic.test.js", 12),
+            ("src/cad/engineBatchAtomic.test.js", 13),
+        ),
+    )
+
+    result = g.run_suite(suite, tmp_path)
+
+    assert result.status == status
+    if status == "FAIL":
+        assert "non-allowlisted vitest skip" in result.note
 
 
 def test_all_skipped_vitest_suite_fails_even_when_every_skip_is_allowlisted(tmp_path):

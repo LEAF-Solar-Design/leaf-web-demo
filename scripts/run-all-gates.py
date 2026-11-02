@@ -3412,15 +3412,11 @@ def build_suites() -> List[Suite]:
                   # cases, the three W4d Draw-group cases, and the lossless
                   # u64-handle collision regression.
                   ("src/cadedit/cadEditSurface.test.jsx", 16),
-                  # W4g-6: the worker's `batch` op on the REAL compiled engine
-                  # (a three-step fillet in one reply, an atomic refusal, the
-                  # bounds, a refused create keeping the document), gated on the
-                  # same machine-local pkg-node build. Four describes (the W4g-6 batch,
-                  # W4g-7b-01c blocks, W4g-7c-2c Create Block and MLEADER
-                  # rows: eight tests) require the rebuilt engine;
-                  # numbers on PRs #1036, #1107 and #1140; W4g-7c-2d adds the
-                  # handle-retention row (nine tests).
+                  # The optional real-engine batch suite has 12 baseline cases.
+                  # BSP2 adds the layer/save/reopen/undo case, verified on the
+                  # compiled engine. Keep both exact counts while older PRs finish.
                   ("src/cad/engineBatchAtomic.test.js", 12),
+                  ("src/cad/engineBatchAtomic.test.js", 13),
               )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -5043,10 +5039,12 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         if c.get("skipped"):
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
             actual = dict(c["skipped_files"])
-            allowed = dict(suite.allowed_vitest_skips)
+            allowed = {}
+            for path, count in suite.allowed_vitest_skips:
+                allowed.setdefault(path, set()).add(count)
             reported = sum(actual.values())
             unexpected = {path: count for path, count in actual.items()
-                          if allowed.get(path) != count}
+                          if count not in allowed.get(path, set())}
             if reported != c["skipped"]:
                 passed = False
                 note += (f"; skip details incomplete: vitest reported {c['skipped']} "
