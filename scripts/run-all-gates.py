@@ -3295,7 +3295,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_migration_expand_contract_gate.py"), 12),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 317,
+              [_npm(), "test", "--", "--exclude", "test/projectPhotoAssignmentCaller.test.ts"], 317,
               allowed_vitest_skips=(
                   # Actual producer: project-lifecycle-postgres.yml,
                   # Run canonical project source PostgreSQL tests. These
@@ -3309,6 +3309,8 @@ def build_suites() -> List[Suite]:
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
               )),
+        Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
+              [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),
         # --- web unit (cwd=web) --- #
         # The web workspace had NO unit runner until the T1 overlay card; its
         # only specs were Playwright e2e, which this gate runs separately. A
