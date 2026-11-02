@@ -5535,6 +5535,22 @@ _PRELUDE_WRITERS = frozenset({
 })
 
 
+# These checks consume source/runtime dependencies, not the build outputs
+# produced by _PRELUDE_WRITERS. Their observed failures cost seconds while
+# browser/native suites cost minutes. Unknown suites remain in the full phase.
+_EARLY_FEEDBACK_SUITES = frozenset({
+    "harness-tsc-noemit", "server-campaign-dxf-inventory",
+    "server-campaign-release-service", "server-entity-scope-admission",
+    "server-entity-scope-transport", "server-sip-r5-routes", "web-app-wiring",
+})
+
+
+class HeavyPrerequisitesFailed(Exception):
+    def __init__(self, status, completed):
+        self.status, self.completed = status, completed
+        super().__init__(f"heavy prerequisites failed with exit {status}")
+
+
 def conflict_resources(suite: Suite) -> frozenset[str]:
     """The named locks a suite holds while it runs; empty means it conflicts with nothing.
 
@@ -5643,7 +5659,8 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
     Results land in `completed` (id -> (Result, attempts)) and the first
     fail-fast red in state["stopped_after"]. Admission and that publication
     share the condition, so after the first red no new suite starts; suites
-    already admitted finish, including retries. Only the caller prints.
+    already admitted finish, including retries. Early-feedback mode streams
+    scrubbed completion blocks; the caller keeps final rows in catalog order.
     Each claim costs O(resources x queue length), never a scan of the catalog.
     """
     if not suites:
@@ -5719,6 +5736,16 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
                 with ready:
                     if res is not None:
                         completed[suite.id] = (res, attempts)
+                        if state.get("stream_results"):
+                            # Stream one atomic, scrubbed completion block while
+                            # other lanes continue; catalog-order rows stay below.
+                            print(f"GATE_RESULT id={suite.id} status={res.status} "
+                                  f"seconds={res.seconds:.1f} attempts={attempts} "
+                                  f"note={scrub_evidence(res.note)}", flush=True)
+                            if res.status == "FAIL":
+                                for line in failed_suite_evidence([res], max_suites=1,
+                                                                  tail_lines=6, max_chars=1400):
+                                    print(line, flush=True)
                         if (fail_fast and res.status == "FAIL"
                                 and state["stopped_after"] is None):
                             state["stopped_after"] = suite.id
@@ -5740,17 +5767,42 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
 
 
 def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
-                        retry: int, fail_fast: bool) -> tuple[List[Result], dict]:
+                        retry: int, fail_fast: bool, *, early_feedback: bool = False,
+                        before_heavy_command=None) -> tuple[List[Result], dict]:
     completed = {}
-    state = {"stopped_after": None}
-    prelude, rest = plan_parallel_phases(suites)
-    run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
-    # A fail-fast red in the prelude must not start any other suite.
-    if state["stopped_after"] is None:
-        run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
+    state = {"stopped_after": None, "stream_results": early_feedback}
+    early = [s for s in suites if early_feedback and s.id in _EARLY_FEEDBACK_SUITES]
+    remaining = [s for s in suites if s not in early]
+    # Collect all cheap failures, never retry them or let fail-fast hide one.
+    run_lanes(early, log_dir, jobs, 0, False, completed, state)
+    early_red = next((s.id for s in early if completed[s.id][0].status != "PASS"), None)
+    if early_red is not None:
+        state["stopped_after"] = early_red
+        for suite in early:
+            result = completed[suite.id][0]
+            if result.status != "PASS" and result.status != "FAIL":
+                result.note = f"early check not proven ({result.status}): {result.note}"
+                result.status = "FAIL"
+        print(f"EARLY_FEEDBACK RED after={early_red} heavy_started=0", flush=True)
+    else:
+        if early_feedback:
+            print(f"EARLY_FEEDBACK GREEN checks={len(early)}", flush=True)
+        if before_heavy_command:
+            try:
+                status = subprocess.run(before_heavy_command, cwd=REPO, check=False).returncode
+            except OSError as exc:
+                print(f"heavy prerequisites could not start: {type(exc).__name__}", flush=True)
+                status = 127
+            if status:
+                raise HeavyPrerequisitesFailed(status, completed)
+        prelude, rest = plan_parallel_phases(remaining)
+        run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
+        # A fail-fast red in the prelude must not start any other suite.
+        if state["stopped_after"] is None:
+            run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
     stopped_after = state["stopped_after"]
 
-    # Only this thread prints. Completion order must never reorder the rows or
+    # Final rows stay catalog ordered. Streamed completion blocks above never reorder
     # their FLAKED/skip/audit callouts (or the machine-readable result file).
     results = []
     attempts_by_id = {}
@@ -6214,7 +6266,8 @@ def executed_count(res: Result) -> Optional[int]:
 def write_result_json(path: str, *, fingerprint: str, total: int,
                       shard_count: int, shard_index: int, selection: str,
                       suites: List[Suite], results: List[Result],
-                      attempts_by_id: dict, wall: float) -> None:
+                      attempts_by_id: dict, wall: float,
+                      execution_failure: bool = False) -> None:
     """One shard's machine-readable outcome, written even when suites failed
     so the fan-in can name the failure instead of reporting a missing shard."""
     entries = []
@@ -6240,7 +6293,7 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
         "suite_ids": [s.id for s in suites],
         "results": entries,
         "executed_total": sum(e["executed"] or 0 for e in entries),
-        "any_fail": any(r.status == "FAIL" for r in results),
+        "any_fail": execution_failure or any(r.status == "FAIL" for r in results),
         "wall_seconds": round(wall, 1),
     }
     out = Path(path)
@@ -6861,6 +6914,10 @@ def _jobs_count(value: str) -> int | str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Leaf web demo full gate runner")
     ap.add_argument("--list", action="store_true", help="print the suite catalog; execute nothing")
+    ap.add_argument("--early-feedback", action="store_true",
+                    help="collect source-only cheap checks before heavy suites; no cheap retries")
+    ap.add_argument("--before-heavy-command", nargs=argparse.REMAINDER,
+                    help="trusted caller argv for heavy prerequisites, after early GREEN")
     ap.add_argument("--catalog-root", default=None, metavar="DIR",
                     help="checkout root used to normalize --list declarations")
     ap.add_argument("--fail-fast", action="store_true",
@@ -6928,6 +6985,11 @@ def main() -> int:
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
     args = ap.parse_args()
+
+    if args.before_heavy_command is not None and not args.early_feedback:
+        ap.error("--before-heavy-command requires --early-feedback")
+    if args.before_heavy_command == []:
+        ap.error("--before-heavy-command requires nonempty argv")
 
     if args.list:
         try:
@@ -7071,11 +7133,14 @@ def main() -> int:
     results: List[Result] = []
     attempts_by_id: dict = {}
     wall0 = time.perf_counter()
+    prerequisite_failure = 0
     try:
-      if args.jobs > 1:
+      if args.jobs > 1 or args.early_feedback:
         results, attempts_by_id = run_suites_parallel(
-            suites, log_dir, args.jobs, args.retry, args.fail_fast)
-      for suite in suites if args.jobs == 1 else ():
+            suites, log_dir, args.jobs, args.retry, args.fail_fast,
+            early_feedback=args.early_feedback,
+            before_heavy_command=args.before_heavy_command)
+      for suite in suites if args.jobs == 1 and not args.early_feedback else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         record_attempt(res, log_dir, 1)
@@ -7111,6 +7176,11 @@ def main() -> int:
         if res.status == "FAIL" and args.fail_fast:
             print(f"  --fail-fast: stopping after {suite.id}")
             break
+    except HeavyPrerequisitesFailed as exc:
+        prerequisite_failure = exc.status
+        results = [exc.completed[s.id][0] for s in suites if s.id in exc.completed]
+        attempts_by_id = {sid: item[1] for sid, item in exc.completed.items()}
+        print(f"FAIL: {exc}; required suites remain unexecuted", flush=True)
     finally:
         # Restore authored_tools.json to the operator's pre-run content (or remove
         # it if it did not exist before) so the gate run leaves no side effect.
@@ -7128,11 +7198,12 @@ def main() -> int:
             shard_count=args.shard_count,
             shard_index=args.shard_index if args.shard_index is not None else 0,
             selection=selection, suites=suites, results=results,
-            attempts_by_id=attempts_by_id, wall=wall)
+            attempts_by_id=attempts_by_id, wall=wall,
+            execution_failure=bool(prerequisite_failure))
 
     # EXIT 0 iff every non-skipped gate passed.
     any_fail = any(r.status == "FAIL" for r in results)
-    return 1 if any_fail else 0
+    return 1 if any_fail or prerequisite_failure else 0
 
 
 if __name__ == "__main__":
