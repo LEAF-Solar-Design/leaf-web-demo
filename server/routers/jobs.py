@@ -284,6 +284,19 @@ def _record_body(rec: Dict[str, Any]) -> Dict[str, Any]:
     return body
 
 
+_LIST_SUMMARY_DROP = ("result", "params", "provenance", "execution_context")
+
+
+def _summary_body(rec: Dict[str, Any]) -> Dict[str, Any]:
+    body = _record_body(rec)
+    result = rec.get("result")
+    if not body.get("cost") and isinstance(result, dict) and "cost" in result:
+        body["cost"] = result["cost"]
+    for key in _LIST_SUMMARY_DROP:
+        body.pop(key, None)
+    return body
+
+
 def _job_for_tenant(job_id: str, tenant_id: str) -> Optional[Dict[str, Any]]:
     legacy = jobs.get_job(job_id)
     if legacy is not None:
@@ -1298,7 +1311,7 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
 
 
 @router.get("/api/jobs")
-def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
+def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant), summary: bool = False):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
     # never trusted (security-audit F1 — this endpoint had no auth + unbound scope).
     actor = None
@@ -1338,7 +1351,7 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
             visible.append(rec)
             seen.add(rec["job_id"])
         return with_envelope_fields(
-            {"jobs": [_record_body(r) for r in visible[:limit]]}
+            {"jobs": [(_summary_body(r) if summary else _record_body(r)) for r in visible[:limit]]}
         )
     except Exception:
         if actor is None:
