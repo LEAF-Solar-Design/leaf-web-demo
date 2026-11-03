@@ -218,3 +218,21 @@ def test_portfolio_export_rechecks_revoked_membership_after_preview_reads(client
     assert response.status_code == 403, response.text
     assert reads == [material['material_id']]
     assert not response.content.startswith(b'PK')
+
+
+def test_coming_soon_action_save_reload_and_export(client, page_project):
+    org, project, actor = page_project
+    url, auth = f'/api/projects/{project}/page', headers(org, actor)
+    document = {**DOCUMENT, 'action': {'label': 'Get updates', 'href': 'https://example.com/updates'}}
+    saved = client.put(url, json={'expected_revision': 0, 'document': document}, headers=auth)
+    assert saved.status_code == 200, saved.text
+    assert saved.json()['page']['revision'] == 1
+    assert saved.json()['page']['document'] == document
+    reloaded = client.get(url, headers=auth)
+    assert reloaded.status_code == 200, reloaded.text
+    assert reloaded.json()['page']['document'] == document
+    exported = client.get(url + '/source?revision=1', headers=auth)
+    assert exported.status_code == 200, exported.text
+    with zipfile.ZipFile(io.BytesIO(exported.content)) as archive:
+        name = next(name for name in archive.namelist() if name == 'page.json' or name.endswith('/page.json'))
+        assert json.loads(archive.read(name)) == document

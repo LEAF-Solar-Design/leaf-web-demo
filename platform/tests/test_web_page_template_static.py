@@ -567,5 +567,84 @@ class EnvironmentDesignSchemaTests(unittest.TestCase):
                     producer.validate_document(value)
 
 
+class ComingSoonActionTests(unittest.TestCase):
+    def test_action_validates_and_round_trips_exactly(self):
+        for href in ('https://example.com/updates', 'mailto:hello@example.com',
+                     'https://updates.example.com:8443/path%20name?topic=bakes&all=1#latest',
+                     'mailto:hello.team+updates@example-domain.com'):
+            value = document(action={'label': 'Get updates', 'href': href})
+            with self.subTest(href=href):
+                actual = template.validate_document(value)
+                self.assertEqual(actual, value)
+                self.assertIsNot(actual['action'], value['action'])
+                with zipfile.ZipFile(io.BytesIO(template.source_archive(value, 1))) as archive:
+                    self.assertEqual(json.loads(archive.read('page.json')), value)
+        for length in (1, 60):
+            value = document(action={'label': 'x' * length, 'href': 'https://example.com'})
+            self.assertEqual(template.validate_document(value), value)
+        href = 'https://example.com/' + 'x' * (2048 - len('https://example.com/'))
+        self.assertEqual(template.validate_document(document(action={'label': 'Go', 'href': href}))['action']['href'], href)
+
+    def test_action_rejects_unsafe_or_unbounded_hrefs(self):
+        hrefs = ['http://example.com', 'javascript:alert(1)', 'data:text/html,x',
+                 'ftp://example.com', '/relative', 'https://user@example.com',
+                 'https://exa mple.com', 'https://example.com/"x',
+                 'mailto:hello@example.com?subject=x', 'mailto:not-an-address',
+                 'https://example.com/' + 'x' * (2049 - len('https://example.com/')), '',
+                 None, True, 42, [], {}, 'https://localhost', 'https://example.com:123456',
+                 'https://example.com/\n', 'https://example.com/\t',
+                 'https://example.com/\u202e', 'https://example.com/<x>',
+                 "https://example.com/'x", 'https://example.com/`x',
+                 'mailto:hello@example.com,other@example.com', 'mailto:hello@example.com\n']
+        for href in hrefs:
+            with self.subTest(href=repr(href)), self.assertRaises(ValueError):
+                template.validate_document(document(action={'label': 'Get updates', 'href': href}))
+
+    def test_action_requires_exact_shape_and_plain_bounded_label(self):
+        href = 'https://example.com/updates'
+        actions = [None, [], 'Get updates', True, {}, {'label': 'Get updates'},
+                   {'href': href}, {'label': 'Get updates', 'href': href, 'extra': 'field'}]
+        labels = ['', ' ', 'x' * 61, 'https://example.com', '<b>', None, True, 42,
+                  [], {}, 'Get\nupdates', 'Get\tupdates', 'Get\x00updates',
+                  'Get\u202eupdates', 'Get\ud800updates', 'www.example.com']
+        actions.extend({'label': label, 'href': href} for label in labels)
+        for action in actions:
+            with self.subTest(action=repr(action)), self.assertRaises(ValueError):
+                template.validate_document(document(action=action))
+
+    def test_absent_action_preserves_canonical_document_and_digest(self):
+        value = document()
+        canonical = json.dumps(value, sort_keys=True, ensure_ascii=False,
+                               separators=(',', ':')).encode('utf-8')
+        expected = hashlib.sha256(canonical).hexdigest()
+        actual = template.validate_document(value)
+        self.assertEqual(actual, value)
+        self.assertNotIn('action', actual)
+        self.assertEqual(json.dumps(actual, sort_keys=True, ensure_ascii=False,
+                                    separators=(',', ':')).encode('utf-8'), canonical)
+        self.assertEqual(template.document_digest(value), expected)
+        self.assertNotEqual(template.document_digest(document(action={
+            'label': 'Get updates', 'href': 'https://example.com/updates'})), expected)
+
+    def test_action_changes_only_exported_data_and_manifest(self):
+        value = document(action={'label': 'Get updates', 'href': 'https://example.com/updates'})
+        with zipfile.ZipFile(io.BytesIO(template.source_archive(document(), 1))) as before:
+            with zipfile.ZipFile(io.BytesIO(template.source_archive(value, 1))) as after:
+                self.assertEqual(before.namelist(), after.namelist())
+                for path in before.namelist():
+                    if path not in ('page.json', 'source-manifest.json'):
+                        self.assertEqual(before.read(path), after.read(path), path)
+                jsx = after.read('app/page.jsx').decode()
+                action_line = '{page.action && <p className="project-page__action"><a href={page.action.href}>{page.action.label}</a></p>}'
+                self.assertEqual(jsx.count(action_line), 1)
+                self.assertLess(jsx.index('{page.status &&'), jsx.index(action_line))
+                self.assertLess(jsx.index(action_line), jsx.index('</div>'))
+                self.assertEqual(json.loads(after.read('page.json')), value)
+                css = after.read('app/globals.css').decode()
+                self.assertTrue(css.endswith(template.PAGE_CSS + template.DESIGN_CSS))
+                self.assertIn('.project-page__action { margin: 2.5rem 0 0;', css)
+                self.assertIn('.project-page__action a { color: inherit; text-decoration: underline; }', css)
+
+
 if __name__ == '__main__':
     unittest.main()
