@@ -64,8 +64,13 @@ function PortfolioView({ document, projectId, scope, onSelectField, onInlineChan
   const [view, setView] = useState('home')
   const [selected, setSelected] = useState(null)
   const trigger = useRef(null), closeButton = useRef(null), surface = useRef(null)
+  const navigationSelection = useRef(null)
   useEffect(() => {
-    if (!selectedElement || !(onInlineChange || onSelectField)) return
+    const selection = (onInlineChange || onSelectField) ? selectedElement : null
+    if (navigationSelection.current === selection) return
+    navigationSelection.current = selection
+    // Ordinary editor renders must not undo the user's gallery navigation.
+    if (!selection) return
     const [identity, path] = selectedElement.split(':')
     const gallery = document.categories.find(item => selectionIdentity(item) === identity || item.images.some(image => selectionIdentity(image) === identity))
     const resume = document.resume.some(section => selectionIdentity(section) === identity || section.entries.some(entry => selectionIdentity(entry) === identity))

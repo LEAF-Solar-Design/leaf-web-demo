@@ -5,6 +5,7 @@ import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testi
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import ProjectPageEditor, { PagePreview } from './ProjectPageEditor.jsx'
 import { portfolioField } from './PortfolioEditor.jsx'
+import { cloneDocument, selectionIdentity } from './portfolioEdits.js'
 import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProjectNativePreview, loadProjectNativePreview, downloadProjectNativePreviewScreenshot, proposeProjectPage } from './projectPageClient.js'
 import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
 import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
@@ -578,6 +579,27 @@ describe('portfolio text proposal review', () => {
 })
 
 describe('portfolio project document', () => {
+  it.each(['callback', 'document'])('preserves manual portfolio navigation after a %s rerender with the same selection', mode => {
+    const original = portfolioDraft()
+    const headline = `${selectionIdentity(original)}:textStyles.headline`
+    const caption = `${selectionIdentity(original.categories[0].images[1])}:captionStyle`
+    const select = vi.fn()
+    const view = render(<PagePreview document={original} projectId={PROJECT} selectedElement={headline} onSelectField={select} />)
+    fireEvent.click(button('Cakes'))
+    expect(button('Edit Cakes caption for Bread.jpg')).toBeTruthy()
+    const document = mode === 'document' ? cloneDocument(original) : original
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} onSelectField={() => {}} />)
+    expect(button('Edit Cakes caption for Bread.jpg')).toBeTruthy()
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={caption} onSelectField={select} />)
+    expect(button('Edit Cakes caption for Bread.jpg')).toBeTruthy()
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} onSelectField={select} />)
+    expect(button('Edit headline')).toBeTruthy()
+    fireEvent.click(button('Cakes'))
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} />)
+    view.rerender(<PagePreview document={document} projectId={PROJECT} selectedElement={headline} onSelectField={select} />)
+    expect(button('Edit headline')).toBeTruthy()
+  })
+
   it('wires separate portfolio edit controls through PagePreview without nesting navigation or View actions', () => {
     const original = portfolioDraft(), select = vi.fn()
     original.resume = [{ heading: 'Experience', entries: [{ title: 'Baker', subtitle: '', dates: '', description: '' }] }]
