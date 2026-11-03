@@ -3683,6 +3683,9 @@ def build_suites() -> List[Suite]:
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
               _py_pytest("tests/test_project_solar_materialization.py"), 22),
+        Suite("server-solar-native-layout-dxf", "server native Solar layout serialization", "pytest", SERVER,
+              _py_pytest("tests/test_solar_native_layout_dxf.py"), 35,
+              allowed_skip_reasons=(r"could not import 'ezdxf\.recover': .*",)),
         Suite("server-project-checkout-custody", "server private project checkout custody", "pytest", SERVER,
               _py_pytest("tests/test_project_checkout_custody.py"), 35),
         Suite("server-conversational-project-write", "server canonical conversational project write", "pytest", SERVER,
