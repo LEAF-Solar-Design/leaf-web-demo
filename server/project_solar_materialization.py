@@ -177,6 +177,13 @@ def current_layout_source(tenant, project_id, drawing_id, parent_id):
     context = project.resolve_context(tenant, project_id, parent_id, drawing_id=drawing_id)
     if not context.binding.is_head:
         project.refuse('STALE_VERSION')
+    if KEY in context.intake:
+        head, _, _ = _canonical_state(context)
+        return {'schema': SCHEMA, 'organization_id': str(context.binding.organization_id),
+                'project_id': str(project_id), 'drawing_id': str(drawing_id), 'parent_version_id': str(parent_id),
+                'physical_source_kind': 'canonical_version_intake', 'physical_version_id': str(parent_id),
+                'physical_source': _head_request(head), 'operations': ['frame-generate', 'piling-generate'],
+                **serialization_availability()}
     binding, graph, drawing, _, backend = _physical_context(context)
     try:
         head, _ = physical.load_physical_head(backend, str(binding.organization_id), drawing,
@@ -194,6 +201,11 @@ def current_layout_source(tenant, project_id, drawing_id, parent_id):
 
 
 def _load(context, body):
+    if KEY in context.intake:
+        head, document, inputs = _canonical_state(context)
+        if _head_request(head) != body:
+            fail('PHYSICAL_HEAD_STALE')
+        return head, document, inputs
     binding, graph, drawing, version, backend = _physical_context(context)
     try:
         head, document = physical.load_physical_head(backend, str(binding.organization_id), drawing,
@@ -222,6 +234,86 @@ def _load(context, body):
     return head, document, inputs
 
 
+def _head_request(head):
+    return {'physical_head': head['state']['artifact_id'],
+            'physical_content_sha256': head['state']['content_sha256'], 'physical_index': head['index']}
+
+
+def _canonical_state(context):
+    """Read physical state from verified canonical bytes, never an invented legacy binding."""
+    binding, metadata = context.binding, context.intake.get(KEY)
+    if type(metadata) is not dict or metadata.get('schema') != SCHEMA:
+        fail('NATIVE_METADATA_INVALID')
+    key, source_sha, _ = editor._source(context)
+    raw = editor._verified_bytes(editor._backend(binding.organization_id), key, source_sha)
+    try:
+        decoded = native_layout.decode_native_layout(raw)
+        encoded = state.encode_document(decoded.document)
+    except (native_layout.NativeLayoutError, state.PhysicalStateError):
+        fail('NATIVE_METADATA_INVALID')
+    expected_scope = {'organization_id': str(binding.organization_id), 'project_id': str(binding.project_id),
+                      'drawing_id': str(binding.drawing_id)}
+    if decoded.scope != expected_scope:
+        fail('NATIVE_SCOPE_MISMATCH')
+    if (metadata.get('document') != encoded.decode('utf-8')
+            or type(metadata.get('parameters')) is not dict
+            or digest(metadata['parameters']) != digest(decoded.parameters)
+            or decoded.parameters.get('schema') != state.PARAMETERS_SCHEMA
+            or type(decoded.parameters.get('generation')) is not dict):
+        fail('NATIVE_METADATA_INVALID')
+    head = {'kind': 'canonical_version_intake', 'version_id': str(binding.input_version_id),
+            'drawing_id': str(binding.drawing_id), 'project_id': str(binding.project_id),
+            'index': binding.version.seq - 1,
+            'state': {'artifact_id': context.intake_sha256, 'content_sha256': editor._sha(encoded)}}
+    return head, decoded.document, decoded.parameters
+
+
+def operation_parameters(body):
+    if (type(body) is not dict or set(body) != {'physical_source', 'operation', 'parameters'}
+            or body['operation'] not in ('frame-generate', 'piling-generate')
+            or type(body['parameters']) is not dict):
+        fail('REQUEST_INVALID', 400)
+    parameters(body['physical_source'])
+    try:
+        digest(body)
+    except (ValueError, TypeError, RecursionError):
+        fail('REQUEST_INVALID', 400)
+    return deepcopy(body)
+
+
+def publish_operation(tenant, project_id, drawing_id, parent_id, body, *, request_id, capability):
+    import solar_frames_piles as fp
+    body = operation_parameters(body)
+    org, actor = project._access(tenant, project_id, write=True)
+    if not all(isinstance(value, UUID) for value in (drawing_id, parent_id, request_id)):
+        project.refuse('INVALID_BINDING')
+    replay = _replay(tenant, org, project_id, drawing_id, parent_id, request_id, body, actor, capability)
+    if replay is None:
+        admission = project.verify_at_admission(tenant, project_id, drawing_id, parent_id,
+                                              checkout_capability=capability)
+        context = admission.context
+        if KEY not in context.intake:
+            fail('NATIVE_METADATA_REQUIRED')
+        head, document, inputs = _load(context, body['physical_source'])
+        try:
+            document, inputs = fp.continue_physical_document(document, inputs,
+                                                             body['operation'], body['parameters'])
+        except (fp.FramesPilesError, state.PhysicalStateError) as exc:
+            raise editor.EditorError(exc.code, 422) from None
+        raw, _ = editor.read_dxf(tenant, project_id, drawing_id, parent_id)
+        output = materialize_native_layout(context, head, document, raw, parameters=inputs)
+        intake = json.loads(editor._edited_intake(context, editor._parse(output, drawing_id)))
+        intake[KEY] = {'schema': SCHEMA, 'mode': 'canonical-operation', 'parent_version_id': str(parent_id),
+                       'request': body, 'head': head, 'document': state.encode_document(document).decode(),
+                       'parameters': inputs}
+        payload = json.dumps(intake, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+        project.verify_at_admission(tenant, project_id, drawing_id, parent_id, checkout_capability=capability)
+        _load(context, body['physical_source'])
+        replay = editor.save_dxf(tenant, project_id, drawing_id, parent_id, output,
+                                request_id=request_id, capability=capability, _restored_intake=payload)
+    return {**replay, 'physical_source': body['physical_source'], 'operation': body['operation']}
+
+
 def materialize_native_layout(context, head, document, source, *, parameters):
     """Serialize native tags and complete scoped metadata without executing CAD."""
     try:
@@ -243,7 +335,7 @@ def _replay(tenant, org, proj, drawing, parent, request, body, actor, capability
     context = project.resolve_context(tenant, proj, row['version_id'], drawing_id=drawing, write=True)
     proof = context.binding.version.provenance
     metadata = context.intake.get(KEY) or {}
-    if (metadata.get('schema') != SCHEMA or metadata.get('request') != body
+    if (metadata.get('schema') != SCHEMA or digest(metadata.get('request')) != digest(body)
             or metadata.get('parent_version_id') != str(parent)
             or proof.get('actor_binding_id') != str(actor)):
         raise project.ProjectContextError('SIP_R2_IDEMPOTENCY_CONFLICT')

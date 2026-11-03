@@ -19,7 +19,7 @@ router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
-    r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout)|"
+    r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout(?:/operations)?)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),
@@ -207,11 +207,11 @@ def _editor_dispatch(operation):
         return _dispatch(lambda: service.refuse("INTERNAL"))
 
 
-async def _editor_request(request, *, restore=False, layout=False, initial=False):
-    expected = "application/json" if restore or layout or initial else "application/dxf"
+async def _editor_request(request, *, restore=False, layout=False, initial=False, physical_operation=False):
+    expected = "application/json" if restore or layout or initial or physical_operation else "application/dxf"
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != expected:
         raise drawing_editor.EditorError("PROJECT_EDITOR_MEDIA_TYPE_REFUSED", 415)
-    maximum = 2 * 1024 * 1024 if initial else (4096 if restore or layout else drawing_editor.MAX_DXF_BYTES)
+    maximum = 2 * 1024 * 1024 if initial or physical_operation else (4096 if restore or layout else drawing_editor.MAX_DXF_BYTES)
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > maximum:
         raise drawing_editor.EditorError("PROJECT_EDITOR_TOO_LARGE", 413)
@@ -220,14 +220,16 @@ async def _editor_request(request, *, restore=False, layout=False, initial=False
         if len(raw) + len(chunk) > maximum:
             raise drawing_editor.EditorError("PROJECT_EDITOR_TOO_LARGE", 413)
         raw.extend(chunk)
-    if not restore and not layout and not initial:
+    if not restore and not layout and not initial and not physical_operation:
         return bytes(raw)
     try:
         import json
         body = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=service._object_pairs,
                           parse_constant=service._nonfinite)
-        if layout or initial:
+        if layout or initial or physical_operation:
             import project_solar_materialization
+            if physical_operation:
+                return project_solar_materialization.operation_parameters(body)
             return (project_solar_materialization.initial_parameters(body) if initial else
                     project_solar_materialization.parameters(body))
         if type(body) is not dict or set(body) != {"version_id"}:
@@ -329,6 +331,27 @@ async def project_solar_layout_route(project_id: UUID, drawing_id: UUID, parent_
             raise exc
         return _editor_dispatch(refused)
     return await run_in_threadpool(_editor_dispatch, lambda: layout.publish_layout(
+        tenant, project_id, drawing_id, parent_version_id, body,
+        request_id=request_id, capability=x_checkout_capability))
+
+
+@router.post("/api/projects/{project_id}/drawings/{drawing_id}/versions/{parent_version_id}/solar-layout/operations")
+async def project_solar_operation_route(project_id: UUID, drawing_id: UUID, parent_version_id: UUID,
+        request: Request, tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[UUID] = Header(default=None), x_project_id: Optional[UUID] = Header(default=None),
+        x_checkout_capability: Optional[str] = Header(default=None),
+        idempotency_key: Optional[str] = Header(default=None)):
+    import project_solar_materialization as layout
+    try:
+        _headers(tenant, project_id, x_org_id, x_project_id)
+        service._access(tenant, project_id, write=True)
+        request_id = drawing_editor.request_uuid(idempotency_key)
+        body = await _editor_request(request, physical_operation=True)
+    except (service.ProjectContextError, drawing_editor.EditorError) as exc:
+        def refused():
+            raise exc
+        return _editor_dispatch(refused)
+    return await run_in_threadpool(_editor_dispatch, lambda: layout.publish_operation(
         tenant, project_id, drawing_id, parent_version_id, body,
         request_id=request_id, capability=x_checkout_capability))
 
