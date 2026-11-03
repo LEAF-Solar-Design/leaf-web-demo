@@ -2050,7 +2050,9 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
               _py_pytest("tests/test_sip_r3a_graph.py"), 24),
         Suite("server-sip-r3b-tools", "server canonical Solar tool chain", "pytest", SERVER,
-      _py_pytest("tests/test_sip_r3b_tools.py"), 26),
+              _py_pytest("tests/test_sip_r3b_tools.py"), 26,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("platform-sip-r3b-tools", "platform canonical Solar tool publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
               uses_database=True, db_gated=True, database_skip_reasons=(

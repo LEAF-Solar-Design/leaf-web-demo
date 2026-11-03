@@ -434,7 +434,8 @@ describe('canvas authoring', () => {
   })
   it('supports palette drag/drop and keeps Strategy limited to Signals and Rules', async () => {
     const { container } = render(<LabCanvas />)
-    expect(container.querySelectorAll('[data-element-family]')).toHaveLength(12)
+    expect(Array.from(container.querySelectorAll('[data-element-family]'),
+      element => element.dataset.elementFamily).sort()).toEqual(ELEMENT_FAMILIES.map(family => family.id).sort())
     const dataTransfer = { setData: vi.fn(), getData: vi.fn(() => 'adjust-none'), effectAllowed: '' }
     fireEvent.dragStart(within(container.querySelector('[data-element-family="adjust"]')).getAllByRole('button', { name: 'Strategy' })[0], { dataTransfer })
     expect(dataTransfer.setData).toHaveBeenCalledWith(BLOCK_MIME, 'adjust-none')

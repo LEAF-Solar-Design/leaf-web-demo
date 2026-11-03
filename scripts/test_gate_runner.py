@@ -448,7 +448,7 @@ def test_sip_r3b_gate_registration():
     suites = {suite.id: suite for suite in runner.build_suites()}
     selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
     for suite_id, directory, floor, database in (
-        ("server-sip-r3b-tools", "server", 24, False),
+            ("server-sip-r3b-tools", "server", 26, True),
             ("platform-sip-r3b-tools", "platform", 7, True)):
         suite = suites[suite_id]
         assert suite.cwd == REPO / directory
