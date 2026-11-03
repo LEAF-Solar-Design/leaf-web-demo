@@ -107,6 +107,14 @@ describe('stageHelpPaletteRow', () => {
 })
 
 it('admits a validated project conversation without removing pending gates', () => {
-  expect(stageRunDisabledReason({...CLEAR, hasDrawing: false, projectConversation: true})).toBeNull()
-  expect(stageRunDisabledReason({...CLEAR, hasDrawing: false, projectConversation: true, busy: true})).toBe(STAGE_RUN_REASONS.busy)
+  const project = {...CLEAR, hasDrawing: false, projectConversation: true}
+  expect(stageRunDisabledReason(project)).toBeNull()
+  expect(stageRunDisabledReason({...project, sessionActive: false, busy: true})).toBe(STAGE_RUN_REASONS.session)
+  expect(stageRunDisabledReason({...project, busy: true, jobRunning: true})).toBe(STAGE_RUN_REASONS.busy)
+  expect(stageRunDisabledReason({...project, jobRunning: true, routing: true})).toBe(STAGE_RUN_REASONS.job)
+  expect(stageRunDisabledReason({...project, routing: true, loading: true})).toBe(STAGE_RUN_REASONS.routing)
+  expect(stageRunDisabledReason({...project, loading: true})).toBe(STAGE_RUN_REASONS.loading)
+  for (const projectConversation of [false, undefined, null, 'true', 1]) {
+    expect(stageRunDisabledReason({...project, projectConversation})).toBe(STAGE_RUN_REASONS.drawing)
+  }
 })

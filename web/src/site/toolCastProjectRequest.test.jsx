@@ -143,8 +143,10 @@ async function setup(surface = 'ops') {
 }
 
 describe('O01 actual mounted stage request admission (transport fixtures, no provider)', () => {
-  it('submits once through the canonical project conversation and renders its reply without a drawing', async () => {
-    const s = await setup()
+  // The iOS stage renders device readiness instead of the shared command bar.
+  it.each(['browser','cad','solar','ops','lab','sheets'])('%s submits once through the canonical project conversation and renders its reply without a drawing', async surface => {
+    const s = await setup(surface)
+    fixture.route = {lane: 'run', tool: null, confidence: 0.99}
     s.type('Summarize these six synthetic records by owner.')
     await waitFor(() => expect(s.run().disabled).toBe(false))
     const button = s.run(); fireEvent.click(button); fireEvent.click(button)
@@ -162,7 +164,7 @@ describe('O01 actual mounted stage request admission (transport fixtures, no pro
     expect(await screen.findByText('Six records grouped by owner.')).toBeTruthy()
   })
 
-  it.each(['session','auth','entitlement','project','org','loading','mismatch'])('refuses unknown or missing %s before dispatch', async missing => {
+  it.each(['session','auth','entitlement','project','org','loading','error','mismatch','orgMismatch'])('refuses unknown or missing %s before dispatch', async missing => {
     const s = await setup()
     if (missing === 'session') fixture.session = {...fixture.session, status: 'required'}
     if (missing === 'auth') fixture.signedIn = false
@@ -170,7 +172,9 @@ describe('O01 actual mounted stage request admission (transport fixtures, no pro
     if (missing === 'project') fixture.workspace = {...fixture.workspace, openProjectId: null}
     if (missing === 'org') fixture.workspace = {...fixture.workspace, orgId: null}
     if (missing === 'loading') fixture.workspace = {...fixture.workspace, workspaceLoading: true}
+    if (missing === 'error') fixture.workspace = {...fixture.workspace, workspaceError: 'Workspace unavailable'}
     if (missing === 'mismatch') fixture.workspace = {...fixture.workspace, workspace: selected(OTHER).workspace}
+    if (missing === 'orgMismatch') fixture.workspace = {...fixture.workspace, workspace: {...fixture.workspace.workspace, project: {project_id: PROJECT, org_id: OTHER}}}
     s.redraw(); s.type('Summarize records')
     expect(s.run().disabled).toBe(true)
     fireEvent.click(s.run())
@@ -178,8 +182,8 @@ describe('O01 actual mounted stage request admission (transport fixtures, no pro
     expect(s.converse.postMessage).not.toHaveBeenCalled()
   })
 
-  it.each(['cad','solar'])('%s still requires a drawing', async surface => {
-    const s = await setup(surface); s.type('Count panels')
+  it.each(['browser','cad','solar','lab','sheets'])('%s still requires a drawing for a drawing command', async surface => {
+    const s = await setup(surface); s.type('/count_panels')
     expect(s.run().disabled).toBe(true)
     expect(s.run().title).toContain('Upload a DWG or DXF')
     expect(s.api.nlPrompt).not.toHaveBeenCalled()

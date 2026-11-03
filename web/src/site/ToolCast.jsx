@@ -923,7 +923,7 @@ export default function ToolCast({
   // A loaded canonical project can converse before it owns a drawing. This
   // admission does not authorize drawing tools or create a conversation store.
   const project = workspace.workspace?.project
-  const projectConversationScope = activeSurface === 'ops' && !transportMock && isSignedIn()
+  const projectConversationScope = !transportMock && isSignedIn()
     && platform.isEntitled('converse') && workspace.openProjectId && workspace.orgId
     && !workspace.workspaceLoading && !workspace.workspaceError
     && (project?.project_id || project?.id) === workspace.openProjectId
