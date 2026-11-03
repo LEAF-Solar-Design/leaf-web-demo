@@ -3580,6 +3580,12 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_build_queue.py"), 86),
         Suite("server-device-bridge-contract", "server tests/test_device_bridge_contract.py", "pytest", SERVER,
               _py_pytest("tests/test_device_bridge_contract.py"), 8),
+        Suite("server-device-auth", "server tests/test_device_auth.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_auth.py"), 19),
+        Suite("server-devices-router", "server tests/test_devices_router.py", "pytest", SERVER,
+              _py_pytest("tests/test_devices_router.py"), 60),
+        Suite("device-agent-tests", "device-agent tests", "pytest", REPO / "device-agent",
+              _py_pytest("tests"), 71),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
         Suite("server-device-store", "server tests/test_device_store.py", "pytest", SERVER,
               _py_pytest("tests/test_device_store.py"), 24, uses_database=True,
