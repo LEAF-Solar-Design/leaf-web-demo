@@ -3690,6 +3690,9 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_reference_materials.py"), 40,
               uses_database=True, db_gated=True, database_skip_reasons=(
                   r"requires managed or verified canonical disposable PostgreSQL producer",)),
+        Suite("server-lab-corpus-executor", "server pinned corpus evaluator and durable job custody", "pytest", SERVER,
+              _py_pytest("tests/test_lab_corpus_executor.py"), 14,
+              uses_database=True, db_gated=True),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
               _py_pytest("tests/test_project_solar_materialization.py"), 30),

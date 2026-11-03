@@ -1677,6 +1677,12 @@ def test_database_suites_take_the_gate_dsn_and_no_longer_allowlist_its_absence()
     # DB-less release producers must report that prerequisite as a suite skip.
     assert suites["web-link-service-flow"].db_gated
     assert suites["web-link-service-flow"].uses_database
+    # Corpus jobs require the real gate database; absent prerequisites cannot
+    # turn their execution or kernel-cage cases into accepted skips.
+    corpus = suites["server-lab-corpus-executor"]
+    assert corpus.uses_database and corpus.db_gated
+    assert corpus.expected == 14
+    assert corpus.allowed_skip_reasons == corpus.database_skip_reasons == ()
     for sid in _DATABASE_SUITE_IDS:
         suite = suites[sid]
         assert suite.uses_database, sid
