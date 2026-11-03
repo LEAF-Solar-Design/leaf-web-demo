@@ -1126,9 +1126,9 @@ def job_list_binding_lane(monkeypatch):
     monkeypatch.setattr(tenancy, "get_store", lambda: SimpleNamespace(resolve_workspace=lambda org: None))
     def caller():
         request = Request({"type": "http", "method": "GET", "path": "/api/jobs",
-                           "headers": [(b"authorization", b"Bearer synthetic-fixture-only")]})
+                           "headers": [(b"authorization", b"Bearer REDACTED-project-read-fixture")]})
         tenant = deps.require_tenant(request, x_tenant_id=None,
-            authorization="Bearer synthetic-fixture-only", x_dispatch_secret=None,
+            authorization="Bearer REDACTED-project-read-fixture", x_dispatch_secret=None,
             x_guest_session=None, x_demo_session=None)
         assert tenant.authority_resolved and len(calls["binding"]) == 1
         calls["binding"].clear()

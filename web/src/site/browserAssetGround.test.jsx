@@ -102,7 +102,7 @@ it('authored_view fetches exact registered HTML into the existing sandbox', asyn
     expect(url.searchParams.get('session_id')).toBe('view-session')
     expect(url.searchParams.get('tool_manifest_sha256')).toBe(fixture.source.tool_manifest_sha256)
     expect(options).toMatchObject({ credentials: 'same-origin', redirect: 'error', cache: 'no-store',
-      headers: { Authorization: expect.stringContaining('Bearer ') } })
+      headers: { 'Authorization': expect.stringContaining('Bearer ') } })
     act(() => expect(deliverProjectPageProposal(fixture.request)).toBe(false))
   } finally { fixture.restore() }
 })

@@ -96,7 +96,7 @@ describe('Verified source bundle download through the real API', () => {
     const parsed = new URL(url, 'https://app.example')
     expect(parsed.pathname).toBe(`/api/projects/${PROJECT}/browser/source/requests/${REQUEST}/export`)
     expect(Object.fromEntries(parsed.searchParams)).toEqual({ source_commit: 'c'.repeat(40), source_tree: 'd'.repeat(40), receipt_digest: 'a'.repeat(64), version: '1' })
-    expect(init).toMatchObject({ method: 'GET', cache: 'no-store', redirect: 'error', headers: { Authorization: expect.stringMatching(/^Bearer /) } })
+    expect(init).toMatchObject({ method: 'GET', cache: 'no-store', redirect: 'error', headers: { 'Authorization': expect.stringMatching(/^Bearer /) } })
     expect(init.body).toBeUndefined()
   })
 
@@ -588,7 +588,7 @@ describe('Browser source through the real API', () => {
       browser_action: 'create', source_request_id: body.source_request_id, material_refs: body.material_refs },
     { allowSecretOnce: false, requireImmediateTurn: true })
     expect(h.events.indexOf('mint')).toBeLessThan(h.events.indexOf('post'))
-    expect(posts[0].headers).toEqual({ Authorization: expect.stringMatching(/^Bearer /), 'Content-Type': 'application/json',
+    expect(posts[0].headers).toEqual({ 'Authorization': expect.stringMatching(/^Bearer /), 'Content-Type': 'application/json',
       'X-Authority-Session-Id': AUTHORITY.session_id, 'X-Authority-Turn-Id': AUTHORITY.turn_id })
     expect(h.calls.every((call) => call.cache === 'no-store')).toBe(true)
     expect(h.calls.every((call) => !call.url.includes('/content'))).toBe(true)

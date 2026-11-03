@@ -83,7 +83,7 @@ test('page_service_save_reload_two_styles', async ({ page, request, baseURL }, t
       const body = await response.json()
       calls.push({ method, path: url.pathname, status: response.status(),
         org: headers['x-org-id'], actor: headers['x-actor-binding-id'], browserActor,
-        authorization: Object.hasOwn(headers, 'authorization'),
+        'authorization': Object.hasOwn(headers, 'authorization'),
         revision: body.page?.revision, document: body.page?.document,
         expectedRevision: method === 'PUT' ? req.postDataJSON().expected_revision : undefined })
       return route.fulfill({ response, headers: { ...response.headers(), ...CORS } })

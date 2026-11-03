@@ -42,7 +42,7 @@ describe('Native project source real API transport', () => {
     expect(fetch.mock.calls.map(([url]) => String(url))).toEqual([root, `${root}/${REQUEST}`, root,
       `${root}/${REQUEST}/confirm`, `${root}/${REQUEST}/recover`, `${root}/${REQUEST}/reject`])
     for (const [, init] of fetch.mock.calls) {
-      expect(init).toMatchObject({ cache: 'no-store', redirect: 'error', headers: { Authorization: expect.stringMatching(/^Bearer /) } })
+      expect(init).toMatchObject({ cache: 'no-store', redirect: 'error', headers: { 'Authorization': expect.stringMatching(/^Bearer /) } })
     }
     for (const [index, expected] of [[2, body()], [3, confirmation], [4, witness], [5, witness]]) {
       const init = fetch.mock.calls[index][1]
@@ -118,7 +118,7 @@ describe('Native project source real API transport', () => {
     expect(String(url)).toBe(`/api/projects/${PROJECT}/native/source/requests`)
     expect(JSON.parse(init.body)).toEqual(edit)
     expect(init).toMatchObject({ method: 'POST', cache: 'no-store', redirect: 'error', headers: {
-      Authorization: expect.stringMatching(/^Bearer /), 'Content-Type': 'application/json',
+      'Authorization': expect.stringMatching(/^Bearer /), 'Content-Type': 'application/json',
       'X-Authority-Session-Id': authority.session_id, 'X-Authority-Turn-Id': authority.turn_id } })
   })
 

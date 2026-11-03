@@ -59,7 +59,7 @@ def status_api(tmp_path, monkeypatch):
     # The real require_tenant runs. Only token verification and its external
     # authority repositories are hermetic seams; X-Tenant-Id is not JWT authority.
     def verify(authorization):
-        if authorization != "Bearer owned-user":
+        if authorization != "Bearer REDACTED-author-stage-fixture":
             raise HTTPException(status_code=401, detail="Authentication required")
         return {"sub": "auth0|status-reader"}
 
@@ -176,7 +176,7 @@ def test_jwt_uses_server_authority_instead_of_caller_tenant(status_api):
     _seed(status_api, "queued")
     before = _snapshot(status_api.store)
     response = status_api.client.get(PATH, headers={
-        "Authorization": "Bearer owned-user", "X-Tenant-Id": FOREIGN,
+        "Authorization": "Bearer REDACTED-author-stage-fixture", "X-Tenant-Id": FOREIGN,
     })
     assert response.status_code == 200, response.text
     assert response.json()["change_set_id"] == ID

@@ -22,7 +22,7 @@ const receipt = c => ({ organization_id: c.organization_id, project_id: c.projec
 const response = (body, status = 200) => ({ ok: status < 400, status,
   headers: { get: () => null }, text: async () => JSON.stringify(body) })
 const client = fetchImpl => createSolarProjectMaterializationClient({ fetchImpl,
-  headers: () => ({ Authorization: 'test-only', 'X-Checkout-Capability': 'test-checkout' }) })
+  headers: () => ({ 'Authorization': 'test-only', 'X-Checkout-Capability': 'test-checkout' }) })
 
 describe('canonical project Solar publication client', () => {
   it('reads actual canonical physical source and sends only its three fields', async () => {
@@ -99,7 +99,7 @@ describe('canonical project Solar publication client', () => {
   it('uses the actual initial project route and whole original generation request without a checkout', async () => {
     const c = captureSolarPublication(initialScope, initialReadback, id(5), originalParameters)
     const fetchImpl = vi.fn().mockResolvedValueOnce(response(initialReadback)).mockResolvedValueOnce(response(receipt(c)))
-    const api = createSolarProjectMaterializationClient({ fetchImpl, headers: () => ({ Authorization: 'test-only' }) })
+    const api = createSolarProjectMaterializationClient({ fetchImpl, headers: () => ({ 'Authorization': 'test-only' }) })
     expect(await api.read(initialScope)).toMatchObject({ ok: true })
     expect(await api.publish(c)).toMatchObject({ ok: true })
     expect(fetchImpl.mock.calls.map(([url]) => url)).toEqual([`/api/projects/${id(2)}/solar-layout`, `/api/projects/${id(2)}/solar-layout`])

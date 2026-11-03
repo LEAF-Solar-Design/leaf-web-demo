@@ -179,7 +179,7 @@ describe("author_stage_status joined read capability", () => {
     { reason_code: "x".repeat(201), retryable: false },
     { reason_code: "x", retryable: false, message: "x".repeat(501) },
     { reason_code: "x", retryable: false, message: "dispatch-private-secret" },
-    { reason_code: "x", retryable: false, message: "Authorization: Bearer private-credential" },
+    { reason_code: "x", retryable: false, message: "Authorization: Bearer REDACTED-auth-stage-fixture" },
   ])("refuses invalid or credential-reflecting failure: %j", async error => {
     const { client } = http({ ...producer("failed"), error });
     await expect(client.getAuthorStageStatus(TENANT, ID)).rejects.toThrow("Author stage status unavailable.");
