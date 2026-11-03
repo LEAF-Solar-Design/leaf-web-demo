@@ -12,6 +12,7 @@ from urllib.request import Request
 
 import pytest
 
+import leaf_agent
 from conftest import Echo, command
 from leaf_agent import sign
 from leaf_agent.__main__ import main
@@ -295,3 +296,11 @@ def test_home_resolution_and_atomic_key(config, monkeypatch, tmp_path):
     atomic_write(target, b"b" * 32)
     assert target.read_bytes() == b"b" * 32
     assert list(target.parent.iterdir()) == [target]
+
+
+def test_client_requests_send_agent_user_agent(config, studio, enrolled):
+    assert enrolled.poll() == []
+    assert len(studio.seen) == 1
+    for _, _, _, headers in studio.seen:
+        assert headers["User-Agent"] == f"leaf-device-agent/{leaf_agent.__version__}"
+        assert not headers["User-Agent"].startswith("Python-urllib")
