@@ -4763,7 +4763,8 @@ def test_R14C_32_mandatory_registration():
         assert ordered[start:start + 3] == wanted
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
-    assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
+    start = mandatory.index("platform-sip-r14-exchange")
+    assert mandatory[start:start + 2] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
     assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
 
 
@@ -4781,7 +4782,9 @@ def test_sip_r14_exchange_gate_registration():
     assert suite.database_skip_reasons == (
         r"PostgreSQL integration test requires DATABASE_URL",)
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
-    assert selection["mandatory_suite_ids"][-3:-1] == [suite.id, "platform-sip-r14-sizing"]
+    mandatory = selection["mandatory_suite_ids"]
+    start = mandatory.index(suite.id)
+    assert mandatory[start:start + 2] == [suite.id, "platform-sip-r14-sizing"]
     assert selection["selection_enabled"] is False
     assert selection["phase"] == "shadow"
 
@@ -4891,7 +4894,7 @@ def test_demo_actor_gate_registration():
 
 
 def test_sip_r14_sizing_gate_registration():
-    """R14-E Exact row, database classification, measured floor and mandatory tail."""
+    """R14-E Exact row, database classification, floor and relative mandatory order."""
     runner = _load_runner()
     rows = runner.build_suites()
     ids = [suite.id for suite in rows]
@@ -4917,7 +4920,7 @@ def test_sip_r14_sizing_gate_registration():
         assert ordered.count(suite.id) == ordered.count("platform-sip-r14-exchange") == 1
         start = ordered.index("platform-sip-r14-exchange")
         assert ordered[start:start + 2] == ["platform-sip-r14-exchange", suite.id]
-    assert selection["mandatory_suite_ids"][-2] == suite.id
+    # Other mandatory suites may follow this group; its own adjacency is pinned above.
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
 
 
@@ -4933,7 +4936,8 @@ def test_sip_w1c_exchange_gate_registration():
         uses_database=True, db_gated=True,
         database_skip_reasons=(r"PostgreSQL integration test requires DATABASE_URL",))
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
-    assert selection["mandatory_suite_ids"][-1] == suite.id
+    mandatory = selection["mandatory_suite_ids"]
+    assert mandatory[mandatory.index("platform-sip-r14-sizing") + 1] == suite.id
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
 
 
@@ -5304,7 +5308,7 @@ def test_r14f1_gate_registration():
 def test_early_feedback_collects_all_reds_and_never_starts_heavy(tmp_path, monkeypatch, capsys):
     g = _load_runner()
     suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None)
-              for name in ["web-build", "harness-tsc-noemit", "server-campaign-dxf-inventory",
+              for name in ["web-build", "harness-tsc-noemit", "server-campaign-dxf-inventory", "gate-runner-selftest",
                            "web-studio-panels-proof"]]
     seen = []
     def run(suite, *_args, **_kwargs):
@@ -5316,19 +5320,20 @@ def test_early_feedback_collects_all_reds_and_never_starts_heavy(tmp_path, monke
     results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 3, True,
                                              early_feedback=True,
                                              before_heavy_command=["trusted-ci", "--heavy-prerequisites"])
-    assert set(seen) == {"harness-tsc-noemit", "server-campaign-dxf-inventory"}
-    assert len(seen) == 2 and all(n == 1 for n in attempts.values())
+    assert set(seen) == {"harness-tsc-noemit", "server-campaign-dxf-inventory", "gate-runner-selftest"}
+    assert len(seen) == 3 and all(n == 1 for n in attempts.values())
     assert all(r.status == "FAIL" for r in results)
     output = capsys.readouterr().out
     assert "GATE_RESULT id=harness-tsc-noemit status=FAIL" in output
     assert "GATE_RESULT id=server-campaign-dxf-inventory status=FAIL" in output
+    assert "GATE_RESULT id=gate-runner-selftest status=FAIL" in output
     assert "heavy_started=0" in output
 
 
 def test_early_feedback_healthy_catalog_parity_and_dependency_barrier(tmp_path, monkeypatch):
     g = _load_runner()
     names = ["web-studio-panels-proof", "harness-tsc-noemit", "web-build",
-             "server-campaign-dxf-inventory", "other-full-control"]
+             "server-campaign-dxf-inventory", "gate-runner-selftest", "other-full-control"]
     suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
     seen = []
     def run(suite, *_args, **_kwargs):
@@ -5572,7 +5577,8 @@ def test_service_smoke_row_registration_is_unique_and_mandatory():
     assert row.cwd == g.WEB and row.timeout_s == 600
     assert row.uses_database and row.db_gated and row.requires_linux
     assert not row.opt_in_env and not row.db_deferred
-    assert row.id not in g._EARLY_FEEDBACK_SUITES and len(g._EARLY_FEEDBACK_SUITES) == 15
+    assert row.id not in g._EARLY_FEEDBACK_SUITES and len(g._EARLY_FEEDBACK_SUITES) == 16
+    assert "gate-runner-selftest" in g._EARLY_FEEDBACK_SUITES
     assert row.argv[1:] == ["--no-install", "playwright", "test", "--config", "playwright.page-service.config.mjs", "--workers=1"]
     assert all(not any("page-service.config" in arg or "project-page.service" in arg for arg in s.argv)
                for s in suites if s.id != row.id)

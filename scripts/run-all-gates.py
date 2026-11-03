@@ -5609,6 +5609,9 @@ _PRELUDE_WRITERS = frozenset({
 # produced by _PRELUDE_WRITERS. Their observed failures cost seconds while
 # browser/native suites cost minutes. Unknown suites remain in the full phase.
 _EARLY_FEEDBACK_SUITES = frozenset({
+    # Existing inert framework/registration checks run once, before expensive
+    # prerequisites, so stale catalog contracts cannot consume a full run.
+    "gate-runner-selftest",
     "harness-tsc-noemit", "server-campaign-dxf-inventory",
     "server-campaign-release-service", "server-entity-scope-admission",
     "server-entity-scope-transport", "server-sip-r5-routes", "web-app-wiring",
