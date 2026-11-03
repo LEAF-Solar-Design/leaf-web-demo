@@ -289,6 +289,34 @@ def test_unprivileged_supervisor_reaps_detached_descendant_and_propagates_exit(t
     assert not Path(f"/proc/{pid}").exists()
 
 
+def test_unprivileged_supervisor_reaps_exited_orphan_before_main_child_finishes(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
+    helper = _unprivileged_helper()
+    pidfile = tmp_path / "orphan-pid"
+    program = f"""
+import os, pathlib, time
+pidfile = pathlib.Path({str(pidfile)!r})
+parent = os.fork()
+if parent == 0:
+    orphan = os.fork()
+    if orphan:
+        os._exit(0)
+    os.setsid()
+    pidfile.write_text(str(os.getpid()))
+    time.sleep(0.15)
+    os._exit(0)
+os.waitpid(parent, 0)
+deadline = time.monotonic() + 3
+while not pidfile.exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+while pidfile.exists() and pathlib.Path('/proc/' + pidfile.read_text()).exists() and time.monotonic() < deadline:
+    time.sleep(0.01)
+os._exit(7 if pidfile.exists() and not pathlib.Path('/proc/' + pidfile.read_text()).exists() else 8)
+"""
+    assert helper.supervise([sys.executable, "-I", "-c", program], tmp_path, os.environ.copy()) == 7
+
+
 def test_unprivileged_supervisor_forwards_termination(tmp_path):
     if not sys.platform.startswith("linux"):
         return

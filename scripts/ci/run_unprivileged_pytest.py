@@ -304,13 +304,30 @@ def supervise(command, cwd, env):
             except ProcessLookupError:
                 pass
 
+    def reap_exited_orphans(signum=None, frame=None):
+        # Native PostgreSQL detaches from pg_ctl. As its subreaper we must
+        # reap its exit while pytest is still checking cleanup, not only
+        # after pytest exits. Preserve Popen's ownership of the main child.
+        if process is None:
+            return
+        children_file = Path(f"/proc/self/task/{os.getpid()}/children")
+        for pid in (int(value) for value in children_file.read_text().split()):
+            if process is not None and pid == process.pid:
+                continue
+            try:
+                os.waitpid(pid, os.WNOHANG)
+            except ChildProcessError:
+                pass
+
     try:
         for signum in (signal.SIGTERM, signal.SIGINT, signal.SIGHUP):
             previous[signum] = signal.signal(signum, stop)
+        previous[signal.SIGCHLD] = signal.signal(signal.SIGCHLD, reap_exited_orphans)
         process = subprocess.Popen(command, cwd=cwd, env=env, start_new_session=True)
         if stopped:
             stop(stopped[-1], None)
         while True:
+            reap_exited_orphans()
             try:
                 code = process.wait(timeout=0.2)
                 if stopped:
