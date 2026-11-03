@@ -162,8 +162,11 @@ def test_operation_timeouts_are_selected_and_workers_are_stopped(config, enrolle
     agent = Agent(config, enrolled, registry, executor=record)
     try:
         agent.execute(command("pkg.install", {"package": "echo", "version": "1"}))
+        agent.execute(command("pkg.upgrade", {"package": "echo", "version": "1"}))
+        agent.execute(command("pkg.uninstall", {"package": "echo", "keep_data": True}))
         agent.execute(command("pkg.health"))
-        assert timeouts == [900, 30]
+        agent.execute(command("http.proxy", {"package": "echo", "method": "GET", "path": "/api/states"}))
+        assert timeouts == [1500, 1500, 120, 30, 30]
     finally:
         agent.db.close()
     registry.handlers["echo"] = Echo(config.home, delay=5)

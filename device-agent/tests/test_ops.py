@@ -21,6 +21,24 @@ def test_proxy_local_auth_query_and_json_only(config, registry, local_package):
     assert post["data"]["body_json"]["body"] == {"entity_id": "light.a"}
 
 
+@pytest.mark.parametrize("op,args", [
+    ("pkg.health", {}), ("pkg.uninstall", {"keep_data": True}),
+    ("pkg.install", {"version": "1"}), ("pkg.upgrade", {"version": "1"}),
+])
+def test_package_operations_do_not_read_locked_credentials(config, registry, local_package, monkeypatch, op, args):
+    reads = []
+
+    def locked():
+        reads.append(True)
+        raise RuntimeError("Keychain locked")
+
+    monkeypatch.setattr(registry.get("echo"), "auth_headers", locked)
+    result = Dispatcher(config, registry).dispatch(op, {"package": "echo", **args})
+    assert result["status"] == "ok" and not reads
+    assert proxy(config, registry)["error"]["code"] == "upstream_error"
+    assert reads == [True] and not local_package.requests
+
+
 @pytest.mark.parametrize("path", ["//evil/api/states", "http://evil/api/states", "/api/statesX", "/api/states/../config", "/api/%73tates", "/api/%2573tates", "/api/%ZZ", "/api/states?x=1", "/api/states#x", "/api/states\\evil", "/api//states", "/api/states/./x", "/api/states/\x00", "/api/states/\x7f", "/api/states/ a"])
 def test_path_denied_before_network(config, registry, local_package, path):
     assert proxy(config, registry, path=path)["error"]["code"] == "path_denied"
@@ -87,13 +105,17 @@ def test_pause_and_local_resume(config, registry, local_package):
     assert canonical_path("/")
 
 
-def test_ha_operations_implicitly_select_registered_homeassistant(config, registry, local_package):
+def test_ha_operations_implicitly_select_registered_homeassistant(config, registry, local_package, monkeypatch):
     from conftest import Echo
     from leaf_agent.config import write_json
     catalog = list(config.catalog().values())
     catalog[0]["package"] = "homeassistant"
     write_json(config.home / "catalog.json", catalog)
-    registry.register("homeassistant", Echo(config.home))
+    handler = Echo(config.home)
+    def unexpected_auth():
+        raise AssertionError("Dispatcher must leave HA authentication to the handler")
+    monkeypatch.setattr(handler, "auth_headers", unexpected_auth)
+    registry.register("homeassistant", handler)
     dispatcher = Dispatcher(config, registry)
     assert dispatcher.dispatch("ha.onboard", {})["status"] == "ok"
     assert dispatcher.dispatch("ha.flow.list", {})["status"] == "ok"

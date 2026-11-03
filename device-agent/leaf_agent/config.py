@@ -11,7 +11,7 @@ from urllib.parse import urlsplit
 
 PINNED_CATALOG = [{
     "package": "homeassistant", "display_name": "Home Assistant",
-    "version": "2026.10.0", "port": 8123, "health_path": "/api/",
+    "version": "2026.10.4", "port": 8123, "health_path": "/api/",
     "relay_allow": [
         {"method": "GET", "path_prefix": "/api/states"},
         {"method": "POST", "path_prefix": "/api/services/light/"},

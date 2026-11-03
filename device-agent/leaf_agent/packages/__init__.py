@@ -2,7 +2,8 @@
 
 Handlers must be spawn-picklable and persist state on disk (operations run in
 isolated processes). All return values must be credential-free JSON. auth_headers
-is local-only; never return its values in state() or handle(). P5 registers HA.
+is local-only; never return its values in state() or handle(). HA is a trusted
+local default; explicit registrations can override it for isolated tests.
 """
 from typing import Protocol
 
@@ -14,8 +15,11 @@ class Handler(Protocol):
 
 
 class Registry:
-    def __init__(self):
+    def __init__(self, home=None):
+        from .homeassistant import HomeAssistant
+
         self.handlers: dict[str, Handler] = {}
+        self._homeassistant = HomeAssistant(home)
 
     def register(self, package: str, handler: Handler) -> None:
         if package in self.handlers:
@@ -23,11 +27,14 @@ class Registry:
         self.handlers[package] = handler
 
     def get(self, package: str) -> Handler | None:
-        return self.handlers.get(package)
+        return self.handlers.get(package, self._homeassistant if package == "homeassistant" else None)
 
     def states(self) -> list[dict]:
         states = []
-        for handler in self.handlers.values():
+        handlers = list(self.handlers.values())
+        if "homeassistant" not in self.handlers:
+            handlers.append(self._homeassistant)
+        for handler in handlers:
             state = handler.state()
             if state is not None:
                 states.append(state)
