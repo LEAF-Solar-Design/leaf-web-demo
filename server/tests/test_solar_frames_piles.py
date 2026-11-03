@@ -45,6 +45,55 @@ def canonical(value):
                                      allow_nan=False).encode("utf-8")).hexdigest()
 
 
+@pytest.mark.parametrize('ordering', ['original', 'canonical', 'reversed'])
+def test_current_native_preset_order_preserves_original_pack_and_geometry(ordering):
+    from dataclasses import asdict
+    from test_solar_ground_conversion import canonical_preset
+    original = canonical_preset()
+    supplied = (json.loads(json.dumps(original, sort_keys=True)) if ordering == 'canonical'
+                else dict(reversed(list(original.items()))) if ordering == 'reversed' else original)
+    loaded, _ = fp.load_current_preset(supplied)
+    expected, _ = fp.load_current_preset(original)
+    assert asdict(loaded) == asdict(expected)
+    assert [(s.kind, s.count) for s in loaded.tracker_pack.segments] == [
+        ('Modules', 6), ('JointGap', 1), ('Motor', 1), ('Modules', 6)]
+    assert (loaded.rows, loaded.columns, loaded.module_power_wp) == (6, 12, 715)
+    assert frames.frame_footprint(loaded) == pytest.approx((14.654, 16.336))
+    boundary = [[0, 0], [15, 0], [15, 18], [0, 18]]
+    doc, _ = fp.prepare_initial_frames(boundary=boundary, preset=supplied, drawing_units='m', current_native=True)
+    base, _ = fp.prepare_initial_frames(boundary=boundary, preset=original, drawing_units='m', current_native=True)
+    assert ps.encode_document(doc) == ps.encode_document(base)
+
+
+def test_current_native_original_conflicting_material_is_not_rewritten(graph):
+    from dataclasses import asdict
+    import solar_ground_conversion as conversion
+    from test_solar_ground_graph_codec import ground_base
+    before = copy.deepcopy(PRESET)
+    loaded, _ = fp.load_current_preset(PRESET)
+    doc, _ = fp.prepare_initial_frames(boundary=GEN['boundary'], preset=PRESET, drawing_units='m', current_native=True)
+    assert (loaded.rows, loaded.columns, loaded.module_power_wp) == (6, 1, 715)
+    assert sum(s.count for s in loaded.tracker_pack.segments if s.kind == 'Modules') == 6
+    # Exact native geometry is retained. It is not relabeled as a genuine module layout.
+    assert frames.frame_footprint(loaded) == pytest.approx((7.918, 7.818))
+    view = {'kind': 'canonical_version_intake', 'index': 0,
+        'state': {'artifact_id': 'a'*64, 'content_sha256': 'b'*64},
+        'parameters': {'generation_models': [asdict(loaded)],
+                       'frame_generations': {f['handle']: 0 for f in doc['state']['frames']}}}
+    g = ground_base(graph)
+    with pytest.raises(conversion.GroundConversionError, match='GROUND_CONVERSION_INPUT_INVALID'):
+        conversion.convert_physical_state(view, doc, g, provenance=g['project']['provenance'], rev=g['rev'])
+    assert PRESET == before
+
+
+def test_historical_snapshot_collection_reuse_remains_explicit_and_unchanged():
+    legacy, _ = fp.load_preset(PRESET)
+    replaced, _ = fp.load_preset(PRESET, replicate_list_reuse=False)
+    assert sum(s.count for s in legacy.tracker_pack.segments if s.kind == 'Modules') == 12
+    assert sum(s.count for s in replaced.tracker_pack.segments if s.kind == 'Modules') == 6
+    assert legacy.frame_power_kwp == replaced.frame_power_kwp == 4.29
+
+
 def ev():
     return producer("solar_ground_studio_evidence")
 
