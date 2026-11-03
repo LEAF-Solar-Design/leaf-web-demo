@@ -329,7 +329,8 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const isUnmatchedDecision = (decision) => decision?.lane === 'run' && !decision.slash &&
-    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()))
+    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()) ||
+      (projectScope() && Array.isArray(current.surfaceFamilyIds) && current.surfaceFamilyIds.length === 0))
 
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
     const unmatched = isUnmatchedDecision(decision)

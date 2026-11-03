@@ -4181,6 +4181,9 @@ export default function App() {
     () => (studioGround ? familiesForSurface(catalog.families, activeSurface) : catalog.families),
     [studioGround, catalog.families, activeSurface],
   )
+  useEffect(() => {
+    catalogController.setContext({ surfaceFamilyIds: PRODUCT_SURFACES.find((surface) => surface.id === activeSurface)?.familyIds ?? null })
+  }, [catalogController, activeSurface])
 
   // W4c-V3: the Solar tab's ground material. Under the studio on the solar
   // surface, the Panels layer takes the solar accent and every other layer

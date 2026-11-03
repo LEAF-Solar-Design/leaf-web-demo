@@ -664,6 +664,75 @@ describe('non-executable project prompt routing', () => {
   })
 })
 
+describe('project prompts on surfaces without tools', () => {
+  const prompt = 'help me plan the next project milestone'
+
+  function surfacePromptSetup(surfaceFamilyIds) {
+    const run = receiptSetup()
+    run.controller.setContext({ projectIntents: [], surfaceFamilyIds, agentDisabled: false })
+    run.decision = { lane: 'run', tool: 'solar-settings', confidence: 0.95 }
+    run.services.routePrompt.mockResolvedValue(run.decision)
+    run.adapters.agentBannerFor = vi.fn(() => ({ kind: 'unreachable' }))
+    run.adapters.startAgentTurn = vi.fn(async () => {})
+    return run
+  }
+
+  it('sends a router-named tool to the project agent on an empty-family surface', async () => {
+    const run = surfacePromptSetup([])
+    try {
+      await run.controller.actions.loadCatalog()
+      expect(await run.controller.actions.dispatch(prompt)).toEqual(run.decision)
+      expect(run.adapters.startAgentTurn).toHaveBeenCalledExactlyOnceWith(prompt, {
+        lane: 'run', tool: 'solar-settings', confidence: 0.95, rationale: null,
+      }, { allowSecretOnce: false })
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.controller.getState().routeError).toBeNull()
+    } finally { retireReceipt(run) }
+  })
+
+  it.each([
+    ['Solar', ['stringing', 'placement', 'measurement', 'selection']],
+    ['whole catalog', null],
+  ])('keeps project admission required for the %s family list', async (_label, surfaceFamilyIds) => {
+    const run = surfacePromptSetup(surfaceFamilyIds)
+    try {
+      await run.controller.actions.loadCatalog()
+      await run.controller.actions.dispatch(prompt)
+      expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.controller.getState().routeError).toBe('project_request_required')
+    } finally { retireReceipt(run) }
+  })
+
+  it('keeps slash tools behind project admission on an empty-family surface', async () => {
+    const run = surfacePromptSetup([])
+    try {
+      await run.controller.actions.loadTools()
+      await run.controller.actions.loadCatalog()
+      await run.controller.actions.dispatchSlash('solar-settings')
+      expect(run.services.routePrompt).not.toHaveBeenCalled()
+      expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(run.adapters.commitDecision).not.toHaveBeenCalled()
+      expect(run.controller.getState().routeError).toBe('project_request_required')
+    } finally { retireReceipt(run) }
+  })
+
+  it.each([['absent', undefined], ['empty', []]])('keeps standalone named-tool routing with %s surface families', async (_label, surfaceFamilyIds) => {
+    const run = setup()
+    const decision = { lane: 'run', tool: 'solar-settings', confidence: 0.95 }
+    run.controller.setContext({ entitlements: { entitlements: { run_write: true } },
+      ...(surfaceFamilyIds === undefined ? {} : { surfaceFamilyIds }) })
+    run.services.routePrompt.mockResolvedValue(decision)
+    try {
+      await run.load()
+      expect(await run.controller.actions.dispatch(prompt)).toEqual(decision)
+      expect(run.adapters.commitDecision).toHaveBeenCalledExactlyOnceWith(decision)
+      expect(run.adapters.startAgentTurn).not.toHaveBeenCalled()
+      expect(run.controller.getState().routeError).toBeNull()
+    } finally { run.controller.destroy() }
+  })
+})
+
 describe('project catalog receipts', () => {
   it('R13A-27 publishes the five-field receipt from the accepted catalog', async () => {
     const input = receiptCatalog()
