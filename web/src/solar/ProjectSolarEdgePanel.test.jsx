@@ -1,6 +1,7 @@
 import React from 'react'
 import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
 import { afterEach, expect, it, vi } from 'vitest'
+import { createHash, webcrypto } from 'node:crypto'
 import ProjectSolarEdgePanel from './ProjectSolarEdgePanel.jsx'
 import { createSolarProjectClient } from './solarProjectClient.js'
 
@@ -31,15 +32,22 @@ function edge(selected, report = false) {
       download: `/api/projects/${P}/drawings/${D}/solar-artifacts/${id}` } }
 }
 const clients = []
-afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.dispose()) })
-function setup({ isHead = true } = {}) {
+afterEach(() => { cleanup(); clients.splice(0).forEach((client) => client.dispose()); vi.restoreAllMocks(); vi.unstubAllGlobals() })
+function setup({ isHead = true, reportBytes, downloadResponse } = {}) {
   let client
   const fetchImpl = vi.fn(async (url) => {
     const selected = client.getSnapshot().binding
     if (url.includes('/context?')) return reply({ context: { ...selected, head_version_id: isHead ? selected.input_version_id : NEXT,
       is_head: isHead, intake_sha256: 'd'.repeat(64) }, intake: { solar_design_graph: { rev: 7 }, solar_design_graph_sha256: 'e'.repeat(64) } })
     if (url.endsWith('/solaredge-pdf')) return reply(edge(selected))
-    if (url.endsWith('/report')) return reply(edge(selected, true))
+    if (url.endsWith('/report')) {
+      const value = edge(selected, true)
+      if (reportBytes) Object.assign(value.report, { byte_length: reportBytes.length,
+        content_sha256: createHash('sha256').update(reportBytes).digest('hex') })
+      return reply(value)
+    }
+    if (url.includes('/solar-artifacts/')) return downloadResponse
+      ? downloadResponse() : new Response(reportBytes, { headers: { 'Content-Type': 'application/json' } })
     if (url.includes('/api/capabilities')) return reply({ families: [{ capabilities: [row] }] })
     throw new Error('Unexpected request')
   })
@@ -119,4 +127,76 @@ it('retains the review when the real catalog preview refuses checkout or policy'
   await screen.findByText('Tracking labels were not staged for acceptance. Try again.')
   expect(screen.getByRole('region', { name: 'Report review' })).toBeTruthy()
   expect(props.onProjectSubmit).not.toHaveBeenCalled()
+})
+
+const reportBytes = new TextEncoder().encode(JSON.stringify({ schema: 'leaf.solar-project-solaredge-report.v1',
+  source: { content_sha256: '9'.repeat(64) }, strings: [{ panel_refs: ['p1', 'p2'], pdf_inverter_id: 4 }] }))
+function downloads() {
+  vi.stubGlobal('crypto', webcrypto)
+  const createObjectURL = vi.fn(() => 'blob:verified-report'), revokeObjectURL = vi.fn()
+  vi.stubGlobal('URL', Object.assign(class extends URL {}, { createObjectURL, revokeObjectURL }))
+  const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+  return { createObjectURL, revokeObjectURL, click }
+}
+
+it('S02export downloads complete canonical report bytes and provenance through the actual project transport', async () => {
+  const save = downloads(), { fetchImpl } = setup({ reportBytes })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Download report' }))
+  await screen.findByText('Report downloaded.')
+  const calls = fetchImpl.mock.calls.filter(([url]) => url.includes('/solar-artifacts/'))
+  expect(calls).toHaveLength(1)
+  expect(calls[0][0]).toBe(`/api/projects/${P}/drawings/${D}/solar-artifacts/${reportId}?current=false`)
+  const savedBytes = await new Promise((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onload = () => resolve(new Uint8Array(reader.result))
+    reader.onerror = reject
+    reader.readAsArrayBuffer(save.createObjectURL.mock.calls[0][0])
+  })
+  expect(Array.from(savedBytes)).toEqual(Array.from(reportBytes))
+  expect(save.click.mock.instances[0].download).toBe('solaredge-report.json')
+  expect(save.revokeObjectURL).toHaveBeenCalledWith('blob:verified-report')
+  expect(document.querySelector('a[download]')).toBeNull()
+})
+
+it.each(['length', 'digest', 'transport'])('S02export saves no report after %s failure and retains the review', async (failure) => {
+  const save = downloads()
+  const wrong = new Uint8Array(reportBytes)
+  wrong[0] ^= 1
+  setup({ reportBytes, downloadResponse: () => failure === 'transport' ? Promise.reject(new Error('offline'))
+    : new Response(failure === 'length' ? wrong.slice(1) : wrong) })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Download report' }))
+  await screen.findByText(failure === 'transport' ? 'Report download stopped. Reopen the current report and try again.'
+    : 'Report download failed. The file did not match its saved report.')
+  expect(save.createObjectURL).not.toHaveBeenCalled()
+  expect(save.click).not.toHaveBeenCalled()
+  expect(screen.getByRole('region', { name: 'Report review' })).toBeTruthy()
+  expect(screen.getByRole('button', { name: 'Accept tracking labels' }).disabled).toBe(false)
+})
+
+it.each(['project_id', 'drawing_id', 'input_version_id', 'authority'])('S02export never saves a pending report after %s changes', async (field) => {
+  const save = downloads(), held = deferred()
+  const { client } = setup({ reportBytes, downloadResponse: () => held.promise })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Download report' }))
+  act(() => client.setScope(field === 'authority' ? binding : { ...binding, [field]: NEXT },
+    field === 'authority' ? 'session-2' : 'session-1'))
+  await act(async () => { held.resolve(new Response(reportBytes)); await Promise.resolve() })
+  expect(save.createObjectURL).not.toHaveBeenCalled()
+  expect(save.click).not.toHaveBeenCalled()
+  expect(screen.queryByText('Report downloaded.')).toBeNull()
+})
+
+it('S02export rechecks scope after asynchronous digest verification before creating a download', async () => {
+  const save = downloads(), held = deferred()
+  vi.stubGlobal('crypto', { subtle: { digest: vi.fn(() => held.promise) } })
+  const { client } = setup({ reportBytes })
+  await upload(); await report()
+  fireEvent.click(screen.getByRole('button', { name: 'Download report' }))
+  await waitFor(() => expect(globalThis.crypto.subtle.digest).toHaveBeenCalledOnce())
+  act(() => client.setScope(binding, 'session-2'))
+  await act(async () => held.resolve(createHash('sha256').update(reportBytes).digest().buffer))
+  expect(save.createObjectURL).not.toHaveBeenCalled()
+  expect(save.click).not.toHaveBeenCalled()
 })

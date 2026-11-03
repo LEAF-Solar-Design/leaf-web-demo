@@ -14,7 +14,7 @@ export const SOLAREDGE_PANEL_REASONS = Object.freeze({
 // The workspace container will mount this panel; it only hands tracking params to its caller.
 export default function SolarEdgeImportPanel({
   drawingId, projectId = null, graphRev, client, onReportReady, onAccept, disabled = false,
-  drawingVersion = undefined, acceptDisabledReason = null,
+  drawingVersion = undefined, acceptDisabledReason = null, onDownloadReport,
 }) {
   const [file, setFile] = useState(null)
   const [source, setSource] = useState(null)
@@ -28,11 +28,14 @@ export default function SolarEdgeImportPanel({
   const acceptance = useRef(null)
   const acceptedReport = useRef(null)
   const [acceptPending, setAcceptPending] = useState(false)
+  const [downloadPending, setDownloadPending] = useState(false)
+  const download = useRef(null)
+  const downloadButton = useRef(null)
   const token = useRef(0)
   const currentDrawing = useRef(drawingId)
   currentDrawing.current = drawingId
   const current = useRef(null)
-  current.current = { drawingId, projectId, drawingVersion, disabled, acceptDisabledReason, graphRev, onAccept }
+  current.current = { drawingId, projectId, drawingVersion, disabled, acceptDisabledReason, graphRev, onAccept, onDownloadReport }
   const lifetime = useRef(null)
   if (!lifetime.current || lifetime.current.drawingId !== drawingId || lifetime.current.projectId !== projectId
     || lifetime.current.drawingVersion !== drawingVersion) lifetime.current = { drawingId, projectId, drawingVersion }
@@ -53,6 +56,7 @@ export default function SolarEdgeImportPanel({
     setOrder('unknown')
     setPending(null)
     setAcceptPending(false)
+    setDownloadPending(false)
     setOutcome(null)
     return () => {
       mounted.current = false
@@ -60,6 +64,8 @@ export default function SolarEdgeImportPanel({
       active.current?.controller.abort()
       active.current = null
       acceptance.current = null
+      download.current?.abort()
+      download.current = null
     }
   }, [drawingId, projectId])
 
@@ -68,15 +74,18 @@ export default function SolarEdgeImportPanel({
     active.current?.controller.abort()
     active.current = null
     acceptance.current = null
+    download.current?.abort()
+    download.current = null
     setPending(null)
     setAcceptPending(false)
+    setDownloadPending(false)
     setOutcome(null)
   }, [drawingVersion])
 
   useEffect(() => {
     if (!outcome) return
     const button = outcome.step === 'upload' ? uploadButton
-      : outcome.step === 'report' ? reportButton : acceptButton
+      : outcome.step === 'report' ? reportButton : outcome.step === 'download' ? downloadButton : acceptButton
     button.current?.focus()
   }, [outcome])
 
@@ -86,7 +95,7 @@ export default function SolarEdgeImportPanel({
   reportRef.current = report
   const parsed = parseTolerance(tolerance)
   const params = acceptParams(graphRev, reportValue, drawingId)
-  const busy = pending !== null || acceptPending
+  const busy = pending !== null || acceptPending || downloadPending
   const acceptReason = reportValue?.drawing_id !== drawingId
     ? 'This report belongs to another drawing. Build a report for this drawing.'
     : !Number.isInteger(graphRev) || graphRev < 0 || graphRev > 2147483647
@@ -98,7 +107,7 @@ export default function SolarEdgeImportPanel({
     if (!mounted.current || lifetime.current !== renderedLifetime
       || captured.drawingId !== drawingId || captured.projectId !== projectId
       || captured.drawingVersion !== drawingVersion) return
-    if (captured.disabled) return
+    if (captured.disabled || download.current) return
     if (acceptance.current) { setOutcome({ step, drawingId, message: SOLAREDGE_PANEL_REASONS.staging_pending }); return }
     if (active.current) { setOutcome({ step, drawingId, message: SOLAREDGE_PANEL_REASONS.request_pending }); return }
     if (step === 'upload' && !file) { setOutcome({ step, drawingId, message: SOLAREDGE_PANEL_REASONS.file_required }); return }
@@ -144,12 +153,37 @@ export default function SolarEdgeImportPanel({
     }
   }
 
+  async function saveReport() {
+    const captured = current.current
+    if (!mounted.current || lifetime.current !== renderedLifetime || token.current !== renderedToken ||
+        captured.disabled || active.current || acceptance.current || download.current ||
+        typeof captured.onDownloadReport !== 'function' || reportRef.current !== report ||
+        report?.version !== captured.drawingVersion || report?.projectId !== captured.projectId ||
+        reportValue?.drawing_id !== captured.drawingId || report?.eligible !== true) return
+    const controller = new AbortController()
+    const generation = token.current
+    download.current = controller
+    setDownloadPending(true)
+    setOutcome(null)
+    let result
+    try { result = await captured.onDownloadReport(reportValue, { signal: controller.signal }) }
+    catch { result = { ok: false } }
+    if (!mounted.current || controller.signal.aborted || download.current !== controller ||
+        token.current !== generation || reportRef.current !== report) return
+    download.current = null
+    setDownloadPending(false)
+    setOutcome({ step: 'download', drawingId, message: result?.ok === true ? 'Report downloaded.'
+      : result?.code === 'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH'
+        ? 'Report download failed. The file did not match its saved report.'
+        : 'Report download stopped. Reopen the current report and try again.' })
+  }
+
   function accept() {
     const captured = current.current
     if (!mounted.current || lifetime.current !== renderedLifetime || token.current !== renderedToken
       || captured.drawingId !== drawingId || captured.projectId !== projectId
       || captured.drawingVersion !== drawingVersion) return
-    if (captured.disabled || captured.acceptDisabledReason || active.current) return
+    if (captured.disabled || captured.acceptDisabledReason || active.current || download.current) return
     if (acceptance.current) {
       setOutcome({ step: 'accept', drawingId, message: SOLAREDGE_PANEL_REASONS.staging_pending })
       return
@@ -218,6 +252,11 @@ export default function SolarEdgeImportPanel({
         </table>
         {reportValue.counts.unassigned_panels > 0 && <p>Review needed: {reportValue.counts.unassigned_panels} panels have no tracking label.</p>}
         {reportValue.counts.partial_strings > 0 && <p>Review needed: {reportValue.counts.partial_strings} {reportValue.counts.partial_strings === 1 ? 'string is' : 'strings are'} partial.</p>}
+        {typeof onDownloadReport === 'function'
+          ? <button ref={downloadButton} type="button" disabled={disabled || busy || report?.version !== drawingVersion
+            || report?.eligible !== true || reportValue.drawing_id !== drawingId}
+            onClick={saveReport}>Download report</button>
+          : <p>Report download is unavailable in this view.</p>}
         {!params && !acceptDisabledReason && <p id={acceptHint}>{acceptReason}</p>}
         {!acceptDisabledReason && report?.version !== drawingVersion && <p>{solarEdgeReason('SOLAREDGE_REPORT_STALE')}</p>}
         {!acceptDisabledReason && report?.version === drawingVersion && report?.eligible !== true

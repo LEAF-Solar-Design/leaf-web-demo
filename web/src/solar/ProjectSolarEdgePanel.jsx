@@ -91,6 +91,43 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
         ? { ok: true, value: outcome.data } : { ok: false, code: outcome.reason || 'SIP_R7_RESPONSE_INVALID' }
     },
   }
+  async function downloadReport(report, { signal } = {}) {
+    if (!saved || !current() || latest.current.busy || scope.report !== report ||
+        typeof projectClient.downloadArtifact !== 'function') return { ok: false }
+    const controller = new AbortController()
+    const abort = () => controller.abort()
+    signal?.addEventListener('abort', abort, { once: true })
+    scope.controllers.add(controller)
+    const active = () => current() && !latest.current.busy && !signal?.aborted &&
+      !controller.signal.aborted && scope.report === report
+    let url
+    try {
+      if (!active()) return { ok: false }
+      const ref = report.report
+      const outcome = await projectClient.downloadArtifact(ref, { signal: controller.signal })
+      if (!active()) return { ok: false }
+      const bytes = outcome?.data?.bytes
+      if (outcome?.ok !== true || outcome.data.notModified || !(bytes instanceof Uint8Array)) return { ok: false }
+      if (bytes.byteLength !== ref.byte_length) return { ok: false, code: 'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH' }
+      const digest = await globalThis.crypto.subtle.digest('SHA-256', bytes)
+      if (!active()) return { ok: false }
+      const hash = Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, '0')).join('')
+      if (hash !== ref.content_sha256) return { ok: false, code: 'SOLAREDGE_CLIENT_ARTIFACT_MISMATCH' }
+      url = URL.createObjectURL(new Blob([bytes], { type: ref.media_type }))
+      const link = document.createElement('a')
+      link.href = url
+      link.download = ref.filename
+      document.body.appendChild(link)
+      try { if (!active()) return { ok: false }; link.click() }
+      finally { link.remove() }
+      return { ok: true }
+    } catch { return { ok: false } }
+    finally {
+      if (url) URL.revokeObjectURL(url)
+      signal?.removeEventListener('abort', abort)
+      scope.controllers.delete(controller)
+    }
+  }
   async function accept(params) {
     if (!saved?.isHead || !current() || latest.current.busy || typeof newProjectIntentKey !== 'function' ||
         typeof latest.current.onProjectSubmit !== 'function' || params.expected_rev !== saved.rev ||
@@ -122,6 +159,7 @@ export default function ProjectSolarEdgePanel({ solarBinding, authorityKey, proj
           : <SolarEdgeImportPanel key={key} drawingId={binding.drawing_id} projectId={binding.project_id}
             drawingVersion={binding.input_version_id} graphRev={saved.rev} client={facade} disabled={busy}
             onReportReady={(report) => { if (current()) scope.report = report }} onAccept={accept}
+            onDownloadReport={downloadReport}
             acceptDisabledReason={!saved.isHead ? 'Open the newest drawing version before accepting tracking labels.' : null} />}
     <button type="button" onClick={onClose}>Close</button>
   </section>
