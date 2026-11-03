@@ -93,7 +93,7 @@ def _actor(tenant):
 
 
 def _project_owner(tenant, project_id):
-    """The tenant owner gate alone does not grant project ownership."""
+    """Require a project owner or two-factor platform admin with project write access, mirroring #2248."""
     binding = platform_link.resolve_caller_binding(tenant)
     platform_link._ensure_platform_package()
     from leaf_platform import project_lifecycle
@@ -105,7 +105,13 @@ def _project_owner(tenant, project_id):
         raise DeviceError(403, "forbidden") from None
     except project_lifecycle.LifecycleUnavailable:
         raise DeviceError(404, "not_found") from None
-    if role != "owner":
+    if role != "owner" and not (
+        role == "editor"
+        and isinstance(tenant, deps.TenantContext)
+        and getattr(tenant, "tier", None) == "admin"
+        and isinstance(tenant.subject, str) and tenant.subject
+        and tenant.subject in deps.admin_subjects()
+    ):
         raise DeviceError(403, "forbidden")
 
 
