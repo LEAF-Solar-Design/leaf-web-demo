@@ -383,6 +383,10 @@ def _operate(backend, tenant_id, drawing_id, operation, base, project_id, reques
                        terrain_view, summary, standing)
     document = ps.physical_document(state, drawing_units=units, source_sha256=request_sha256,
                                     capability=operation, parent=base, frame=frame)
+    # A companion in the existing immutable artifact store preserves original
+    # requests without changing established physical-state bytes or geometry.
+    ps.store_operation_parameters(backend, tenant_id, drawing_id, context, request, document,
+                                  previous=(head, head_document) if head is not None else None)
     published = ph.publish_physical_state(backend, tenant_id, drawing_id, document, project_id=project)
     return _result(operation, "published" if published["created"] else "retry", published["created"],
                    drawing_id, project, base, document, published["head"], terrain_view, summary, standing)
