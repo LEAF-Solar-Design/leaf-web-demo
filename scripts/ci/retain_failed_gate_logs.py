@@ -8,7 +8,7 @@ from pathlib import Path
 import re
 import stat
 
-RESULT_LIMIT = 2 * 1024 * 1024
+RESULT_LIMIT = 8 * 1024 * 1024
 TOTAL_LIMIT = 2 * 1024 * 1024
 FILE_LIMIT = 256 * 1024
 FILE_COUNT_LIMIT = 128

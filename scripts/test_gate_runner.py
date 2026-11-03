@@ -276,13 +276,14 @@ def test_failed_log_retention_result_symlink_no_read(tmp_path):
 
 def test_failed_log_retention_shell_advisory_order_and_verdict():
     source = (REPO / ".codebuild/ci.sh").read_text(encoding="utf-8")
-    gate = source.index('python -u scripts/run-all-gates.py --jobs')
+    gate = source.index('python scripts/run-all-gates.py --jobs')
+    assert source.rindex('export PYTHONUNBUFFERED=1', 0, gate) < gate
     capture = source.index('python -I -B scripts/ci/retain_failed_gate_logs.py')
     next_step = source.index('if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]', gate)
     block = source[capture:next_step]
     assert gate < capture < next_step
     assert '|| gate_status=$?' in source[gate:capture]
-    assert '--result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-failed-logs' in block
+    assert '--result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs' in block
     assert "|| echo 'WARNING: failed gate log retention unavailable' >&2" in block
     assert "gate_status=" not in block and 'if ' not in block
     assert source.rstrip().endswith('exit "$gate_status"')
@@ -5405,7 +5406,8 @@ def test_heavy_prerequisite_failure_preserves_cheap_results_and_cannot_pass(tmp_
 def test_early_feedback_shell_uses_exact_trusted_script_and_one_gate_invocation():
     source = (REPO / ".codebuild/ci.sh").read_text()
     assert 'LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"' in source
-    line = next(line for line in source.splitlines() if line.startswith("python -u scripts/run-all-gates.py --jobs"))
+    line = next(line for line in source.splitlines() if line.startswith("python scripts/run-all-gates.py --jobs"))
+    assert source.rindex('export PYTHONUNBUFFERED=1', 0, source.index(line)) < source.index(line)
     assert '--early-feedback' in line and '--retry 0' in line and '--fail-fast' in line
     assert '--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites' in line
     assert '"${only_args[@]}"' in line
@@ -5784,3 +5786,39 @@ def test_sip_policy_feedback_green_runs_each_selected_control_once(tmp_path, mon
     assert len(seen) == len(suites) and len(set(seen)) == len(seen)
     assert set(attempts) == set(seen) and set(attempts.values()) == {1}
     assert seen[-1] == heavy.id
+
+
+def test_failed_log_retention_actual_producer_size(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    # Synthetic producer-shaped result, not evidence of a live CI run.
+    payload = {"results": [{"id": "red", "status": "FAIL", "attempts": 1,
+                            "test_report": {"output": ""}}]}
+    target_bytes = 2349222
+    payload["results"][0]["test_report"]["output"] = "x" * (
+        target_bytes - len(json.dumps(payload).encode("utf-8")))
+    result.write_bytes(json.dumps(payload).encode("utf-8"))
+    assert result.stat().st_size == target_bytes
+    assert target_bytes > 2 * 1024 * 1024
+    (logs / "red.log").write_bytes(b"actionable failed stack\n")
+    manifest = helper.retain_failed_logs(result, logs, output)
+    assert manifest["failed_suites"] == manifest["copied_files"] == 1
+    assert manifest["files"][0]["status"] == "copied"
+    assert (output / "red.log").read_bytes() == b"actionable failed stack\n"
+    assert json.loads((output / "manifest.json").read_text()) == manifest
+
+
+
+def test_failed_log_retention_above_eight_mib_refused(tmp_path):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [])
+    assert helper.RESULT_LIMIT == 8 * 1024 * 1024
+    payload = {"results": [{"id": "red", "status": "FAIL",
+                            "test_report": {"output": "x" * (8 * 1024 * 1024)}}]}
+    result.write_bytes(json.dumps(payload).encode("utf-8"))
+    assert result.stat().st_size > helper.RESULT_LIMIT
+    (logs / "red.log").write_bytes(b"do not copy refused input")
+    with pytest.raises(ValueError, match="result_too_large"):
+        helper.retain_failed_logs(result, logs, output)
+    assert not output.exists()
+    assert (logs / "red.log").read_bytes() == b"do not copy refused input"
