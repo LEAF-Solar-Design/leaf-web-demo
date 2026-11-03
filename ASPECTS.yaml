@@ -6,6 +6,9 @@ repository: LEAF-Solar-Design/leaf-web-demo
 authored_at_revision: 03e16cc24908c49b25f3670a6ba6d8062046c968
 
 components:
+  - id: device-agent
+    paths: ["device-agent/**"]
+    facets: [backend, agent, deployment]
   - id: server
     paths: ["server/**"]
     facets: [web-api, backend]
