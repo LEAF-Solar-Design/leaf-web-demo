@@ -1,5 +1,5 @@
 import { useLayoutEffect, useMemo, useRef, useState } from 'react'
-import { authHeaders, config, getDrawingIntake, noteUnauthorized, runToolAsync } from '../api.js'
+import { authHeaders, config, createProjectDrawingEditorTransport, getDrawingIntake, noteUnauthorized, runToolAsync } from '../api.js'
 import { createSolarLandxmlClient } from './solarLandxmlClient.js'
 import SolarLandxmlUpload from './SolarLandxmlUpload.jsx'
 import SolarCombinerIntake from './SolarCombinerIntake.jsx'
@@ -14,6 +14,7 @@ import { createSolarTrackerRowsClient } from './solarTrackerRowsClient.js'
 import SolarEdgeImportPanel, { SOLAREDGE_PANEL_REASONS } from './SolarEdgeImportPanel.jsx'
 import { createSolarImportClient } from './solarImportClient.js'
 import { FLOW_PANELS } from './solarWorkspacePanels.js'
+import { captureSolarPublication, createSolarProjectMaterializationClient, initialSolarParameters, solarPublicationMatches } from './solarProjectMaterializationClient.js'
 import './solarFlow.css'
 
 export const SOLAREDGE_WORKSPACE_REASONS = Object.freeze({
@@ -82,9 +83,17 @@ export default function SolarWorkspaceTools({
   drawingId, projectId = null, drawingVersion, flow, checkoutHeld, busy,
   getCheckoutCapability, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement, transport,
   onStageSolarEdgeAccept, catalogDigestOf,
+  projectScope = null, getProjectScope, onProjectDrawingPublished,
 }) {
+  const publicationRequests = useRef(new Map())
   const capability = useRef(getCheckoutCapability)
   capability.current = getCheckoutCapability
+  const publicationCheckout = useMemo(() => transport?.publicationCheckout ?? createProjectDrawingEditorTransport(), [transport])
+  const publicationClient = useMemo(() => createSolarProjectMaterializationClient({
+    fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)), apiBase: config.apiBase,
+    headers: scope => transport?.headers ? transport.headers(scope.drawing_id) : authHeaders(),
+    onResponse: transport?.onResponse ?? ((response, url, sentAuth) => noteUnauthorized(response, url, sentAuth)),
+  }), [transport])
   const client = useMemo(() => createSolarLandxmlClient({
     fetchImpl: transport?.fetchImpl ?? ((...args) => fetch(...args)),
     apiBase: config.apiBase,
@@ -132,6 +141,10 @@ export default function SolarWorkspaceTools({
       key={JSON.stringify([drawingId ?? null, projectId ?? null])}
       drawingId={drawingId}
       projectId={projectId}
+      projectScope={projectScope} getProjectScope={getProjectScope}
+      publicationClient={publicationClient} publicationRequests={publicationRequests.current}
+      publicationCheckout={publicationCheckout}
+      onProjectDrawingPublished={onProjectDrawingPublished}
       flow={flow}
       checkoutHeld={checkoutHeld}
       busy={busy}
@@ -157,6 +170,7 @@ export default function SolarWorkspaceTools({
 Object.defineProperty(SolarWorkspaceTools, 'workspacePanelsByFlow', { value: FLOW_PANELS })
 
 function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHeld, busy, client,
+  projectScope, getProjectScope, publicationClient, publicationRequests, publicationCheckout, onProjectDrawingPublished,
   combinerClient, terrainClient, civilClient, runRead, catalogDigestOf, save, trackerRowsClient, importClient, onStageSolarEdgeAccept, readIntake, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement }) {
   const [openPanel, setOpenPanel] = useState(null)
   const [intake, setIntake] = useState(null)
@@ -166,6 +180,17 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const [generation, setGeneration] = useState(0)
   const [notStaged, setNotStaged] = useState(false)
   const [physicalHead, setPhysicalHead] = useState(null)
+  const [publication, setPublication] = useState({ phase: 'idle', message: '' })
+  const [publicationReadback, setPublicationReadback] = useState(null)
+  const [initialBoundary, setInitialBoundary] = useState('')
+  const [initialPreset, setInitialPreset] = useState('')
+  const [initialUnits, setInitialUnits] = useState('m')
+  let initialParameters = null
+  try { initialParameters = initialSolarParameters(JSON.parse(initialBoundary), JSON.parse(initialPreset), initialUnits) } catch { /* incomplete input */ }
+  const publicationPending = useRef(false)
+  const publicationCurrent = useRef(null)
+  publicationCurrent.current = { scope: projectScope, head: physicalHead, readback: publicationReadback,
+    parameters: initialParameters, drawingId, projectId, checkoutHeld, busy }
   const [terrainHeadSignal, setTerrainHeadSignal] = useState(null)
   const [landxmlPending, setLandxmlPending] = useState(false)
   const [writers, setWriters] = useState({})
@@ -281,7 +306,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     const held = writerTokens.current
     const inFlight = (name) => (held[name]?.size ?? 0) > 0
     const current = solarCurrent.current
-    if (!activeScope.current || inFlight('civil') || (kind === 'civil'
+    if (!activeScope.current || publicationPending.current || inFlight('civil') || (kind === 'civil'
       ? Object.keys(held).some(inFlight) || current.busy || current.checkoutHeld !== true
         || current.phase === 'refreshing' || current.phase === 'failed' || stagingToken.current
       : kind === 'tracker'
@@ -550,6 +575,107 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     setPhysicalHead((current) => Number.isInteger(current?.index) && current.index > head.index ? current : head)
   }
 
+  function publicationCapture(requestId) {
+    const current = publicationCurrent.current
+    const scope = getProjectScope?.() ?? current.scope
+    if (!scope || !activeScope.current || current.projectId !== scope.project_id
+      || (scope.drawing_id !== null && current.drawingId !== scope.drawing_id)) return null
+    const captured = captureSolarPublication(scope, current.readback, requestId, current.parameters)
+    if (captured?.mode === 'successor' && current.head?.project_id === captured.project_id && current.head.drawing_id === captured.drawing_id
+      && (current.head.state?.artifact_id !== captured.physical_head
+      || current.head.state?.content_sha256 !== captured.physical_content_sha256 || current.head.index !== captured.physical_index)) return null
+    return captured
+  }
+
+  async function readPublicationHead() {
+    if (publicationPending.current || busy || !projectScope) return
+    publicationPending.current = true
+    setPublication({ phase: 'pending', message: 'Reading the current layout.' })
+    const scope = projectScope
+    try {
+      const result = await publicationClient.read(scope)
+      if (!activeScope.current) return
+      if (!['organization_id', 'project_id', 'drawing_id', 'input_version_id'].every(key => publicationCurrent.current.scope?.[key] === scope[key])) {
+        setPublication({ phase: 'idle', message: 'The selected drawing changed. Read its current layout again.' }); return
+      }
+      if (result?.ok) setPublicationReadback(result.value)
+      setPublication({ phase: 'idle', message: result?.ok
+        ? result.value.writer_available === false ? 'The current layout is ready, but the licensed drawing writer is unavailable.'
+          : 'Current layout read. Review it before publishing.'
+        : result?.code === 'PROJECT_LAYOUT_INITIAL_UNAVAILABLE' ? 'Initial project drawing publication is not connected yet.'
+          : 'The current layout is unavailable. Read it again before publishing.' })
+    } catch {
+      if (activeScope.current) setPublication({ phase: 'idle', message: 'The current layout could not be read. Try again.' })
+    } finally { publicationPending.current = false }
+  }
+
+  async function publishLayout() {
+    if (publicationPending.current || busy || phase !== 'idle'
+      || Object.values(writers).some(Boolean) || stagingPending) return
+    const key = JSON.stringify([projectScope?.organization_id, projectId, projectScope?.drawing_id ?? null])
+    const previous = publicationRequests.get(key)
+    let captured = publicationCapture(previous?.captured.request_id ?? globalThis.crypto.randomUUID())
+    if (!captured || typeof onProjectDrawingPublished !== 'function') {
+      setPublication({ phase: 'idle', message: 'Select a project drawing version and read its current layout before publishing.' }); return
+    }
+    if (previous?.unknown && !solarPublicationMatches(previous.captured, captured)) {
+      setPublication({ phase: 'unknown', message: 'The previous publication outcome is unknown. Return to its drawing version and layout to reconcile that request.' }); return
+    }
+    if (previous && !previous.unknown && !solarPublicationMatches(previous.captured, captured))
+      captured = publicationCapture(globalThis.crypto.randomUUID())
+    const attempt = previous && solarPublicationMatches(previous.captured, captured) ? previous : { captured }
+    publicationRequests.set(key, attempt)
+    publicationPending.current = true
+    setPublication({ phase: 'pending', message: 'Publishing the layout to this project drawing.' })
+    let writeStarted = false
+    try {
+      if (!attempt.receipt && captured.mode === 'successor' && !attempt.capability) {
+        const acquired = await publicationCheckout.acquireCheckout(captured)
+        attempt.capability = typeof acquired === 'string' ? acquired : acquired?.capability ?? acquired?.checkout_capability
+        if (typeof attempt.capability !== 'string' || !attempt.capability) throw new Error('checkout unavailable')
+      }
+      if (!solarPublicationMatches(attempt.captured, publicationCapture(attempt.captured.request_id))) {
+        if (activeScope.current) setPublication({ phase: 'idle', message: 'The drawing or layout changed. Publication was not sent.' })
+        return
+      }
+      writeStarted = !attempt.receipt
+      const answer = attempt.receipt ? { ok: true, value: attempt.receipt }
+        : await publicationClient.publish(attempt.captured, { capability: attempt.capability })
+      if (!answer.ok) {
+        attempt.unknown = answer.outcomeUnknown === true
+        if (activeScope.current) setPublication({ phase: attempt.unknown ? 'unknown' : 'idle', message:
+          answer.code === 'PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE'
+            ? 'Editable drawing publication is unavailable because the licensed layout writer is not connected.'
+            : attempt.unknown ? 'Publication outcome is unknown. Retry to reconcile the same request.'
+              : `Publication is incomplete (${answer.code}). Check access and the current drawing checkout, then retry.` })
+        return
+      }
+      attempt.unknown = false
+      attempt.receipt = answer.value
+      if (!solarPublicationMatches(attempt.captured, publicationCapture(attempt.captured.request_id))) {
+        if (activeScope.current) setPublication({ phase: 'idle', message: 'The drawing or layout changed. Publication was not selected.' })
+        return
+      }
+      const seated = await onProjectDrawingPublished(answer.value, attempt.captured,
+        () => solarPublicationMatches(attempt.captured, publicationCapture(attempt.captured.request_id)))
+      if (activeScope.current) setPublication({ phase: 'idle', message: seated
+        ? 'Layout published as an editable project drawing version.'
+        : 'Publication is incomplete. The project could not be refreshed to the returned drawing version.' })
+    } catch {
+      attempt.unknown = writeStarted && !attempt.receipt
+      if (activeScope.current) setPublication({ phase: attempt.unknown ? 'unknown' : 'idle', message: attempt.unknown
+        ? 'Publication outcome is unknown. Retry to reconcile the same request.'
+        : attempt.receipt ? 'Publication is incomplete. Retry the project refresh for the same returned version.'
+          : 'The project drawing checkout is unavailable. No publication was sent. Retry the same request.' })
+    } finally {
+      if (!attempt.unknown && attempt.capability) {
+        try { await publicationCheckout.releaseCheckout(attempt.captured, attempt.capability); attempt.capability = null }
+        catch { /* Keep the exact capability on this attempt for explicit cleanup/retry. */ }
+      }
+      publicationPending.current = false
+    }
+  }
+
   function signalPhysicalPeers(head, origin) {
     const signal = head?.state?.artifact_id
     if (typeof signal !== 'string') return
@@ -606,11 +732,33 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     onPhysicalHeadChanged?.(result)
   }
 
-  if (!hasLandxml && !hasCombiner && !hasTerrain && !hasSolarEdge && !trackerMounted) return null
+  const hasProjectPublication = projectId !== null && flow === 'ground-physical'
+  if (!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasSolarEdge && !trackerMounted) return null
   return (
     <section className="solar-workspace-tools" aria-label="Solar workspace tools"
-      hidden={!hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows && !hasSolarEdge}
+      hidden={!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows && !hasSolarEdge}
       data-physical-head-index={physicalHead?.index ?? undefined}>
+      {projectId !== null && flow === 'ground-physical' && <div aria-label="Project layout publication">
+        {projectScope?.drawing_id === null && projectScope?.input_version_id === null && <div>
+          <p>Use the original boundary and complete preset. No drawing upload is required.</p>
+          <label>Site boundary (JSON)<textarea value={initialBoundary} maxLength={2000000}
+            onChange={event => setInitialBoundary(event.target.value)} /></label>
+          <label>Complete preset (JSON)<textarea value={initialPreset} maxLength={2000000}
+            onChange={event => setInitialPreset(event.target.value)} /></label>
+          <label>Drawing units for publication<select value={initialUnits} onChange={event => setInitialUnits(event.target.value)}>
+            <option value="m">Metres</option><option value="ft">Feet</option>
+          </select></label>
+        </div>}
+        <button type="button" disabled={publication.phase === 'pending' || busy || !projectScope}
+          onClick={readPublicationHead}>Read current layout for publication</button>
+        <button type="button" disabled={publication.phase === 'pending' || busy
+          || !publicationReadback || !projectScope || (projectScope.input_version_id === null && !initialParameters)
+          || Object.values(writers).some(Boolean) || phase !== 'idle' || stagingPending}
+          onClick={publishLayout}>{publication.phase === 'unknown' ? 'Reconcile layout publication'
+            : projectScope?.input_version_id === null ? 'Generate editable project drawing' : 'Publish layout as editable drawing'}</button>
+        {!projectScope && <p>Select a canonical project drawing version before publishing.</p>}
+        <p role="status">{publication.message}</p>
+      </div>}
       {hasCivil && <button type="button" ref={civilTrigger} aria-expanded={openPanel === 'civil'}
         onClick={() => { if (openPanel === 'civil') civilHeading.current?.focus(); else setOpenPanel('civil') }}>Civil operations</button>}
       {hasPhysicalRead && <button type="button" ref={readTrigger} aria-expanded={openPanel === 'physical-read'}
