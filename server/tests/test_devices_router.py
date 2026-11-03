@@ -485,3 +485,66 @@ def test_store_unavailability_is_safe_and_does_not_echo_exception(api, monkeypat
     assert response.status_code == 503
     assert response.json()["error"]["code"] == "service_unavailable"
     assert "fixture-secret-token" not in response.text
+
+
+def test_real_project_owner_check_admits_two_factor_admin_editor(api, monkeypatch):
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+    api.tenant = deps.TenantContext(TENANT, subject="auth0|admin", tier="admin")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|admin")
+    binding = SimpleNamespace(binding_id=uuid4())
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: binding)
+    monkeypatch.setattr(project_lifecycle, "require_project_role", lambda *args, **kwargs: "editor")
+    monkeypatch.setattr(devices, "_project_owner", _REAL_PROJECT_OWNER)
+    assert enroll(api).status_code == 201
+
+
+@pytest.mark.parametrize("tier,allowlist", [
+    ("admin", ""), ("pro", "auth0|admin"), ("admin", "auth0|someone-else"),
+], ids=["no-list", "no-tier", "other"])
+def test_real_project_owner_check_admin_needs_both_factors(api, monkeypatch, tier, allowlist):
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+    api.tenant = deps.TenantContext(TENANT, subject="auth0|admin", tier=tier)
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", allowlist)
+    binding = SimpleNamespace(binding_id=uuid4())
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: binding)
+    monkeypatch.setattr(project_lifecycle, "require_project_role", lambda *args, **kwargs: "editor")
+    monkeypatch.setattr(devices, "_project_owner", _REAL_PROJECT_OWNER)
+    response = enroll(api)
+    assert response.status_code == 403 and response.json()["error"]["code"] == "forbidden"
+
+
+@pytest.mark.parametrize("role", ["reviewer", "forbidden"], ids=["reviewer", "forbidden"])
+def test_real_project_owner_check_admin_still_needs_write_role(api, monkeypatch, role):
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+    api.tenant = deps.TenantContext(TENANT, subject="auth0|admin", tier="admin")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|admin")
+    binding = SimpleNamespace(binding_id=uuid4())
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: binding)
+
+    def require_role(*args, **kwargs):
+        assert kwargs["write"] is True
+        if role == "forbidden":
+            raise project_lifecycle.LifecycleForbidden("x")
+        return role
+
+    monkeypatch.setattr(project_lifecycle, "require_project_role", require_role)
+    monkeypatch.setattr(devices, "_project_owner", _REAL_PROJECT_OWNER)
+    response = enroll(api)
+    assert response.status_code == 403 and response.json()["error"]["code"] == "forbidden"
+
+
+def test_real_project_owner_check_admin_pass_covers_revoke_and_commands(api, monkeypatch):
+    device_id = device(api)
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+    api.tenant = deps.TenantContext(TENANT, subject="auth0|admin", tier="admin")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", "auth0|admin")
+    binding = SimpleNamespace(binding_id=uuid4())
+    monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda tenant: binding)
+    monkeypatch.setattr(project_lifecycle, "require_project_role", lambda *args, **kwargs: "editor")
+    monkeypatch.setattr(devices, "_project_owner", _REAL_PROJECT_OWNER)
+    assert enqueue(api, device_id).status_code == 202
+    assert api.client.post(f"/api/devices/{device_id}/revoke").status_code == 200
