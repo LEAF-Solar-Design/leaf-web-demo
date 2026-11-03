@@ -17,7 +17,7 @@ const jsonResponse = body => new Response(JSON.stringify(body), { headers: { 'Co
 beforeEach(() => {
   auth.scope = 'synthetic-account-a'
   // Replace the entire storage surface; no real browser credentials are read.
-  const values = { 'leaf.jwt': 'synthetic-reference-token', 'leaf.org_id': 'synthetic-org', 'leaf.actor_binding_id': 'synthetic-binding' }
+  const values = { 'leaf.jwt': 'REDACTED-reference-fixture', 'leaf.org_id': 'synthetic-org', 'leaf.actor_binding_id': 'synthetic-binding' }
   vi.stubGlobal('localStorage', { getItem: vi.fn(key => values[key] ?? null) })
   vi.stubGlobal('fetch', vi.fn().mockResolvedValue(jsonResponse({ materials: [] })))
 })
@@ -57,7 +57,7 @@ describe('original reference transport', () => {
     expect(fetch).toHaveBeenCalledExactlyOnceWith(`${base}?filename=${encodeURIComponent(name)}`, {
       method: 'POST', body: original, signal: controller.signal,
       headers: {
-        'Content-Type': contentType, Authorization: 'Bearer synthetic-reference-token',
+        'Content-Type': contentType, Authorization: 'Bearer REDACTED-reference-fixture',
         'X-Org-Id': 'synthetic-org', 'X-Actor-Binding-Id': 'synthetic-binding',
       },
     })
@@ -98,9 +98,9 @@ describe('original reference transport', () => {
     expect(await blob.text()).toBe('original movie bytes')
     expect(fetch).toHaveBeenCalledExactlyOnceWith(`${base}/${material}/content`, {
       signal: controller.signal, cache: 'no-store',
-      headers: { Authorization: 'Bearer synthetic-reference-token', 'X-Org-Id': 'synthetic-org', 'X-Actor-Binding-Id': 'synthetic-binding' },
+      headers: { Authorization: 'Bearer REDACTED-reference-fixture', 'X-Org-Id': 'synthetic-org', 'X-Actor-Binding-Id': 'synthetic-binding' },
     })
-    expect(fetch.mock.calls[0][0]).not.toContain('synthetic-reference-token')
+    expect(fetch.mock.calls[0][0]).not.toContain('REDACTED-reference-fixture')
   })
 
   it.each(['../foreign', '', null, 'not-a-uuid', `${project}/content`])('rejects malformed project %s for every operation before fetch', bad => {
