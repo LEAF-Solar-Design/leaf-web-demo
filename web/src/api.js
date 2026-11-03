@@ -1182,7 +1182,7 @@ export async function getJob(jobId) {
 // GET recent jobs for a tenant (reconnect-after-tab-close list).
 export async function listJobs(tenantId = TENANT, limit = 20) {
   // tenant scope is enforced from the header server-side; the query param is legacy/ignored
-  const data = await http(`/api/jobs?limit=${limit}`, { headers: { 'X-Tenant-Id': tenantId } })
+  const data = await http(`/api/jobs?limit=${limit}&summary=1`, { headers: { 'X-Tenant-Id': tenantId } })
   return data.jobs || []
 }
 
