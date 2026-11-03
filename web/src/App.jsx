@@ -103,6 +103,7 @@ import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import AddonsPanel from './components/AddonsPanel.jsx'
 import CostTransparencyPanel from './components/CostTransparencyPanel.jsx'
 import useTenantMcpRegistry from './useTenantMcpRegistry.js'
+import useDeviceRegistry from './useDeviceRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
 import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
@@ -1085,6 +1086,8 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const deviceRegistry = useDeviceRegistry({ mock: mock || knownGuest, projectId: openProjectId })
+  const [linkDeviceOpen, setLinkDeviceOpen] = useState(false)
   useDrawingScopeReset(openProjectId)
   useLayoutEffect(() => {
     // A project or drawing change retires any queued product-tab switch.
@@ -4905,6 +4908,27 @@ export default function App() {
         onRefresh: mcpRegistry.refresh,
         onHealth: mcpRegistry.health,
         onUnlink: mcpRegistry.unlink,
+      }}
+      devices={!mock && (knownGuest || !openProjectId) ? null : {
+        mock,
+        projectId: openProjectId,
+        devices: deviceRegistry.devices,
+        loading: deviceRegistry.loading,
+        busy: deviceRegistry.busy,
+        error: deviceRegistry.error,
+        catalog: deviceRegistry.catalog,
+        catalogLoading: deviceRegistry.catalogLoading,
+        catalogError: deviceRegistry.catalogError,
+        onLoadCatalog: deviceRegistry.loadCatalog,
+        open: linkDeviceOpen,
+        onToggle: setLinkDeviceOpen,
+        onEnroll: deviceRegistry.enroll,
+        onRefresh: deviceRegistry.refresh,
+        onCommand: deviceRegistry.command,
+        onGetCommand: deviceRegistry.getCommand,
+        onAudit: deviceRegistry.audit,
+        onRevoke: deviceRegistry.revoke,
+        onRelayToken: deviceRegistry.relayToken,
       }}
     >
     <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-drawer={studioShell && !browserAssetActive ? studioDrawer : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"
