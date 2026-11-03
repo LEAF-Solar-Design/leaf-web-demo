@@ -989,7 +989,7 @@ def build_suites() -> List[Suite]:
         # report whether the stored frame elevations and piles still match the current grid. Hermetic and
         # nothing skips: the floor is the exact count, 106.
         Suite("server-solar-frames-piles", "server tests/test_solar_frames_piles.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 106),
+              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 111),
         # sf-w3-tracker-rows-domain: explicit manual tracker rows created once on the drawing's physical
         # head (server/solar_tracker_rows.py), converted end to end by the Ground conversion kernel.
         # Hermetic and nothing skips: the floor is the exact count, 38.
@@ -2050,7 +2050,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
               _py_pytest("tests/test_sip_r3a_graph.py"), 24),
         Suite("server-sip-r3b-tools", "server canonical Solar tool chain", "pytest", SERVER,
-      _py_pytest("tests/test_sip_r3b_tools.py"), 25),
+      _py_pytest("tests/test_sip_r3b_tools.py"), 26),
         Suite("platform-sip-r3b-tools", "platform canonical Solar tool publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
               uses_database=True, db_gated=True, database_skip_reasons=(

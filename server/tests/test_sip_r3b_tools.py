@@ -51,6 +51,80 @@ def manifest(tool):
     return deps.catalog_tool_digest(solar_tools.trusted_record(tool))
 
 
+def test_current_native_canonical_preset_producer_roundtrip_real_pg(fresh):
+    import solar_native_layout_dxf as native
+    import solar_ground_graph_codec as codec
+    from test_solar_ground_conversion import canonical_preset
+    from test_solar_tool_design_presets_l2_mode import settings_of
+    from uuid import uuid4
+    lane, project_id = fresh
+    original = canonical_preset()
+    body = {'boundary': [[0, 0], [15, 0], [15, 18], [0, 18]],
+            'preset': json.loads(json.dumps(original, sort_keys=True)), 'drawing_units': 'm'}
+    key = str(uuid4())
+    response = lane.http.post(f'/api/projects/{project_id}/solar-layout', json=body,
+                              headers={'Idempotency-Key': key})
+    assert response.status_code == 200, response.text
+    first = response.json()
+    drawing, parent = UUID(first['drawing_id']), first['drawing_version']['version_id']
+    base = f'/api/projects/{project_id}/drawings/{drawing}'
+    raw = lane.http.get(base+f'/versions/{parent}/dxf').content
+    decoded = native.decode_native_layout(raw)
+    model = decoded.parameters['generation_models'][0]
+    assert [s['count'] for s in model['tracker_pack']['segments']] == [6, 1, 1, 6]
+    assert model['rows']*model['columns'] == 72 and model['module_power_wp'] == 715
+    assert decoded.document['state']['frames'][0]['vertices'][2] == pytest.approx([14.654, 16.336])
+    reordered = {**body, 'preset': original}
+    assert lane.http.post(f'/api/projects/{project_id}/solar-layout', json=reordered,
+                         headers={'Idempotency-Key': key}).json() == first
+    cap = lane.http.post(base+'/checkout').json()['checkout_capability']
+    source = lane.http.get(base+f'/versions/{parent}/solar-layout').json()['physical_source']
+    second_preset = canonical_preset(rows=4, power=650)
+    continued = lane.http.post(base+f'/versions/{parent}/solar-layout/operations', json={
+        'physical_source': source, 'operation': 'frame-generate', 'parameters': {
+            'boundary': [[100, 0], [110, 0], [110, 18], [100, 18]],
+            'preset': dict(reversed(list(second_preset.items()))), 'drawing_units': 'm'}},
+        headers={'Idempotency-Key': str(uuid4()), 'X-Checkout-Capability': cap})
+    assert continued.status_code == 200, continued.text
+    parent = UUID(continued.json()['drawing_version']['version_id'])
+    second = native.decode_native_layout(lane.http.get(base+f'/versions/{parent}/dxf').content)
+    assert second.parameters['generation_models'][0] == model
+    assert second.document['state']['frames'][0] == decoded.document['state']['frames'][0]
+    assert len(second.document['state']['frames']) == 2
+    admission = project.verify_at_admission(lane.tenant, project_id, drawing, parent, checkout_capability=cap)
+    ctx = adapter.resolve_project_graph_context(project.resolve_context(lane.tenant, project_id, parent, drawing_id=drawing))
+    def reopen(result):
+        return adapter.resolve_project_graph_context(project.resolve_context(lane.tenant, project_id,
+            UUID(result['output_version_id']), drawing_id=drawing))
+    seeded = adapter.run_project_graph_seed(lane.tenant, ctx, {'expected_rev': 0,
+        'changes': {'panels_in_sequence': 12}, 'initialize': {'schema_version': 1,
+        'source_intake_sha256': ctx.intake_sha256, 'units': {**deepcopy(UNITS), 'drawing_units': 'm'}}},
+        checkout=admission.checkout, job_id=uuid4(), attempt=1, tool_manifest_sha256=manifest('solar-settings'))
+    ctx = reopen(seeded)
+    profiled = adapter.run_project_graph_commit(lane.tenant, ctx, 'solar-design-presets',
+        {'expected_rev': ctx.graph['rev'], 'subcommand': 'Create', 'name': 'Ground',
+         'current_settings': settings_of(False, design='Ground')}, checkout=admission.checkout,
+        job_id=uuid4(), attempt=1, tool_manifest_sha256=manifest('solar-design-presets'))
+    ctx = reopen(profiled)
+    job = uuid4()
+    params = {'expected_rev': ctx.graph['rev']}
+    result = adapter.run_project_graph_commit(lane.tenant, ctx, 'solar-trackers-to-panel-groups', params,
+        checkout=admission.checkout, job_id=job, attempt=1,
+        tool_manifest_sha256=manifest('solar-trackers-to-panel-groups'))
+    grouped = reopen(result)
+    expanded = codec.expand_graph(grouped.graph)
+    assert len(expanded['panels']) == 120
+    assert sum(f['module_slots']*f['module_power_watts'] for f in grouped.graph['frames']) == 82680
+    assert adapter.run_project_graph_commit(lane.tenant, ctx, 'solar-trackers-to-panel-groups', params,
+        checkout=admission.checkout, job_id=job, attempt=1,
+        tool_manifest_sha256=manifest('solar-trackers-to-panel-groups')) == result
+    restored = lane.http.post(base+f"/versions/{result['output_version_id']}/editor/restore",
+        json={'version_id': first['drawing_version']['version_id']},
+        headers={'Idempotency-Key': str(uuid4()), 'X-Checkout-Capability': cap})
+    assert restored.status_code == 200, restored.text
+    assert lane.http.get(base+f"/versions/{restored.json()['drawing_version']['version_id']}/dxf").content == raw
+
+
 def test_canonical_generated_modules_group_through_real_pg_profile_and_reprepare(fresh):
     import project_solar_materialization as physical
     import solar_ground_graph_codec as codec

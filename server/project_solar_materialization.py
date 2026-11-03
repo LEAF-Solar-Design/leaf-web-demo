@@ -77,7 +77,7 @@ def publish_initial_layout(tenant, project_id, body, *, request_id):
     if project.write_loop.drawing_mutations_refusal() is not None:
         project.refuse('WRITES_DRAINED')
     try:
-        document, inputs = fp.prepare_initial_frames(**body)
+        document, inputs = fp.prepare_initial_frames(**body, current_native=True)
     except (fp.FramesPilesError, state.PhysicalStateError) as exc:
         raise editor.EditorError(exc.code, 422) from None
     drawing_id = uuid5(project_id, 'solar-initial:' + str(request_id))
@@ -286,7 +286,7 @@ def _canonical_state(context, *, conn=None):
 def _generation_provenance(inputs, document, preset, *, existing=()):
     """Keep the actual parsed model, including order-sensitive native pack semantics."""
     import solar_frames_piles as fp
-    loaded, _ = fp.load_preset(preset)
+    loaded, _ = fp.load_current_preset(preset)
     models = inputs.setdefault('generation_models', [])
     associations = inputs.setdefault('frame_generations', {})
     index = len(models)
@@ -338,7 +338,7 @@ def publish_operation(tenant, project_id, drawing_id, parent_id, body, *, reques
         existing_handles = {frame['handle'] for frame in document['state'].get('frames', [])}
         try:
             document, inputs = fp.continue_physical_document(document, inputs,
-                                                             body['operation'], body['parameters'])
+                                                             body['operation'], body['parameters'], current_native=True)
         except (fp.FramesPilesError, state.PhysicalStateError) as exc:
             raise editor.EditorError(exc.code, 422) from None
         if body['operation'] == 'frame-generate':
