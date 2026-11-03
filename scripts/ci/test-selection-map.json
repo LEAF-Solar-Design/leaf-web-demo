@@ -243,6 +243,7 @@
     "server-build-queue",
     "server-device-auth",
     "server-device-bridge-contract",
+    "server-device-relay",
     "server-build-receipts",
     "server-builds-route",
     "server-cost-pooled",
