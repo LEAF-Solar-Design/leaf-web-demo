@@ -55,28 +55,29 @@ const errorWords = {
   rate_limited: 'Too many requests. Try again in a minute.',
   service_unavailable: 'Device management is temporarily unavailable. Try again.',
 }
+const knownErrorCode = (code) => typeof code === 'string' && Object.hasOwn(errorWords, code) ? code : null
 
 export class DeviceRequestError extends Error {
-  constructor(status, code = '') {
+  constructor(status, code = null) {
     super('Device request failed.')
     this.name = 'DeviceRequestError'
     this.status = status
-    this.code = code
+    this.code = knownErrorCode(code)
   }
 }
 
 export function deviceError(error) {
   const code = error?.body?.error?.code || error?.error?.code || error?.code
   // Never render an arbitrary server error message, which could carry secrets.
-  if (typeof error?.status === 'number') {
-    if (error.status === 403) return errorWords.forbidden
-    if (error.status === 401) return errorWords.unauthorized
-    if (error.status === 409 && code === 'device_revoked') return errorWords.device_revoked
-    if (error.status === 429) return errorWords.rate_limited
-    if (error.status === 503 || error.status === 0) return errorWords.service_unavailable
-    return "That didn't work. Try again."
-  }
-  return errorWords[code] || (code ? 'The device could not complete this action. Try again.' : humanizeError(error))
+  if (error?.status === 401) return errorWords.unauthorized
+  if (error?.status === 403) return errorWords.forbidden
+  if (error?.status === 429) return errorWords.rate_limited
+  // Specific device guidance takes precedence over other HTTP status fallbacks.
+  const knownCode = knownErrorCode(code)
+  if (knownCode) return errorWords[knownCode]
+  if (error?.status === 503 || error?.status === 0) return errorWords.service_unavailable
+  if (typeof error?.status === 'number' || code) return "That didn't work. Try again."
+  return humanizeError(error)
 }
 
 export const demoDevice = projectDevice({
@@ -121,7 +122,7 @@ export default function useDeviceRegistry({ mock = false, projectId } = {}) {
         })
       } catch {
         if (current.current !== scope || life !== lifetime.current) return null
-        throw new DeviceRequestError(0, 'network_error')
+        throw new DeviceRequestError(0)
       }
       response = noteUnauthorized(response, path, headers.Authorization)
       if (current.current !== scope || life !== lifetime.current) return null
@@ -130,7 +131,7 @@ export default function useDeviceRegistry({ mock = false, projectId } = {}) {
       catch (e) { if (response.ok) throw e }
       if (current.current !== scope || life !== lifetime.current) return null
       if (!response.ok) {
-        throw new DeviceRequestError(response.status, text(result?.error?.code) || text(result?.detail))
+        throw new DeviceRequestError(response.status, knownErrorCode(result?.error?.code) || knownErrorCode(result?.detail))
       }
       return result
     } finally { requests.current.delete(controller) }

@@ -37,7 +37,7 @@ it.each([
   [503, { detail: 'private upstream diagnostics' }, 'Device management is temporarily unavailable. Try again.'],
   [409, { error: { code: 'device_revoked', message: 'private device diagnostics' } }, 'This device was revoked. Link it again.'],
   [409, { detail: 'private conflict diagnostics' }, "That didn't work. Try again."],
-  [500, { error: { code: 'forbidden', message: 'private failure diagnostics' } }, "That didn't work. Try again."],
+  [500, { error: { code: 'forbidden', message: 'private failure diagnostics' } }, ownerMessage],
   [0, null, 'Device management is temporarily unavailable. Try again.'],
 ])('shows a safe enrollment refusal for HTTP %s with body %j', async (status, body, message) => {
   fetch.mockImplementation(async (url) => {
@@ -94,6 +94,13 @@ it('clears an enrollment refusal on close and keeps it cleared on reopening', as
 it.each([
   ['command', 403, { detail: 'tenant owner authority required' }, ownerMessage],
   ['command', 409, { error: { code: 'device_revoked', message: 'private command diagnostics' } }, 'This device was revoked. Link it again.'],
+  ['command', 422, { error: { code: 'version_unknown', message: 'private catalog diagnostics' } }, 'This version is not in the device catalog. Refresh the agent and retry.'],
+  ['command', 422, { error: { code: 'path_denied' } }, 'This action is not allowed by the device catalog.'],
+  ['command', 422, { error: { code: 'package_unknown' } }, 'This package is not in the device catalog.'],
+  ['command', 422, { error: { code: 'unsupported_op' } }, 'This agent does not support that action. Update the agent and retry.'],
+  ['command', 503, { error: { code: 'device_offline' } }, 'This device is offline. Check its connection and retry.'],
+  ['command', 503, { error: { code: 'service_unavailable' } }, 'Device management is temporarily unavailable. Try again.'],
+  ['command', 422, { error: { code: 'unknown_failure', message: 'private failure diagnostics' } }, "That didn't work. Try again."],
   ['revoke', 403, { error: { code: 'forbidden', message: 'private revoke diagnostics' } }, ownerMessage],
   ['revoke', 503, { detail: 'private revoke diagnostics' }, 'Device management is temporarily unavailable. Try again.'],
 ])('shows %s HTTP %s failures in the device row and clears them on retry and close', async (action, status, body, message) => {
@@ -114,6 +121,10 @@ it.each([
   fireEvent.click(button)
   const row = button.closest('.ca-account')
   expect(await within(row).findByRole('alert')).toHaveTextContent(message)
+  if (action === 'command') {
+    const request = fetch.mock.calls.find(([url]) => url.endsWith('/commands'))
+    expect(JSON.parse(request[1].body)).toEqual({ op: 'pkg.install', args: { package: 'homeassistant', version: 'catalog-v2' } })
+  }
   expect(screen.getAllByRole('alert')).toHaveLength(1)
   expect(container.innerHTML).not.toMatch(/private|tenant owner authority required/)
   await waitFor(() => expect(button).not.toBeDisabled())
