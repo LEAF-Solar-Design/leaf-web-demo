@@ -17,6 +17,122 @@ from test_w1_design_graph import graph
 from test_project_drawing_editor import lane, private_pg, checkout
 
 
+def canonical_start(fresh):
+    lane, project = fresh
+    response = lane.http.post(f'/api/projects/{project}/solar-layout', json=initial_body(),
+                              headers={'Idempotency-Key': str(uuid4())})
+    assert response.status_code == 200, response.text
+    receipt = response.json()
+    base = f"/api/projects/{project}/drawings/{receipt['drawing_id']}"
+    return lane, project, receipt, base
+
+
+def test_canonical_initial_physical_continuity_and_exact_restore(fresh):
+    import solar_native_layout_dxf as native
+    lane, project, first, base = canonical_start(fresh)
+    parent = first['drawing_version']['version_id']
+    source = lane.http.get(base + f'/versions/{parent}/solar-layout')
+    assert source.status_code == 200, source.text
+    assert source.json()['physical_source_kind'] == 'canonical_version_intake'
+    physical_source = source.json()['physical_source']
+    assert physical_source['physical_head'] == first['intake_sha256']
+    cap = lane.http.post(base + '/checkout').json()['checkout_capability']
+    request = str(uuid4())
+    parameters = initial_body()
+    parameters['boundary'] = [[x + 1000, y] for x, y in parameters['boundary']]
+    body = {'physical_source': physical_source, 'operation': 'frame-generate', 'parameters': parameters}
+    route = base + f'/versions/{parent}/solar-layout/operations'
+    response = lane.http.post(route, json=body, headers={'Idempotency-Key': request, 'X-Checkout-Capability': cap})
+    assert response.status_code == 200, response.text
+    receipt = response.json()
+    successor = receipt['drawing_version']['version_id']
+    before = lane.http.get(base + f'/versions/{parent}/dxf').content
+    after = lane.http.get(base + f'/versions/{successor}/dxf').content
+    original, continued = native.decode_native_layout(before), native.decode_native_layout(after)
+    assert len(continued.frames) == 2 * len(original.frames)
+    assert continued.document['state']['frames'][:len(original.frames)] == original.document['state']['frames']
+    assert continued.parameters['generation_history'] == [original.parameters['generation'], continued.parameters['generation']]
+    assert continued.parameters['generation']['boundary'] == parameters['boundary']
+    assert lane.http.post(route, json=body, headers={'Idempotency-Key': request, 'X-Checkout-Capability': cap}).json() == receipt
+    reopened = lane.http.get(base + f'/versions/{successor}/solar-layout')
+    assert reopened.status_code == 200 and reopened.json()['physical_source']['physical_head'] == receipt['intake_sha256']
+    conflict = lane.http.post(route, json={**body, 'parameters': initial_body()},
+        headers={'Idempotency-Key': request, 'X-Checkout-Capability': cap})
+    assert conflict.status_code == 409 and conflict.json()['error']['reason_code'] == 'SIP_R2_IDEMPOTENCY_CONFLICT'
+    boolean_request = deepcopy(body)
+    assert boolean_request['parameters']['boundary'][0][1] == 0
+    boolean_request['parameters']['boundary'][0][1] = False
+    conflict = lane.http.post(route, json=boolean_request,
+        headers={'Idempotency-Key': request, 'X-Checkout-Capability': cap})
+    assert conflict.status_code == 409 and conflict.json()['error']['reason_code'] == 'SIP_R2_IDEMPOTENCY_CONFLICT'
+    restored = lane.http.post(base + f'/versions/{successor}/editor/restore', json={'version_id': parent},
+        headers={'Idempotency-Key': str(uuid4()), 'X-Checkout-Capability': cap})
+    assert restored.status_code == 200, restored.text
+    restored_id = restored.json()['drawing_version']['version_id']
+    raw = lane.http.get(base + f'/versions/{restored_id}/dxf').content
+    assert raw == before and native.decode_native_layout(raw).parameters == original.parameters
+    assert lane.http.get(base + f'/versions/{restored_id}/solar-layout').status_code == 200
+    assert lane.http.post(route, json=body, headers={'Idempotency-Key': request, 'X-Checkout-Capability': cap}).json() == receipt
+
+
+@pytest.mark.parametrize('failure', ['stale_version', 'stale_head', 'foreign_project', 'foreign_tenant',
+                                     'foreign_metadata', 'tampered_metadata', 'no_checkout'])
+def test_canonical_continuity_refuses_before_mutation(fresh, failure):
+    import deps
+    import solar_frames_piles as fp
+    import solar_native_layout_dxf as native
+    from leaf_platform import store
+    lane, project, first, base = canonical_start(fresh)
+    drawing, parent = layout.UUID(first['drawing_id']), layout.UUID(first['drawing_version']['version_id'])
+    source = lane.http.get(base + f'/versions/{parent}/solar-layout').json()['physical_source']
+    context = layout.project.resolve_context(lane.tenant, project, parent, drawing_id=drawing)
+    raw = lane.http.get(base + f'/versions/{parent}/dxf').content
+    cap = None if failure == 'no_checkout' else lane.http.post(base + '/checkout').json()['checkout_capability']
+    expected = None
+    if failure in ('stale_version', 'foreign_metadata', 'tampered_metadata'):
+        if failure != 'stale_version':
+            decoded = native.decode_native_layout(raw)
+            scope = {'organization_id': lane.org, 'project_id': project, 'drawing_id': drawing}
+            document = decoded.document
+            parameters = decoded.parameters
+            if failure == 'foreign_metadata':
+                scope['drawing_id'] = uuid4()
+            else:
+                values = initial_body()
+                values['boundary'] = [[x + 1000, y] for x, y in values['boundary']]
+                document, parameters = fp.prepare_initial_frames(**values)
+            raw = native.materialize_native_layout(scope, None, document, None, parameters=parameters)
+        saved = editor.save_dxf(lane.tenant, project, drawing, parent, raw, request_id=uuid4(), capability=cap)
+        if failure != 'stale_version':
+            parent = layout.UUID(saved['drawing_version']['version_id'])
+            expected = 'PROJECT_LAYOUT_NATIVE_SCOPE_MISMATCH' if failure == 'foreign_metadata' else 'PROJECT_LAYOUT_NATIVE_METADATA_INVALID'
+        else:
+            expected = 'SIP_R1_STALE_VERSION'
+    if failure == 'stale_head':
+        source['physical_head'] = '0' * 64
+        expected = 'PROJECT_LAYOUT_PHYSICAL_HEAD_STALE'
+    if failure == 'foreign_project':
+        base = f'/api/projects/{lane.project}/drawings/{drawing}'
+    if failure == 'foreign_tenant':
+        org = store.create_org('Foreign continuity tenant')
+        subject = 'auth0|continuity-' + uuid4().hex
+        store.create_identity_binding(org.org_id, 'auth0', subject, role='editor')
+        lane.app.dependency_overrides[deps.require_active_tenant] = lambda: deps.TenantContext(
+            str(org.org_id), org_id=str(org.org_id), subject=subject, authority_resolved=True)
+    if failure == 'no_checkout':
+        expected = 'SIP_R1_CHECKOUT_REQUIRED'
+    before = [v.version_id for v in store.list_drawing_versions(lane.org, project)]
+    body = {'physical_source': source, 'operation': 'frame-generate', 'parameters': initial_body()}
+    headers = {'Idempotency-Key': str(uuid4())}
+    if cap:
+        headers['X-Checkout-Capability'] = cap
+    response = lane.http.post(base + f'/versions/{parent}/solar-layout/operations', json=body, headers=headers)
+    assert response.status_code in (403, 404, 409), response.text
+    if expected:
+        assert response.json()['error']['reason_code'] == expected
+    assert [v.version_id for v in store.list_drawing_versions(lane.org, project)] == before
+
+
 @pytest.fixture
 def fresh(lane):
     from leaf_platform import db, store
@@ -78,11 +194,9 @@ def test_connected_initial_layout_needs_no_import_or_dummy_drawing(fresh):
     reopened = lane.http.get(base + f'/versions/{restored_id}/dxf')
     assert reopened.content == source.content
     assert native.decode_native_layout(reopened.content).parameters == decoded.parameters
-    # Exact remaining continuity gap: initial canonical intake has no legacy
-    # account-upload graph/head binding. Do not invent one after publication.
     followup = lane.http.get(base + f'/versions/{restored_id}/solar-layout')
-    assert followup.status_code == 409
-    assert followup.json()['error']['reason_code'] == 'PROJECT_LAYOUT_GRAPH_REQUIRED'
+    assert followup.status_code == 200
+    assert followup.json()['physical_source_kind'] == 'canonical_version_intake'
 
 
 def test_initial_real_storage_metadata_replay_and_normal_history(fresh, monkeypatch):

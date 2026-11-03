@@ -522,6 +522,44 @@ def prepare_initial_frames(*, boundary, preset, drawing_units):
                       "generation": request, "piling": None}
 
 
+def continue_physical_document(document, parameters, operation, values):
+    """Run existing kernels on a canonical snapshot; the caller owns versioned publication."""
+    document = ps.decode_document(ps.encode_document(document))
+    parameters = json.loads(json.dumps(parameters, allow_nan=False))
+    state, units = document['state'], document['units']['drawing_units']
+    base = hashlib.sha256(ps.encode_document(document)).hexdigest()
+    if type(values) is not dict:
+        raise FramesPilesError('FRAMES_PILES_STATE_INVALID')
+    if operation == GENERATE and set(values) == {'boundary', 'preset', 'drawing_units'}:
+        if values['drawing_units'] != units:
+            raise FramesPilesError('FRAMES_PILES_UNITS_MISMATCH')
+        boundary = _boundary(values['boundary'])
+        preset, _ = load_preset(values['preset'])
+        request = {'operation': GENERATE, 'base': base, 'boundary': boundary,
+                   'preset': values['preset'], 'drawing_units': units}
+        inputs = {'boundary': boundary, 'preset': preset}
+    elif operation == PILING and set(values) == {'preset', 'pile_template'}:
+        preset, presets = load_preset(values['preset'])
+        inputs = {'preset': preset, 'pile_store': load_pile_store(values['pile_template'], preset, presets)}
+        request = {'operation': PILING, 'base': base, **values}
+    else:
+        raise FramesPilesError('FRAMES_PILES_STATE_INVALID')
+    terrain_standing(state, ps.UNITS[units])
+    try:
+        _RUN[operation](state, ps.UNITS[units], inputs)
+        terrain_standing(state, ps.UNITS[units])
+    except frames.GroundFramesError as exc:
+        raise FramesPilesError(_kernel_refusal(exc)) from None
+    result = ps.physical_document(state, drawing_units=units, source_sha256=canonical_sha256(request),
+                                  capability=operation, parent=base, frame=document['frame'])
+    parameters['operation'] = request
+    key = 'generation' if operation == GENERATE else 'piling'
+    history = parameters.setdefault(key + '_history', [parameters[key]] if parameters.get(key) else [])
+    history.append(request)
+    parameters[key] = request
+    return result, parameters
+
+
 def detect_collisions(backend, tenant_id, drawing_id, *, base, project_id=None):
     """frame-collision-detect: overlap markers for the head's native frames."""
     base = _common(project_id, base)
