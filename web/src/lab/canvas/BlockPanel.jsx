@@ -1,11 +1,17 @@
-import { useEffect, useRef, useState } from 'react'
+import { createContext, useContext, useEffect, useRef, useState } from 'react'
 import { canonicalJSON } from '../contract.js'
 import { manifestFor, registry } from './registry.js'
 import { connectionStatus } from './portCompat.js'
 import { inputValues, pipeId, validateGraph } from './graphDoc.js'
 import CodeTab, { SettingField, SettingsJSON } from '../code/CodeTab.jsx'
 
+// Inspector also serves read-only views; edit actions come from the owning canvas.
+export const OutputActionsContext = createContext(null)
+
 export default function BlockPanel({ block, document, onSettings, onConnect, onDisconnect, entries = registry, upstream = {}, evidence = null, codeEvidence }) {
+  const outputActions = useContext(OutputActionsContext)
+  const [outputName, setOutputName] = useState('')
+  const [outputPort, setOutputPort] = useState('')
   const manifest = manifestFor(block, entries)
   const [tab, setTab] = useState('Setup')
   const [draft, setDraft] = useState(block.settings)
@@ -65,6 +71,21 @@ export default function BlockPanel({ block, document, onSettings, onConnect, onD
           {pipe.from.node}/{pipe.from.port} → {pipe.to.port} <button type="button" onClick={() => onDisconnect(pipeId(pipe))}>Disconnect {pipe.to.port}</button>
         </p>)}
         {Object.entries(manifest.inputs).map(([name, pin]) => <p key={name}>{name}: {pin.has_default ? `omitted uses default ${JSON.stringify(pin.default)}` : pin.required ? 'pipe required' : 'optional, no declared default'}</p>)}
+        {outputActions && <fieldset><legend>Expose as output</legend>
+          <label>Output port<select value={outputPort} onChange={event => setOutputPort(event.target.value)}>
+            <option value="">Choose output port</option>{Object.keys(manifest.outputs).map(port => <option key={port}>{port}</option>)}
+          </select></label>
+          <label>Output name<input value={outputName} onChange={event => setOutputName(event.target.value)} /></label>
+          <button type="button" disabled={!outputPort} onClick={() => {
+            try { outputActions.set(outputName, { node: block.id, port: outputPort }); setMessage('Output added') }
+            catch (error) { setMessage(error.message) }
+          }}>Add output</button>
+          {Object.entries(document.outputs).filter(([, endpoint]) => endpoint.node === block.id).map(([name, endpoint]) =>
+            <p key={name}>{name} / {endpoint.port} <button type="button" onClick={() => {
+              try { outputActions.remove(name); setMessage('Output removed') }
+              catch (error) { setMessage(error.message) }
+            }}>Remove output {name}</button></p>)}
+        </fieldset>}
         <details><summary>Submit settings JSON</summary>
           <SettingsJSON value={json} onChange={value => { setJson(value); dirty.current = true }} onApply={() => { try { save(JSON.parse(json)) } catch (error) { setMessage(error.message) } }} />
         </details>

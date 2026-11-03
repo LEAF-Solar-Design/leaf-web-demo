@@ -3,10 +3,11 @@ import { Background, Controls, ReactFlow, ReactFlowProvider, useReactFlow } from
 import '@xyflow/react/dist/style.css'
 import Palette, { BLOCK_MIME } from './Palette.jsx'
 import Inspector from './Inspector.jsx'
+import { OutputActionsContext } from './BlockPanel.jsx'
 import NodeCard from './NodeCard.jsx'
 import LatencyPipe from './LatencyPipe.jsx'
 import { contract, resolveManifest, registry } from './registry.js'
-import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, roundTrip, updateSettings, validateGraph } from './graphDoc.js'
+import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, removeOutput, roundTrip, setOutput, updateSettings, validateGraph } from './graphDoc.js'
 import { connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
 
@@ -172,9 +173,12 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
         <span className="leaf-timing">Layout {layoutMs === null ? 'not measured' : `${layoutMs.toFixed(2)} ms`}</span>{' · '}
         <span className="leaf-timing">Validation {validation.ms.toFixed(2)} ms</span></footer>
     </section>
+    <OutputActionsContext.Provider value={{ set: (name, endpoint) => commit(setOutput(current.current, name, endpoint, entries)),
+      remove: name => commit(removeOutput(current.current, name)) }}>
     <Inspector block={document.blocks.find(block => block.id === selected)} document={document} entries={entries} upstream={upstream} codeEvidence={codeEvidence}
       onSettings={settings => commit(updateSettings(current.current, selected, settings, entries))}
       onConnect={connect} onDisconnect={disconnect} onRemove={remove} onClose={() => setSelected(null)} />
+    </OutputActionsContext.Provider>
   </div>
 }
 
