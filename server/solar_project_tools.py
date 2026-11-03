@@ -2,6 +2,8 @@
 
 SUPPORTED_TOOLS = frozenset((
     "solar-settings",
+    "solar-design-presets",
+    "solar-trackers-to-panel-groups",
     "solar-panels-from-drawing",
     "solar-size-strings",
     "solar-combiners",

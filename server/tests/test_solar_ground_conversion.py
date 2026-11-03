@@ -33,6 +33,91 @@ SOURCE = "c" * 64
 VIEW = {"index": 0, "state": {"artifact_id": "b" * 64, "content_sha256": "d" * 64}}
 
 
+def canonical_preset(*, rows=6, power=715, segmented=True):
+    from test_solar_frames_piles import PRESET
+    raw = deepcopy(PRESET)
+    raw.pop('TrackerPack')
+    pack = {'Segments': [{'Kind': 'Modules', 'Count': 6}, {'Kind': 'JointGap', 'Count': 1},
+                         {'Kind': 'Motor', 'Count': 1}, {'Kind': 'Modules', 'Count': 6}],
+            'JointGapWidthM': .17, 'MotorGapWidthM': .53, 'IsMotorGapEnabled': True,
+            'PlacePilesAtJoints': True}
+    # Actual native loader semantics: initialize the pack before Rows/Columns.
+    # The publisher must retain the loaded model when canonical JSON reorders these keys.
+    return {'TrackerPack': pack if segmented else None, **raw, 'Name': 'Full faithful segmented preset',
+            'Rows': rows, 'Columns': 12, 'Orientation': 'Landscape', 'ModulePowerWp': power,
+            'HorizontalGapM': .07, 'VerticalGapM': .11}
+
+
+def canonical_conversion_input(preset=None):
+    from dataclasses import asdict
+    import solar_frames_piles as fp
+    preset = canonical_preset() if preset is None else preset
+    document, _ = fp.prepare_initial_frames(boundary=[[0, 0], [15, 0], [15, 18], [0, 18]],
+                                           preset=preset, drawing_units='m')
+    loaded, _ = fp.load_preset(preset)
+    view = {**deepcopy(VIEW), 'kind': 'canonical_version_intake', 'parameters': {
+        'generation_models': [asdict(loaded)],
+        'frame_generations': {frame['handle']: 0 for frame in document['state']['frames']}}}
+    return view, document
+
+
+def preset_discrepancy():
+    from dataclasses import asdict
+    import solar_frames_piles as fp
+    from test_solar_frames_piles import PRESET
+    legacy, _ = fp.load_preset(PRESET)
+    original = canonical_preset()
+    loaded, _ = fp.load_preset(original)
+    reloaded, _ = fp.load_preset(json.loads(json.dumps(original, sort_keys=True)))
+    return {'legacy': {'raw_json': json.dumps(PRESET, separators=(',', ':')), 'loaded_model': asdict(legacy)},
+            'order_sensitive': {'raw_json': json.dumps(original, separators=(',', ':')),
+                'loaded_pack': asdict(loaded.tracker_pack), 'canonical_reload_pack': asdict(reloaded.tracker_pack),
+                'footprint': fp.frames.frame_footprint(loaded),
+                'canonical_reload_footprint': fp.frames.frame_footprint(reloaded)},
+            'parity_kernel_unchanged': True}
+
+
+@pytest.mark.parametrize('segmented', [False, True])
+def test_canonical_multirow_modules_keep_real_gaps_power_and_identity(graph, segmented):
+    view, doc = canonical_conversion_input(canonical_preset(segmented=segmented))
+    result = conv.convert_physical_state(view, doc, ground_base(graph), provenance=provenance(), rev=1)
+    rows = result['frames']
+    assert len(rows) == 6 and result['counts']['slots'] == 72
+    assert all(frame['module_power_watts'] == 715 and frame['module_columns'] == 12 for frame in rows)
+    tables = [codec.decode_slots(frame['ground_slots']) for frame in rows]
+    assert len({ref for table in tables for ref in table.ids}) == 72
+    assert tables[1].centres[0] - tables[0].centres[0] == pytest.approx(2.384 + .07)
+    step = tables[0].centres[3] - tables[0].centres[1]
+    middle = tables[0].centres[13] - tables[0].centres[11]
+    assert step == pytest.approx(1.303 if segmented else 1.303 + .11)
+    assert middle == pytest.approx(1.303 + .17 + .53 if segmented else 1.303 + .11)
+    assert [frame['extra']['physical_frame']['source_module_row'] for frame in rows] == list(range(6))
+    assert result == conv.convert_physical_state(view, doc, ground_base(graph), provenance=provenance(), rev=1)
+
+
+@pytest.mark.parametrize('failure', ['missing_provenance', 'conflicting_model', 'wrong_units', 'changed_geometry',
+                                     'original_conflicting_preset'])
+def test_canonical_grouping_rejects_missing_or_conflicting_physical_provenance(graph, failure):
+    view, doc = canonical_conversion_input()
+    g = ground_base(graph)
+    code = 'GROUND_CONVERSION_INPUT_INVALID'
+    if failure == 'missing_provenance':
+        view['parameters']['frame_generations'] = {}
+    elif failure == 'conflicting_model':
+        view['parameters']['generation_models'][0]['columns'] = 11
+    elif failure == 'wrong_units':
+        g['project']['units']['meters_per_unit'] = .3048
+        code = 'GROUND_CONVERSION_UNITS_MISMATCH'
+    elif failure == 'changed_geometry':
+        doc['state']['frames'][0]['vertices'][1] = list(doc['state']['frames'][0]['vertices'][1])
+        doc['state']['frames'][0]['vertices'][1][0] += 1
+    else:
+        from test_solar_frames_piles import PRESET
+        view, doc = canonical_conversion_input(PRESET)
+        print('J10_PRESET_DISCREPANCY ' + json.dumps(preset_discrepancy(), separators=(',', ':')))
+    refused(code, conv.convert_physical_state, view, doc, g, provenance=provenance(), rev=1)
+
+
 def provenance():
     return deepcopy(entity("frame", 1)["provenance"])
 

@@ -1,5 +1,6 @@
 """Publish complete native physical layouts through canonical drawing custody."""
 from copy import deepcopy
+from dataclasses import asdict
 import json
 from uuid import UUID, uuid5
 
@@ -80,6 +81,7 @@ def publish_initial_layout(tenant, project_id, body, *, request_id):
     except (fp.FramesPilesError, state.PhysicalStateError) as exc:
         raise editor.EditorError(exc.code, 422) from None
     drawing_id = uuid5(project_id, 'solar-initial:' + str(request_id))
+    _generation_provenance(inputs, document, body['preset'])
     generation_source = {'parameters_sha256': digest(body),
                          'physical_content_sha256': editor._sha(state.encode_document(document))}
     # No imported source, synthetic base drawing, or canonical row exists here.
@@ -239,12 +241,25 @@ def _head_request(head):
             'physical_content_sha256': head['state']['content_sha256'], 'physical_index': head['index']}
 
 
-def _canonical_state(context):
+def _canonical_state(context, *, conn=None):
     """Read physical state from verified canonical bytes, never an invented legacy binding."""
     binding, metadata = context.binding, context.intake.get(KEY)
     if type(metadata) is not dict or metadata.get('schema') != SCHEMA:
         fail('NATIVE_METADATA_INVALID')
-    key, source_sha, _ = editor._source(context)
+    source_context, seen = context, set()
+    while (source_context.binding.version.provenance.get('schema') == 'leaf.project-drawing-publication.v1'
+           and source_context.binding.version.provenance.get('source') is None):
+        source_binding = source_context.binding
+        if source_binding.input_version_id in seen or len(seen) >= 128:
+            fail('SOURCE_INVALID')
+        seen.add(source_binding.input_version_id)
+        parent = project.graph_store().resolve_version_binding(source_binding.organization_id,
+            source_binding.project_id, UUID(source_binding.version.provenance['parent_version_id']),
+            drawing_id=source_binding.drawing_id, conn=conn)
+        if parent.version.oss_object != binding.version.oss_object:
+            fail('SOURCE_INVALID')
+        source_context = project._read_intake(parent)
+    key, source_sha, _ = editor._source(source_context)
     raw = editor._verified_bytes(editor._backend(binding.organization_id), key, source_sha)
     try:
         decoded = native_layout.decode_native_layout(raw)
@@ -266,6 +281,31 @@ def _canonical_state(context):
             'index': binding.version.seq - 1,
             'state': {'artifact_id': context.intake_sha256, 'content_sha256': editor._sha(encoded)}}
     return head, decoded.document, decoded.parameters
+
+
+def _generation_provenance(inputs, document, preset, *, existing=()):
+    """Keep the actual parsed model, including order-sensitive native pack semantics."""
+    import solar_frames_piles as fp
+    loaded, _ = fp.load_preset(preset)
+    models = inputs.setdefault('generation_models', [])
+    associations = inputs.setdefault('frame_generations', {})
+    index = len(models)
+    models.append(asdict(loaded))
+    for frame in document['state']['frames']:
+        if frame['handle'] not in existing:
+            associations[frame['handle']] = index
+
+
+def canonical_ground_input(context, *, conn=None):
+    """Reconstruct trusted physical input from this exact stored graph parent."""
+    binding = project.graph_store().resolve_version_binding(context.organization_id, context.project_id,
+        context.parent_version_id, drawing_id=context.drawing_id, conn=conn)
+    verified = project._read_intake(binding)
+    if verified.intake_bytes != context.intake_bytes or verified.intake_sha256 != context.intake_sha256:
+        fail('NATIVE_METADATA_INVALID')
+    head, document, inputs = _canonical_state(verified, conn=conn)
+    head['parameters'] = inputs
+    return {'view': head, 'document': document}
 
 
 def operation_parameters(body):
@@ -295,11 +335,14 @@ def publish_operation(tenant, project_id, drawing_id, parent_id, body, *, reques
         if KEY not in context.intake:
             fail('NATIVE_METADATA_REQUIRED')
         head, document, inputs = _load(context, body['physical_source'])
+        existing_handles = {frame['handle'] for frame in document['state'].get('frames', [])}
         try:
             document, inputs = fp.continue_physical_document(document, inputs,
                                                              body['operation'], body['parameters'])
         except (fp.FramesPilesError, state.PhysicalStateError) as exc:
             raise editor.EditorError(exc.code, 422) from None
+        if body['operation'] == 'frame-generate':
+            _generation_provenance(inputs, document, body['parameters']['preset'], existing=existing_handles)
         raw, _ = editor.read_dxf(tenant, project_id, drawing_id, parent_id)
         output = materialize_native_layout(context, head, document, raw, parameters=inputs)
         intake = json.loads(editor._edited_intake(context, editor._parse(output, drawing_id)))
