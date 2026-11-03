@@ -329,7 +329,9 @@ export function createCatalogController({ services, adapters = {}, context = {} 
   }
 
   const isUnmatchedDecision = (decision) => decision?.lane === 'run' && !decision.slash &&
-    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()))
+    (decision.tool == null || (typeof decision.tool === 'string' && !decision.tool.trim()) ||
+      ((projectScope() || current.projectConversationScope) &&
+        Array.isArray(current.surfaceFamilyIds) && current.surfaceFamilyIds.length === 0))
 
   const commitDecision = (decision, { routeOutcome = 'invalidated', requestText = null } = {}) => {
     const unmatched = isUnmatchedDecision(decision)
@@ -794,7 +796,7 @@ export function createCatalogController({ services, adapters = {}, context = {} 
       const modeChanged = Object.prototype.hasOwnProperty.call(next, 'mock') && next.mock !== current.mock
       const pausedChanged = Object.prototype.hasOwnProperty.call(next, 'guestReadsPaused') &&
         !!next.guestReadsPaused !== !!current.guestReadsPaused
-      const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id',
+      const drawingChanged = ['drawingId', 'drawing_id', 'projectId', 'project_id', 'projectConversationScope',
         'drawingVersion', 'drawing_version'].some((key) =>
         Object.prototype.hasOwnProperty.call(next, key) && next[key] !== current[key])
       const derivedChanged = Object.prototype.hasOwnProperty.call(next, 'entitlements') &&

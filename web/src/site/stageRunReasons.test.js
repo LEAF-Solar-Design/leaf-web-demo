@@ -105,3 +105,8 @@ describe('stageHelpPaletteRow', () => {
     expect(() => stageHelpPaletteRow().onSelect()).not.toThrow()
   })
 })
+
+it('admits a validated project conversation without removing pending gates', () => {
+  expect(stageRunDisabledReason({...CLEAR, hasDrawing: false, projectConversation: true})).toBeNull()
+  expect(stageRunDisabledReason({...CLEAR, hasDrawing: false, projectConversation: true, busy: true})).toBe(STAGE_RUN_REASONS.busy)
+})
