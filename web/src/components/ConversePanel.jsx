@@ -328,6 +328,19 @@ export default function ConversePanel({
     approvalScopeRef.current = { sessionId, projectContext, revision: approvalScopeRef.current.revision + 1 }
   }
   const sessionIdRef = useRef(sessionId)
+  const authoredViewTurns = useRef(new Map())
+  const authoredViewReceipts = useRef(new WeakSet())
+  // App-dispatched prompts carry ephemeral POST receipts too. Bind each once
+  // to the project lifetime that received it; old receipts cannot be rebound.
+  for (const receipt of userTurns) {
+    if (!receipt || typeof receipt !== 'object' || authoredViewReceipts.current.has(receipt)) continue
+    authoredViewReceipts.current.add(receipt)
+    if (!sessionId || !projectContext?.project_id) continue
+    const key = receipt.status === 'started' ? receipt.turnId
+      : receipt.status === 'queued' && receipt.requestId ? `queue:${receipt.requestId}` : null
+    if (key) authoredViewTurns.current.set(key, approvalScopeRef.current)
+    if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+  }
   const onCatalogChangedRef = useRef(onCatalogChanged)
   const consumeCatalogPublicationRef = useRef(consumeCatalogPublication)
   const refreshApprovalsRef = useRef(null)
@@ -401,11 +414,41 @@ export default function ConversePanel({
         if (env?.type === 'turn_started' && env.session_id === sessionId) {
           // A new turn invalidates prior photo reviews, including repeated ids.
           photoTurn = { id: env.turn_id, seq: env.seq }
+          const queueKey = `queue:${env.data?.queued_id}`
+          const lifetime = authoredViewTurns.current.get(queueKey)
+          if (lifetime === approvalScopeRef.current) {
+            authoredViewTurns.current.set(env.turn_id, lifetime)
+            authoredViewTurns.current.delete(queueKey)
+          }
         }
         const photo = env?.data?.tool === 'propose_project_photo_assignments'
+        const view = env?.data?.tool === 'run_capability' && env?.data?.result?.contract === 'leaf.authored-view.v1'
         if (!currentProposalScope() || env?.session_id !== sessionId || env.type !== 'tool_result'
-          || !env.data || Array.isArray(env.data) || (!photo && env.data.tool !== 'propose_project_page') || env.data.ok !== true
+          || !env.data || Array.isArray(env.data) || (!view && !photo && env.data.tool !== 'propose_project_page') || env.data.ok !== true
           || !Number.isSafeInteger(env.seq) || env.seq < 1) return
+        if (view) {
+          const result = env.data.result
+          const turn = photoTurn
+          const projectLifetime = authoredViewTurns.current.get(env.turn_id)
+          const projectId = projectLifetime?.projectContext?.project_id
+          const current = () => currentProposalScope() && approvalScopeRef.current === projectLifetime
+            && projectContextRef.current?.project_id === projectId && photoTurn === turn
+            && authoredViewTurns.current.get(env.turn_id) === projectLifetime
+          if (!current() || !projectId || result.session_id !== sessionId || result.turn_id !== env.turn_id
+            || typeof env.turn_id !== 'string' || !env.turn_id.trim() || env.turn_id.length > 200 || /[\p{C}]/u.test(env.turn_id)
+            || turn?.id !== env.turn_id || !Number.isSafeInteger(turn.seq) || env.seq <= turn.seq
+            || result.kind !== 'view' || result.route !== 'view' || result.tenant_id !== getStoredOrgId()
+            || typeof result.tool !== 'string' || !/^[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])/.test(result.tool) || result.tool.length > 200
+            || typeof result.catalog_commit !== 'string' || !/^[0-9a-f]{40}(?![\s\S])/.test(result.catalog_commit)
+            || typeof result.effective_catalog_digest !== 'string' || !/^[0-9a-f]{64}(?![\s\S])/.test(result.effective_catalog_digest)
+            || typeof result.tool_manifest_sha256 !== 'string' || !/^sha256:[0-9a-f]{64}(?![\s\S])/.test(result.tool_manifest_sha256)
+            || result.catalog_digest !== result.tool_manifest_sha256
+            || new TextEncoder().encode(JSON.stringify(env)).length > 16384) return
+          const key = JSON.stringify([sessionId, env.turn_id, env.seq, result.tool, result.catalog_commit])
+          deliverProjectPageProposal({ accountScope, activeScope, projectId, key,
+            result: JSON.parse(JSON.stringify(result)), provenance: { sessionId, turnId: env.turn_id, seq: env.seq }, isCurrent: current })
+          return
+        }
         const turn = photoTurn
         const turnId = env.turn_id, seq = env.seq
         if (photo && !photoIdentity) photoIdentity = { orgId: getStoredOrgId(), actorBindingId: getStoredActorBindingId() }
@@ -437,8 +480,13 @@ export default function ConversePanel({
         notifyCatalogPublication(env, sessionId, active, sessionIdRef, onCatalogChangedRef, consumeCatalogPublicationRef)
         notifyPageProposal(env)
         const queued = reconcileQueuedTurn(queueStateRef.current, env)
+        const queuedViewKey = `queue:${queueStateRef.current.queuedTurn?.queuedId}`
+        const queuedViewLifetime = authoredViewTurns.current.get(queuedViewKey)
         setQueueState(queued.state)
         if (queued.action === 'promote') {
+          if (queuedViewLifetime === approvalScopeRef.current) authoredViewTurns.current.set(queued.turn.turnId, queuedViewLifetime)
+          authoredViewTurns.current.delete(queuedViewKey)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
           setLocalTurns((prev) => [...prev, queued.turn])
         }
         if (env.type === 'job_linked' && env.data?.job_id && !jobSeenRef.current.has(env.data.job_id)) {
@@ -797,20 +845,31 @@ export default function ConversePanel({
       project_id: projectContext.project_id,
       input_version_id: projectContext.input_version_id,
     } : null
+    const authoredViewLifetime = approvalScopeRef.current
     let delivered = false
     setSending(true); setSendErr(null)
     restoreComposerFocus()
     const accept = (res, images) => {
       if (res.status === 'queued') {
+        if (res.queued_id && approvalScopeRef.current === authoredViewLifetime) {
+          authoredViewTurns.current.set(`queue:${res.queued_id}`, authoredViewLifetime)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+        }
         const queued = acceptQueuedTurn(queueStateRef.current, {
           queuedId: res.queued_id || null,
           text,
         })
         setQueueState(queued.state)
         if (queued.action === 'promote') {
+          if (approvalScopeRef.current === authoredViewLifetime) authoredViewTurns.current.set(queued.turn.turnId, authoredViewLifetime)
+          authoredViewTurns.current.delete(`queue:${res.queued_id}`)
           setLocalTurns((prev) => [...prev, queued.turn])
         }
       } else {
+        if (approvalScopeRef.current === authoredViewLifetime && sessionIdRef.current === sessionId) {
+          authoredViewTurns.current.set(res.turn_id, authoredViewLifetime)
+          if (authoredViewTurns.current.size > 32) authoredViewTurns.current.delete(authoredViewTurns.current.keys().next().value)
+        }
         setLocalTurns((prev) => [...prev, { turnId: res.turn_id, text, images }])
       }
       if (clearInput) setInput('')
