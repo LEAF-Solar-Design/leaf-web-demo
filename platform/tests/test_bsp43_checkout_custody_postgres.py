@@ -1,7 +1,8 @@
-"""Real private PG transactions for BSP43 custody; authority seams stay synthetic.
+"""Real PG transactions for BSP43 custody; authority seams stay synthetic.
 
-Run only with the managed bsp43_pg_probe supplier. This verifies actual migration,
-JSONB roundtrip, idempotent issuance and revocation, not live project publication.
+The platform conftest supplies and migrates DATABASE_URL in ordinary CI and with
+the managed bsp43_pg_probe supplier. This verifies actual migration, JSONB
+roundtrip, idempotent issuance and revocation, not live project publication.
 """
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -28,8 +29,9 @@ class PrivateDatabase:
 
 
 def test_real_postgres_custody_issue_replay_revoke_and_no_credentials(monkeypatch):
-    if not os.environ.get('LEAF_E364B_PG_PARENT'):
-        pytest.fail('managed private PostgreSQL producer required')
+    # The platform autouse fixture owns migration for either actual producer.
+    # A private-runner marker is not emitted by the ordinary CI producer.
+    monkeypatch.delenv('LEAF_E364B_PG_PARENT', raising=False)
     database = PrivateDatabase(os.environ['DATABASE_URL'])
     migration = (ROOT / 'platform/migrations/0097_project_checkout_custody.sql').read_text()
     def initialize(conn):
