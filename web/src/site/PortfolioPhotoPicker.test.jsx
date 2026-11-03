@@ -117,17 +117,23 @@ describe('connected portfolio thumbnail chooser', () => {
     initial.categories[0].images = [{ ...photoReference(rows[0]), material_id: 'existing-first' }]
     initial.categories.push({ slug: 'other', title: 'Other', description: '', hero: 0,
       images: Array.from({ length: 198 }, (_, index) => ({ ...photoReference(rows[0]), material_id: `existing-${index}` })) })
-    render(<Studio initial={initial} onChange={change} />)
-    await load()
-    const first = choice(), second = choice('Bread.jpg')
+    const view = render(<Studio initial={initial} onChange={change} />)
+    // Keep queries inside the target gallery instead of rescanning 199 photos' labels.
+    const target = view.container.querySelector('section[aria-label="Gallery 1"]')
+    expect(target).toHaveAccessibleName('Gallery 1')
+    fireEvent.click(target.querySelector('details > summary'))
+    fireEvent.click(screen.getByText('Load project photos', { selector: 'button' }))
+    const picker = await within(target).findByRole('group', { name: 'Choose photos for Selected work' })
+    const first = within(picker).getByRole('button', { name: 'Add Cake.jpg to Selected work' })
+    const second = within(picker).getByRole('button', { name: 'Add Bread.jpg to Selected work' })
     act(() => { first.click(); first.click(); second.click() })
     expect(change).toHaveBeenCalledTimes(1)
     expect(draft().categories[0].images).toHaveLength(2)
     expect(draft().categories.reduce((sum, gallery) => sum + gallery.images.length, 0)).toBe(200)
     expect(draft().categories[0].images.at(-1)).toEqual(photoReference(rows[0]))
-    expect(choice('Bread.jpg')).toBeDisabled()
-    expect(within(gallery()).getByLabelText('Add project photo to Selected work')).toBeDisabled()
-    expect(within(gallery()).getByText(/reached its 200 photo limit/)).toBeVisible()
+    expect(within(picker).getByRole('button', { name: 'Add Bread.jpg to Selected work' })).toBeDisabled()
+    expect(within(target).getByLabelText('Add project photo to Selected work')).toBeDisabled()
+    expect(within(target).getByText(/reached its 200 photo limit/)).toBeVisible()
   }, 15000)
 
   it('honors a disabled parent fieldset for both selection paths', async () => {
