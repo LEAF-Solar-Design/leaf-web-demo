@@ -1,5 +1,6 @@
 """Original bytes and real single-frame QuickTime/JPEG producer coverage."""
 import hashlib
+import gzip
 import io
 from pathlib import Path
 import struct
@@ -149,3 +150,137 @@ def test_failed_storage_retry_and_corruption_refusal(tmp_path, monkeypatch):
     with pytest.raises(references.ReferenceStoreUnavailable):
         references.read_content(org, project, {**material, 'byte_size': 1})
     assert backend.get(references.object_key(org, project, material['sha256'])) == b'original'
+
+
+def test_full_corpus_original_bytes_over_5000_rows_survive_storage(tmp_path, monkeypatch):
+    import store
+    import write_loop
+    import json
+    backend = store.FilesystemBackend(str(tmp_path))
+    monkeypatch.setattr(write_loop, 'upload_backend_for_tenant', lambda tenant: backend)
+    rows = b''.join(json.dumps({'row': index}).encode() + b'\n' for index in range(6001))
+    raw = gzip.compress(rows, mtime=0)
+    org, project = uuid.uuid4(), uuid.uuid4()
+    material = references.prepare_and_store(org, project, 'BTC.JSONL.GZ', 'application/gzip', raw)
+    assert material == references.prepare_and_store(org, project, 'BTC.JSONL.GZ', 'application/gzip', raw)
+    assert material['sha256'] == hashlib.sha256(raw).hexdigest()
+    assert material['media_type'] == 'application/gzip'
+    downloaded = references.read_content(org, project, material)
+    assert downloaded == raw
+    assert gzip.decompress(downloaded) == rows
+    assert len(gzip.decompress(downloaded).splitlines()) == 6001
+    foreign = uuid.uuid4()
+    with pytest.raises(references.ReferenceStoreUnavailable):
+        references.read_content(org, foreign, material)
+
+
+@pytest.mark.parametrize('payload', [
+    b'', b'\n', b'[]\n', b'{"x":NaN}\n', b'{"x":Infinity}\n', b'{"x":1e999}\n',
+    b'{"x":1,"x":2}\n', b'{"x":{"a":1,"a":2}}\n', b'{"x":"\xff"}\n', b'{\n',
+    b'{"x":1}\n\n',
+])
+def test_corpus_rejects_invalid_json_rows(payload):
+    with pytest.raises(references.InvalidReference):
+        references.validate('x.jsonl.gz', 'application/gzip', gzip.compress(payload))
+
+
+def test_corpus_gzip_envelope_crc_and_limits(monkeypatch):
+    raw = gzip.compress(b'{"x":1}\n')
+    for invalid in (raw[:-1], raw + b'junk', raw + raw,
+                    raw[:-8] + bytes([raw[-8] ^ 1]) + raw[-7:], b'not gzip'):
+        with pytest.raises(references.InvalidReference):
+            references.validate('x.jsonl.gz', 'application/gzip', invalid)
+    for name, mime in [('x.gz', 'application/gzip'), ('x.jsonl.gz', 'application/json'),
+                       ('x.jsonl.gz', 'application/gzip; charset=utf-8')]:
+        with pytest.raises(references.InvalidReference):
+            references.validate(name, mime, raw)
+    monkeypatch.setattr(references, 'CORPUS_MAX_BYTES', len(raw) - 1)
+    with pytest.raises(references.InvalidReference):
+        references.validate('x.jsonl.gz', 'application/gzip', raw)
+    monkeypatch.setattr(references, 'CORPUS_MAX_BYTES', len(raw))
+    assert references.validate('x.jsonl.gz', 'application/gzip', raw)
+    monkeypatch.setattr(references, 'CORPUS_EXPANDED_MAX_BYTES', 7)
+    with pytest.raises(references.InvalidReference):
+        references.validate('x.jsonl.gz', 'application/gzip', raw)
+    monkeypatch.setattr(references, 'CORPUS_EXPANDED_MAX_BYTES', 100)
+    monkeypatch.setattr(references, 'CORPUS_LINE_MAX_BYTES', 6)
+    with pytest.raises(references.InvalidReference):
+        references.validate('x.jsonl.gz', 'application/gzip', raw)
+    monkeypatch.setattr(references, 'CORPUS_LINE_MAX_BYTES', 7)
+    assert references.validate('x.jsonl.gz', 'application/gzip', raw)
+    monkeypatch.setattr(references, 'CORPUS_MAX_ROWS', 1)
+    with pytest.raises(references.InvalidReference):
+        references.validate('x.jsonl.gz', 'application/gzip', gzip.compress(b'{}\n{}\n'))
+
+
+def test_corpus_chunk_and_line_boundaries_without_final_newline():
+    import random
+    import json
+    randomizer = random.Random(17)
+    rows = [json.dumps({'text': ''.join(randomizer.choices('abcdef0123456789', k=2048))}) for _ in range(70)]
+    expanded = '\n'.join(rows).encode()
+    raw = gzip.compress(expanded)
+    assert len(raw) > 65536 and len(expanded) > 65536
+    assert references.validate('chunked.jsonl.gz', 'application/gzip', raw)['sha256'] == hashlib.sha256(raw).hexdigest()
+
+
+def test_corpus_postgres_upgrade_route_and_scope(tmp_path, monkeypatch):
+    """Run only on an explicitly allocated private PostgreSQL proof producer."""
+    import os
+    from test_project_drawing_editor import canonical_ci_pg
+    managed = os.environ.get('LEAF_E364B_PG_PARENT') and os.environ.get('DATABASE_URL')
+    if not managed and not canonical_ci_pg():
+        pytest.skip('requires managed or verified canonical disposable PostgreSQL producer')
+    import platform_link
+    db = platform_link.platform_db()
+    db.apply_migration()
+    from leaf_platform import api, project_lifecycle, store as metadata_store
+    import store as blobs
+    import write_loop
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    monkeypatch.setenv('LEAF_AUTH_LIVE', '0')
+    backend = blobs.FilesystemBackend(str(tmp_path))
+    monkeypatch.setattr(write_loop, 'upload_backend_for_tenant', lambda tenant: backend)
+    org = metadata_store.create_org(name='Private corpus proof')
+    actor = metadata_store.create_identity_binding(org.org_id, 'auth0', str(uuid.uuid4()), role='owner')
+    project = project_lifecycle.create_blank_project(org.org_id, actor.binding_id,
+        name='Original corpus', idempotency_key=str(uuid.uuid4()))['project']['project_id']
+    app = FastAPI()
+    app.include_router(api.router)
+    headers = {'X-Org-Id': str(org.org_id), 'X-Actor-Binding-Id': str(actor.binding_id)}
+    url = f'/api/projects/{project}/reference-files'
+    raw = gzip.compress(b'{}\n' * 6001)
+    migration = Path(__file__).resolve().parents[2] / 'platform/migrations/0099_lab_corpus_reference_materials.sql'
+    with TestClient(app) as client:
+        old = client.post(url + '?filename=notes.txt', content=b'original notes',
+            headers={**headers, 'Content-Type': 'text/plain'})
+        assert old.status_code == 201, old.text
+        # Execute the additive SQL twice against real catalog constraints.
+        for _ in range(2):
+            with db.transaction() as conn:
+                conn.execute(migration.read_text())
+        db.assert_schema_current()
+        response = client.post(url + '?filename=BTC.jsonl.gz', content=raw,
+            headers={**headers, 'Content-Type': 'application/gzip'})
+        assert response.status_code == 201, response.text
+        material = response.json()['material']
+        assert material['sha256'] == hashlib.sha256(raw).hexdigest()
+        assert material['media_type'] == 'application/gzip' and material['byte_size'] == len(raw)
+        assert material['preview_status'] == 'unsupported' and material['model_status'] == 'not_consumed'
+        retry = client.post(url + '?filename=BTC.jsonl.gz', content=raw,
+            headers={**headers, 'Content-Type': 'application/gzip'})
+        assert retry.json()['material'] == material
+        saved = client.get(url, headers=headers).json()['materials']
+        assert {item['sha256'] for item in saved} == {material['sha256'], old.json()['material']['sha256']}
+        downloaded = client.get(url + '/' + material['material_id'] + '/content', headers=headers)
+        assert downloaded.content == raw and len(gzip.decompress(downloaded.content).splitlines()) == 6001
+        stranger = metadata_store.create_identity_binding(org.org_id, 'auth0', str(uuid.uuid4()), role='owner')
+        denied = {**headers, 'X-Actor-Binding-Id': str(stranger.binding_id)}
+        assert client.get(url, headers=denied).status_code == 403
+        assert client.post(url + '?filename=BTC.jsonl.gz', content=raw,
+            headers={**denied, 'Content-Type': 'application/gzip'}).status_code == 403
+        with db.transaction() as conn:
+            conn.execute("UPDATE identity_bindings SET status='revoked', revoked_at=NOW() WHERE binding_id=%s", (actor.binding_id,))
+        assert client.get(url + '/' + material['material_id'] + '/content', headers=headers).status_code == 403
+    db.reset_pool()

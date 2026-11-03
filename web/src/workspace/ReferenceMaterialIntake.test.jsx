@@ -45,6 +45,29 @@ afterEach(() => {
 })
 
 describe('shared project original reference intake', () => {
+  it('offers complete gzip JSONL originals and connects picker to upload, saved list and download', async () => {
+    const { gzipSync } = await import('node:zlib')
+    const compressed = gzipSync(Array.from({ length: 6001 }, (_, row) => JSON.stringify({ row })).join('\n'))
+    const corpus = new File([compressed], 'BTC.jsonl.gz', { type: 'application/gzip' })
+    const material = { ...row(corpus.name, 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'),
+      media_type: 'application/gzip', byte_size: corpus.size }
+    uploadProjectReference.mockResolvedValue({ material })
+    readProjectReferenceOriginal.mockResolvedValue(new Blob([compressed], { type: 'application/gzip' }))
+    const click = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    render(<ReferenceMaterialIntake projectId={project} />)
+    await ready()
+    expect(screen.getByLabelText('Original reference files').accept).toContain('.jsonl.gz')
+    choose(corpus)
+    await waitFor(() => expect(saved().getByText(corpus.name)).toBeTruthy())
+    expect(uploadProjectReference.mock.calls[0][1]).toBe(corpus)
+    expect(saved().getByText('Uploaded · Preview unavailable · Model not consumed')).toBeTruthy()
+    fireEvent.click(screen.getByRole('button', { name: `Download original ${corpus.name}` }))
+    await waitFor(() => expect(click).toHaveBeenCalledOnce())
+    expect(readProjectReferenceOriginal).toHaveBeenCalledWith(project, material.material_id,
+      expect.objectContaining({ expectedScope: 'account-a' }))
+    click.mockRestore()
+  })
+
   it('loads saved originals on initial open and reopens the same project from the server', async () => {
     listProjectReferences.mockResolvedValue({ materials: [row('shared.txt')] })
     const view = render(<ReferenceMaterialIntake projectId={project} />)

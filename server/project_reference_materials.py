@@ -7,12 +7,18 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 import struct
 import unicodedata
+import zlib
 from uuid import UUID
 
 VIDEO_MAX_BYTES = 64 * 1024 * 1024
 TEXT_MAX_BYTES = 8 * 1024 * 1024
+CORPUS_MAX_BYTES = 64 * 1024 * 1024
+CORPUS_EXPANDED_MAX_BYTES = 2 * 1024 ** 3
+CORPUS_LINE_MAX_BYTES = 1024 * 1024
+CORPUS_MAX_ROWS = 6_000_000
 TYPES = {'.mov': 'video/quicktime', '.txt': 'text/plain', '.json': 'application/json'}
 
 
@@ -29,15 +35,88 @@ def upload_policy(name, content_type):
     if not name or len(name) > 255 or any(unicodedata.category(c).startswith('C') or c in '/\\' for c in name):
         raise InvalidReference('Filename must be a plain name of 1 to 255 characters.')
     extension = '.' + name.rsplit('.', 1)[-1].lower()
-    media_type = TYPES.get(extension)
+    corpus = name.lower().endswith('.jsonl.gz')
+    media_type = 'application/gzip' if corpus else TYPES.get(extension)
     if media_type is None:
-        raise InvalidReference('Choose an original MOV, UTF-8 TXT or JSON file.')
+        raise InvalidReference('Choose an original MOV, UTF-8 TXT/JSON or gzip JSONL corpus.')
     parts = [part.strip().lower() for part in (content_type or '').split(';')]
     if parts[0] != media_type or any(part not in {'charset=utf-8', 'charset="utf-8"'} for part in parts[1:]):
         raise InvalidReference('The file extension and content type must agree (MOV, UTF-8 TXT or JSON).')
-    if media_type == 'video/quicktime' and len(parts) != 1:
-        raise InvalidReference('MOV content type must be video/quicktime.')
-    return name, media_type, VIDEO_MAX_BYTES if extension == '.mov' else TEXT_MAX_BYTES
+    if media_type in {'video/quicktime', 'application/gzip'} and len(parts) != 1:
+        raise InvalidReference('Binary original content type must match without parameters.')
+    return name, media_type, CORPUS_MAX_BYTES if corpus else VIDEO_MAX_BYTES if extension == '.mov' else TEXT_MAX_BYTES
+
+
+def validate_corpus(raw):
+    """Validate one gzip member incrementally, retaining no expanded corpus.
+
+    Output chunks and unfinished lines have separate bounds. zlib checks the
+    gzip CRC/trailer; eof and unused_data reject truncation, extra members and
+    trailing bytes. The uploaded compressed bytes remain the stored original.
+    """
+    expanded = rows = 0
+    line = bytearray()
+    decoder = zlib.decompressobj(16 + zlib.MAX_WBITS)
+
+    def invalid_constant(value):
+        raise ValueError('nonfinite')
+
+    def unique_object(pairs):
+        value = {}
+        for key, child in pairs:
+            if key in value:
+                raise ValueError('duplicate key')
+            value[key] = child
+        return value
+
+    def finite_float(value):
+        number = float(value)
+        if not math.isfinite(number):
+            raise ValueError('nonfinite')
+        return number
+
+    def row(data):
+        nonlocal rows
+        if not data or len(data) > CORPUS_LINE_MAX_BYTES:
+            raise ValueError('line size')
+        value = json.loads(data.decode('utf-8'), parse_constant=invalid_constant,
+                           parse_float=finite_float, object_pairs_hook=unique_object)
+        if not isinstance(value, dict):
+            raise ValueError('row object required')
+        rows += 1
+        if rows > CORPUS_MAX_ROWS:
+            raise ValueError('row count')
+
+    try:
+        for offset in range(0, len(raw), 65536):
+            pending = raw[offset:offset + 65536]
+            while pending:
+                output = decoder.decompress(pending, min(65536, CORPUS_EXPANDED_MAX_BYTES - expanded + 1))
+                expanded += len(output)
+                if expanded > CORPUS_EXPANDED_MAX_BYTES:
+                    raise ValueError('expanded size')
+                pending = decoder.unconsumed_tail
+                for index, fragment in enumerate(output.split(b'\n')):
+                    if index:
+                        row(bytes(line))
+                        line.clear()
+                    line.extend(fragment)
+                    if len(line) > CORPUS_LINE_MAX_BYTES:
+                        raise ValueError('line size')
+                if decoder.unused_data:
+                    raise ValueError('trailing data or gzip members')
+                if decoder.eof:
+                    if offset + 65536 < len(raw) or pending:
+                        raise ValueError('trailing data')
+                    break
+        if not decoder.eof:
+            raise ValueError('incomplete gzip')
+        if line:
+            row(bytes(line))
+        if not rows:
+            raise ValueError('empty corpus')
+    except (zlib.error, ValueError, UnicodeError, RecursionError, OverflowError):
+        raise InvalidReference('Corpus must be one complete gzip JSONL stream within the byte, line and row limits.') from None
 
 
 def _atoms(raw, start=0, end=None):
@@ -130,7 +209,9 @@ def validate(name, content_type, raw):
     name, media_type, limit = upload_policy(name, content_type)
     if not 0 < len(raw) <= limit:
         raise InvalidReference('Reference file is empty or exceeds its size limit.')
-    if media_type == 'video/quicktime':
+    if media_type == 'application/gzip':
+        validate_corpus(raw)
+    elif media_type == 'video/quicktime':
         validate_mov(raw)
     else:
         try:
@@ -175,7 +256,7 @@ def read_content(org_id, project_id, material):
     import write_loop
     try:
         raw = write_loop.upload_backend_for_tenant(str(org_id)).get(object_key(org_id, project_id, material['sha256']))
-        limit = VIDEO_MAX_BYTES if material['media_type'] == 'video/quicktime' else TEXT_MAX_BYTES
+        limit = CORPUS_MAX_BYTES if material['media_type'] == 'application/gzip' else VIDEO_MAX_BYTES if material['media_type'] == 'video/quicktime' else TEXT_MAX_BYTES
         if not 0 < len(raw) <= limit or len(raw) != material['byte_size'] or hashlib.sha256(raw).hexdigest() != material['sha256']:
             raise ValueError('reference integrity')
         return raw
