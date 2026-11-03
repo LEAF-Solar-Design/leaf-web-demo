@@ -95,6 +95,10 @@ def _json_float(value):
 def _read_intake(binding):
     version = binding.version
     provenance = version.provenance
+    if isinstance(provenance, dict) and provenance.get("schema") == graph_store().INITIAL_PUBLICATION_SCHEMA:
+        key, digest = _initial_reference(binding)
+        raw, intake = _load_intake(binding.organization_id, key, digest)
+        return VerifiedProjectContext(binding, raw, intake, digest, key)
     if isinstance(provenance, dict) and provenance.get("schema") == "leaf.project-drawing-publication.v1":
         key, digest = _publication_reference(binding)
         raw, intake = _load_intake(binding.organization_id, key, digest)
@@ -125,6 +129,40 @@ def _read_intake(binding):
         refuse("INTAKE_REFERENCE_INVALID")
     raw, intake = _load_intake(binding.organization_id, key, proof["sha256"])
     return VerifiedProjectContext(binding, raw, intake, proof["sha256"], key)
+
+
+def _initial_reference(binding):
+    version, proof = binding.version, binding.version.provenance
+    for field in ("organization_id", "project_id", "drawing_id", "request_id", "actor_binding_id"):
+        try:
+            if type(proof.get(field)) is not str or str(UUID(proof[field])) != proof[field]:
+                raise ValueError()
+        except (ValueError, TypeError, AttributeError):
+            refuse("INTAKE_REFERENCE_INVALID")
+    for field in ("source", "intake"):
+        value = proof.get(field)
+        if (type(value) is not dict or type(value.get("sha256")) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", value["sha256"]) is None):
+            refuse("INTAKE_REFERENCE_INVALID")
+    if (type(proof.get("parameters_sha256")) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", proof["parameters_sha256"]) is None):
+        refuse("INTAKE_REFERENCE_INVALID")
+    key = graph_store().publication_intake_key(binding.organization_id, binding.project_id,
+                                               binding.drawing_id, proof["intake"]["sha256"])
+    source = graph_store().publication_source_key(binding.organization_id, binding.project_id,
+                                                 binding.drawing_id, proof["source"]["sha256"])
+    if (proof["organization_id"] != str(binding.organization_id)
+            or proof["project_id"] != str(binding.project_id)
+            or proof["drawing_id"] != str(binding.drawing_id)
+            or version.org_id != binding.organization_id or version.project_id != binding.project_id
+            or version.drawing_id != binding.drawing_id or version.seq != 1
+            or proof.get("parent_version_id", "missing") is not None
+            or version.idempotency_key != "sip-r2:" + proof["request_id"]
+            or version.intake_ref != key or proof["intake"].get("ref") != key
+            or version.oss_object != source or proof["source"].get("ref") != source
+            or proof.get("base_object_ref") != source):
+        refuse("INTAKE_REFERENCE_INVALID")
+    return key, proof["intake"]["sha256"]
 
 
 def _publication_reference(binding):

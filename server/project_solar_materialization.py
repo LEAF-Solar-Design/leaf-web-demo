@@ -6,7 +6,7 @@ must never turn into a successful polyline-only layout publication.
 """
 from copy import deepcopy
 import json
-from uuid import UUID
+from uuid import UUID, uuid5
 
 import project_drawing_editor as editor
 import solar_physical_head as physical
@@ -17,6 +17,106 @@ from solar_solve_results import digest
 project = editor.project
 SCHEMA = 'leaf.project-physical-layout.v1'
 KEY = 'solar_physical_layout'
+
+
+def initial_parameters(body):
+    if type(body) is not dict or set(body) != {'boundary', 'preset', 'drawing_units'}:
+        fail('REQUEST_INVALID', 400)
+    return deepcopy(body)
+
+
+def _initial_scope(tenant, project_id):
+    org, actor = project._access(tenant, project_id, write=True)
+    project.platform_link.platform_db().run_transaction(lambda conn:
+        project.graph_store().initial_publication_scope(org, project_id, actor, conn=conn))
+    return org, actor
+
+
+def initial_layout_source(tenant, project_id):
+    org, _ = _initial_scope(tenant, project_id)
+    return {'schema': SCHEMA, 'mode': 'initial', 'organization_id': str(org),
+            'project_id': str(project_id), 'drawing_id': None, 'parent_version_id': None,
+            'writer_available': False, 'reason_code': 'PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE'}
+
+
+def _initial_receipt(version, request_id, metadata):
+    proof = version.provenance
+    return {'drawing_version': version.to_dict(), 'organization_id': str(version.org_id),
+            'project_id': str(version.project_id), 'drawing_id': str(version.drawing_id),
+            'parent_version_id': None, 'request_id': str(request_id), 'mode': 'initial',
+            'source_sha256': proof['source']['sha256'], 'intake_sha256': proof['intake']['sha256'],
+            'generation_source': deepcopy(metadata['generation_source'])}
+
+
+def publish_initial_layout(tenant, project_id, body, *, request_id):
+    """Generate from parameters and publish the first real canonical artifact atomically."""
+    import solar_frames_piles as fp
+    body = initial_parameters(body)
+    org, actor = project._access(tenant, project_id, write=True)
+    if not isinstance(request_id, UUID):
+        project.refuse('INVALID_BINDING')
+    database, graph = project.platform_link.platform_db(), project.graph_store()
+    def lookup(conn):
+        with conn.cursor() as cur:
+            cur.execute('SELECT version_id FROM drawing_versions WHERE org_id=%s AND project_id=%s '
+                        'AND idempotency_key=%s', (org, project_id, 'sip-r2:' + str(request_id)))
+            return cur.fetchone()
+    prior = database.run_transaction(lookup)
+    if prior is not None:
+        context = project.resolve_context(tenant, project_id, prior['version_id'], write=True)
+        metadata, proof = context.intake.get(KEY) or {}, context.binding.version.provenance
+        if (proof.get('schema') != graph.INITIAL_PUBLICATION_SCHEMA
+                or proof.get('actor_binding_id') != str(actor) or metadata.get('request') != body
+                or proof.get('parameters_sha256') != digest(body)):
+            raise project.ProjectContextError('SIP_R2_IDEMPOTENCY_CONFLICT')
+        editor.read_dxf(tenant, project_id, context.binding.drawing_id, prior['version_id'])
+        return _initial_receipt(context.binding.version, request_id, metadata)
+    _initial_scope(tenant, project_id)
+    if project.write_loop.drawing_mutations_refusal() is not None:
+        project.refuse('WRITES_DRAINED')
+    try:
+        document, inputs = fp.prepare_initial_frames(**body)
+    except (fp.FramesPilesError, state.PhysicalStateError) as exc:
+        raise editor.EditorError(exc.code, 422) from None
+    drawing_id = uuid5(project_id, 'solar-initial:' + str(request_id))
+    generation_source = {'parameters_sha256': digest(body),
+                         'physical_content_sha256': editor._sha(state.encode_document(document))}
+    # No imported source, synthetic base drawing, or canonical row exists here.
+    output = materialize_native_layout({'organization_id': org, 'project_id': project_id,
+        'actor_binding_id': actor, 'drawing_id': drawing_id}, None, deepcopy(document), None,
+        parameters=deepcopy(inputs))
+    intake = json.loads(editor._parse(output, drawing_id))
+    metadata = {'schema': SCHEMA, 'mode': 'initial', 'parent_version_id': None,
+                'request': body, 'generation_source': generation_source,
+                'document': state.encode_document(document).decode('utf-8'), 'parameters': inputs}
+    intake[KEY] = metadata
+    payload = json.dumps(intake, sort_keys=True, separators=(',', ':'), allow_nan=False).encode()
+    source_sha, intake_sha = editor._sha(output), editor._sha(payload)
+    backend = editor._backend(org)
+    source_key = graph.publication_source_key(org, project_id, drawing_id, source_sha)
+    intake_key = graph.publication_intake_key(org, project_id, drawing_id, intake_sha)
+    def operation(conn):
+        def durable():
+            try:
+                backend.put_if_absent_or_verify(source_key, output)
+                backend.put_if_absent_or_verify(intake_key, payload)
+            except Exception:
+                fail('SOURCE_UNAVAILABLE', 503)
+            editor._verified_bytes(backend, source_key, source_sha)
+            project._load_intake(org, intake_key, intake_sha)
+        version = graph.publish_initial_version(org, project_id, drawing_id,
+            actor_binding_id=actor, request_id=request_id, intake_sha256=intake_sha,
+            source_sha256=source_sha, parameters_sha256=digest(body), conn=conn, before_new=durable)
+        return _initial_receipt(version, request_id, metadata)
+    try:
+        with project.write_loop.drawing_mutation_refusal_guard() as refusal:
+            if refusal is not None:
+                project.refuse('WRITES_DRAINED')
+            return database.run_transaction(operation)
+    except (editor.EditorError, project.ProjectContextError):
+        raise
+    except Exception:
+        project.refuse('STORE_UNAVAILABLE')
 
 
 def fail(code, status=409):

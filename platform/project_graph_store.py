@@ -76,7 +76,7 @@ def _scope(cur, org_id, project_id, drawing_id, *, actor_binding_id=None):
     args = {"org_id": org_id, "project_id": project_id, "drawing_id": drawing_id}
     cur.execute(
         "SELECT project_id FROM live_projects WHERE org_id = %(org_id)s "
-        "AND project_id = %(project_id)s FOR SHARE", args,
+        "AND project_id = %(project_id)s " + ("FOR UPDATE" if drawing_id is None else "FOR SHARE"), args,
     )
     if cur.fetchone() is None:
         refuse("CONTEXT_NOT_FOUND")
@@ -99,13 +99,14 @@ def _scope(cur, org_id, project_id, drawing_id, *, actor_binding_id=None):
         authority = cur.fetchone()
     if authority is None or authority["authority_mode"] != "postgres_canonical":
         refuse("CANONICAL_AUTHORITY_REQUIRED")
-    cur.execute(
-        "SELECT drawing_id FROM drawing_artifacts WHERE org_id = %(org_id)s "
-        "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s "
-        "AND status = 'active' FOR UPDATE", args,
-    )
-    if cur.fetchone() is None:
-        refuse("CONTEXT_NOT_FOUND")
+    if drawing_id is not None:
+        cur.execute(
+            "SELECT drawing_id FROM drawing_artifacts WHERE org_id = %(org_id)s "
+            "AND project_id = %(project_id)s AND drawing_id = %(drawing_id)s "
+            "AND status = 'active' FOR UPDATE", args,
+        )
+        if cur.fetchone() is None:
+            refuse("CONTEXT_NOT_FOUND")
     if actor_binding_id is not None:
         args["actor"] = actor_binding_id
         cur.execute(
@@ -284,6 +285,61 @@ def verify_checkout(org_id, project_id, drawing_id, *, actor_binding_id, expecte
 
 
 PUBLICATION_SCHEMA = "leaf.project-drawing-publication.v1"
+INITIAL_PUBLICATION_SCHEMA = "leaf.project-drawing-initial-publication.v1"
+
+
+def initial_publication_scope(org_id, project_id, actor_binding_id, *, conn):
+    """Serialize first drawing creation on the real project, with normal authority."""
+    _ids(org_id, project_id, actor_binding_id)
+    with conn.cursor() as cur:
+        _scope(cur, org_id, project_id, None, actor_binding_id=actor_binding_id)
+        cur.execute("SELECT drawing_id FROM drawing_artifacts WHERE org_id=%s "
+                    "AND project_id=%s AND status='active' LIMIT 1", (org_id, project_id))
+        if cur.fetchone() is not None:
+            raise ProjectContextError("PROJECT_LAYOUT_INITIAL_REQUIRES_EMPTY_PROJECT")
+
+
+def publish_initial_version(org_id, project_id, drawing_id, *, actor_binding_id,
+                            request_id, intake_sha256, source_sha256, parameters_sha256,
+                            conn, before_new):
+    """Create the first actual artifact/version only after durable native output exists."""
+    _ids(org_id, project_id, drawing_id, actor_binding_id, request_id)
+    if any(not isinstance(value, str) or re.fullmatch(r"[0-9a-f]{64}", value) is None
+           for value in (intake_sha256, source_sha256, parameters_sha256)):
+        raise ProjectContextError("SIP_R2_PUBLICATION_PARAMS_INVALID")
+    source = publication_source_key(org_id, project_id, drawing_id, source_sha256)
+    intake = publication_intake_key(org_id, project_id, drawing_id, intake_sha256)
+    proof = {"schema": INITIAL_PUBLICATION_SCHEMA, "organization_id": str(org_id),
+             "project_id": str(project_id), "drawing_id": str(drawing_id),
+             "parent_version_id": None, "request_id": str(request_id),
+             "actor_binding_id": str(actor_binding_id), "parameters_sha256": parameters_sha256,
+             "source": {"ref": source, "sha256": source_sha256},
+             "intake": {"ref": intake, "sha256": intake_sha256}, "base_object_ref": source}
+    args = {"org": org_id, "project": project_id, "drawing": drawing_id,
+            "key": "sip-r2:" + str(request_id)}
+    with conn.cursor() as cur:
+        _scope(cur, org_id, project_id, None, actor_binding_id=actor_binding_id)
+        cur.execute("SELECT * FROM drawing_versions WHERE org_id=%(org)s "
+                    "AND project_id=%(project)s AND idempotency_key=%(key)s", args)
+        row = cur.fetchone()
+        if row is not None:
+            if (row["deleted_at"] is not None or row["provenance"] != proof
+                    or row["drawing_id"] != drawing_id or row["oss_object"] != source
+                    or row["intake_ref"] != intake or row["seq"] != 1
+                    or row["import_fingerprint"] != _publication_fingerprint(proof)):
+                raise ProjectContextError("SIP_R2_IDEMPOTENCY_CONFLICT")
+            return DrawingVersion.from_row(row)
+        initial_publication_scope(org_id, project_id, actor_binding_id, conn=conn)
+        before_new()
+        cur.execute("INSERT INTO drawing_artifacts (drawing_id,project_id,org_id,name) "
+                    "VALUES (%(drawing)s,%(project)s,%(org)s,'Primary drawing')", args)
+        args.update(version=uuid4(), source=source, intake=intake, actor=str(actor_binding_id),
+                    proof=Jsonb(proof), fingerprint=_publication_fingerprint(proof))
+        cur.execute("INSERT INTO drawing_versions (version_id,drawing_id,project_id,org_id,seq,"
+                    "oss_object,intake_ref,created_by,provenance,idempotency_key,import_fingerprint) "
+                    "VALUES (%(version)s,%(drawing)s,%(project)s,%(org)s,1,%(source)s,%(intake)s,"
+                    "%(actor)s,%(proof)s,%(key)s,%(fingerprint)s) RETURNING *", args)
+        return DrawingVersion.from_row(cur.fetchone())
 
 
 def validate_publication_params(org_id, project_id, drawing_id, parent_id,
