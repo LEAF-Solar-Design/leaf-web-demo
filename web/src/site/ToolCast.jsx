@@ -91,7 +91,7 @@ import {
 import VersionList, { VersionPreviewStrip } from '../components/VersionList.jsx'
 import { navigate } from './router.js'
 import {
-  productSurfaceFromSearch, productSurfaceStates, searchForProductSurface,
+  PRODUCT_SURFACES, productSurfaceFromSearch, productSurfaceStates, searchForProductSurface,
 } from './productSurfaces.js'
 import { useSurfaceContract } from './useSurfaceContract.js'
 import { deriveWorkspaceProjectState } from './workspaceProjectState.js'
@@ -894,7 +894,7 @@ export default function ToolCast({
   // Live sessions echo the verified subject's org — persist it (leaf.org_id)
   // so a fresh browser lists its projects instead of the create-org bootstrap.
   useSessionOrgAdoption(sessionOrg, workspace.adoptOrgId)
-  useEffect(() => {
+  useLayoutEffect(() => {
     bindConverseProject(workspace.openProjectId || null)
   }, [bindConverseProject, workspace.openProjectId])
   const currentProjectName = selectCurrentProjectName(workspace)
@@ -920,6 +920,18 @@ export default function ToolCast({
     fallbackDrawingId: activeDrawingId,
   }), [activeDrawingId, drawing.drawingState, tenantId, workspace.canonicalVersionId, workspace.openProjectId, workspace.orgId, workspace.workspace])
 
+  // A loaded canonical project can converse before it owns a drawing. This
+  // admission does not authorize drawing tools or create a conversation store.
+  const project = workspace.workspace?.project
+  const projectConversationScope = activeSurface === 'ops' && !transportMock && isSignedIn()
+    && platform.isEntitled('converse') && workspace.openProjectId && workspace.orgId
+    && !workspace.workspaceLoading && !workspace.workspaceError
+    && (project?.project_id || project?.id) === workspace.openProjectId
+    && project?.org_id === workspace.orgId
+      ? `${workspace.orgId}:${workspace.openProjectId}` : null
+  const isProjectConversation = useCallback((text) => Boolean(projectConversationScope)
+    && !!text.trim() && !text.trim().startsWith('/'), [projectConversationScope])
+
   const catalog = useCatalogController({
     services: catalogServices,
     adapters: catalogAdapters,
@@ -930,6 +942,22 @@ export default function ToolCast({
       agentDisabled: transportMock || !platform.isEntitled('converse'),
     },
   })
+
+  const composerProjectScopeRef = useRef(null)
+  useLayoutEffect(() => {
+    const projectScope = `${workspace.orgId || ''}:${workspace.openProjectId || ''}`
+    const projectChanged = composerProjectScopeRef.current !== null && composerProjectScopeRef.current !== projectScope
+    composerProjectScopeRef.current = projectScope
+    catalog.controller.setContext({
+      projectId: workspace.openProjectId || null,
+      projectConversationScope,
+      surfaceFamilyIds: PRODUCT_SURFACES.find(surface => surface.id === activeSurface)?.familyIds ?? null,
+    })
+    if (projectChanged) {
+      catalog.actions.setPrompt('')
+      setPrompt('')
+    }
+  }, [activeSurface, catalog.actions, catalog.controller, projectConversationScope, workspace.openProjectId, workspace.orgId])
 
   useLayoutEffect(() => {
     if (!activeDrawingId) return
@@ -1396,7 +1424,7 @@ export default function ToolCast({
   // — now simply drops the authorisation with the call.
   const dispatchRequest = useCallback(async (override, { allowSecretOnce = false } = {}) => {
     const text = (typeof override === 'string' ? override : prompt).trim()
-    const reason = stageRunDisabledReason({ sessionActive: platformSession.status === 'active', hasDrawing, busy, jobRunning, routing, loading: phase === 'loading' })
+    const reason = stageRunDisabledReason({ sessionActive: platformSession.status === 'active', hasDrawing, projectConversation: isProjectConversation(text), busy, jobRunning, routing, loading: phase === 'loading' })
     if (reason) { setError(reason); return }
     if (!text) return
     setError(null)
@@ -1427,7 +1455,7 @@ export default function ToolCast({
     if (decision) setPhase('proposal')
     else setPhase('failed')
     return decision
-  }, [busy, catalog.actions, catalog.controller, hasDrawing, jobRunning, phase, platformSession.status, prompt, routing])
+  }, [busy, catalog.actions, catalog.controller, hasDrawing, isProjectConversation, jobRunning, phase, platformSession.status, prompt, routing])
 
   const runRequest = useCallback(() => dispatchRequest(), [dispatchRequest])
 
@@ -1827,8 +1855,8 @@ export default function ToolCast({
                   // parameter. There is no latch to strand: this bar's own
                   // preconditions (below) can short-circuit the re-dispatch and
                   // the authorisation simply evaporates with it.
-                  disabled={platformSession.status !== 'active' || !hasDrawing || busy || jobRunning || routing}
-                  title={stageRunDisabledReason({ sessionActive: platformSession.status === 'active', hasDrawing, busy, jobRunning, routing }) || undefined}
+                  disabled={!!stageRunDisabledReason({ sessionActive: platformSession.status === 'active', hasDrawing, projectConversation: isProjectConversation(prompt), busy, jobRunning, routing })}
+                  title={stageRunDisabledReason({ sessionActive: platformSession.status === 'active', hasDrawing, projectConversation: isProjectConversation(prompt), busy, jobRunning, routing }) || undefined}
                   onClick={() => dispatchRequest(undefined, { allowSecretOnce: true })}
                 >
                   Send anyway
@@ -1867,7 +1895,7 @@ export default function ToolCast({
                   .tc-bar-scopes lane string; PromptBox's live .bar-scope chip
                   replaces both. */}
           <p id="tc-run-reason" className="tc-panel-note">{stageRunDisabledReason({
-            sessionActive: platformSession.status === 'active', hasDrawing, busy, jobRunning, routing,
+            sessionActive: platformSession.status === 'active', hasDrawing, projectConversation: isProjectConversation(prompt), busy, jobRunning, routing,
             loading: phase === 'loading',
           }) || 'Press Enter to submit. Use Shift+Enter for a new line.'}</p>
           <PromptBox
@@ -1902,6 +1930,7 @@ export default function ToolCast({
             disabledReason={stageRunDisabledReason({
               sessionActive: platformSession.status === 'active',
               hasDrawing,
+              projectConversation: isProjectConversation(prompt),
               busy,
               jobRunning,
               routing,
