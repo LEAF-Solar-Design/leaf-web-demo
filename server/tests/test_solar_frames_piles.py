@@ -229,7 +229,25 @@ def test_frames_piles_first_generate_is_the_evidence_g1(backend):
     assert document["state"]["next_handle"] == 145
     assert (result["head"]["state"]["artifact_id"], result["head"]["state"]["byte_length"]) == MEASURED_G1_STATE
     assert canonical(result) == MEASURED_G1_RESULT
-    assert len(keys(backend) - before) == 3
+    state_meta, _ = ps.solar_artifacts.read_artifact(backend, TENANT, DRAWING, result['head']['state']['artifact_id'])
+    context = {'project_id': state_meta['project_id'], 'resolved_version': state_meta['source_version'],
+               'graph_sha256': state_meta['graph_sha256']}
+    parameter_id = canonical(ps.solar_artifacts.artifact_binding(
+        TENANT, DRAWING, context, ps.PARAMETERS_TOOL, document['source']['sha256']))
+    parameter_meta, parameter_raw = ps.solar_artifacts.read_artifact(backend, TENANT, DRAWING, parameter_id)
+    parameters = ps.load_operation_parameters(backend, TENANT, DRAWING, state_meta, document)
+    request = {'operation': 'frame-generate', 'base': None, 'drawing_units': 'm',
+               'boundary': GEN['boundary'], 'preset': PRESET}
+    assert parameters == json.loads(parameter_raw) == {
+        'schema': ps.PARAMETERS_SCHEMA, 'operation': request, 'generation': request, 'piling': None}
+    assert parameter_meta['filename'] == 'physical-parameters.json'
+    assert keys(backend) - before == {
+        f"{PREFIX}artifacts/{state_meta['artifact_id']}.json",
+        f"{PREFIX}artifacts/blobs/{state_meta['content_sha256']}.bin",
+        ph.entry_key(TENANT, DRAWING, 0),
+        f"{PREFIX}artifacts/{parameter_id}.json",
+        f"{PREFIX}artifacts/blobs/{parameter_meta['content_sha256']}.bin",
+    }
 
 
 MEASURED_G1_STATE = ("4431effa54c7630c12269f5ae9ee2b9a9edd54d5b152ba810bf409e5ca9bfc3b", 50469)
