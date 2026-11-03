@@ -450,6 +450,19 @@ _REQUIRED_COLUMNS = {
 # Legacy values intentionally add nothing. Session shadow and dual-write modes
 # still write PostgreSQL, so they require the same proof as canonical reads.
 _AUTHORITY_REQUIRED_COLUMNS = {
+    "devices": {
+        "device_enrollments": {"enrollment_id", "tenant_id", "project_id", "label", "token_sha256",
+                               "created_by", "created_at", "expires_at", "consumed_at", "device_id"},
+        "devices": {"device_id", "tenant_id", "project_id", "label", "public_key", "agent_version",
+                    "platform", "hostname", "created_at", "last_seen_at", "revoked_at", "revoked_by",
+                    "packages", "free_mem_mb"},
+        "device_commands": {"command_id", "tenant_id", "device_id", "op", "args", "issued_by", "issued_at",
+                            "expires_at", "leased_at", "lease_until", "state", "result", "finished_at"},
+        "device_nonces": {"device_id", "nonce", "seen_at"},
+        "device_relay_tokens": {"token_id", "tenant_id", "device_id", "package", "label", "token_sha256",
+                                "created_by", "created_at", "revoked_at", "last_used_at"},
+        "device_audit": {"event_id", "tenant_id", "device_id", "at", "actor", "op", "target", "status", "request_sha256"},
+    },
     "lab_runs": {
         "lab_activations": {"tenant_id", "activation_id", "doc_id", "revision", "graph_sha256",
                             "registry_digest", "ops_revision", "input_digest", "principal", "interval_s",
@@ -1306,6 +1319,27 @@ _REQUIRED_TRIGGERS = {
 # Names below are stable database API. They enforce idempotency, fencing, state
 # shape, referential integrity, and immutable audit records used by callers.
 _AUTHORITY_REQUIRED_CONSTRAINTS = {
+    "devices": {
+        "device_enrollments_pkey": _catalog_contract("device_enrollments", "PRIMARY KEY (enrollment_id)"),
+        "device_enrollments_token_sha256_key": _catalog_contract("device_enrollments", "UNIQUE (token_sha256)"),
+        "devices_pkey": _catalog_contract("devices", "PRIMARY KEY (device_id)"),
+        "devices_public_key_key": _catalog_contract("devices", "UNIQUE (public_key)"),
+        "devices_tenant_id_device_id_key": _catalog_contract("devices", "UNIQUE (tenant_id, device_id)"),
+        "device_commands_pkey": _catalog_contract("device_commands", "PRIMARY KEY (command_id)"),
+        "device_commands_tenant_id_device_id_fkey": _catalog_contract(
+            "device_commands", "FOREIGN KEY (tenant_id, device_id)", "REFERENCES devices(tenant_id, device_id)"),
+        "device_commands_op_check": _catalog_contract(
+            "device_commands", "CHECK", "op", "pkg.install", "pkg.upgrade", "pkg.uninstall", "pkg.health",
+            "http.proxy", "ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list", "agent.pause", "agent.update"),
+        "device_commands_state_check": _catalog_contract("device_commands", "CHECK", "state", "queued", "leased", "done", "expired"),
+        "device_nonces_pkey": _catalog_contract("device_nonces", "PRIMARY KEY (device_id, nonce)"),
+        "device_relay_tokens_pkey": _catalog_contract("device_relay_tokens", "PRIMARY KEY (token_id)"),
+        "device_relay_tokens_token_sha256_key": _catalog_contract("device_relay_tokens", "UNIQUE (token_sha256)"),
+        "device_relay_tokens_tenant_id_device_id_fkey": _catalog_contract(
+            "device_relay_tokens", "FOREIGN KEY (tenant_id, device_id)", "REFERENCES devices(tenant_id, device_id)"),
+        "device_audit_pkey": _catalog_contract("device_audit", "PRIMARY KEY (event_id)"),
+        "device_audit_status_check": _catalog_contract("device_audit", "CHECK", "status", "ok", "error", "refused"),
+    },
     "lab_runs": {
         "lab_activations_pkey": _catalog_contract("lab_activations", "PRIMARY KEY (tenant_id, activation_id)"),
         "lab_activations_interval_s_check": _catalog_contract("lab_activations", "CHECK", "interval_s", "60", "86400"),
@@ -1804,6 +1838,10 @@ _AUTHORITY_REQUIRED_CONSTRAINTS = {
 }
 
 _AUTHORITY_REQUIRED_INDEXES = {
+    "devices": {
+        "device_commands_device_state_issued_idx": _catalog_contract("device_commands", "(device_id, state, issued_at)"),
+        "device_audit_device_at_idx": _catalog_contract("device_audit", "(device_id, at DESC)"),
+    },
     "lab": {
         "lab_git_pending_live_idx": _catalog_contract(
             "lab_git_pending", "CREATE UNIQUE INDEX", "(tenant_id, doc_id)", "WHERE", "state <> 'abandoned'"),
@@ -1997,6 +2035,7 @@ _AUTHORITY_REQUIRED_TRIGGERS = {
 _TRIGGER_ENABLED_MODES = frozenset({"O", "A"})
 
 _AUTHORITY_SELECTORS = {
+    "LEAF_DEVICE_STORE": {"postgres": "devices", "postgres_required": "devices"},
     "LEAF_LAB_RUN_STORE": {"postgres": "lab_runs", "postgres_required": "lab_runs"},
     "LEAF_LAB_STORE": {"postgres": "lab"},
     "LEAF_JOBS_STORE": {"postgres": "jobs"},

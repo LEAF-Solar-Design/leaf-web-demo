@@ -313,6 +313,7 @@
     "server-deployment-identity-live",
     "server-deployment-source-identity",
     "server-developer-jobs-transport",
+    "server-device-store",
     "server-drawing-authority-cutover-marker",
     "server-drawing-authority-postgres",
     "server-drawing-dxf-route",
