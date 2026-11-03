@@ -194,3 +194,129 @@ def test_record_body_hoists_from_real_spend_quota_envelope():
     assert "tier" not in body
     assert "limit" not in body
     assert "used" not in body
+
+
+def test_summary_body_drops_payloads_preserves_list_fields_and_does_not_mutate():
+    from copy import deepcopy
+    from routers.jobs import _summary_body
+
+    rec = {
+        "job_id": "summary-1", "status": "failed", "tool": "extract",
+        "created_at": "2026-11-01T00:00:00Z",
+        "error": {"error_code": "TIMEOUT", "message": "boom"},
+        "result": {"cost": {"usd_est": 0.125}, "degraded_mode": True},
+        "params": {"drawing": "large"}, "provenance": {"trace": "large"},
+        "execution_context": {"graph": "large"},
+    }
+    original = deepcopy(rec)
+    body = _summary_body(rec)
+    for key in ("result", "params", "provenance", "execution_context"):
+        assert key not in body
+    for key in ("job_id", "status", "tool", "error", "created_at"):
+        assert body[key] == rec[key]
+    assert body["cost"] == rec["result"]["cost"]
+    assert body["degraded_mode"] is True
+    assert rec == original
+
+
+@pytest.mark.parametrize("cost", [None, 0, {}, {"usd_est": 0.5}])
+def test_summary_body_cost_uses_result_only_when_top_level_is_not_truthy(cost):
+    from routers.jobs import _summary_body
+
+    rec = {"cost": cost, "result": {"cost": {"usd_est": 0.125}}}
+    assert _summary_body(rec)["cost"] == (cost or rec["result"]["cost"])
+
+
+@pytest.mark.parametrize("result", [None, {}, {"cost": None}, {"cost": 0}])
+def test_summary_body_handles_missing_or_empty_result_cost(result):
+    from routers.jobs import _summary_body
+
+    body = _summary_body({"result": result})
+    if isinstance(result, dict) and "cost" in result:
+        assert body["cost"] == result["cost"]
+    else:
+        assert "cost" not in body
+
+
+@pytest.mark.parametrize("degraded_mode", [False, True])
+def test_summary_body_preserves_record_body_quota_fields_and_degraded_mode(degraded_mode):
+    from routers.jobs import _summary_body
+
+    env = usage.daily_quota_envelope("acme", "demo", limit=5, used=5)
+    rec = {"job_id": "summary-quota", "status": "failed", "tenant_id": "acme",
+           "result": {"degraded_mode": degraded_mode}, "error": env["error"]}
+    full = _record_body(rec)
+    body = _summary_body(rec)
+    for key in ("quota_kind", "tier", "limit", "used", "degraded_mode"):
+        assert body[key] == full[key]
+
+
+@pytest.mark.parametrize("summary", [False, True])
+def test_list_jobs_summary_projection_is_opt_in(monkeypatch, summary):
+    from routers import jobs as routes
+
+    canonical = {"job_id": "summary-canonical", "tenant_id": "acme",
+                 "status": "complete", "result": {"cost": {"usd_est": 0.125}}}
+    legacy = {"job_id": "summary-legacy", "tenant_id": "acme",
+              "status": "complete", "result": {"ok": True}}
+
+    def canonical_jobs(tenant_id, *, limit):
+        assert tenant_id == "acme"
+        assert limit == 20
+        return [canonical]
+
+    def legacy_jobs(tenant_id, limit):
+        assert tenant_id == "acme"
+        assert limit == 20
+        return [legacy]
+
+    monkeypatch.setattr(routes.jobs.platform_link, "list_canonical_jobs", canonical_jobs)
+    monkeypatch.setattr(routes.jobs, "list_jobs", legacy_jobs)
+    monkeypatch.setattr(routes.jobs, "job_store_mode", lambda: "legacy")
+    monkeypatch.setattr(routes, "_access_error", lambda *args, **kwargs: None)
+    body = routes.list_jobs(tenant="acme", summary=summary)
+    expected = routes._summary_body if summary else _record_body
+    assert body["jobs"] == [expected(canonical), expected(legacy)]
+    assert all(("result" not in item) == summary for item in body["jobs"])
+    if not summary:
+        assert routes.list_jobs(tenant="acme")["jobs"] == body["jobs"]
+
+
+@pytest.mark.parametrize("summary", [False, True])
+def test_summary_list_preserves_current_caller_binding_and_denied_rows(monkeypatch, summary):
+    from types import SimpleNamespace
+    from routers import jobs as routes
+
+    tenant = deps.TenantContext("caller-tenant", subject="auth0|summary-reader")
+    binding = SimpleNamespace(platform_tenant_id="bound-tenant")
+    state = {"allowed": True, "resolutions": 0, "checks": 0}
+    record = {"job_id": "current-job", "tenant_id": "bound-tenant",
+              "status": "complete", "result": {"private": "payload"}}
+
+    def resolve(caller):
+        assert caller is tenant
+        state["resolutions"] += 1
+        return binding
+
+    def access(rec, caller, job_id, **options):
+        assert rec is record and caller is tenant and job_id == "current-job"
+        assert options == {"binding": binding, "bound_tenant_id": "bound-tenant"}
+        state["checks"] += 1
+        return None if state["allowed"] else object()
+
+    def canonical(tenant_id, *, limit):
+        assert tenant_id == "bound-tenant"
+        return [record]
+
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(routes.jobs.platform_link, "resolve_caller_binding", resolve)
+    monkeypatch.setattr(routes.jobs.platform_link, "list_canonical_jobs", canonical)
+    monkeypatch.setattr(routes.jobs, "list_jobs", lambda *args: [])
+    monkeypatch.setattr(routes.jobs, "job_store_mode", lambda: "legacy")
+    monkeypatch.setattr(routes, "_access_error", access)
+    visible = routes.list_jobs(tenant=tenant, summary=summary)["jobs"]
+    assert len(visible) == 1
+    assert ("result" not in visible[0]) == summary
+    state["allowed"] = False
+    assert routes.list_jobs(tenant=tenant, summary=summary)["jobs"] == []
+    assert state["resolutions"] == state["checks"] == 2
