@@ -133,40 +133,38 @@ def test_registry_fallback_untouched_when_flag_off(monkeypatch) -> None:
 # tripped all four, and this unit-economics card (0051) tripped them again.
 # Renamed off the number so the NEXT card edits values, not identifiers.
 
-def test_authority_inventory_advanced_to_the_head() -> None:
+def _assert_inventory_manifest(files):
     inventory = json.loads(
-        (PROJECT_ROOT / "platform" / "authority-inventory.json")
-        .read_text(encoding="utf-8"))
-    ids = inventory["scope"]["migration_ids"]
-    assert ids[-1] == "0097"
-    assert ids == [f"{n:04d}" for n in range(1, 98)]
-    files = sorted(
-        p.name.split("_", 1)[0]
-        for p in (PROJECT_ROOT / "platform" / "migrations").glob("*.sql"))
-    assert files == ids
+        (PROJECT_ROOT / "platform" / "authority-inventory.json").read_text(encoding="utf-8"))
+    assert files == sorted(files) and len(files) == len(set(files))
+    assert inventory["scope"]["migration_files"] == files
+    assert inventory["scope"]["migration_ids"] == sorted({
+        name.split("_", 1)[0] for name in files
+    })
 
 
-def test_conversation_model_pin_advanced() -> None:
-    src = (SERVER_DIR / "tests" / "test_conversation_model.py").read_text(
-        encoding="utf-8")
-    assert 'migration_ids[-1] == "0097"' in src
-    assert "range(1, 98)" in src
+def _migration_files():
+    return sorted(path.name for path in (PROJECT_ROOT / "platform" / "migrations").glob("*.sql"))
 
 
-def test_readiness_pins_advanced() -> None:
-    src = (PROJECT_ROOT / "platform" / "tests" / "test_db_readiness_static.py"
-           ).read_text(encoding="utf-8")
-    # The FILENAME, not the bare number. That file also holds synthetic "0049"
-    # and "0050" literals inside two negative pin-drift tests, so a bare-number
-    # assertion passed whether or not the real pin had moved -- vacuous.
-    assert "0097_project_checkout_custody.sql" in src
+def test_authority_inventory_advanced_to_the_head() -> None:
+    _assert_inventory_manifest(_migration_files())
 
 
-def test_postgres_contract_expected_migrations_advanced() -> None:
-    src = (SERVER_DIR / "tests" /
-           "test_postgres_authority_inventory_contract.py").read_text(
-        encoding="utf-8")
-    assert "range(1, 98)" in src
+def test_inventory_rejects_missing_migration_filename() -> None:
+    with pytest.raises(AssertionError):
+        _assert_inventory_manifest(_migration_files()[:-1])
+
+
+def test_inventory_rejects_unregistered_migration_filename() -> None:
+    with pytest.raises(AssertionError):
+        _assert_inventory_manifest(sorted(_migration_files() + ["9999_unregistered.sql"]))
+
+
+def test_inventory_rejects_duplicate_full_migration_filename() -> None:
+    files = _migration_files()
+    with pytest.raises(AssertionError):
+        _assert_inventory_manifest(sorted(files + [files[-1]]))
 
 
 def test_db_registers_template_versions_columns() -> None:

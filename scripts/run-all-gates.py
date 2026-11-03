@@ -3596,6 +3596,12 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_broker_blank_dwg.py"), 18),
         Suite("server-build-queue", "server tests/test_build_queue.py", "pytest", SERVER,
               _py_pytest("tests/test_build_queue.py"), 86),
+        Suite("server-device-bridge-contract", "server tests/test_device_bridge_contract.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_bridge_contract.py"), 8),
+        # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
+        Suite("server-device-store", "server tests/test_device_store.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_store.py"), 24, uses_database=True,
+              database_skip_reasons=(r"platform DB unreachable: DATABASE_URL unset",)),
         Suite("server-builds-route", "server tests/test_builds_route.py", "pytest", SERVER,
               _py_pytest("tests/test_builds_route.py"), 10),
         # TCM-08 pooled AWS lines split by the Environment tag: hermetic (fake ce client), exact count.

@@ -67,11 +67,11 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "project_reference_materials_name_check": db._catalog_contract(
             "project_reference_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
         "project_reference_materials_media_type_check": db._catalog_contract(
-            "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'"),
+            "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'", "'application/gzip'"),
         "project_reference_materials_byte_size_check": db._catalog_contract(
             "project_reference_materials", "CHECK", "byte_size >= 1", "byte_size <= 67108864"),
         "reference_text_size": db._catalog_contract(
-            "project_reference_materials", "CHECK", "media_type = 'video/quicktime'", "byte_size <= 8388608"),
+            "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'application/gzip'", "byte_size <= 8388608"),
         "project_reference_materials_sha256_check": db._catalog_contract(
             "project_reference_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
     }
@@ -86,8 +86,7 @@ def test_acceptance_schema_readiness_contract(monkeypatch):
         "org_id IS NOT NULL", "org_account_class", "'customer'", "'production_acceptance'", "'demo'")
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert manifest[-1]["name"] == "0097_project_checkout_custody.sql"
-    assert inventory["scope"]["migration_ids"][-1] == "0097"
+    assert [item["name"] for item in manifest] == inventory["scope"]["migration_files"]
 
     class Schema:
         absent = None
@@ -208,8 +207,8 @@ def test_runner_registry(monkeypatch):
     columns = db.required_columns_for_selected_authorities({})
     manifest = db.migration_manifest()
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    assert inventory["scope"]["migration_ids"] == [f"{n:04d}" for n in range(1, 98)]
-    assert [item["name"][:4] for item in manifest] == inventory["scope"]["migration_ids"]
+    assert [item["name"] for item in manifest] == inventory["scope"]["migration_files"]
+    _assert_manifest_matches_inventory([item["name"] for item in manifest], inventory["scope"]["migration_ids"])
     assert len(ADDONS) == 12
     assert "-- expand-contract: contract-of=0083" in sql
     names = [f"{table}_addon_check" for table in ("tenant_cost_events", "tenant_addon_settings")]
@@ -364,9 +363,9 @@ def test_sip_r1_schema_contract_complete():
 def test_sip_r1_migration_registration_complete():
     root = db._PKG_DIR.parent
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
-    ids = [f"{n:04d}" for n in range(1, 98)]
-    assert inventory["scope"]["migration_ids"] == ids
-    assert db.migration_manifest()[-1]["name"] == "0097_project_checkout_custody.sql"
+    names = [item["name"] for item in db.migration_manifest()]
+    assert inventory["scope"]["migration_files"] == names
+    _assert_manifest_matches_inventory(names, inventory["scope"]["migration_ids"])
     ledger = next(a for a in inventory["authorities"] if a["id"] == "canonical_project_ledger")
     assert "project_drawing_checkouts" in ledger["postgres_tables"]
     assert "project_checkout_custody" in ledger["postgres_tables"]
@@ -374,11 +373,7 @@ def test_sip_r1_migration_registration_complete():
     assert "project_solve_exchanges" in ledger["postgres_tables"]
     assert 'project_materials' in ledger['postgres_tables']
     assert "project_reference_materials" in ledger["postgres_tables"]
-    for name in ("test_conversation_model.py", "test_template_store.py",
-                 "test_postgres_authority_inventory_contract.py"):
-        source = (root / "server/tests" / name).read_text(encoding="utf-8")
-        assert "range(1, 98)" in source
-        assert "range(1, 74)" not in source
+
 
 
 def test_sip_r1_expand_only_migration():
@@ -491,10 +486,12 @@ def _assert_manifest_matches_inventory(manifest_names, migration_ids):
     )
     assert len(migration_ids) == len(set(migration_ids))
     assert migration_ids == sorted(migration_ids)
-    assert migration_ids == [
-        f"{number:04d}" for number in range(1, len(migration_ids) + 1)
-    ]
-    assert [name.split("_", 1)[0] for name in manifest_names] == migration_ids
+    assert manifest_names == sorted(manifest_names)
+    assert len(manifest_names) == len(set(manifest_names))
+    assert all(re.fullmatch(r"[0-9]{4}_[A-Za-z0-9_]+\.sql", name) for name in manifest_names)
+    # The producer ledger keys full filenames and digests. Parallel changes may
+    # share a numeric prefix or leave a gap without aliasing either migration.
+    assert sorted({name.split("_", 1)[0] for name in manifest_names}) == migration_ids
 
 
 @pytest.mark.parametrize("url", [
@@ -562,14 +559,8 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
     inventory = json.loads(_AUTHORITY_INVENTORY_PATH.read_text(encoding="utf-8"))
     assert "0042_annotation_batches.sql" in manifest_names
     _assert_closed_world_pin(
-        manifest_names[-1], "0097_project_checkout_custody.sql",
-        "Update this pin to the new last migration filename once main adds "
-        "one (and the migration_ids pin below to match).",
-    )
-    _assert_closed_world_pin(
-        inventory["scope"]["migration_ids"][-1], "0097",
-        "Update this pin (and authority-inventory.json's "
-        "scope.migration_ids) to the new last migration id.",
+        manifest_names, inventory["scope"]["migration_files"],
+        "Record every complete migration filename in the authority inventory.",
     )
     assert "annotation_targets" in db._REQUIRED_COLUMNS
     assert "annotation_batches" in db._REQUIRED_COLUMNS
@@ -592,9 +583,9 @@ def test_annotation_migration_is_in_the_unconditional_readiness_inventory():
         (["0001_one.sql"], ["0001", "0002"]),
         (["0001_one.sql", "0002_two.sql"], ["0001", "0001"]),
         (["0001_one.sql", "0002_two.sql"], ["0002", "0001"]),
-        (["0001_one.sql", "0003_three.sql"], ["0001", "0003"]),
+        (["0001_one.sql", "0001_one.sql"], ["0001"]),
     ],
-    ids=["missing", "extra", "duplicate", "reordered", "noncontiguous"],
+    ids=["missing", "extra", "duplicate", "reordered", "duplicate-fullname"],
 )
 def test_migration_inventory_refuses_incomplete_or_ambiguous_ids(
     manifest_names, migration_ids,
