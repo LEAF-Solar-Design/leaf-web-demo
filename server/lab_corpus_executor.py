@@ -28,6 +28,10 @@ MAX_RESULT_BYTES = 1024 * 1024
 _OWNER = object()
 
 
+class CorpusStopped(ValueError):
+    """Raised only through the child's cleanup finally block."""
+
+
 def _hash(raw):
     return hashlib.sha256(raw).hexdigest()
 
@@ -192,8 +196,14 @@ def run(job_id, worker_id, attempt, context, heartbeat, cancelled, deadline):
             'PYTHONDONTWRITEBYTECODE': '1'}, stdin=subprocess.DEVNULL,
             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
         try:
+            checked_at = float('-inf')
             while process.poll() is None:
-                guard(heartbeat, cancelled, deadline)
+                now = time.monotonic()
+                if not math.isfinite(deadline) or now >= deadline:
+                    raise ValueError('Corpus attempt lost its lease or execution budget.')
+                if now - checked_at >= 1:
+                    guard(heartbeat, cancelled, deadline)
+                    checked_at = time.monotonic()
                 time.sleep(min(0.1, max(0, deadline - time.monotonic())))
             guard(heartbeat, cancelled, deadline)
             output = stage / 'result.json'
@@ -212,6 +222,8 @@ def run(job_id, worker_id, attempt, context, heartbeat, cancelled, deadline):
                     'attempt': attempt, 'context': context, 'row_count': count,
                     'rows_sha256': result['rows_sha256'], 'result_sha256': _hash(raw),
                     'result': result}
+        except Exception as exc:
+            raise CorpusStopped(str(exc)) from None
         finally:
             # Reap the entire private process group even after the group leader
             # exits. A result is never published while descendants can survive.

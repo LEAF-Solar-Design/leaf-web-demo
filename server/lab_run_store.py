@@ -54,7 +54,7 @@ CREATE TABLE IF NOT EXISTS lab_runs (
  state TEXT NOT NULL CHECK (state IN ('queued','running','finished','failed','cancelled')),
  lease_owner TEXT, lease_fence INTEGER NOT NULL DEFAULT 0, lease_expires_at TEXT,
  claimed_build_revision TEXT, claimed_color TEXT CHECK (claimed_color IN ('active','idle')),
- cancel_requested_at TEXT, cancel_requested_by TEXT,
+ cancel_requested_at TEXT, cancel_requested_by TEXT, corpus_authority_json TEXT,
  next_seq INTEGER NOT NULL DEFAULT 0, event_count INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL, finished_at TEXT,
  PRIMARY KEY (tenant_id, run_id)
@@ -153,6 +153,7 @@ def _run(tenant, operation, *, write=False):
             ("claimed_build_revision", "TEXT"),
             ("claimed_color", "TEXT CHECK (claimed_color IN ('active','idle'))"),
             ("cancel_requested_at", "TEXT"), ("cancel_requested_by", "TEXT"),
+            ("corpus_authority_json", "TEXT"),
         ):
             if name not in columns:
                 conn.execute("ALTER TABLE lab_runs ADD COLUMN " + name + " " + definition)
@@ -218,11 +219,17 @@ def release_stream(tenant, principal, stream_id):
 
 def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
            input_digest, adapter_revision, build_revision, *, registry_digest=None,
-           submission_id=None, authority=None, reconcile_only=False):
+           submission_id=None, authority=None, reconcile_only=False, corpus_authority=None):
     for value in (doc_id, run_id, graph_sha256, ops_revision, input_digest, adapter_revision, build_revision):
         _pin(value)
     if type(graph_revision) is not int or graph_revision < 1:
         raise InvalidGraph("invalid_lab_graph_revision")
+    if corpus_authority is not None:
+        corpus_authority = validate_corpus_authority(corpus_authority)
+        if any(corpus_authority[k] != v for k, v in {
+                'tenant_id': tenant, 'doc_id': doc_id, 'graph_revision': graph_revision,
+                'graph_sha256': graph_sha256}.items()):
+            raise InvalidGraph('lab_corpus_authority_mismatch')
     digest = globals()["registry_digest"]()
     if registry_digest is not None and _pin(registry_digest) != digest:
         raise InvalidGraph("lab_registry_digest_mismatch")
@@ -258,8 +265,80 @@ def create(tenant, doc_id, run_id, graph_revision, graph_sha256, ops_revision,
                     " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
                     (tenant, doc_id, run_id, graph_revision, graph_sha256, digest, ops_revision,
                      input_digest, adapter_revision, build_revision, "queued", now, now))
+        if corpus_authority is not None:
+            sql.execute('UPDATE lab_runs SET corpus_authority_json=? WHERE tenant_id=? AND run_id=?',
+                        (json.dumps(corpus_authority, sort_keys=True), tenant, run_id))
         return dict(_row(sql, tenant, run_id))
 
+    return _run(tenant, operation, write=True)
+
+
+def validate_corpus_authority(value):
+    import uuid
+    fields = {'schema', 'tenant_id', 'project_id', 'actor_id', 'doc_id',
+              'graph_revision', 'graph_sha256'}
+    if (type(value) is not dict or set(value) != fields
+            or value['schema'] != 'leaf.lab-corpus-authority.v1'):
+        raise InvalidGraph('lab_corpus_authority_missing')
+    for key in ('tenant_id', 'project_id', 'actor_id'):
+        if type(value[key]) is not str or str(uuid.UUID(value[key])) != value[key]:
+            raise InvalidGraph('lab_corpus_authority_mismatch')
+    if (type(value['graph_revision']) is not int or value['graph_revision'] < 1
+            or not isinstance(value['doc_id'], str) or not value['doc_id']
+            or not isinstance(value['graph_sha256'], str) or len(value['graph_sha256']) != 64):
+        raise InvalidGraph('lab_corpus_authority_mismatch')
+    return json.loads(json.dumps(value))
+
+
+def corpus_authority(row):
+    value = row.get('corpus_authority_json')
+    if value is None:
+        return None
+    value = json.loads(value) if isinstance(value, str) else value
+    value = validate_corpus_authority(value)
+    if any(value[k] != row[k] for k in ('tenant_id', 'doc_id', 'graph_revision', 'graph_sha256')):
+        raise InvalidGraph('lab_corpus_authority_mismatch')
+    from lab_canonical import graph_digest
+    if graph_digest(value) != row['input_digest']:
+        raise InvalidGraph('lab_corpus_authority_mismatch')
+    return value
+
+
+def owns_corpus_run(tenant, run_id, owner, fence):
+    return _run(tenant, lambda sql: _holder(sql, tenant, run_id, owner, fence, _now()) is not None)
+
+
+def cancel_corpus_job(tenant, run_id, owner, fence, block_id, job_id, *, deadline=False):
+    """Serialize cancellation with Lab takeover; never wait while holding locks."""
+    if store_mode() != 'postgres':
+        return None
+    def operation(sql):
+        row = _holder(sql, tenant, run_id, owner, fence, _now())
+        if row is None or (row['cancel_requested_at'] is None and not deadline):
+            return None
+        authority = corpus_authority(dict(row))
+        if authority is None:
+            return None
+        job = sql.execute('SELECT * FROM async_jobs WHERE job_id=? AND tenant_id=? FOR UPDATE',
+                          (job_id, tenant)).fetchone()
+        if (job is None or job['tool'] != 'internal.lab-corpus-evaluate'
+                or job['project_id'] != authority['project_id']
+                or job['idempotency_key'] != f'lab:{run_id}:{block_id}:corpus:v1'):
+            return None
+        existing = job['corpus_cancel_json']
+        if existing is not None:
+            return json.loads(existing) if isinstance(existing, str) else existing
+        if job['status'] in {'complete', 'failed'}:
+            return None
+        tag = {'run_id': run_id, 'fence': fence, 'block_id': block_id,
+               'attempt': int(job['attempt']), 'reason': 'deadline' if deadline else 'cancel'}
+        sql.execute("UPDATE async_jobs SET progress='closed',lease_owner=NULL,"
+                    "lease_expires_at=NULL,heartbeat_at=NULL,corpus_cancel_json=? WHERE job_id=?",
+                    (json.dumps(tag, sort_keys=True), job_id))
+        if job['status'] == 'submitted' and int(job['attempt']) == 0:
+            sql.execute('UPDATE async_jobs SET corpus_cleanup_json=? WHERE job_id=?',
+                (json.dumps({'attempt': 0, 'cancel': tag, 'not_started': True}), job_id))
+        return tag
     return _run(tenant, operation, write=True)
 
 

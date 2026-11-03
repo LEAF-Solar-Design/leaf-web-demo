@@ -87,6 +87,104 @@ afterEach(async () => {
   vi.useRealTimers()
 })
 
+describe('project corpus evaluation flow', () => {
+  const project = '11111111-2222-4333-8444-555555555555'
+  const corpusId = 'aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee'
+  const suiteId = 'bbbbbbbb-cccc-4ddd-8eee-ffffffffffff'
+  const material = { material_id: corpusId, name: 'Original market corpus.jsonl.gz',
+    sha256: 'a'.repeat(64), byte_size: 12345, media_type: 'application/gzip' }
+  const suite = { material_id: suiteId, name: 'Registered evaluation suite.json',
+    sha256: 'b'.repeat(64), byte_size: 456, media_type: 'application/json' }
+  function options() {
+    const manifest = JSON.parse(JSON.stringify(registry['constant@1.0.0']))
+    manifest.id = 'corpus-evaluator'; manifest.title = 'Evaluate project corpus'
+    manifest.version = { semver: '1.0.0', code_sha256: 'c'.repeat(64) }
+    manifest.inputs = {}; manifest.outputs = { result: { mode: 'scalar', schema: { type: 'string' },
+      unit: 'none', nullable: false, required: false, has_default: false } }
+    const reference = { type: 'object', additionalProperties: false,
+      required: ['material_id', 'sha256', 'byte_size'], properties: {
+        material_id: { type: 'string', minLength: 36, maxLength: 36 },
+        sha256: { type: 'string', minLength: 64, maxLength: 64 },
+        byte_size: { type: 'integer', minimum: 1, maximum: 67108864 } } }
+    manifest.settings_schema = { type: 'object', additionalProperties: false,
+      required: ['project_id', 'corpus', 'suite'], properties: {
+        project_id: { type: 'string', minLength: 36, maxLength: 36 }, corpus: reference, suite: reference } }
+    manifest.sample_input = {}; manifest.sample_output = { result: '{}' }
+    manifest.effect = 'read'; manifest.residency = 'tenant'; manifest.ui_schema = {}
+    return { projects: [{ project_id: project, name: 'Shared research project' }],
+      materials: [material, suite], manifest }
+  }
+  function clientFor(graph, saved) {
+    const client = createLabArtifactsClient({ fetchImpl: async (url, init = {}) => {
+      if (init.method === 'POST') {
+        saved.graph = JSON.parse(init.body).graph
+        return { ok: true, status: 200, json: async () => ({ revision: 2, graph: saved.graph, sha256: 'd'.repeat(64) }) }
+      }
+      return { ok: true, status: 200, json: async () => ({ revision: 1, graph, sha256: 'e'.repeat(64) }) }
+    } })
+    client.setDocId('shared-corpus-graph')
+    return client
+  }
+
+  it('selects named project originals and saves/reloads immutable descriptors with existing graph links', async () => {
+    let graph = addBlock(emptyGraph(), registry['constant@1.0.0'])
+    graph = addBlock(graph, registry['constant@1.0.0'])
+    graph.blocks[0].settings = { value: 2 }; graph.blocks[1].settings = { value: 3 }
+    graph = addBlock(graph, registry['add@1.0.0'])
+    graph.pipes = [{ from: { node: 'constant-1', port: 'result' }, to: { node: 'add-1', port: 'value' } },
+      { from: { node: 'constant-2', port: 'result' }, to: { node: 'add-1', port: 'auxiliary' } }]
+    const saved = {}
+    vi.stubGlobal('fetch', vi.fn(async () => ({ ok: true, json: async () => options() })))
+    const client = clientFor(graph, saved)
+    const takeGraph = vi.spyOn(client, 'takeGraph')
+    const view = render(<GraphView initialDocument={graph} client={client} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Evaluate project corpus' }))
+    await screen.findByRole('option', { name: 'Shared research project' })
+    fireEvent.change(screen.getByLabelText('Project'), { target: { value: project } })
+    await screen.findByRole('option', { name: material.name })
+    fireEvent.change(screen.getByLabelText('Original corpus'), { target: { value: corpusId } })
+    fireEvent.change(screen.getByLabelText('Evaluation suite'), { target: { value: suiteId } })
+    expect(screen.getByLabelText('Project')).toHaveValue(project)
+    expect(screen.getByLabelText('Original corpus')).toHaveValue(corpusId)
+    expect(screen.getByLabelText('Evaluation suite')).toHaveValue(suiteId)
+    const add = screen.getByRole('button', { name: 'Add corpus evaluation' })
+    await waitFor(() => expect(add).toBeEnabled())
+    fireEvent.click(add)
+    expect(screen.queryByText(/Wait for .*finish loading/)).toBeNull()
+    expect(takeGraph).toHaveBeenCalledOnce()
+    expect(client.state.restoredGraph.blocks.at(-1).registry.id).toBe('corpus-evaluator')
+    await screen.findByTestId('corpus-evaluator-1')
+    const block = () => saved.graph?.blocks.find(item => item.registry.id === 'corpus-evaluator')
+    const save = screen.getByRole('button', { name: 'Save', exact: true })
+    await waitFor(() => expect(save).toBeEnabled())
+    fireEvent.click(save)
+    await waitFor(() => expect(block()).toBeTruthy())
+    expect(saved.graph.pipes).toEqual(graph.pipes)
+    expect(block().settings).toEqual({ project_id: project,
+      corpus: { material_id: corpusId, sha256: material.sha256, byte_size: material.byte_size },
+      suite: { material_id: suiteId, sha256: suite.sha256, byte_size: suite.byte_size } })
+    view.unmount()
+    render(<GraphView initialDocument={saved.graph} client={clientFor(saved.graph, {})} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Evaluate project corpus' }))
+    await waitFor(() => expect(screen.getByLabelText('Original corpus')).toHaveDisplayValue(material.name))
+    expect(screen.getByLabelText('Evaluation suite')).toHaveDisplayValue(suite.name)
+    expect(screen.getByTestId('pipe-count')).toHaveTextContent('2')
+    expect(screen.queryByRole('textbox', { name: /uuid/i })).toBeNull()
+  })
+
+  it('drops pending project material replies on explicit logout', async () => {
+    let deliver
+    vi.stubGlobal('fetch', vi.fn(() => new Promise(resolve => { deliver = resolve })))
+    render(<GraphView initialDocument={emptyGraph()} client={clientFor(emptyGraph(), {})} />)
+    fireEvent.click(await screen.findByRole('button', { name: 'Evaluate project corpus' }))
+    await waitFor(() => expect(deliver).toBeTypeOf('function'))
+    act(() => authLifecycle.logouts.forEach(logout => logout()))
+    await act(async () => deliver({ ok: true, json: async () => options() }))
+    expect(screen.queryByRole('region', { name: 'Project corpus evaluation' })).toBeNull()
+    expect(screen.queryByRole('option', { name: material.name })).toBeNull()
+  })
+})
+
 describe('first-click live graph', () => {
   it('mounts a collapsed report-only rail beside Live values only when a controller is present', () => {
     const provider = hostProvider()

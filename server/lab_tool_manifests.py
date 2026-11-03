@@ -6,6 +6,7 @@ from dataclasses import dataclass
 import hashlib
 import json
 import re
+import os
 from threading import Lock
 
 from jsonschema import Draft202012Validator
@@ -226,12 +227,17 @@ def tenant_tool_projection(tenant_id):
 
 def registry_for(tenant_id):
     registry = dict(lab_evaluate.trusted_registry())
+    if os.environ.get('LEAF_LAB_TOOL_NODES') == '1':
+        manifest, _ = corpus_capability()
+        registry['corpus-evaluator@1.0.0'] = manifest
     registry.update({f"{tool.name}@{tool.version}": tool.manifest
                      for tool in tenant_tool_projection(tenant_id) if tool.manifest is not None})
     return registry
 
 
 def trusted_for(tenant_id, block_id, version):
+    if (block_id, version) == ('corpus-evaluator', '1.0.0') and os.environ.get('LEAF_LAB_TOOL_NODES') == '1':
+        return corpus_capability()[1]
     for tool in tenant_tool_projection(tenant_id):
         if tool.name == block_id and tool.version == version and tool.trusted is not None:
             return tool.trusted
@@ -244,3 +250,36 @@ def row_for(tenant_id, block_id, version, code_sha256):
                 and tool.code_sha256 == code_sha256):
             return json.loads(row), dict(tool.params_by_port)
     return None
+
+
+def corpus_capability():
+    """Fixed app-owned operation, independent of tenant scripts and broker tools."""
+    import lab_corpus_executor as corpus
+    descriptor = project_tool({
+        'name': 'corpus-evaluator', 'version': '1.0.0', 'kind': 'script',
+        'description': 'Evaluate project corpus', 'entry': 'lab_corpus_executor.py',
+        'capability': 'compute.corpus', 'capabilities': ['compute.corpus'],
+        'execution_class': 'worker', 'aps_live': False,
+        'params': {'type': 'object', 'properties': {}},
+        'returns': {'type': 'string', 'maxLength': 65536},
+        'package_sha256': corpus.ARCHIVE_SHA256}, 'platform')
+    if descriptor.manifest is None:
+        raise ValueError('Corpus manifest unavailable.')
+    manifest = json.loads(lab_evaluate.canonical_json(descriptor.manifest))
+    reference = {'type': 'object', 'additionalProperties': False,
+        'required': ['material_id', 'sha256', 'byte_size'], 'properties': {
+            'material_id': {'type': 'string', 'minLength': 36, 'maxLength': 36},
+            'sha256': {'type': 'string', 'minLength': 64, 'maxLength': 64},
+            'byte_size': {'type': 'integer', 'minimum': 1, 'maximum': 67108864}}}
+    manifest['settings_schema'] = {'type': 'object', 'additionalProperties': False,
+        'required': ['project_id', 'corpus', 'suite'], 'properties': {
+            'project_id': {'type': 'string', 'minLength': 36, 'maxLength': 36},
+            'corpus': reference, 'suite': reference}}
+    manifest['ui_schema'] = {'labels': {'project_id': 'Project identity',
+                                      'corpus': 'Selected original corpus', 'suite': 'Selected suite'}}
+    manifest['version']['code_sha256'] = hashlib.sha256(lab_evaluate.canonical_json({
+        'manifest': manifest, 'archive_sha256': corpus.ARCHIVE_SHA256,
+        'executor_sha256': hashlib.sha256(__import__('pathlib').Path(corpus.__file__).read_bytes()).hexdigest(),
+    }).encode()).hexdigest()
+    lab_evaluate._admit_manifest(manifest)
+    return manifest, descriptor.trusted

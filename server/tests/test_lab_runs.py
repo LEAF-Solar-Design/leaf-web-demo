@@ -15,6 +15,7 @@ from lab_canonical import graph_digest
 from routers import lab_router, lab_runs
 from test_lab_evaluate import case
 from test_lab_run_store import authority  # noqa: F401 -- PostgreSQL twin
+from test_lab_corpus_executor import private_pg, installed, kernel_filter, lane as producer_lane  # noqa: F401
 
 
 @pytest.fixture
@@ -43,6 +44,336 @@ def rig(authority, monkeypatch):
 
 def create(rig):
     return rig.http.post("/api/lab/runs", json={"doc_id": "doc", "graph_revision": 1})
+
+
+def test_corpus_manifest_is_normal_compilable_and_drawing_free(monkeypatch):
+    import lab_tool_manifests
+    from lab_evaluate import admit_graph
+    monkeypatch.setenv('LEAF_LAB_TOOL_NODES', '1')
+    manifest, trusted = lab_tool_manifests.corpus_capability()
+    assert trusted.execution_class == 'worker'
+    assert 'drawing' not in manifest['settings_schema']['properties']
+    material = {'material_id': '11111111-2222-4333-8444-555555555555',
+                'sha256': 'a' * 64, 'byte_size': 100}
+    graph = {'schema': 'leaf.lab-graph.v1', 'blocks': [{
+        'id': 'corpus-evaluator-1', 'registry': {'id': manifest['id'],
+            'version': manifest['version']['semver'], 'code_sha256': manifest['version']['code_sha256']},
+        'settings': {'project_id': material['material_id'], 'corpus': material, 'suite': material}}],
+        'pipes': [], 'outputs': {}}
+    assert admit_graph(graph, {'corpus-evaluator@1.0.0': manifest})
+
+
+@pytest.fixture
+def corpus_join(producer_lane, private_pg, monkeypatch):
+    import uuid
+    from concurrent.futures import ThreadPoolExecutor
+    import lab_tool_manifests
+    import lab_tool_nodes
+    context, jobs, _, _, _ = producer_lane
+    for name in ('LEAF_LAB_STORE', 'LEAF_LAB_RUN_STORE'):
+        monkeypatch.setenv(name, 'postgres')
+    monkeypatch.setenv('LEAF_LAB_TOOL_NODES', '1')
+    monkeypatch.setenv('LEAF_BUILD_REVISION', 'corpus-join-proof')
+    monkeypatch.setattr(deps, 'effective_tools_with_provenance', lambda tenant: [])
+    with private_pg.cursor() as cur:
+        cur.execute('SELECT external_subject FROM identity_bindings WHERE binding_id=%s', (context['actor_id'],))
+        subject = cur.fetchone()['external_subject']
+    tenant = deps.TenantContext(context['tenant_id'], org_id=context['org_id'], tier='hosted_pro',
+                                subject=subject, authority_resolved=True)
+    manifest, _ = lab_tool_manifests.corpus_capability()
+    graph = {'schema': 'leaf.lab-graph.v1', 'blocks': [{
+        'id': 'corpus-evaluator-1', 'registry': {'id': manifest['id'],
+            'version': manifest['version']['semver'], 'code_sha256': manifest['version']['code_sha256']},
+        'settings': {key: context[key] for key in ('project_id', 'corpus', 'suite')}}],
+        'pipes': [], 'outputs': {'evaluation': {'node': 'corpus-evaluator-1', 'port': 'result'}}}
+    doc_id = 'corpus-' + uuid.uuid4().hex
+    artifact = ledger.save(str(tenant), doc_id, graph, None, subject)
+    pool = ThreadPoolExecutor(max_workers=1)
+    monkeypatch.setitem(jobs._executors, jobs.LANE_SLOW, pool)
+    app = FastAPI()
+    app.include_router(lab_runs.router)
+    app.dependency_overrides[deps.require_tenant] = lambda: tenant
+    with TestClient(app, raise_server_exceptions=False) as http:
+        yield SimpleNamespace(context=context, jobs=jobs, tenant=tenant, graph=graph,
+            manifest=manifest, doc_id=doc_id, artifact=artifact, http=http, db=private_pg)
+    for row in jobs.list_jobs(str(tenant), 200):
+        if row['status'] not in jobs.TERMINAL:
+            jobs.mark_job_closed(row['job_id'])
+    pool.shutdown(wait=True)
+
+
+def corpus_admit(lane):
+    from test_lab_run_store import intent_id
+    body = {'doc_id': lane.doc_id, 'graph_revision': 1, 'submission_id': intent_id()}
+    response = lane.http.post('/api/lab/runs', json=body)
+    assert response.status_code == 202, response.text
+    return response.json()['run_id'], body
+
+
+def corpus_adapter(lane, run_id, owner='corpus-worker'):
+    import lab_tool_nodes
+    row = store.get(str(lane.tenant), run_id)
+    lease = store.claim(str(lane.tenant), run_id, owner, 30,
+                        build_revision='corpus-join-proof', color='active')
+    assert lease
+    args = (str(lane.tenant), run_id, owner, lease['fence'])
+    adapter = lab_tool_nodes.ToolNodeAdapter(str(lane.tenant), run_id, cancelled=lambda: False,
+        corpus_authority=store.corpus_authority(row),
+        corpus_owned=lambda: store.owns_corpus_run(*args),
+        corpus_requested=lambda: store.cancel_requested(str(lane.tenant), run_id),
+        corpus_cancel=lambda block, job, deadline: store.cancel_corpus_job(*args, block, job, deadline=deadline))
+    return row, lease, adapter
+
+
+def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join):
+    from functools import partial
+    import lab_tool_manifests
+    from lab_evaluate import evaluate_graph
+    lane = corpus_join
+    run_id, body = corpus_admit(lane)
+    body['reconcile_only'] = True
+    assert lane.http.post('/api/lab/runs', json=body).json()['run_id'] == run_id
+    row, lease, adapter = corpus_adapter(lane, run_id)
+    authority = store.corpus_authority(row)
+    assert authority['actor_id'] == lane.context['actor_id']
+    assert authority['project_id'] == lane.context['project_id']
+    options = dict(tool_adapter=adapter, trusted_lookup=partial(lab_tool_manifests.trusted_for, str(lane.tenant)))
+    registry = lab_tool_manifests.registry_for(str(lane.tenant))
+    result = evaluate_graph(lane.graph, registry, **options)
+    value = result['values']['corpus-evaluator-1']['result']
+    assert not value.error, value.error
+    projected = json.loads(value.data)
+    assert projected['row_count'] == 6001 and projected['run_id'] == run_id
+    assert projected['context']['suite'] == lane.context['suite']
+    assert projected['doc_id'] == lane.doc_id and projected['graph_sha256'] == lane.artifact['sha256']
+    again = evaluate_graph(lane.graph, registry, **options)
+    assert json.loads(again['values']['corpus-evaluator-1']['result'].data)['job_id'] == projected['job_id']
+    assert len([job for job in lane.jobs.list_jobs(str(lane.tenant), 200)
+                if job['idempotency_key'] == f'lab:{run_id}:corpus-evaluator-1:corpus:v1']) == 1
+    lane.db.assert_schema_current()
+    with lane.db.cursor() as cur:
+        cur.execute("SELECT data_type FROM information_schema.columns WHERE table_name='lab_runs' "
+                    "AND column_name='corpus_authority_json'")
+        assert cur.fetchone()['data_type'] == 'jsonb'
+
+
+def test_corpus_picker_lists_real_named_project_materials_and_refuses_client_actor(corpus_join):
+    lane = corpus_join
+    response = lane.http.get('/api/lab/runs/corpus-options', params={'project_id': lane.context['project_id']})
+    assert response.status_code == 200, response.text
+    assert any(project['name'] == 'Synthetic corpus' for project in response.json()['projects'])
+    assert {material['name'] for material in response.json()['materials']} == {'synthetic.jsonl.gz', 'suite.json'}
+    response = lane.http.post('/api/lab/runs', json={'doc_id': lane.doc_id, 'graph_revision': 1, 'actor_id': lane.context['actor_id']})
+    assert response.status_code == 422
+
+
+def test_corpus_revoked_actor_refused_before_execution_and_after_restart(corpus_join):
+    lane = corpus_join
+    run_id, _ = corpus_admit(lane)
+    with lane.db.transaction() as conn:
+        conn.execute("UPDATE identity_bindings SET status='revoked',revoked_at=NOW() WHERE binding_id=%s", (lane.context['actor_id'],))
+    assert lane.http.post('/api/lab/runs', json={'doc_id': lane.doc_id, 'graph_revision': 1}).status_code == 422
+    _, _, adapter = corpus_adapter(lane, run_id)
+    trusted = lab_runs.lab_tool_manifests.corpus_capability()[1]
+    output = adapter('corpus-evaluator-1', trusted, lane.manifest, {}, lane.graph['blocks'][0]['settings'], deadline_s=5)
+    assert 'error' in output
+    assert not lane.jobs.list_jobs(str(lane.tenant), 200)
+
+
+@pytest.mark.parametrize('reason', ['cancel', 'deadline'])
+def test_corpus_closed_intent_waits_actual_reap_not_generic_terminal(corpus_join, monkeypatch, reason):
+    from concurrent.futures import ThreadPoolExecutor
+    import subprocess
+    import sys
+    import threading
+    import time
+    import lab_corpus_executor as corpus
+    from lab_evaluate import RunCancelled, RunBudgetExceeded
+    lane = corpus_join
+    run_id, _ = corpus_admit(lane)
+    _, lease, adapter = corpus_adapter(lane, run_id)
+    children, stages = [], []
+    reaped, acknowledge = threading.Event(), threading.Event()
+    real_popen, terminate = subprocess.Popen, corpus._terminate
+    def start(argv, **kwargs):
+        stages.append(kwargs['cwd'])
+        child = real_popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'], **kwargs)
+        children.append(child)
+        return child
+    def held_cleanup(child):
+        terminate(child)
+        reaped.set()
+        assert acknowledge.wait(5)
+    monkeypatch.setattr(corpus.subprocess, 'Popen', start)
+    monkeypatch.setattr(corpus, '_terminate', held_cleanup)
+    trusted = lab_runs.lab_tool_manifests.corpus_capability()[1]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
+            lane.graph['blocks'][0]['settings'], deadline_s=0.3 if reason == 'deadline' else 30)
+        stop = time.monotonic() + 5
+        while not children and time.monotonic() < stop:
+            time.sleep(0.01)
+        assert children
+        rows = lane.jobs.list_jobs(str(lane.tenant), 200)
+        job_id = rows[0]['job_id']
+        if reason == 'cancel':
+            store.request_cancel(str(lane.tenant), run_id, 'operator')
+        assert reaped.wait(5)
+        assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
+        # A generic reaper terminal is not evidence that staged files have gone.
+        from envelopes import ErrorCode, error_obj
+        current = lane.jobs.get_job(job_id)
+        lane.jobs.complete_callback(job_id, 'failed',
+            error=error_obj(ErrorCode.INTERNAL, 'synthetic generic reaper', False),
+            provenance={'attempt': current['attempt'], 'execution_path': 'local'}, _allow_closed=True)
+        time.sleep(0.3)
+        assert not future.done()
+        acknowledge.set()
+        with pytest.raises(RunBudgetExceeded if reason == 'deadline' else RunCancelled):
+            future.result(timeout=5)
+        receipt = lane.jobs.corpus_cleanup(job_id, str(lane.tenant))
+        assert receipt['reaped'] is True and receipt['cancel']['fence'] == lease['fence']
+        assert children[0].poll() is not None and all(not path.exists() for path in stages)
+
+
+def test_corpus_stale_lab_owner_does_not_cancel_successor_intent(corpus_join, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    import subprocess
+    import sys
+    import time
+    import lab_corpus_executor as corpus
+    from lab_evaluate import RunCancelled
+    lane = corpus_join
+    run_id, _ = corpus_admit(lane)
+    _, lease, adapter = corpus_adapter(lane, run_id)
+    children = []
+    real_popen = subprocess.Popen
+    def start(argv, **kwargs):
+        child = real_popen([sys.executable, '-I', '-c', 'import time; time.sleep(60)'], **kwargs)
+        children.append(child)
+        return child
+    monkeypatch.setattr(corpus.subprocess, 'Popen', start)
+    trusted = lab_runs.lab_tool_manifests.corpus_capability()[1]
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        future = pool.submit(adapter, 'corpus-evaluator-1', trusted, lane.manifest, {},
+            lane.graph['blocks'][0]['settings'], deadline_s=30)
+        stop = time.monotonic() + 5
+        while not children and time.monotonic() < stop:
+            time.sleep(0.01)
+        assert children
+        job_id = lane.jobs.list_jobs(str(lane.tenant), 200)[0]['job_id']
+        store._run(str(lane.tenant), lambda sql: sql.execute(
+            'UPDATE lab_runs SET lease_expires_at=? WHERE tenant_id=? AND run_id=?',
+            ((store._now() - timedelta(seconds=1)).isoformat(), str(lane.tenant), run_id)), write=True)
+        successor = store.claim(str(lane.tenant), run_id, 'successor', 30,
+                                build_revision='corpus-join-proof', color='active')
+        assert successor['fence'] > lease['fence']
+        with pytest.raises(RunCancelled):
+            future.result(timeout=5)
+        assert store.cancel_corpus_job(str(lane.tenant), run_id, 'corpus-worker', lease['fence'],
+            'corpus-evaluator-1', job_id, deadline=True) is None
+        assert children[0].poll() is None
+        assert lane.jobs.get_job(job_id)['progress'] != 'closed'
+        store.request_cancel(str(lane.tenant), run_id, 'operator')
+        tag = store.cancel_corpus_job(str(lane.tenant), run_id, 'successor', successor['fence'],
+                                     'corpus-evaluator-1', job_id)
+        assert tag['fence'] == successor['fence']
+        stop = time.monotonic() + 5
+        while not lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) and time.monotonic() < stop:
+            time.sleep(0.05)
+        assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant))['reaped'] is True
+
+
+def test_corpus_durable_authority_tamper_is_refused(corpus_join):
+    import uuid
+    lane = corpus_join
+    run_id, _ = corpus_admit(lane)
+    row = store.get(str(lane.tenant), run_id)
+    value = store.corpus_authority(row)
+    value['actor_id'] = str(uuid.uuid4())
+    row['corpus_authority_json'] = value
+    with pytest.raises(Exception, match='authority_mismatch'):
+        store.corpus_authority(row)
+
+
+def test_corpus_foreign_project_reader_cannot_get_events_cancel_or_open_stream(corpus_join):
+    import uuid
+    from routers import lab_stream
+    from leaf_platform import store as platform_store
+    lane = corpus_join
+    run_id, _ = corpus_admit(lane)
+    lane.http.app.include_router(lab_stream.router)
+    subject = str(uuid.uuid4())
+    platform_store.create_identity_binding(lane.context['org_id'], 'auth0', subject, role='owner')
+    lane.tenant.subject = subject
+    for path in (f'/api/lab/runs/{run_id}', f'/api/lab/runs/{run_id}/events',
+                 f'/api/lab/stream/runs?runs={run_id}'):
+        response = lane.http.get(path)
+        assert response.status_code == 422, response.text
+        assert 'project_refused' in response.text and 'row_count' not in response.text
+    assert lane.http.post(f'/api/lab/runs/{run_id}/cancel').status_code == 422
+    assert not store.cancel_requested(str(lane.tenant), run_id)
+    with lane.db.cursor() as cur:
+        cur.execute('SELECT COUNT(*) AS count FROM lab_stream_leases WHERE tenant_id=%s', (str(lane.tenant),))
+        assert cur.fetchone()['count'] == 0
+
+
+def test_corpus_stream_same_project_delivers_then_closes_before_revoked_batch(corpus_join):
+    import asyncio
+    import uuid
+    from routers import lab_stream
+    from lab_evaluate import runtime_value, export_value
+    lane = corpus_join
+    run_id, _ = corpus_admit(lane)
+    _, lease, _ = corpus_adapter(lane, run_id)
+    args = (str(lane.tenant), run_id, 'corpus-worker', lease['fence'])
+    store.append_events(*args, [{'kind': 'value', 'block_id': 'corpus-evaluator-1',
+        'payload': {'result': export_value(runtime_value('CORPUS-ALLOWED-DERIVED'))}}])
+    async def exercise():
+        principal, stream_id = lane.tenant.subject, uuid.uuid4().hex
+        store.acquire_stream(str(lane.tenant), principal, stream_id, 45)
+        stream = lab_stream.event_stream(lane.tenant, {run_id: -1}, principal, stream_id, asyncio.Event())
+        try:
+            frame = await asyncio.wait_for(anext(stream), 3)
+            assert 'CORPUS-ALLOWED-DERIVED' in frame
+            with lane.db.transaction() as conn:
+                conn.execute("UPDATE project_member_bindings SET status='revoked',revoked_at=NOW() "
+                    'WHERE org_id=%s AND project_id=%s AND binding_id=%s',
+                    (lane.context['org_id'], lane.context['project_id'], lane.context['actor_id']))
+            store.append_events(*args, [{'kind': 'value', 'block_id': 'corpus-evaluator-1',
+                'payload': {'result': export_value(runtime_value('CORPUS-REFUSED-DERIVED'))}}])
+            closed = await asyncio.wait_for(anext(stream), 3)
+            assert 'corpus_project_refused' in closed
+            assert 'CORPUS-REFUSED-DERIVED' not in closed
+        finally:
+            await stream.aclose()
+        with lane.db.cursor() as cur:
+            cur.execute('SELECT COUNT(*) AS count FROM lab_stream_leases WHERE tenant_id=%s', (str(lane.tenant),))
+            assert cur.fetchone()['count'] == 0
+    asyncio.run(exercise())
+
+
+def test_corpus_reap_ack_never_accepts_old_attempt_or_expired_open_intent(corpus_join, monkeypatch):
+    lane = corpus_join
+    class Queue:
+        def submit(self, *args):
+            pass
+    monkeypatch.setitem(lane.jobs._executors, lane.jobs.LANE_SLOW, Queue())
+    run_id, _ = corpus_admit(lane)
+    _, lease, adapter = corpus_adapter(lane, run_id)
+    context = lane.context
+    job_id = lane.jobs.submit_lab_corpus(context['tenant_id'], context['org_id'], context['project_id'],
+        context['actor_id'], context['corpus'], context['suite'], capability_sha256=context['capability_sha256'],
+        idempotency_key=f'lab:{run_id}:corpus-evaluator-1:corpus:v1')
+    with lane.db.transaction() as conn:
+        conn.execute("UPDATE async_jobs SET attempt=2,status='running' WHERE job_id=%s", (job_id,))
+    lane.jobs._ack_corpus_reap(job_id, 'expired-open', 2)
+    assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
+    tag = store.cancel_corpus_job(str(lane.tenant), run_id, 'corpus-worker', lease['fence'],
+                                  'corpus-evaluator-1', job_id, deadline=True)
+    assert tag['attempt'] == 2
+    lane.jobs._ack_corpus_reap(job_id, 'stale-producer', 1)
+    assert lane.jobs.corpus_cleanup(job_id, str(lane.tenant)) is None
 
 
 def test_submission_recovery_rechecks_admission_and_authority(rig, monkeypatch):

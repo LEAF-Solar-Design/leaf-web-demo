@@ -484,7 +484,8 @@ _AUTHORITY_REQUIRED_COLUMNS = {
                      "registry_digest", "ops_revision", "input_digest", "adapter_revision",
                      "build_revision", "state", "lease_owner", "lease_fence", "lease_expires_at",
                      "next_seq", "event_count", "created_at", "updated_at", "finished_at",
-                     "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by"},
+                     "claimed_build_revision", "claimed_color", "cancel_requested_at", "cancel_requested_by",
+                     "corpus_authority_json"},
         "lab_run_events": {"tenant_id", "run_id", "seq", "block_id", "kind", "payload", "created_at"},
         "lab_worker_status": {"worker_id", "build_revision", "color", "heartbeat_at", "active_runs", "queued_runs"},
         "lab_worker_control": {"id", "paused", "reason", "updated_by", "updated_at"},
@@ -512,7 +513,7 @@ _AUTHORITY_REQUIRED_COLUMNS = {
             "lease_owner", "lease_expires_at", "heartbeat_at", "provenance_json",
             "terminal_fingerprint", "terminal_conflict_json", "org_id", "project_id",
             "authority_mode", "idempotency_key", "submission_fingerprint", "dwg_version",
-            "aps_workitem_id", "aps_workitem_attempt",
+            "aps_workitem_id", "aps_workitem_attempt", "corpus_cancel_json", "corpus_cleanup_json",
         },
         "async_job_terminal_conflicts": {
             "job_id", "fingerprint", "evidence_json", "received_at",

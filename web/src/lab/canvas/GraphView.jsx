@@ -1,7 +1,7 @@
 import { lazy, memo, Suspense, useCallback, useEffect, useId, useMemo, useRef, useState, useSyncExternalStore } from 'react'
 import { registry, withTools } from './registry.js'
 import { fetchLabTools } from './toolNodes.js'
-import { pipeId, validateGraph } from './graphDoc.js'
+import { addBlock, pipeId, validateGraph } from './graphDoc.js'
 import { authHeaders, config } from '../../api.js'
 import { subscribeBeforeLogout, subscribeTokenStored } from '../../auth.js'
 import { fetchWithBudget } from '../../fetchBudget.js'
@@ -218,6 +218,13 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const [local] = useState(() => createHostProvider({ framed: false, operator, onChange: () => setRevision(value => value + 1) }))
   const provider = supplied || local
   const [tools, setTools] = useState([])
+  const [corpusPanel, setCorpusPanel] = useState(false)
+  const [corpusOptions, setCorpusOptions] = useState(null)
+  const [corpusProject, setCorpusProject] = useState('')
+  const [corpusMaterial, setCorpusMaterial] = useState('')
+  const [corpusSuite, setCorpusSuite] = useState('')
+  const [corpusMessage, setCorpusMessage] = useState('')
+  const corpusRequest = useRef(0)
   const toolsRequest = useRef(null)
   const toolsActive = useRef(true)
   useEffect(() => {
@@ -235,7 +242,8 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     }
     return toolsRequest.current
   }, [])
-  const toolEntries = useMemo(() => withTools(entries || registry, tools), [entries, tools])
+  const toolEntries = useMemo(() => ({ ...withTools(entries || registry, tools),
+    ...(corpusOptions?.manifest ? { 'corpus-evaluator@1.0.0': corpusOptions.manifest } : {}) }), [entries, tools, corpusOptions])
   const live = useLiveGraph({ provider, registry: toolEntries, revision: supplied ? revision : localRevision, artifacts: client })
   const [, refreshHead] = useState(0)
   const [runMessage, setRunMessage] = useState('')
@@ -247,6 +255,64 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
   const submissionIntent = useRef(null)
   const logoutGeneration = useRef(0)
   const explicitlySignedOut = useRef(false)
+  const loadCorpusOptions = async (project = '') => {
+    const request = ++corpusRequest.current
+    const generation = logoutGeneration.current
+    const requestAuthority = authHeaders().Authorization
+    setCorpusOptions(previous => previous ? { ...previous, materials: [] } : null)
+    setCorpusMessage('Loading project reference files…')
+    try {
+      const response = await fetchWithBudget(fetch, `${config.apiBase}/api/lab/runs/corpus-options${project ? `?project_id=${encodeURIComponent(project)}` : ''}`,
+        { headers: authHeaders(), cache: 'no-store' })
+      if (!response.ok) throw new Error('Corpus evaluation is unavailable for this project.')
+      const options = await response.json()
+      if (request !== corpusRequest.current || generation !== logoutGeneration.current
+          || explicitlySignedOut.current || authHeaders().Authorization !== requestAuthority) return
+      setCorpusOptions(options)
+      setCorpusMessage(options.limited ? 'Showing the first available projects.' : '')
+    } catch (error) {
+      if (request === corpusRequest.current && generation === logoutGeneration.current) {
+        setCorpusOptions(null); setCorpusMessage(error.message)
+      }
+    }
+  }
+  const openCorpus = () => {
+    setCorpusPanel(true)
+    const existing = live.draft?.document.blocks.find(block => block.registry.id === 'corpus-evaluator')
+    const project = existing?.settings.project_id || route?.params?.project_id || ''
+    setCorpusProject(project)
+    setCorpusMaterial(existing?.settings.corpus.material_id || '')
+    setCorpusSuite(existing?.settings.suite.material_id || '')
+    void loadCorpusOptions(project)
+  }
+  const addCorpus = () => {
+    const original = live.draft?.document
+    const material = corpusOptions?.materials?.find(item => item.material_id === corpusMaterial && item.media_type === 'application/gzip')
+    const suite = corpusOptions?.materials?.find(item => item.material_id === corpusSuite && item.media_type === 'application/json')
+    if (!original) { setCorpusMessage('Wait for the graph to finish loading, then add the evaluation.'); return }
+    if (!material || !suite || !corpusProject) { setCorpusMessage('Wait for the selected project files to finish loading, then add the evaluation.'); return }
+    if (original.blocks.some(block => block.registry.id === 'corpus-evaluator' && block.settings.project_id !== corpusProject)) {
+      setCorpusMessage('This graph already uses another project. Select that project to keep its material scope.'); return
+    }
+    const next = addBlock(original, corpusOptions.manifest)
+    const descriptor = value => Object.fromEntries(['material_id', 'sha256', 'byte_size'].map(key => [key, value[key]]))
+    next.blocks[next.blocks.length - 1].settings = { project_id: corpusProject, corpus: descriptor(material), suite: descriptor(suite) }
+    client.takeGraph(next)
+    setCorpusMessage('Corpus evaluation added. Save this graph, then run it to evaluate the complete original.')
+  }
+  useEffect(() => {
+    const graph = restored.graph || initialDocument
+    const block = graph?.blocks?.find(item => item.registry.id === 'corpus-evaluator')
+    if (block && !hidden) {
+      setCorpusProject(block.settings.project_id)
+      setCorpusMaterial(block.settings.corpus.material_id)
+      setCorpusSuite(block.settings.suite.material_id)
+      void loadCorpusOptions(block.settings.project_id)
+    } else if (corpusPanel && !hidden) {
+      void loadCorpusOptions(corpusProject)
+    }
+    return () => { corpusRequest.current += 1 }
+  }, [restored.key, hidden])
   const [outcomeUnknown, setOutcomeUnknown] = useState(false)
   const currentRunScope = () => JSON.stringify([config.apiBase, config.tenant, runAccount() || authHeaders().Authorization || '',
     client.currentDocId(), client.state.head, logoutGeneration.current])
@@ -284,6 +350,10 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
     const offLogout = subscribeBeforeLogout(() => {
       logoutGeneration.current += 1
       explicitlySignedOut.current = true
+      corpusRequest.current += 1
+      setCorpusOptions(null)
+      setCorpusPanel(false)
+      setCorpusProject(''); setCorpusMaterial(''); setCorpusSuite(''); setCorpusMessage('')
       account.current = null
       submissionIntent.current = null
       streams.current.forEach(stream => { stream.stop(); stream.unsubscribe() })
@@ -488,6 +558,23 @@ export default function GraphView({ hidden = false, initialDocument, entries, on
           {reopenMessage && <p role="status">{reopenMessage}</p>}
           {activeRunStatus.endsWith('/auth_expired') && <p>Sign in again, then resume <button type="button" onClick={() => labValueStore.resume(valueRunId)}>Resume</button></p>}
         </section>
+        <button type="button" onClick={openCorpus}>Evaluate project corpus</button>
+        {corpusPanel && <section aria-label="Project corpus evaluation">
+          <label>Project<select value={corpusProject} onChange={event => {
+            const project = event.target.value; setCorpusProject(project); setCorpusMaterial(''); setCorpusSuite('');
+            void loadCorpusOptions(project)
+          }}><option value="">Choose project</option>{(corpusOptions?.projects || []).map(project =>
+            <option key={project.project_id} value={project.project_id}>{project.name}</option>)}</select></label>
+          <label>Original corpus<select value={corpusMaterial} onChange={event => setCorpusMaterial(event.target.value)}>
+            <option value="">Choose original corpus</option>{(corpusOptions?.materials || []).filter(item => item.media_type === 'application/gzip').map(item =>
+              <option key={item.material_id} value={item.material_id}>{item.name}</option>)}</select></label>
+          <label>Evaluation suite<select value={corpusSuite} onChange={event => setCorpusSuite(event.target.value)}>
+            <option value="">Choose evaluation suite</option>{(corpusOptions?.materials || []).filter(item => item.media_type === 'application/json').map(item =>
+              <option key={item.material_id} value={item.material_id}>{item.name}</option>)}</select></label>
+          <button type="button" disabled={!live.draft?.document || !corpusProject || !corpusMaterial || !corpusSuite || !corpusOptions?.manifest} onClick={addCorpus}>Add corpus evaluation</button>
+          <p>Original files stay in this project. Running evaluates the complete corpus without starting a model or trade.</p>
+          {corpusMessage && <p role="status">{corpusMessage}</p>}
+        </section>}
         <LabSaveBar document={live.draft?.document} ready={live.ready} client={client} onTakeTheirs={graph => client.takeGraph(graph)} />
         <LiveValues values={live.values} provider={provider} saveBar={false} runId={onRun ? 'local' : valueRunId} renderProbe={renderProbe} />
         <Suspense fallback={<p role="status" aria-label="Loading dependency canvas">Loading dependency canvas…</p>}>

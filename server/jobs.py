@@ -1764,6 +1764,28 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
             provenance=provenance)
 
 
+def corpus_cleanup(job_id, tenant):
+    """Separate factual reap receipt; a generic terminal row is not this proof."""
+    import job_pg_store
+    with job_pg_store._db().cursor() as cur:
+        cur.execute('SELECT corpus_cleanup_json FROM async_jobs WHERE job_id=%s AND tenant_id=%s '
+                    "AND tool='internal.lab-corpus-evaluate'", (job_id, tenant))
+        row = cur.fetchone()
+    return row['corpus_cleanup_json'] if row else None
+
+
+def _ack_corpus_reap(job_id, worker_id, attempt):
+    import job_pg_store
+    with job_pg_store._db().transaction() as conn:
+        row = conn.execute('SELECT corpus_cancel_json FROM async_jobs WHERE job_id=%s '
+            "AND tool='internal.lab-corpus-evaluate' AND attempt=%s FOR UPDATE", (job_id, attempt)).fetchone()
+        tag = (row or {}).get('corpus_cancel_json')
+        if not isinstance(tag, dict) or tag.get('attempt') != attempt:
+            return
+        conn.execute('UPDATE async_jobs SET corpus_cleanup_json=%s::jsonb WHERE job_id=%s AND attempt=%s',
+            (json.dumps({'attempt': attempt, 'worker_id': worker_id, 'cancel': tag, 'reaped': True}), job_id, attempt))
+
+
 def _run_lab_corpus(job_id: str, *, _worker_id=None, _attempt=None) -> None:
     """Own the actual child lifecycle inside the existing fenced job lease."""
     import lab_corpus_executor as corpus_adapter
@@ -1794,7 +1816,9 @@ def _run_lab_corpus(job_id: str, *, _worker_id=None, _attempt=None) -> None:
         complete_callback(job_id, 'complete', result_env={'ok': True, 'result': result},
             worker_id=worker_id, provenance=provenance,
             _corpus_owner=corpus_adapter._OWNER, _corpus_deadline=deadline)
-    except Exception:
+    except Exception as exc:
+        if isinstance(exc, corpus_adapter.CorpusStopped):
+            _ack_corpus_reap(job_id, worker_id, attempt)
         if not cancelled():
             complete_callback(job_id, 'failed', worker_id=worker_id, provenance=provenance,
                 error=error_obj(ErrorCode.INTERNAL, 'corpus execution could not be verified', False))
