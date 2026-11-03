@@ -20,14 +20,277 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import lab_corpus_executor as corpus
 
 
+def job_private_pg16(directory, environment):
+    """Pinned PGDG signature, private supply, <=3 packages/128MiB/120 seconds."""
+    import re
+    import shlex
+    import base64
+    import binascii
+    import urllib.request
+    import urllib.error
+    deadline = time.monotonic() + 120
+    byte_limit = 128 * 1024 * 1024
+    env = {'PATH': environment.get('PATH', '/usr/bin:/bin'), 'HOME': str(directory)}
+    def refused(stage):
+        raise RuntimeError('Job-private PG16 supply refused: ' + stage)
+    def command(argv, stage):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            refused('time_budget')
+        try:
+            result = subprocess.run(argv, cwd=directory, env=env, capture_output=True,
+                                    text=True, timeout=remaining)
+        except (OSError, subprocess.TimeoutExpired):
+            refused(stage)
+        if result.returncode:
+            refused(stage)
+        return result.stdout.strip()
+    def fields(text):
+        return dict(line.split(': ', 1) for line in text.splitlines()
+                    if ': ' in line and not line.startswith(' '))
+    # One combined observation, not one allocator job per executable.
+    inventory = {}
+    for name in ('apt-get', 'gpgv', 'sqv'):
+        executable = shutil.which(name, path=env['PATH'])
+        item = {'present': executable is not None}
+        if executable is not None:
+            help_text = command([executable, '--help'], 'backend_help_' + name)
+            version = command([executable, '--version'], 'backend_version_' + name)
+            (directory / (name + '-help.txt')).write_text(help_text)
+            (directory / (name + '-version.txt')).write_text(version)
+            item.update(executable=executable, help=help_text,
+                        help_sha256=hashlib.sha256(help_text.encode()).hexdigest(),
+                        version=version.splitlines()[0][:160])
+        inventory[name] = item
+    apt_methods = {name: (Path('/usr/lib/apt/methods') / name).is_file()
+                   for name in ('gpgv', 'sqv')}
+    public_inventory = {name: {key: value for key, value in item.items()
+                              if key not in {'help', 'executable'}}
+                        for name, item in inventory.items()}
+    print('L03_SIGNATURE_BACKENDS ' + json.dumps(
+        {'tools': public_inventory, 'apt_methods': apt_methods}, sort_keys=True), flush=True)
+    sqv_help = inventory['sqv'].get('help', '')
+    if inventory['gpgv']['present']:
+        backend = 'gpgv'
+    elif all(option in sqv_help for option in ('--keyring', '--cleartext', '--output')):
+        backend = 'sqv_cleartext'
+    elif '--keyring' in sqv_help and ('--signature-file' in sqv_help or
+            re.search(r'<(?:SIG|SIGNATURE)[-_]?FILE>\s+<FILE>', sqv_help)):
+        backend = 'sqv_detached'
+    else:
+        refused('supported_signature_backend_unavailable')
+    arch = command(['dpkg', '--print-architecture'], 'architecture')
+    multiarch = {'amd64': 'x86_64-linux-gnu', 'arm64': 'aarch64-linux-gnu'}.get(arch)
+    if multiarch is None:
+        refused('unsupported_architecture')
+    release = fields(Path('/etc/os-release').read_text().replace('=', ': ').replace('"', ''))
+    distro, codename = release.get('ID'), release.get('VERSION_CODENAME')
+    supported = {'debian': {'trixie', 'bookworm', 'forky', 'sid'},
+                 'ubuntu': {'stonking', 'resolute', 'noble', 'jammy'}}
+    if codename not in supported.get(distro, set()) or (codename == 'stonking' and arch != 'amd64'):
+        refused('unsupported_distribution')
+    repository = 'https://apt.postgresql.org/pub/repos/apt/'
+    metadata_left = 32 * 1024 * 1024
+    class FixedOrigin(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            refused('unexpected_redirect')
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), FixedOrigin())
+    def fetch(url, limit, stage):
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            refused('time_budget')
+        try:
+            with opener.open(url, timeout=min(15, remaining)) as response:
+                data = bytearray()
+                while True:
+                    if time.monotonic() >= deadline:
+                        refused('time_budget')
+                    chunk = response.read(min(65536, limit + 1 - len(data)))
+                    if not chunk:
+                        return bytes(data)
+                    data.extend(chunk)
+                    if len(data) > limit:
+                        refused(stage + '_byte_budget')
+        except (OSError, urllib.error.URLError):
+            refused(stage)
+    def metadata(url, stage):
+        nonlocal metadata_left
+        data = fetch(url, metadata_left, stage)
+        metadata_left -= len(data)
+        return data
+    # No ambient APT source/keyring/state or configuration is read or written.
+    key = directory / 'pgdg.asc'
+    key.write_bytes(metadata('https://www.postgresql.org/media/keys/ACCC4CF8.asc', 'key_download'))
+    keyring = directory / 'keyring'
+    keyring.mkdir(mode=0o700)
+    # Root independently bound these exact public bytes to the full fingerprint.
+    # The pins replace key inspection only; gpgv still verifies the signature.
+    fingerprint = 'B97B0AFCAA1A47F044F244A07FCC7D46ACCC4CF8'
+    armored = key.read_bytes()
+    if (len(armored) != 4812 or hashlib.sha256(armored).hexdigest()
+            != '0144068502a1eddd2a0280ede10ef607d1ec592ce819940991203941564e8e76'):
+        refused('key_armored_identity')
+    try:
+        lines = armored.decode('ascii').splitlines()
+        assert lines[0] == '-----BEGIN PGP PUBLIC KEY BLOCK-----'
+        assert lines[-1] == '-----END PGP PUBLIC KEY BLOCK-----'
+        body = lines[lines.index('') + 1:-1]
+        if body[-1].startswith('='):
+            body = body[:-1]
+        binary = base64.b64decode(''.join(body), validate=True)
+    except (UnicodeError, ValueError, AssertionError, IndexError, binascii.Error):
+        refused('key_armor_decode')
+    if (len(binary) != 3494 or hashlib.sha256(binary).hexdigest()
+            != '8ca1b2fb3a2533cc44b87ee146a03858f6e8ea31c1f165dfd38dc270c04ada0f'):
+        refused('key_binary_identity')
+    trusted_key = keyring / 'trusted.gpg'
+    trusted_key.write_bytes(binary)
+    suite = codename + '-pgdg'
+    release_path = directory / 'Release'
+    if backend == 'sqv_detached':
+        # Use official detached artifacts; never extract unverified cleartext.
+        signed = directory / 'Release.gpg'
+        release_path.write_bytes(metadata(repository + 'dists/' + suite + '/Release', 'release_download'))
+        signed.write_bytes(metadata(repository + 'dists/' + suite + '/Release.gpg', 'signature_download'))
+        argv = [inventory['sqv']['executable'], '--keyring', str(trusted_key)]
+        if '--signature-file' in sqv_help:
+            argv += ['--signature-file', str(signed), str(release_path)]
+        else:
+            argv += [str(signed), str(release_path)]
+        command(argv, 'release_signature')
+    else:
+        signed = directory / 'InRelease'
+        signed.write_bytes(metadata(repository + 'dists/' + suite + '/InRelease', 'inrelease_download'))
+        if backend == 'gpgv':
+            status = command([inventory['gpgv']['executable'], '--homedir', str(keyring),
+                '--keyring', str(trusted_key), '--status-fd', '1', '--output', str(release_path),
+                str(signed)], 'inrelease_signature')
+            if not any(line.startswith('[GNUPG:] VALIDSIG ' + fingerprint + ' ')
+                       for line in status.splitlines()):
+                refused('inrelease_signer')
+        else:
+            command([inventory['sqv']['executable'], '--keyring', str(trusted_key),
+                     '--cleartext', '--output', str(release_path), str(signed)], 'inrelease_signature')
+    print('L03_SIGNATURE_VERIFIED backend=' + backend + ' sole_key=' + fingerprint
+          + ' release_sha256=' + hashlib.sha256(release_path.read_bytes()).hexdigest(), flush=True)
+    index_name = 'main/binary-' + arch + '/Packages.gz'
+    checksums = {}
+    in_sha = False
+    for line in release_path.read_text().splitlines():
+        if line == 'SHA256:':
+            in_sha = True
+        elif line.startswith(' ') and in_sha:
+            parts = line.split()
+            if len(parts) == 3:
+                checksums[parts[2]] = parts[:2]
+        else:
+            in_sha = False
+    identity = checksums.get(index_name)
+    if identity is None:
+        refused('signed_index_missing')
+    packed = metadata(repository + 'dists/' + suite + '/' + index_name, 'index_download')
+    if hashlib.sha256(packed).hexdigest() != identity[0] or len(packed) != int(identity[1]):
+        refused('signed_index_identity')
+    import io
+    with gzip.GzipFile(fileobj=io.BytesIO(packed)) as stream:
+        unpacked = stream.read(metadata_left + 1)
+    if len(unpacked) > metadata_left:
+        refused('metadata_byte_budget')
+    metadata_left -= len(unpacked)
+    index = [fields(part) for part in unpacked.decode().split('\n\n')]
+    print('L03_PGDG_INDEX distro=' + distro + ' suite=' + suite + ' architecture=' + arch
+          + ' key_sha256=' + hashlib.sha256(key.read_bytes()).hexdigest()
+          + ' binary_key_sha256=' + hashlib.sha256(binary).hexdigest()
+          + ' signed_artifact_sha256=' + hashlib.sha256(signed.read_bytes()).hexdigest()
+          + ' index_sha256=' + identity[0] + ' fingerprint=' + fingerprint, flush=True)
+    # Fixed explicit supplier set, never an open-ended dependency resolver.
+    packages = ('postgresql-16', 'postgresql-client-16', 'libpq5')
+    expected, declared_bytes = {}, 0
+    for name in packages:
+        rows = [row for row in index if row.get('Package') == name and row.get('Architecture') == arch
+                and (not name.startswith('postgresql-') or row.get('Version', '').split('.', 1)[0] == '16')]
+        if not rows:
+            refused('candidate_missing_' + name)
+        metadata = rows[0]
+        candidate = metadata.get('Version', '')
+        if re.fullmatch(r'[0-9A-Za-z:~.+-]{1,128}', candidate) is None:
+            refused('candidate_identity')
+        if name.startswith('postgresql-') and candidate.rsplit(':', 1)[-1].split('.', 1)[0] != '16':
+            refused('candidate_not_major16')
+        if (metadata is None or len(metadata.get('SHA256', '')) != 64
+                or any(c not in '0123456789abcdef' for c in metadata['SHA256'])):
+            refused('authenticated_metadata_' + name)
+        try:
+            size, installed_size = int(metadata['Size']), int(metadata['Installed-Size']) * 1024
+        except (KeyError, ValueError):
+            refused('package_size_metadata')
+        if min(size, installed_size) <= 0:
+            refused('package_size_metadata')
+        declared_bytes += size + installed_size
+        if declared_bytes > byte_limit:
+            refused('declared_byte_budget')
+        expected[name] = metadata
+    print('L03_PG_SUPPLY supplier=authenticated_private_pgdg packages=3 byte_limit=134217728 seconds_limit=120', flush=True)
+    downloaded_bytes = 0
+    for name, metadata in expected.items():
+        filename = metadata.get('Filename', '')
+        if re.fullmatch(r'pool/[0-9A-Za-z_+./~%-]+\.deb', filename) is None or '..' in filename:
+            refused('package_location')
+        data = fetch(repository + filename, min(int(metadata['Size']), byte_limit - downloaded_bytes), 'download_' + name)
+        downloaded_bytes += len(data)
+        (directory / (name + '.deb')).write_bytes(data)
+    archives = list(directory.glob('*.deb'))
+    if len(archives) != len(packages) or sum(path.stat().st_size for path in archives) > byte_limit:
+        refused('download_byte_or_package_budget')
+    prefix = directory / 'prefix'
+    prefix.mkdir(mode=0o700)
+    observed = set()
+    for archive in archives:
+        row = fields(command(['dpkg-deb', '--field', str(archive), 'Package', 'Version', 'Architecture'],
+                             'package_readback'))
+        metadata = expected.get(row.get('Package'))
+        digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+        if (metadata is None or row['Package'] in observed or row.get('Version') != metadata['Version']
+                or row.get('Architecture') != arch or digest != metadata['SHA256']
+                or archive.stat().st_size != int(metadata['Size'])):
+            refused('package_identity_mismatch')
+        observed.add(row['Package'])
+        command(['dpkg-deb', '--extract', str(archive), str(prefix)], 'package_extract')
+        if downloaded_bytes + sum(path.stat().st_size for path in prefix.rglob('*')
+                                  if not path.is_symlink() and path.is_file()) > byte_limit:
+            refused('extracted_byte_budget')
+        print('L03_PG_PACKAGE name=' + row['Package'] + ' version=' + row['Version']
+              + ' architecture=' + arch + ' sha256=' + digest + ' bytes=' + str(archive.stat().st_size), flush=True)
+    if observed != set(packages):
+        refused('supplier_set')
+    # Child-local fixed loader paths only. The consumer's environment is unchanged.
+    wrappers = directory / 'bin'
+    wrappers.mkdir(mode=0o700)
+    libraries = str(prefix / 'usr/lib' / multiarch) + ':' + str(prefix / 'usr/lib/postgresql/16/lib')
+    for name in ('initdb', 'pg_ctl', 'postgres'):
+        target = prefix / 'usr/lib/postgresql/16/bin' / name
+        if not target.is_file() or target.is_symlink() or not os.access(target, os.X_OK):
+            refused('native_executable_' + name)
+        raw = ('#!/bin/sh\nexport LD_LIBRARY_PATH=' + shlex.quote(libraries)
+               + '\nexec ' + shlex.quote(str(target)) + ' "$@"\n').encode()
+        wrapper = wrappers / name
+        wrapper.write_bytes(raw)
+        wrapper.chmod(0o700)
+        print('L03_PG_WRAPPER name=' + name + ' sha256=' + hashlib.sha256(wrapper.read_bytes()).hexdigest(), flush=True)
+    if time.monotonic() > deadline:
+        refused('time_budget')
+    return dict(environment, LEAF_PG_BIN=str(wrappers))
+
+
 @pytest.fixture(scope='module')
 def private_pg():
-    """Reuse canonical CI PG, otherwise produce the actual private managed PG16."""
+    """Preserve canonical/parent custody; private native PG consumes local supply."""
     from test_project_drawing_editor import canonical_ci_pg
     import platform_link
     db = platform_link.platform_db()
     authority = None
     run_root = None
+    supply_root = None
     aliases = ('DATABASE_URL', 'OVERLAY_PG_URL', 'ANNOTATION_PG_URL')
     prior = {key: os.environ.get(key) for key in aliases}
     try:
@@ -38,14 +301,23 @@ def private_pg():
             spec = importlib.util.spec_from_file_location('_lab_corpus_private_pg', producer)
             module = importlib.util.module_from_spec(spec)
             spec.loader.exec_module(module)
+            environment = dict(os.environ)
+            if sys.platform == 'linux':
+                # Native and Docker are already known unavailable on this lane.
+                # This is the one separately admitted job-private supply method.
+                supply_root = Path(tempfile.mkdtemp(prefix='leaf-lab-pg-supply-', dir='/tmp')).resolve()
+                os.chmod(supply_root, 0o700)
+                environment = job_private_pg16(supply_root, environment)
             run_root = Path(tempfile.mkdtemp(prefix='leaf-lab-corpus-pg-', dir='/tmp')).resolve()
             os.chmod(run_root, 0o700)
             with socket.socket() as sock:
                 sock.bind(('127.0.0.1', 0))
                 port = sock.getsockname()[1]
             authority = module.NativePgAuthority.start('lab-corpus-' + uuid.uuid4().hex[:16],
-                run_root=run_root, port=port,
-                environ=dict(os.environ, LEAF_PG_BIN='/opt/homebrew/opt/postgresql@16/bin'))
+                run_root=run_root, port=port, environ=environment)
+            ready = authority.readiness()
+            assert str(ready['server_version']).split('.', 1)[0] == '16', 'Private PG must be major16.'
+            print('L03_PRIVATE_PG supplier=native major=16 round_trip_bytes=' + str(ready['round_trip_bytes']), flush=True)
             for key in aliases:
                 os.environ[key] = authority.dsn()
         db.reset_pool()
@@ -63,9 +335,15 @@ def private_pg():
             if stopped and run_root.exists():
                 run_root.rmdir()
             assert stopped and not run_root.exists(), 'Private PostgreSQL cleanup failed.'
-            print('L03_PRODUCER_PRIVATE_PG cleanup=true directory_absent=true major=16')
+            print('L03_PRODUCER_PRIVATE_PG cleanup=true directory_absent=true major=16', flush=True)
         elif run_root is not None and run_root.exists() and not any(run_root.iterdir()):
             run_root.rmdir()
+        if supply_root is not None and (run_root is None or not run_root.exists()):
+            assert (not supply_root.is_symlink() and supply_root.parent == Path('/tmp').resolve()
+                    and supply_root.name.startswith('leaf-lab-pg-supply-')), 'Private supply cleanup refused.'
+            shutil.rmtree(supply_root)
+            assert not supply_root.exists(), 'Private supply remains.'
+            print('L03_PG_SUPPLY cleanup=true directory_absent=true', flush=True)
 
 
 @pytest.fixture(scope='module')

@@ -65,10 +65,30 @@ def test_corpus_manifest_is_normal_compilable_and_drawing_free(monkeypatch):
 
 @pytest.fixture
 def corpus_join(producer_lane, private_pg, monkeypatch):
+    import os
+    from pathlib import Path
+    import sys
     import uuid
     from concurrent.futures import ThreadPoolExecutor
     import lab_tool_manifests
     import lab_tool_nodes
+    import lab_corpus_executor as corpus
+    real_command = corpus._command
+    def observed_command(stage):
+        if sys.platform == 'linux':
+            status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines()
+                          if ':' in line)
+            identity = {'euid': os.geteuid(), **{key: status.get(key, '').strip()
+                for key in ('CapEff', 'CapPrm', 'CapInh', 'CapAmb', 'NoNewPrivs')}}
+            print('L03_LINUX_PREREQUISITE ' + json.dumps(identity, sort_keys=True), flush=True)
+        try:
+            return real_command(stage)
+        except ValueError as exc:
+            reason = ('unprivileged_identity' if str(exc) ==
+                'Corpus execution requires an unprivileged app identity.' else 'other_prerequisite')
+            print('L03_PRE_POPEN_REFUSED type=ValueError reason=' + reason, flush=True)
+            raise
+    monkeypatch.setattr(corpus, '_command', observed_command)
     context, jobs, _, _, _ = producer_lane
     for name in ('LEAF_LAB_STORE', 'LEAF_LAB_RUN_STORE'):
         monkeypatch.setenv(name, 'postgres')
@@ -422,8 +442,9 @@ def test_create_pins_and_public_row(rig):
         "lab-ops.v1", "lab-worker.v1", "abc1234")
     public = rig.http.get("/api/lab/runs/" + run_id)
     assert public.status_code == 200
+    assert 'corpus_authority_json' not in public.json()
     assert public.json() == jsonable_encoder({k: v for k, v in row.items()
-                                            if k not in {"lease_owner", "lease_fence"}})
+                                            if k not in {"lease_owner", "lease_fence", "corpus_authority_json"}})
     assert create(rig).json()["run_id"] != run_id
 
 
