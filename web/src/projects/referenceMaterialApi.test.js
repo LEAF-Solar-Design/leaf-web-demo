@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { gzipSync } from 'node:zlib'
 import { listProjectReferences, readProjectReferenceOriginal, uploadProjectReference } from './api.js'
 
 const auth = vi.hoisted(() => ({ scope: 'synthetic-account-a' }))
@@ -23,12 +24,30 @@ beforeEach(() => {
 afterEach(() => vi.unstubAllGlobals())
 
 describe('original reference transport', () => {
+  it('uploads and downloads actual complete gzip bytes without changing the original', async () => {
+    const compressed = gzipSync(Array.from({ length: 6001 }, (_, row) => JSON.stringify({ row })).join('\n'))
+    const original = new File([compressed], 'BTC.jsonl.gz', { type: 'application/gzip' })
+    fetch.mockResolvedValueOnce(jsonResponse({ material: { material_id: material, name: original.name } }))
+    await uploadProjectReference(project, original, { expectedScope: auth.scope })
+    expect(fetch.mock.calls[0][1].body).toBe(original)
+    expect(fetch.mock.calls[0][1].headers['Content-Type']).toBe('application/gzip')
+    fetch.mockResolvedValueOnce(new Response(compressed, { headers: { 'Content-Type': 'application/gzip' } }))
+    const downloaded = await readProjectReferenceOriginal(project, material, { expectedScope: auth.scope })
+    expect(new Uint8Array(await downloaded.arrayBuffer())).toEqual(new Uint8Array(compressed))
+  })
+
+  it.each([['rows.gz', 'application/gzip'], ['rows.jsonl.gz', 'application/json']])('refuses gzip suffix or MIME mismatch %s', (name, type) => {
+    expect(() => uploadProjectReference(project, file(name, type))).toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
   it.each([
     ['clip #1.MOV', 'video/quicktime', 'video/quicktime'],
     ['notes & plans.txt', 'text/plain;charset=utf-8', 'text/plain'],
     ['scene.json', 'application/json', 'application/json'],
     ['unknown.txt', '', 'text/plain'],
     ['binary.mov', 'application/octet-stream', 'video/quicktime'],
+    ['BTC.JSONL.GZ', 'application/gzip', 'application/gzip'],
   ])('posts the raw File for %s with canonical content type', async (name, type, contentType) => {
     const original = file(name, type)
     const controller = new AbortController()

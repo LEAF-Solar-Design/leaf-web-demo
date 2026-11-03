@@ -177,14 +177,15 @@ export function listProjectReferences(projectId, { cursor, signal, expectedScope
 
 export function uploadProjectReference(projectId, file, { signal, expectedScope } = {}) {
   const id = requireUuid(projectId, 'project')
-  const extension = String(file?.name || '').split('.').pop().toLowerCase()
-  const mediaType = { mov: 'video/quicktime', txt: 'text/plain', json: 'application/json' }[extension]
-  const maximum = extension === 'mov' ? 64 * 1024 * 1024 : 8 * 1024 * 1024
+  const name = String(file?.name || '').toLowerCase()
+  const extension = name.endsWith('.jsonl.gz') ? 'jsonl.gz' : name.split('.').pop()
+  const mediaType = { mov: 'video/quicktime', txt: 'text/plain', json: 'application/json', 'jsonl.gz': 'application/gzip' }[extension]
+  const maximum = ['mov', 'jsonl.gz'].includes(extension) ? 64 * 1024 * 1024 : 8 * 1024 * 1024
   if (!mediaType || !file?.size || file.size > maximum) {
-    throw new Error('Choose an original MOV up to 64 MiB, or UTF-8 TXT/JSON up to 8 MiB.')
+    throw new Error('Choose an original MOV or gzip JSONL up to 64 MiB, or UTF-8 TXT/JSON up to 8 MiB.')
   }
   if (file.type && file.type !== 'application/octet-stream' && file.type.split(';')[0].toLowerCase() !== mediaType) {
-    throw new Error('The file extension and content type must agree (MOV, UTF-8 TXT or JSON).')
+    throw new Error('The file extension and content type must agree (MOV, UTF-8 TXT/JSON or gzip JSONL).')
   }
   return request(`/api/projects/${id}/reference-files?filename=${encodeURIComponent(file.name)}`, {
     method: 'POST', body: file, headers: { 'Content-Type': mediaType }, signal, expectedScope,

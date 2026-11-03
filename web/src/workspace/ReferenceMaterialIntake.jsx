@@ -116,9 +116,9 @@ function ReferenceSession({ projectId, scope }) {
   const uploaded = queue.filter(item => item.state === 'uploaded').length
   return <section aria-label="Reference files">
     <h3>Reference files</h3>
-    <p>Original MOV up to 64 MiB; UTF-8 TXT and JSON up to 8 MiB each. Originals stay with this shared project.</p>
+    <p>Original MOV and gzip JSONL corpora up to 64 MiB; UTF-8 TXT and JSON up to 8 MiB each. Originals stay with this shared project.</p>
     <p>Preview unavailable. These files have not been consumed by a model. Uploading does not start an author turn or build.</p>
-    <input ref={input} type="file" aria-label="Original reference files" accept=".mov,.txt,.json" multiple hidden disabled={busy || loading} onChange={choose} />
+    <input ref={input} type="file" aria-label="Original reference files" accept=".mov,.txt,.json,.jsonl.gz" multiple hidden disabled={busy || loading} onChange={choose} />
     <button type="button" disabled={busy || loading} onClick={() => input.current?.click()}>Add reference files</button>
     <p role="status">{busy ? `Uploading reference files: ${uploaded} of ${queue.length} uploaded.` : loading ? 'Loading reference files…' : `${rows.length} reference files in this project.${queue.length ? ` ${uploaded} uploaded; ${failed} need a retry.` : ''}`}</p>
     {error && <p role="alert">{error} <button type="button" disabled={busy || loading} onClick={() => void load()}>Reload reference files</button></p>}

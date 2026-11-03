@@ -1161,11 +1161,11 @@ _REQUIRED_CONSTRAINTS = {
     "project_reference_materials_name_check": _catalog_contract(
         "project_reference_materials", "CHECK", "char_length(name) >= 1", "char_length(name) <= 255"),
     "project_reference_materials_media_type_check": _catalog_contract(
-        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'"),
+        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'text/plain'", "'application/json'", "'application/gzip'"),
     "project_reference_materials_byte_size_check": _catalog_contract(
         "project_reference_materials", "CHECK", "byte_size >= 1", "byte_size <= 67108864"),
     "reference_text_size": _catalog_contract(
-        "project_reference_materials", "CHECK", "media_type = 'video/quicktime'", "byte_size <= 8388608"),
+        "project_reference_materials", "CHECK", "media_type", "'video/quicktime'", "'application/gzip'", "byte_size <= 8388608"),
     "project_reference_materials_sha256_check": _catalog_contract(
         "project_reference_materials", "CHECK", "sha256 ~ '^[0-9a-f]{64}$'"),
     "project_materials_pkey": _catalog_contract(
