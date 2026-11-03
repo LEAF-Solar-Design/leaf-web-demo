@@ -98,11 +98,8 @@ def canonical_ci_pg():
                 return False
             if data.is_symlink() or data.resolve().parent != Path("/tmp").resolve():
                 return False
-            major = (data / "PG_VERSION").read_text().strip()
-            if not major.isdecimal() or int(major) < 16 or state["bin"] != f"/usr/lib/postgresql/{major}/bin":
-                return False
-            pid = (data / "postmaster.pid").read_text().splitlines()
-            if len(pid) < 4 or not pid[0].isdecimal() or pid[1] != str(data) or pid[3] != port:
+            binary = re.fullmatch(r"/usr/lib/postgresql/([0-9]+)/bin", state["bin"])
+            if not binary or int(binary[1]) < 16:
                 return False
         elif state == {"mode": "docker", "name": "leaf-ci-postgres"}:
             result = subprocess.run(["docker", "inspect", "leaf-ci-postgres"],
@@ -130,6 +127,25 @@ def canonical_ci_pg():
                 cur.execute("SELECT current_database(), current_user, current_setting('data_directory'), "
                             "system_identifier::text FROM pg_control_system()")
                 actual_database, user, directory, actual_system_id = cur.fetchone()
+                if state["mode"] == "native":
+                    if actual_database != database or user != "postgres" or directory != str(data):
+                        return False
+                    # The real producer owns its data directory with mode 0700.
+                    # Read these fixed, bounded files through that same server,
+                    # so an unprivileged test needs no filesystem ownership.
+                    cur.execute("SELECT pg_read_file('PG_VERSION', 0, 64, false), "
+                                "pg_read_file('postmaster.pid', 0, 4096, false), "
+                                "current_setting('port'), current_setting('server_version_num')")
+                    version_file, pid_file, actual_port, server_version = cur.fetchone()
+                    major = version_file.strip()
+                    pid = pid_file.splitlines()
+                    if (not major.isdecimal() or major != binary[1]
+                            or not str(server_version).isdecimal()
+                            or int(server_version) // 10000 != int(major)
+                            or actual_port != port or not str(actual_system_id).isdecimal()
+                            or len(pid) < 4 or not pid[0].isdecimal()
+                            or pid[1] != str(data) or pid[3] != port):
+                        return False
         return (actual_database == database and user == "postgres" and
                 (directory == str(data) if state["mode"] == "native" else actual_system_id == system_id))
     except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError, psycopg.Error):
@@ -170,11 +186,20 @@ def canonical_pg_guard(monkeypatch, tmp_path):
                 "NetworkSettings": {"Ports": {"5432/tcp": [{"HostIp": "127.0.0.1", "HostPort": "54329"}]}}},
             queries=[], commands=[])
 
+        read_text = Path.read_text
+        evidence.server_port = "54329"
+        evidence.server_version = "160015"
+
         @contextmanager
         def connection(*args, **kwargs):
             @contextmanager
             def cursor():
-                yield SimpleNamespace(execute=evidence.queries.append, fetchone=lambda: evidence.identity)
+                def fetchone():
+                    if "pg_read_file" in evidence.queries[-1]:
+                        return (read_text(data / "PG_VERSION"), read_text(data / "postmaster.pid"),
+                                evidence.server_port, evidence.server_version)
+                    return evidence.identity
+                yield SimpleNamespace(execute=evidence.queries.append, fetchone=fetchone)
             yield SimpleNamespace(cursor=cursor)
 
         def docker(command, **kwargs):
@@ -195,10 +220,39 @@ def test_canonical_ci_pg_guard_accepts_real_producer_shapes(canonical_pg_guard, 
         proof.state_file.write_text("mode=docker\nname=leaf-ci-postgres\n")
         proof.identity[2] = "/var/lib/postgresql/data"
     assert canonical_ci_pg()
-    assert len(proof.queries) == 1 and proof.queries[0].startswith("SELECT ")
+    assert len(proof.queries) == (1 if mode == "docker" else 2)
+    assert all(query.startswith("SELECT ") for query in proof.queries)
     assert len(proof.commands) == (2 if mode == "docker" else 0)
     assert not os.environ.get("LEAF_E364B_PG_PARENT")
     assert not os.environ.get("LEAF_GATE_REQUIRE_DATABASE")
+
+
+def test_canonical_ci_pg_guard_accepts_server_owned_native_files(canonical_pg_guard, monkeypatch):
+    proof = canonical_pg_guard
+    read_text = Path.read_text
+
+    def client_read(path, *args, **kwargs):
+        if path in (proof.data / "PG_VERSION", proof.data / "postmaster.pid"):
+            raise PermissionError("producer-owned directory")
+        return read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", client_read)
+    assert canonical_ci_pg()
+    assert len(proof.queries) == 2
+
+
+@pytest.mark.parametrize("mismatch", ["server_port", "server_major", "file_major", "system_id"])
+def test_canonical_ci_pg_guard_refuses_native_server_mismatch(canonical_pg_guard, mismatch):
+    proof = canonical_pg_guard
+    if mismatch == "server_port":
+        proof.server_port = "5432"
+    elif mismatch == "server_major":
+        proof.server_version = "170001"
+    elif mismatch == "file_major":
+        (proof.data / "PG_VERSION").write_text("17\n")
+    else:
+        proof.identity[3] = "not-a-system-id"
+    assert not canonical_ci_pg()
 
 
 @pytest.mark.parametrize("mismatch", ["ambient", "remote", "credentials", "missing_state", "duplicate_state",
