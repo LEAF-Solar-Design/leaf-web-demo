@@ -30,7 +30,7 @@ const fixture = vi.hoisted(() => {
       setFamilyOpen: vi.fn(),
       setPrompt: vi.fn(),
       upsertTool: vi.fn(),
-    }, controller: {} },
+    }, controller: { setContext: vi.fn() } },
     jobs: { jobs: [], reset: noop },
     platform: {
       entitlements: { tier: 'team' },
