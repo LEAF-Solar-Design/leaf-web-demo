@@ -145,8 +145,45 @@ def corpus_adapter(lane, run_id, owner='corpus-worker'):
     return row, lease, adapter
 
 
-def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join):
+def corpus_failure_diagnostic(errors, children, stderr):
+    """Fixed categories only; raw child output and exception text stay private."""
+    reasons = {
+        'Pinned corpus evaluator did not produce a bounded result.': 'bounded_result_absent',
+        'Corpus result identity mismatch.': 'result_identity',
+        'Corpus attempt lost its lease or execution budget.': 'lease_or_budget',
+        'Corpus terminal identity mismatch.': 'terminal_identity',
+    }
+    allowed_types = {'CorpusStopped', 'ValueError', 'PermissionError', 'FileNotFoundError',
+                     'OSError', 'TimeoutError', 'RuntimeError'}
+    stderr.seek(0, 2)
+    size = stderr.tell()
+    stderr.seek(0)
+    prefix = stderr.read(8192)
+    signals = []
+    if (b'setpriv' in prefix and b'--seccomp-filter' in prefix
+            and any(token in prefix for token in (b'unrecognized option', b'invalid option'))):
+        signals.append('setpriv_seccomp_option_unavailable')
+    for token, label in ((b'PermissionError', 'permission_error'),
+                         (b'Permission denied', 'permission_denied'),
+                         (b'ModuleNotFoundError', 'module_missing'),
+                         (b'ImportError', 'import_error'),
+                         (b'MemoryError', 'memory_error'),
+                         (b'Bad system call', 'syscall_denied'),
+                         (b'Operation not permitted', 'operation_not_permitted')):
+        if token in prefix:
+            signals.append(label)
+    return {'exceptions_total': len(errors), 'exceptions': [
+        {'type': type(error).__name__ if type(error).__name__ in allowed_types else 'Other',
+         'reason': reasons.get(str(error), 'unclassified')} for error in errors[:4]],
+        'children_total': len(children),
+        'child_returncodes': [process.poll() for process in children[:4]],
+        'stderr_bytes': size, 'stderr_truncated': size > len(prefix), 'stderr_signals': signals}
+
+
+def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join, monkeypatch):
     from functools import partial
+    import tempfile
+    import lab_corpus_executor as corpus
     import lab_tool_manifests
     from lab_evaluate import evaluate_graph
     lane = corpus_join
@@ -159,9 +196,28 @@ def test_corpus_normal_compiled_run_actual_producer_and_recovery(corpus_join):
     assert authority['project_id'] == lane.context['project_id']
     options = dict(tool_adapter=adapter, trusted_lookup=partial(lab_tool_manifests.trusted_for, str(lane.tenant)))
     registry = lab_tool_manifests.registry_for(str(lane.tenant))
-    result = evaluate_graph(lane.graph, registry, **options)
-    value = result['values']['corpus-evaluator-1']['result']
-    assert not value.error, value.error
+    errors, children = [], []
+    real_run, real_popen = corpus.run, corpus.subprocess.Popen
+    def observed_run(*args, **kwargs):
+        try:
+            return real_run(*args, **kwargs)
+        except Exception as exc:
+            errors.append(exc)
+            raise
+    with tempfile.TemporaryFile(mode='w+b') as child_errors, monkeypatch.context() as observed:
+        def start(*args, **kwargs):
+            kwargs['stderr'] = child_errors
+            process = real_popen(*args, **kwargs)
+            children.append(process)
+            return process
+        observed.setattr(corpus, 'run', observed_run)
+        observed.setattr(corpus.subprocess, 'Popen', start)
+        result = evaluate_graph(lane.graph, registry, **options)
+        value = result['values']['corpus-evaluator-1']['result']
+        if value.error:
+            print('L03_CORPUS_FAILURE ' + json.dumps(
+                corpus_failure_diagnostic(errors, children, child_errors), sort_keys=True), flush=True)
+        assert not value.error, value.error
     projected = json.loads(value.data)
     assert projected['row_count'] == 6001 and projected['run_id'] == run_id
     assert projected['context']['suite'] == lane.context['suite']
