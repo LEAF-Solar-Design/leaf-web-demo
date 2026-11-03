@@ -274,11 +274,11 @@ def test_failed_log_retention_result_symlink_no_read(tmp_path):
     assert outside.read_bytes() == b"secret malformed result must never be parsed"
 
 
-def test_failed_log_retention_shell_advisory_order_and_verdict():
+def test_failed_log_stdout_shell_advisory_order_and_verdict():
     source = (REPO / ".codebuild/ci.sh").read_text(encoding="utf-8")
-    gate = source.index('python scripts/run-all-gates.py --jobs')
+    gate = source.index('python scripts/run-all-gates.py --jobs', source.index('# LEAF_DIAGNOSTIC_END'))
     assert source.rindex('export PYTHONUNBUFFERED=1', 0, gate) < gate
-    capture = source.index('python -I -B scripts/ci/retain_failed_gate_logs.py')
+    capture = source.index('python -I -B scripts/ci/retain_failed_gate_logs.py', gate)
     next_step = source.index('if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]', gate)
     block = source[capture:next_step]
     assert gate < capture < next_step
@@ -286,7 +286,183 @@ def test_failed_log_retention_shell_advisory_order_and_verdict():
     assert '--result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs' in block
     assert "|| echo 'WARNING: failed gate log retention unavailable' >&2" in block
     assert "gate_status=" not in block and 'if ' not in block
+    assert '--emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}"' in block
+    assert source.count('--emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}"') == 2
+    assert 'tail -c 16384 "/tmp/gate-logs/' not in source
+    assert 'lines = log_path.read_text' not in source
+    assert '--body /tmp/gate-results/gate-result.json' in source
     assert source.rstrip().endswith('exit "$gate_status"')
+    assert subprocess.run(['bash', '-n', str(REPO / '.codebuild/ci.sh')], capture_output=True).returncode == 0
+
+
+def _failed_stdout_frames(text):
+    chunks, manifests = [], []
+    for line in text.splitlines():
+        if line.startswith('LEAF_FAILED_LOG_CHUNK '):
+            chunks.append(json.loads(line.split(' ', 1)[1]))
+        elif line.startswith('LEAF_FAILED_LOG_MANIFEST '):
+            manifests.append(json.loads(line.split(' ', 1)[1]))
+    return chunks, manifests
+
+
+def test_failed_log_stdout_playwright_original_retry_and_digests(tmp_path, capsys):
+    import hashlib
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [
+        {'id': 'browser-proof', 'status': 'FAIL', 'attempts': 2},
+        {'id': 'green', 'status': 'PASS'}])
+    case = '1) [chromium] > tests/project.spec.ts:42 > preserves project after reopen'
+    locator = "Locator: getByRole('button', { name: 'Reopen project', exact: true })"
+    block = case + '\nError: expect(locator).toBeVisible() failed\n' + locator + '\nExpected: visible\nReceived: hidden\n'
+    originals = {'browser-proof.log': block + 'Original attempt\n',
+                 'browser-proof.retry1.log': block + 'Retry attempt\n'}
+    for name, text in originals.items():
+        (logs / name).write_text(text, encoding='utf-8')
+    (logs / 'green.log').write_text('green content must not publish')
+    source, build = 'a' * 40, 'leaf-ci-test:' + '1' * 32
+    assert helper.main(['--result', str(result), '--logs', str(logs), '--output', str(output),
+                        '--emit-stdout', '--source', source, '--build-id', build]) == 0
+    printed = capsys.readouterr().out
+    chunks, manifests = _failed_stdout_frames(printed)
+    assert len(manifests) == 1 and len(manifests[0]['files']) == 2
+    assert 'green content' not in printed
+    for name, text in originals.items():
+        body = ''.join(c['text'] for c in chunks if c['log_name'] == name)
+        assert case in body and locator in body and body == text
+        entry = next(e for e in manifests[0]['files'] if e['source'] == name)
+        digest = hashlib.sha256(text.encode()).hexdigest()
+        assert entry['source_sha256'] == entry['copy_sha256'] == digest
+        assert entry['redacted_sha256'] == entry['published_sha256'] == digest
+        assert entry['published_bytes'] == len(text.encode())
+        assert not entry['publication_truncated']
+    assert all(c['source_sha'] == source and c['build_id'] == build for c in chunks)
+
+
+@pytest.mark.parametrize('shape', ['header', 'assignment', 'dsn', 'uri', 'signed', 'encoded_signed',
+                                  'relative_signed', 'encoded_relative_signed', 'environment',
+                                  'nested_context', 'unfinished_context', 'private_key'])
+def test_failed_log_stdout_secret_shapes_never_publish(tmp_path, shape):
+    import hashlib
+    import io
+    helper = _failed_log_retention_helper()
+    secret = 'unit' + '-private-value-never-publish'
+    if shape == 'header':
+        raw = ': '.join(('Authorization', ' '.join(('Bearer', secret))))
+    elif shape == 'assignment':
+        raw = json.dumps({'client_secret': secret})
+    elif shape == 'dsn':
+        raw = 'postgresql' + '://reader:' + secret + '@db.invalid/scratch'
+    elif shape == 'uri':
+        raw = 'https' + '://reader:' + secret + '@service.invalid/resource'
+    elif shape in ('signed', 'encoded_signed'):
+        key = 'X-Amz-Signature' if shape == 'signed' else '%58-Amz-Signature'
+        raw = 'https://files.invalid/input?' + key + '=' + secret + '&safe=value'
+    elif shape in ('relative_signed', 'encoded_relative_signed'):
+        key = 'X-Amz-Signature' if shape == 'relative_signed' else '%58-Amz-Signature'
+        raw = 'GET /input?' + key + '=' + secret + '&safe=value'
+    elif shape == 'environment':
+        raw = 'UNRECOGNIZED_SETTING=' + secret
+    elif shape == 'nested_context':
+        raw = 'context = {\n"member": {"display": "' + secret + '"}\n}\nLocator: safe button'
+    elif shape == 'unfinished_context':
+        raw = 'context = {\n"member": {"display": "' + secret + '"}'
+    else:
+        raw = '-' * 5 + 'BEGIN' + ' PRIVATE KEY' + '-' * 5 + '\n' + secret + '\n' + '-' * 5 + 'END' + ' PRIVATE KEY' + '-' * 5
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    content = ('Exact failing case\n' + raw + '\n').encode()
+    (logs / 'red.log').write_bytes(content)
+    manifest = helper.retain_failed_logs(result, logs, output)
+    stream = io.StringIO()
+    published = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+    assert secret not in stream.getvalue()
+    chunks, _ = _failed_stdout_frames(stream.getvalue())
+    body = ''.join(c['text'] for c in chunks)
+    assert 'Exact failing case' in body and 'REDACTED' in body
+    assert published['files'][0]['source_sha256'] == hashlib.sha256(content).hexdigest()
+    assert published['files'][0]['redacted_sha256'] == hashlib.sha256(body.encode()).hexdigest()
+    assert published['files'][0]['redacted_sha256'] != published['files'][0]['source_sha256']
+    assert (output / 'red.log').read_bytes() == content
+
+
+def test_failed_log_stdout_green_needs_no_identity_or_log_read(tmp_path, capsys):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'green', 'status': 'PASS'}])
+    (logs / 'green.log').write_text('private green diagnostic')
+    assert helper.main(['--result', str(result), '--logs', str(logs), '--output', str(output), '--emit-stdout']) == 0
+    printed = capsys.readouterr().out
+    assert 'LEAF_FAILED_LOG_' not in printed and 'private green diagnostic' not in printed
+
+
+@pytest.mark.parametrize('change', ['symlink', 'modified', 'oversize', 'traversal'])
+def test_failed_log_stdout_refuses_changed_or_unsafe_copies(tmp_path, change):
+    import io
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    (logs / 'red.log').write_text('known case')
+    manifest = helper.retain_failed_logs(result, logs, output)
+    outside = tmp_path / 'outside'
+    outside.write_text('outside content must never publish')
+    if change == 'symlink':
+        (output / 'red.log').unlink()
+        (output / 'red.log').symlink_to(outside)
+    elif change == 'modified':
+        (output / 'red.log').write_text('modified content must never publish')
+    elif change == 'oversize':
+        (output / 'red.log').write_bytes(b'x' * (helper.FILE_LIMIT + 1))
+    else:
+        manifest['files'][0]['copy'] = '../outside'
+    stream = io.StringIO()
+    if change == 'traversal':
+        with pytest.raises(ValueError, match='unsafe_publication_copy'):
+            helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+        assert stream.getvalue() == ''
+    else:
+        public = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+        assert public['files'][0]['publication_status'] == 'copy_refused'
+        assert not _failed_stdout_frames(stream.getvalue())[0]
+    assert 'content must never publish' not in stream.getvalue()
+
+
+def test_failed_log_stdout_tail_drops_partial_line_and_wire_is_bounded(tmp_path, monkeypatch):
+    import hashlib
+    import io
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    monkeypatch.setattr(helper, 'FILE_LIMIT', 80)
+    (logs / 'red.log').write_text('unlabelled-private-fragment' * 20 + '\nExact failing case\nLocator: visible button\n')
+    manifest = helper.retain_failed_logs(result, logs, output)
+    stream = io.StringIO()
+    public = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+    chunks, _ = _failed_stdout_frames(stream.getvalue())
+    body = ''.join(c['text'] for c in chunks)
+    assert body == 'Exact failing case\nLocator: visible button\n'
+    assert public['files'][0]['partial_first_line_dropped']
+    assert public['files'][0]['published_sha256'] == hashlib.sha256(body.encode()).hexdigest()
+    assert len(stream.getvalue().encode()) <= helper.STDOUT_LIMIT
+
+
+def test_failed_log_stdout_wire_budget_caps_escaped_text(tmp_path):
+    import io
+    helper = _failed_log_retention_helper()
+    rows = [{'id': 'red' + str(i), 'status': 'FAIL'} for i in range(8)]
+    result, logs, output = _failed_log_retention_inputs(tmp_path, rows)
+    for row in rows:
+        (logs / (row['id'] + '.log')).write_bytes(b'"\\\n' * (helper.FILE_LIMIT // 3))
+    manifest = helper.retain_failed_logs(result, logs, output)
+    stream = io.StringIO()
+    public = helper.emit_failed_logs(manifest, output, 'a' * 40, 'leaf-ci-test:' + '1' * 32, stream)
+    assert len(stream.getvalue().encode()) <= helper.STDOUT_LIMIT
+    assert any(e['publication_truncated'] for e in public['files'])
+
+
+def test_failed_log_stdout_invalid_identity_is_not_echoed(tmp_path, capsys):
+    helper = _failed_log_retention_helper()
+    result, logs, output = _failed_log_retention_inputs(tmp_path, [{'id': 'red', 'status': 'FAIL'}])
+    (logs / 'red.log').write_text('failure')
+    private = 'unit-private-identity'
+    assert helper.main(['--result', str(result), '--logs', str(logs), '--output', str(output),
+                        '--emit-stdout', '--source', 'a' * 40, '--build-id', private]) == 1
+    assert private not in capsys.readouterr().out
 
 
 def test_prod_readonly_contract_gate_registration():

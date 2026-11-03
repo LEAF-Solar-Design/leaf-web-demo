@@ -959,9 +959,11 @@ LEAF_DIAGNOSTIC_EXACT
   fi
   printf 'LEAF_DIAGNOSTIC diagnostic-only/no-full-verdict suite=%s status=%s postgres_status=%s\n' \
     "$LEAF_GATE_ONLY" "$diagnostic_status" "$postgres_status" | tee /tmp/gate-results/diagnostic.txt || true
-  # Reuse the runner's result and suite log, bounding each text excerpt to 16 KiB.
-  tail -c 16384 /tmp/gate-results/gate-result.json 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
-  tail -c 16384 "/tmp/gate-logs/$LEAF_GATE_ONLY.log" 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
+  # NO_SOURCE builds have no artifact download. Publish only sanitized retained evidence.
+  python -I -B scripts/ci/retain_failed_gate_logs.py \
+    --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/diagnostic-failed-gate-logs \
+    --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
+    || echo 'WARNING: failed diagnostic log publication unavailable' >&2
   exit "$diagnostic_status"
 fi
 # LEAF_DIAGNOSTIC_END
@@ -972,6 +974,7 @@ export PYTHONUNBUFFERED=1
 python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
 python -I -B scripts/ci/retain_failed_gate_logs.py \
   --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs \
+  --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
   || echo 'WARNING: failed gate log retention unavailable' >&2
 if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2
@@ -1003,63 +1006,8 @@ if [[ -n "${CODEBUILD_BUILD_ID:-}" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" == refs/
     --content-type application/json --if-none-match '*' >/dev/null \
     || echo 'WARNING: pointer_write_failed; this shard is not a reuse donor' >&2
 fi
-if [[ -f /tmp/gate-results/gate-result.json ]]; then
-  tail -n 200 /tmp/gate-results/gate-result.json || true
-  # BEGIN GATE FAIL NAMES
-  {
-    python3 - <<'PY'
-import json
-import re
-from pathlib import Path
-
-try:
-    result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text())
-except Exception as exc:
-    print(f"gate fail names: result JSON unreadable ({type(exc).__name__})")
-    raise SystemExit(0)
-
-output_lines = 0
-
-def emit(text):
-    global output_lines
-    for line in str(text).splitlines() or [""]:
-        print(line)
-        output_lines += 1
-        if output_lines == 400:
-            print("gate fail names: output capped at 400 lines")
-            raise SystemExit(0)
-
-log_dir = Path("/tmp/gate-logs")
-markers = re.compile(r"\bFAIL\b|FAILED|\u00d7|\u2717|AssertionError|Error:|Timeout")
-for suite in result.get("results", []):
-    if suite.get("status") != "FAIL":
-        continue
-    suite_id = suite.get("id", "")
-    emit(f"GATE FAIL {suite_id}: {suite.get('note', '')}")
-    failed_ids = suite.get("test_report", {}).get("failed_test_ids", [])
-    for test_id in failed_ids[:20]:
-        emit(f"  failed test: {test_id}")
-    if len(failed_ids) > 20:
-        emit(f"  ... and {len(failed_ids) - 20} more failed tests")
-    log_path = log_dir / f"{suite_id}.log"
-    retry_pattern = re.compile(re.escape(suite_id) + r"\.retry(\d+)\.log")
-    try:
-        retries = [(int(match.group(1)), path)
-                   for path in log_dir.iterdir()
-                   if (match := retry_pattern.fullmatch(path.name))]
-        if retries:
-            log_path = max(retries, key=lambda retry: retry[0])[1]
-        lines = log_path.read_text(errors="replace").splitlines()
-    except OSError:
-        emit(f"  (no suite log at {log_path})")
-        continue
-    matching = [line for line in lines if markers.search(line)]
-    for line in matching[:40] if matching else lines[-20:]:
-        emit("  log: " + line[:300])
-PY
-  } || true
-  # END GATE FAIL NAMES
-else
+# Sanitized retained-log frames above replace raw result/log tails and note dumps.
+if [[ ! -f /tmp/gate-results/gate-result.json ]]; then
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi
 if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
