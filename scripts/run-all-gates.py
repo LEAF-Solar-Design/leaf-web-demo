@@ -3681,7 +3681,9 @@ def build_suites() -> List[Suite]:
         Suite("server-project-material-inspection", "server tests/test_project_material_inspection.py", "pytest", SERVER,
               _py_pytest("tests/test_project_material_inspection.py"), 134),
         Suite("server-project-reference-materials", "server tests/test_project_reference_materials.py", "pytest", SERVER,
-              _py_pytest("tests/test_project_reference_materials.py"), 25),
+              _py_pytest("tests/test_project_reference_materials.py"), 40,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"requires managed or verified canonical disposable PostgreSQL producer",)),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
               _py_pytest("tests/test_project_solar_materialization.py"), 30),

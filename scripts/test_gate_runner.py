@@ -1626,6 +1626,7 @@ def test_all_skipped_pytest_suite_fails_even_when_reason_is_allowlisted(tmp_path
 _GATE_DSN = "postgresql://postgres@127.0.0.1:5432/leaf_gate_fixture"
 _DATABASE_SUITE_IDS = (
     "server-lab-run-store",
+    "server-project-reference-materials",
     "server-w1-commit-solve-adapter", "server-jobs-tenant-inflight-cap",
     "server-drawing-authority-postgres", "server-agent-gate-postgres",
     "server-agent-ops-postgres", "server-broker-pg-store",
