@@ -58,6 +58,7 @@
     ".gitignore"
   ],
   "mandatory_suite_ids": [
+    "web-stage-source-contracts",
     "web-page-service-smoke",
     "ci-process-capture-core",
     "ci-process-capture-runner",

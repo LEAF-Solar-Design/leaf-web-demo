@@ -3417,8 +3417,15 @@ def build_suites() -> List[Suite]:
         # supplies measured per-shard floors (752 / 3 is not a safe floor).
         # Includes src/solar/solarProjectMaterializationClient.test.js through
         # the normal src/**/*.test.{js,jsx} discovery, including initial publication.
+        # These existing source-only contracts need installed Vitest dependencies,
+        # not browser or build output. Run them once in the cheap phase.
+        Suite("web-stage-source-contracts", "web stage and surface source contracts", "vitest", WEB,
+              [_npm(), "run", "test:unit", "--", "src/site/surfaceGates.test.js",
+               "src/site/toolCastStageBar.test.js", "--maxWorkers=1"], 1),
         *(Suite(f"web-vitest-{shard}", f"web npm run test:unit (vitest {shard}/3)", "vitest", WEB,
-              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1,
+              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2",
+               "--exclude=src/site/surfaceGates.test.js",
+               "--exclude=src/site/toolCastStageBar.test.js"], 1,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -5624,7 +5631,7 @@ _PRELUDE_WRITERS = frozenset({
 _EARLY_FEEDBACK_SUITES = frozenset({
     # Existing inert framework/registration checks run once, before expensive
     # prerequisites, so stale catalog contracts cannot consume a full run.
-    "gate-runner-selftest",
+    "gate-runner-selftest", "web-stage-source-contracts",
     "harness-tsc-noemit", "server-campaign-dxf-inventory",
     "server-campaign-release-service", "server-entity-scope-admission",
     "server-entity-scope-transport", "server-sip-r5-routes", "web-app-wiring",
