@@ -38,7 +38,8 @@ class TestCodebuildCiScript(unittest.TestCase):
                         catalog_status=0, raw_catalog=None):
         script = CI_PATH.read_text(encoding="utf-8")
         # Execute the real PostgreSQL setup, EXIT trap, admission, catalog validator,
-        # runner invocation and early exit. Only external commands are inert doubles.
+        # runner invocation and early exit. Runner/PG are inert doubles; the real
+        # retained-log publisher reads and writes only fixture-private artifacts.
         start = script.index('echo "LEAF_T start postgres ')
         block = script[start:script.index('# LEAF_DIAGNOSTIC_END', start)]
         env = {key: value for key, value in os.environ.items()
@@ -48,20 +49,36 @@ class TestCodebuildCiScript(unittest.TestCase):
                    "suites": [{"id": suite_id} for suite_id in (ids or [])]}
         with tempfile.TemporaryDirectory() as temporary:
             directory = Path(temporary)
+            raw_log = ("padding\n" * 40000 + "INERT_BOUNDED_RUNNER_EVIDENCE\n"
+                       'context={"private":"inert-private-context"}\n'
+                       "password=inert-private-password\n").encode()
+            (directory / "input.log").write_bytes(raw_log)
+            (directory / "logs").mkdir()
             runner = directory / "fake_runner.py"
             runner.write_text(
                 "import json, os, sys\n"
+                "from pathlib import Path\n"
                 "args = sys.argv[1:]\n"
                 "with open(os.environ['TEST_CALLS'], 'a', encoding='utf-8') as out:\n"
                 "    out.write(json.dumps(args) + '\\n')\n"
                 "if '--list' in args:\n"
                 "    print(os.environ['TEST_CATALOG'])\n"
                 "    sys.exit(int(os.environ['TEST_CATALOG_STATUS']))\n"
+                "suite = args[args.index('--only') + 1]\n"
+                "status = int(os.environ['TEST_RUNNER_STATUS'])\n"
+                "directory = Path(os.environ['TEST_DIRECTORY'])\n"
+                "(directory / 'result.json').write_text(json.dumps({'results': [\n"
+                "    {'id': suite, 'status': 'FAIL' if status else 'PASS', 'attempts': 1}\n"
+                "]}), encoding='utf-8')\n"
+                "(directory / 'logs' / (suite + '.log')).write_bytes(\n"
+                "    (directory / 'input.log').read_bytes())\n"
                 "sys.exit(int(os.environ['TEST_RUNNER_STATUS']))\n", encoding="utf-8")
             # Forward slashes also work when this test is run by Windows Python/Git Bash.
             env.update(MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*",
                        TEST_PYTHON=sys.executable.replace("\\", "/"),
                        TEST_RUNNER=runner.as_posix(), TEST_CALLS=(directory / "calls").as_posix(),
+                       TEST_DIRECTORY=directory.as_posix(),
+                       HEAD_SHA="a" * 40, CODEBUILD_BUILD_ID="device:dv-" + "b" * 16,
                        TEST_DIAGNOSTIC=(directory / "diagnostic.txt").as_posix(),
                        TEST_CATALOG=raw_catalog if raw_catalog is not None else json.dumps(catalog),
                        TEST_CATALOG_STATUS=str(catalog_status),
@@ -72,6 +89,13 @@ CODEBUILD_SRC_DIR="$2"
 python() {
   if [[ "$1" == scripts/run-all-gates.py ]]; then
     command "$TEST_PYTHON" "$TEST_RUNNER" "$@"
+  elif [[ "$1" == -I && "$2" == -B && "$3" == scripts/ci/retain_failed_gate_logs.py ]]; then
+    [[ "$#" == 14 ]] || return 98
+    [[ "$*" == "-I -B scripts/ci/retain_failed_gate_logs.py --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/diagnostic-failed-gate-logs --emit-stdout --source $HEAD_SHA --build-id $CODEBUILD_BUILD_ID" ]] || return 98
+    shift 9
+    command "$TEST_PYTHON" -I -B "$CODEBUILD_SRC_DIR/scripts/ci/retain_failed_gate_logs.py" \
+      --result "$TEST_DIRECTORY/result.json" --logs "$TEST_DIRECTORY/logs" \
+      --output "$TEST_DIRECTORY/retained" "$@"
   else
     command "$TEST_PYTHON" "$@"
   fi
@@ -96,11 +120,6 @@ tee() {
     command tee "$TEST_DIAGNOSTIC"
   fi
 }
-tail() {
-  [[ "$#" == 3 && "$1" == -c && "$2" == 16384 ]] || return 98
-  [[ "$3" == /tmp/gate-results/gate-result.json || "$3" == "/tmp/gate-logs/$LEAF_GATE_ONLY.log" ]] || return 98
-  printf 'INERT_BOUNDED_RUNNER_EVIDENCE\n'
-}
 ''' + block + '''
 printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
 '''
@@ -112,6 +131,10 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                 if calls_path.exists() else []
             diagnostic_path = directory / "diagnostic.txt"
             diagnostic = diagnostic_path.read_text(encoding="utf-8") if diagnostic_path.exists() else None
+            manifest_path = directory / "retained" / "manifest.json"
+            result.retained_manifest = json.loads(manifest_path.read_text(encoding="utf-8")) \
+                if manifest_path.exists() else None
+            result.fixture_log_sha256 = hashlib.sha256(raw_log).hexdigest()
             return result, calls, diagnostic
 
     @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic execution requires bash")
@@ -133,8 +156,54 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                     self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
                     self.assertEqual(result.stdout.count("POSTGRES_CLEANUP"), 1)
                     self.assertIn(f"suite={suite_id} status={status} postgres_status=0", diagnostic)
-                    self.assertEqual(diagnostic.count("INERT_BOUNDED_RUNNER_EVIDENCE"), 2)
-                    self.assertLess(len(diagnostic), 33000)
+                    self.assertEqual(len(diagnostic.splitlines()), 1)
+                    self.assertNotIn("INERT_BOUNDED_RUNNER_EVIDENCE", diagnostic)
+                    frames = [line for line in result.stdout.splitlines()
+                              if line.startswith("LEAF_FAILED_LOG_")]
+                    self.assertLessEqual(len(("\n".join(frames) + "\n").encode()), 2 * 1024 * 1024)
+                    retained = result.retained_manifest
+                    self.assertIsNotNone(retained, result.stdout + result.stderr)
+                    self.assertEqual(retained["failed_suites"], int(status != 0))
+                    self.assertNotIn("WARNING:", result.stderr)
+                    for private in ("inert-private-context", "inert-private-password",
+                                    "inert-private-database"):
+                        self.assertNotIn(private, result.stdout + result.stderr + diagnostic)
+                    if status == 0:
+                        self.assertEqual(frames, [])
+                        self.assertEqual(retained["files"], [])
+                    else:
+                        manifests = [json.loads(line.split(" ", 1)[1]) for line in frames
+                                     if line.startswith("LEAF_FAILED_LOG_MANIFEST ")]
+                        chunks = [json.loads(line.split(" ", 1)[1]) for line in frames
+                                  if line.startswith("LEAF_FAILED_LOG_CHUNK ")]
+                        self.assertEqual(len(manifests), 1)
+                        self.assertTrue(chunks)
+                        manifest = manifests[0]
+                        self.assertEqual(manifest["schema"], "leaf.ci.failed-logs.stdout.v1")
+                        self.assertEqual(manifest["failed_suites"], 1)
+                        for frame in [manifest, *chunks]:
+                            self.assertEqual(frame["source_sha"], "a" * 40)
+                            self.assertEqual(frame["build_id"], "device:dv-" + "b" * 16)
+                        self.assertEqual([chunk["chunk_index"] for chunk in chunks], list(range(len(chunks))))
+                        for chunk in chunks:
+                            self.assertEqual(chunk["suite_id"], suite_id)
+                            self.assertEqual(chunk["log_name"], suite_id + ".log")
+                        published = "".join(chunk["text"] for chunk in chunks)
+                        self.assertEqual(published.count("INERT_BOUNDED_RUNNER_EVIDENCE"), 1)
+                        self.assertIn("[REDACTED]", published)
+                        self.assertEqual(len(manifest["files"]), 1)
+                        evidence = manifest["files"][0]
+                        self.assertEqual(evidence["source"], suite_id + ".log")
+                        self.assertEqual(evidence["source_sha256"], result.fixture_log_sha256)
+                        self.assertEqual(evidence["status"], "copied")
+                        self.assertTrue(evidence["truncated"])
+                        self.assertTrue(evidence["partial_first_line_dropped"])
+                        self.assertEqual(evidence["publication_status"], "published")
+                        self.assertFalse(evidence["publication_truncated"])
+                        self.assertEqual(evidence["copy_sha256"], retained["files"][0]["copy_sha256"])
+                        self.assertLessEqual(evidence["copied_size"], 256 * 1024)
+                        self.assertEqual(evidence["published_sha256"], hashlib.sha256(published.encode()).hexdigest())
+                        self.assertEqual(evidence["published_bytes"], len(published.encode()))
 
     @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic execution requires bash")
     def test_diagnostic_unknown_colliding_or_invalid_catalog_runs_no_suite(self):
@@ -156,6 +225,10 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                 self.assertIn("LEAF_DIAGNOSTIC refused", result.stderr)
                 self.assertIn("status=2", diagnostic)
                 self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
+                self.assertNotIn("ORDINARY_REQUIRED_CONTROLS", result.stdout)
+                self.assertNotIn("LEAF_FAILED_LOG_", result.stdout)
+                self.assertIsNone(result.retained_manifest)
+                self.assertIn("failed_log_retention error=input_or_output_refused", result.stdout)
                 self.assertEqual(result.stdout.count("POSTGRES_CLEANUP"), 1)
 
     @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic execution requires bash")
@@ -186,9 +259,17 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                     ["suite"], runner_status=runner_status, postgres_status=1)
                 self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
                 self.assertEqual(len(calls), 2)
+                self.assertEqual(calls[1], [
+                    "scripts/run-all-gates.py", "--jobs", "1", "--retry", "0", "--fail-fast",
+                    "--result-json", "/tmp/gate-results/gate-result.json", "--log-dir",
+                    "/tmp/gate-logs", "--only", "suite"])
                 self.assertIn("FATAL: ephemeral PostgreSQL did not start", result.stderr)
                 self.assertIn(f"status={expected} postgres_status=1", diagnostic)
                 self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
+                self.assertNotIn("ORDINARY_REQUIRED_CONTROLS", result.stdout)
+                self.assertIsNotNone(result.retained_manifest, result.stdout + result.stderr)
+                self.assertEqual(result.retained_manifest["failed_suites"], int(runner_status != 0))
+                self.assertNotIn("WARNING:", result.stderr)
                 self.assertEqual(result.stdout.count("POSTGRES_CLEANUP"), 1)
 
     def test_diagnostic_exit_precedes_normal_publication_and_proof(self):
@@ -408,13 +489,13 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
         key = '--key "mq/leaf-web-demo/selection/${CODEBUILD_BUILD_ID}.result.json"'
         self.assertIn(key, script)
         gate_end = script.index('echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"')
-        result_display = script.index(
-            'if [[ -f /tmp/gate-results/gate-result.json ]]; then', gate_end)
+        missing_result_inspection = script.index(
+            'if [[ ! -f /tmp/gate-results/gate-result.json ]]; then', gate_end)
         block_start = script.index(
             'if [[ -n "${CODEBUILD_BUILD_ID:-}" && -f /tmp/gate-results/gate-result.json ]]; then')
         block_end = script.index('\nfi\n', block_start)
         self.assertLess(gate_end, block_start)
-        self.assertLess(block_end, result_display)
+        self.assertLess(block_end, missing_result_inspection)
         block = script[block_start:block_end]
         put_object = block[block.index('aws s3api put-object'):].strip()
         self.assertIn(key, put_object)
@@ -430,14 +511,15 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                'shard-${CI_SHARD_INDEX_N}-of-${CI_SHARD_TOTAL_N}.json"')
         self.assertIn(key, script)
         gate_end = script.index('echo "LEAF_T end gate $(date +%s%3N) rc=$gate_status"')
-        result_display = script.index(
-            'if [[ -f /tmp/gate-results/gate-result.json ]]; then', gate_end)
+        missing_result_inspection = script.index(
+            'if [[ ! -f /tmp/gate-results/gate-result.json ]]; then', gate_end)
         block_start = script.index('# Reuse donor pointer (plan ci-test-selection-20260925 S1b)')
         block_end = script.index('\nfi\n', block_start)
         self.assertLess(script.index(
             '--key "mq/leaf-web-demo/selection/${CODEBUILD_BUILD_ID}.result.json"'),
             block_start)
-        self.assertLess(block_end, result_display)
+        self.assertLess(gate_end, block_start)
+        self.assertLess(block_end, missing_result_inspection)
         block = script[block_start:block_end]
         condition = block[block.index('if [['):block.index(']]; then')]
         for guard in ('refs/heads/main', '== PUSH', '"$selection_mode" == full',

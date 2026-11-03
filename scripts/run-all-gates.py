@@ -205,6 +205,14 @@ def _py_pytest(target: str) -> List[str]:
             "-r", "s", "-p", "no:cacheprovider"]
 
 
+def _unprivileged_pytest(target: str) -> List[str]:
+    if not sys.platform.startswith("linux"):
+        return _py_pytest(target)
+    # Keep the literal pytest token for reporting_command's plugin injection.
+    return [sys.executable, "-I", str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py"),
+            *_py_pytest(target)[2:]]
+
+
 def _npm() -> str:
     if os.name == "nt":
         return shutil.which("npm.cmd") or shutil.which("npm") or "npm.cmd"
@@ -1359,7 +1367,7 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
         Suite("server-lab-runs", "server tests/test_lab_runs.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
+              _unprivileged_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-stream", "server tests/test_lab_stream.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_stream.py"), 30, uses_database=True,
@@ -3698,7 +3706,7 @@ def build_suites() -> List[Suite]:
               uses_database=True, db_gated=True, database_skip_reasons=(
                   r"requires managed or verified canonical disposable PostgreSQL producer",)),
         Suite("server-lab-corpus-executor", "server pinned corpus evaluator and durable job custody", "pytest", SERVER,
-              _py_pytest("tests/test_lab_corpus_executor.py"), 14,
+              _unprivileged_pytest("tests/test_lab_corpus_executor.py"), 14,
               uses_database=True, db_gated=True),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
@@ -4137,7 +4145,8 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     # S8c (measured 2026-09-25, proofs E3 and 148574c1): the shadow plugin's per-test outcome path costs about 150 ms per
     # test in CI (a 356-test suite 0.5 s -> 54 s), so pytest loads it only on tracing builds, where the parent carries
     # LEAF_READSET_DIR. PR and merge-group suites run plain pytest; their attempt records stay reporting-incomplete.
-    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv and (os.environ.get("LEAF_READSET_DIR") or capturing):
+    corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
+    if suite.kind == "pytest" and "pytest" in argv and ("-I" not in argv or corpus_launcher) and (os.environ.get("LEAF_READSET_DIR") or capturing):
         if capturing and not trusted:
             trace_env["PYTHONPATH"] = str(directory) + (os.pathsep + os.environ["PYTHONPATH"]
                                                        if os.environ.get("PYTHONPATH") else "")
@@ -5027,7 +5036,8 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             logf.write("WARNING: " + report_failure["test_report_incomplete_reasons"][0] + "\n")
         logf.flush()
         try:
-            spawn = run_capture_command if capture_output is not None else subprocess.run
+            corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
+            spawn = run_capture_command if capture_output is not None or corpus_launcher else subprocess.run
             proc = spawn(
                 spawn_command,
                 cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env, **service_env},

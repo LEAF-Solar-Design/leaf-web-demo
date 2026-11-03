@@ -61,6 +61,309 @@ def _failed_log_retention_helper():
     return mod
 
 
+def _unprivileged_helper():
+    spec = importlib.util.spec_from_file_location(
+        "run_unprivileged_pytest", SCRIPTS / "ci/run_unprivileged_pytest.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    return mod
+
+
+def test_unprivileged_both_named_gates_preserve_contract(monkeypatch, tmp_path):
+    runner = _load_runner()
+    suites = {suite.id: suite for suite in runner.build_suites()}
+    for sid, target, floor, gated in (
+        ("server-lab-runs", "tests/test_lab_runs.py", 24, False),
+        ("server-lab-corpus-executor", "tests/test_lab_corpus_executor.py", 14, True),
+    ):
+        suite = suites[sid]
+        expected_argv = ([sys.executable, "-I", str(SCRIPTS / "ci/run_unprivileged_pytest.py"),
+                          *runner._py_pytest(target)[2:]] if sys.platform.startswith("linux")
+                         else runner._py_pytest(target))
+        assert suite.argv == expected_argv
+        assert suite.cwd == runner.SERVER
+        assert suite.uses_database and suite.db_gated == gated
+        assert suite.expected == floor
+        monkeypatch.setenv("LEAF_TRUSTED_CI_DIR", str(SCRIPTS / "ci"))
+        monkeypatch.setenv("LEAF_READSET_DIR", str(tmp_path / "readsets"))
+        env = runner.suite_trace_env(suite, tmp_path, 1)
+        command = runner.reporting_command(suite, suite.argv, env)
+        assert command[:len(suite.argv)] == suite.argv
+        assert command[len(suite.argv):len(suite.argv) + 2] == ["-p", "pytest_selection"]
+        assert "--leaf-output=" + env["LEAF_TEST_REPORT_DIR"] in command
+        assert json.loads((Path(env["LEAF_TEST_REPORT_DIR"]) / "report-only.json").read_text())["apply_filter"] is False
+
+
+@pytest.mark.parametrize("args", [[], ["sh", "-c", "id"], ["pytest", "tests/test_other.py"],
+    ["pytest", "tests/test_lab_runs.py", "--override-ini=pythonpath=/private"],
+    ["pytest", "tests/test_lab_runs.py", "-p", "arbitrary_plugin"],
+    ["pytest", "tests/test_lab_runs.py", "../tests/test_lab_runs.py"]])
+def test_unprivileged_refuses_other_commands(args):
+    with pytest.raises(ValueError):
+        _unprivileged_helper().validate_args(args)
+
+
+def test_unprivileged_nodeids_and_normal_options():
+    helper = _unprivileged_helper()
+    args = ["pytest", "tests/test_lab_runs.py::test_one", "tests/test_lab_runs.py::test_two",
+            "-q", "--color=no", "-r", "s", "-p", "no:cacheprovider"]
+    assert helper.validate_args(args) == args
+
+
+def test_unprivileged_source_snapshot_excludes_untracked_and_preserves_bytes(tmp_path, monkeypatch):
+    helper = _unprivileged_helper()
+    repo = tmp_path / "original"
+    repo.mkdir(mode=0o700)
+    paths = ["server/tests/test_lab_runs.py", "engine/pinned.tar.gz", "deploy/gen_seccomp_filter.c",
+             "scripts/proof_project_pg.py", "platform/module.py", "scripts/ci/run_unprivileged_pytest.py"]
+    before = {}
+    for name in paths:
+        path = repo / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(b"exact\x00bytes\xff")
+        path.chmod(0o600)
+        before[name] = (path.read_bytes(), path.stat().st_mode)
+    (repo / "secret-untracked").write_text("private")
+    monkeypatch.setattr(helper.subprocess, "run", lambda *a, **k: SimpleNamespace(
+        stdout=b"\0".join(name.encode() for name in paths[:-1]) + b"\0"))
+    copied = tmp_path / "snapshot"
+    helper.snapshot(repo, copied, helper.Budget())
+    assert not (copied / "secret-untracked").exists()
+    for name, (content, mode) in before.items():
+        assert (copied / name).read_bytes() == content
+        assert ((repo / name).read_bytes(), (repo / name).stat().st_mode) == (content, mode)
+
+
+def test_unprivileged_refuses_escaping_and_symlink_sources(tmp_path):
+    helper = _unprivileged_helper()
+    for name in ("../outside", "/etc/passwd", ".git/config", "bad\\path"):
+        with pytest.raises(ValueError):
+            helper.safe_file(tmp_path, name)
+    if sys.platform.startswith("linux"):
+        (tmp_path / "link").symlink_to("/etc/passwd")
+        with pytest.raises(ValueError, match="symlink"):
+            helper.safe_file(tmp_path, "link")
+        (tmp_path / "directory").symlink_to("/etc", target_is_directory=True)
+        with pytest.raises(ValueError, match="symlink"):
+            helper.safe_file(tmp_path, "directory/passwd")
+
+
+@pytest.mark.parametrize("limit", ["MAX_FILES", "MAX_BYTES"])
+def test_unprivileged_copy_budget_refuses_before_output(tmp_path, monkeypatch, limit):
+    helper = _unprivileged_helper()
+    original = tmp_path / "source"
+    original.write_bytes(b"bounded source")
+    monkeypatch.setattr(helper, limit, 0)
+    with pytest.raises(ValueError, match="budget"):
+        helper.Budget().copy(original, tmp_path / "destination")
+    assert not (tmp_path / "destination").exists()
+    assert original.read_bytes() == b"bounded source"
+
+
+def test_unprivileged_handback_maps_exact_output_refs_and_refuses_redirects(tmp_path):
+    helper = _unprivileged_helper()
+    private, original = tmp_path / "private", tmp_path / "original"
+    private.mkdir()
+    (private / "capture-suites.json").write_text(json.dumps([
+        {"outcomes_ref": str(private / "attempts-main.jsonl"), "test_ids": ["suite::test"]}]))
+    (private / "attempts-main.jsonl").write_text('{"outcome":"failed"}\n')
+    helper.handback(private, original, [(str(private), str(original))], helper.Budget())
+    assert json.loads((original / "capture-suites.json").read_text())[0]["outcomes_ref"] == str(original / "attempts-main.jsonl")
+    assert json.loads((original / "attempts-main.jsonl").read_text())["outcome"] == "failed"
+    with pytest.raises(ValueError, match="collision"):
+        helper.handback(private, original, [], helper.Budget())
+    if sys.platform.startswith("linux"):
+        (private / "redirect.json").symlink_to("/etc/passwd")
+        with pytest.raises(ValueError):
+            helper.handback(private, tmp_path / "other", [], helper.Budget())
+
+
+def test_unprivileged_real_clean_child_identity_and_nnp(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return  # No Linux identity proof is asserted on other platforms.
+    helper = _unprivileged_helper()
+    # Exercise the actual child boundary, replacing only the final pytest exec.
+    program = (
+        "import importlib.util,os; "
+        f"s=importlib.util.spec_from_file_location('launcher',{str(helper.SELF)!r}); "
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        "os.execv=lambda *a: None; m.child(['pytest','tests/test_lab_runs.py'])"
+    )
+    command = [sys.executable, "-I", "-c", program]
+    if os.geteuid() == 0:
+        # Copy only this helper into a traversable private directory for UID10003.
+        with helper.tempfile.TemporaryDirectory(prefix="leaf-identity-", dir="/tmp") as raw:
+            directory = Path(raw)
+            copied = directory / "launcher.py"
+            copied.write_bytes(helper.SELF.read_bytes())
+            copied.chmod(0o600)
+            helper.own_tree(directory)
+            command[-1] = program.replace(repr(str(helper.SELF)), repr(str(copied)))
+            command = [shutil.which("setpriv") or "/usr/bin/setpriv", "--reuid=10003", "--regid=10003",
+                       "--clear-groups", "--bounding-set=-all", "--inh-caps=-all", "--ambient-caps=-all", *command]
+            result = subprocess.run(command, capture_output=True, text=True, cwd="/tmp", timeout=15)
+    else:
+        result = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    assert result.returncode == 0, result.stderr
+    assert "CapEff=0 CapPrm=0 CapInh=0 CapAmb=0 NNP=1" in result.stdout
+    assert "uid=0 " not in result.stdout
+    assert f"uid={10003 if os.geteuid() == 0 else os.geteuid()} " in result.stdout
+
+
+def test_unprivileged_rejects_privileged_identity(monkeypatch):
+    helper = _unprivileged_helper()
+    monkeypatch.setattr(helper.Path, "read_text", lambda self: (
+        "Uid:\t0 0 0 0\nCapEff:\t0\nCapPrm:\t0\nCapInh:\t0\nCapAmb:\t0\nNoNewPrivs:\t1\n"))
+    with pytest.raises(ValueError, match="identity"):
+        helper.identity()
+
+
+@pytest.mark.parametrize("field,value", [("CapEff", "1"), ("CapPrm", "1"),
+    ("CapInh", "1"), ("CapAmb", "1"), ("NoNewPrivs", "0")])
+def test_unprivileged_rejects_each_unclean_identity_field(monkeypatch, field, value):
+    helper = _unprivileged_helper()
+    fields = dict(Uid="10003 10003 10003 10003", CapEff="0", CapPrm="0", CapInh="0", CapAmb="0", NoNewPrivs="1")
+    fields[field] = value
+    monkeypatch.setattr(helper.Path, "read_text", lambda self: "\n".join(k + ": " + v for k, v in fields.items()))
+    with pytest.raises(ValueError, match="identity"):
+        helper.identity()
+
+
+def test_unprivileged_private_runtime_bytes_and_declared_readset_destination(tmp_path, monkeypatch):
+    helper = _unprivileged_helper()
+    trusted = tmp_path / "trusted"
+    trusted.mkdir(mode=0o700)
+    names = ("sitecustomize.py", "pytest_selection.py", "select_tests.py", "trace_reads.py")
+    for name in names:
+        (trusted / name).write_bytes(b"# frozen trusted bytes\n")
+        (trusted / name).chmod(0o600)
+    (trusted / "unrelated-secret").write_text("must not be copied")
+    private = tmp_path / "private"
+    private.mkdir()
+    monkeypatch.setattr(helper, "snapshot", lambda repo, dest, budget: dest.mkdir())
+    monkeypatch.setattr(helper, "own_tree", lambda directory: None)
+    env = {"LEAF_TRUSTED_CI_DIR": str(trusted), "PYTHONPATH": str(trusted),
+           "LEAF_READSET_DIR": str(tmp_path / "readsets"), "LEAF_READSET_SUITE": "suite/a.b",
+           "LEAF_READSET_ATTEMPT": "2", "DATABASE_URL": "private-dsn"}
+    source, args, child_env, outputs, mappings = helper.prepare(
+        private, ["pytest", "tests/test_lab_runs.py"], env)
+    copied = Path(child_env["LEAF_TRUSTED_CI_DIR"])
+    assert child_env["PYTHONPATH"] == str(copied)
+    assert sorted(p.name for p in copied.iterdir()) == sorted(names)
+    assert all((copied / name).read_bytes() == (trusted / name).read_bytes() for name in names)
+    assert outputs == [(Path(child_env["LEAF_READSET_DIR"]) / "suite%2Fa%2Eb/2",
+                        tmp_path / "readsets/suite%2Fa%2Eb/2")]
+    assert child_env["DATABASE_URL"] == "private-dsn"
+    assert "private-dsn" not in repr(args)
+    assert env["PYTHONPATH"] == str(trusted)
+
+
+def test_unprivileged_prepare_failure_cleans_private_tree_and_sanitizes(tmp_path, monkeypatch, capsys):
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return
+    helper = _unprivileged_helper()
+    seen = []
+    def fail(directory, args, environment):
+        seen.append(directory)
+        (directory / "partial").write_text("private")
+        raise ValueError("private exception and DATABASE_URL")
+    monkeypatch.setattr(helper, "prepare", fail)
+    assert helper.main(["pytest", "tests/test_lab_runs.py"]) == 125
+    assert seen and not seen[0].exists()
+    output = capsys.readouterr()
+    assert output.err == "corpus launcher refused stage=prepare class=ValueError\n"
+
+
+def test_unprivileged_supervisor_reaps_detached_descendant_and_propagates_exit(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
+    helper = _unprivileged_helper()
+    pidfile = tmp_path / "pid"
+    program = (
+        "import os,time; pid=os.fork(); "
+        f"open({str(pidfile)!r},'w').write(str(pid)) if pid else None; "
+        "os._exit(9) if pid else None; os.setsid(); time.sleep(60)"
+    )
+    assert helper.supervise([sys.executable, "-I", "-c", program], tmp_path, os.environ.copy()) == 9
+    pid = int(pidfile.read_text())
+    assert not Path(f"/proc/{pid}").exists()
+
+
+def test_unprivileged_supervisor_forwards_termination(tmp_path):
+    if not sys.platform.startswith("linux"):
+        return
+    helper = _unprivileged_helper()
+    pidfile = tmp_path / "child-pid"
+    child_code = f"import os,time; open({str(pidfile)!r},'w').write(str(os.getpid())); time.sleep(60)"
+    program = (
+        "import importlib.util,os,sys; "
+        f"s=importlib.util.spec_from_file_location('launcher',{str(helper.SELF)!r}); "
+        "m=importlib.util.module_from_spec(s); s.loader.exec_module(m); "
+        f"sys.exit(m.supervise([sys.executable,'-I','-c',{child_code!r}],{str(tmp_path)!r},os.environ.copy()))"
+    )
+    process = subprocess.Popen([sys.executable, "-I", "-c", program])
+    try:
+        deadline = time.monotonic() + 10
+        while not pidfile.exists() and process.poll() is None and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert pidfile.exists()
+        process.terminate()
+        assert process.wait(timeout=10) == 143
+        assert not Path("/proc/" + pidfile.read_text()).exists()
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
+
+
+def test_unprivileged_real_root_private_inputs_reports_cleanup_and_exit(tmp_path, monkeypatch):
+    if not sys.platform.startswith("linux") or os.geteuid() != 0:
+        return  # Root-start proof must be supplied by the root Linux verifier.
+    helper = _unprivileged_helper()
+    repo = tmp_path / "repo"
+    (repo / "server").mkdir(parents=True, mode=0o700)
+    launcher = repo / "scripts/ci/run_unprivileged_pytest.py"
+    launcher.parent.mkdir(parents=True)
+    launcher.write_bytes(helper.SELF.read_bytes())
+    # A tiny pytest module discriminates the launcher boundary without replaying suites.
+    probe = repo / "server/pytest.py"
+    probe.write_text(
+        "import json,os,sys\nfrom pathlib import Path\n"
+        "opts=dict(a.split('=',1) for a in sys.argv if a.startswith('--leaf-'))\n"
+        "assert json.loads(Path(opts['--leaf-selection']).read_text()) == {'apply_filter':False}\n"
+        "assert Path(os.environ['HOME']).stat().st_uid == os.getuid() != 0\n"
+        "assert Path(os.environ['TMPDIR']).stat().st_uid == os.getuid()\n"
+        "out=Path(opts['--leaf-output'])\n"
+        "(out/'completion-main.json').write_text(json.dumps({'outcomes_ref':str(out/'attempts-main.jsonl'),'source':str(Path.cwd().parent),'home':os.environ['HOME']}))\n"
+        "(out/'attempts-main.jsonl').write_text('{\"outcome\":\"failed\"}\\n')\n"
+        "sys.exit(7)\n")
+    probe.chmod(0o600)
+    report = tmp_path / "reports"
+    report.mkdir(mode=0o700)
+    selection = report / "report-only.json"
+    selection.write_text('{"apply_filter":false}')
+    monkeypatch.setattr(helper, "REPO", repo)
+    actual_run = helper.subprocess.run
+    def tracked(command, **kwargs):
+        if command[0] == "git":
+            return SimpleNamespace(stdout=b"server/pytest.py\0scripts/ci/run_unprivileged_pytest.py\0")
+        return actual_run(command, **kwargs)
+    monkeypatch.setattr(helper.subprocess, "run", tracked)
+    for key in ("PYTHONPATH", "LEAF_TRUSTED_CI_DIR", "LEAF_READSET_DIR", "LEAF_READSET_ROOT", "LEAF_PROCESS_CAPTURE_DIR"):
+        monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("LEAF_TEST_REPORT_DIR", str(report))
+    before = (probe.read_bytes(), probe.stat().st_mode, repo.stat().st_mode)
+    code = helper.main(["pytest", "tests/test_lab_runs.py", "--leaf-output=" + str(report),
+                        "--leaf-selection=" + str(selection), "--leaf-repo=" + str(repo)])
+    assert code == 7
+    evidence = json.loads((report / "completion-main.json").read_text())
+    assert evidence["source"] == str(repo)
+    assert evidence["outcomes_ref"] == str(report / "attempts-main.jsonl")
+    assert not Path(evidence["home"]).parent.exists()
+    assert (probe.read_bytes(), probe.stat().st_mode, repo.stat().st_mode) == before
+    assert json.loads(selection.read_text()) == {"apply_filter": False}
+
+
 def _failed_log_retention_inputs(tmp_path, rows):
     result = tmp_path / "result.json"
     result.write_text(json.dumps({"results": rows}), encoding="utf-8")
