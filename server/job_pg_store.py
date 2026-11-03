@@ -87,6 +87,10 @@ def _record(row: Dict[str, Any]) -> Dict[str, Any]:
     native = native_record_context(_json(row.get("execution_json")) or {}, rec)
     if native is not None:
         rec["native_preview"] = native
+    from lab_corpus_executor import record_context as corpus_record_context
+    corpus = corpus_record_context(_json(row.get("execution_json")) or {}, rec)
+    if corpus is not None:
+        rec["lab_corpus"] = corpus
     return rec
 
 

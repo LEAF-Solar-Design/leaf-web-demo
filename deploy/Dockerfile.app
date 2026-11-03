@@ -117,7 +117,7 @@ RUN printf '%s\n' "$TRIXIE_DEBIAN_SECURITY_INRELEASE_SHA256" \
       /var/lib/apt/lists/deb.debian.org_debian_dists_trixie-updates_InRelease \
       | sha256sum -c - \
  && apt-get upgrade -y \
- && apt-get install -y --no-install-recommends git curl ca-certificates \
+ && apt-get install -y --no-install-recommends git curl ca-certificates util-linux \
       xz-utils gcc make libc6-dev libseccomp-dev \
  && curl -fsSL https://github.com/LibreDWG/libredwg/releases/download/0.14.8584/libredwg-0.14.8584.tar.xz \
       -o /tmp/libredwg.tar.xz \
@@ -179,6 +179,7 @@ RUN pip install --no-cache-dir playwright==1.60.0 \
 COPY server/    /app/server/
 COPY da/        /app/da/
 COPY engine/    /app/engine/
+RUN python /app/server/lab_corpus_executor.py --install
 COPY platform/  /app/platform/
 COPY contract/  /app/contract/
 COPY data/      /app/data/

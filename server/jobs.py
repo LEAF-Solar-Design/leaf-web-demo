@@ -652,8 +652,9 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     is a key-reuse question, not a different run input.
     """
     from native_preview_job import OPERATION
-    if tool.get("name") == OPERATION:
-        raise ValueError("native preview requires internal admission")
+    from lab_corpus_executor import OPERATION as CORPUS_OPERATION
+    if tool.get("name") in {OPERATION, CORPUS_OPERATION}:
+        raise ValueError("internal operation requires internal admission")
     _reject_oversized_params(params)
     from product_capability_availability import is_cloud_proposal, is_local_graph_commit, is_local_graph_read
     if is_cloud_proposal(tool):
@@ -710,6 +711,26 @@ def submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dwg
     )
 
 
+def submit_lab_corpus(tenant_id: str, org_id: str, project_id: str,
+                      actor_id: str, corpus: Dict[str, Any], suite: Dict[str, Any], *,
+                      capability_sha256: str, idempotency_key: str) -> str:
+    """Server-only file custody admission into the existing PostgreSQL spine."""
+    import lab_corpus_executor as corpus_adapter
+    if job_store_mode() != "postgres":
+        raise ValueError("corpus execution requires PostgreSQL")
+    if (type(idempotency_key) is not str or not 1 <= len(idempotency_key) <= 200
+            or any(ord(c) < 32 or ord(c) == 127 for c in idempotency_key)):
+        raise ValueError("corpus execution requires an idempotency key")
+    context = corpus_adapter.validate_context({
+        'schema': corpus_adapter.SCHEMA, 'tenant_id': tenant_id, 'org_id': org_id,
+        'project_id': project_id, 'actor_id': actor_id, 'corpus': corpus, 'suite': suite,
+        'capability_sha256': capability_sha256})
+    corpus_adapter.require_executor()
+    corpus_adapter.read_sources(context)
+    return _submit_job(tenant_id, {}, {}, "", False, org_id, project_id,
+                       idempotency_key=idempotency_key, lab_corpus=context)
+
+
 def submit_native_preview(tenant_id: str, org_id: str, project_id: str,
                           actor_id: str, descriptor: Dict[str, Any], *,
                           idempotency_key: str) -> str:
@@ -756,8 +777,21 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 entity_scope: Optional[Dict[str, Any]] = None,
                 solve_context: Optional[Dict[str, Any]] = None,
                 proposal_candidate: Optional[Dict[str, Any]] = None,
-                native_preview: Optional[Dict[str, Any]] = None) -> str:
+                native_preview: Optional[Dict[str, Any]] = None,
+                lab_corpus: Optional[Dict[str, Any]] = None) -> str:
     """Shared durable insert and executor hand-off for tool and data-plan jobs."""
+    if lab_corpus is not None:
+        import lab_corpus_executor as corpus_adapter
+        lab_corpus = corpus_adapter.validate_context(lab_corpus)
+        if (job_store_mode() != 'postgres' or tool != {} or params != {} or dwg != ''
+                or aps_live is not False or dwg_version is not None
+                or authority_mode != 'legacy_sqlite' or not idempotency_key
+                or any(value is not None for value in (native_preview, plan,
+                    capability_provenance, completion_provenance, entity_scope,
+                    solve_context, proposal_candidate, checkout_holder, checkout_fence,
+                    platform_context)) or any(lab_corpus[k] != v for k, v in {
+                        'tenant_id': tenant_id, 'org_id': org_id, 'project_id': project_id}.items())):
+            raise ValueError('Corpus submission scope or execution mode mismatch.')
     if native_preview is not None:
         import native_preview_job as native
         native_preview = native.validate_context(native_preview)
@@ -772,7 +806,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                 or not idempotency_key or any(native_preview[k] != v for k, v in {
                     "tenant_id": tenant_id, "org_id": org_id, "project_id": project_id}.items())):
             raise ValueError("native submission scope or execution mode mismatch")
-    tool_name = native.OPERATION if native_preview is not None else tool["name"]
+    tool_name = (corpus_adapter.OPERATION if lab_corpus is not None else
+                 native.OPERATION if native_preview is not None else tool["name"])
     if entity_scope is not None:
         from entity_scope import ScopeError, validate_binding
         from product_capability_availability import is_local_graph_commit, is_local_graph_read
@@ -862,6 +897,9 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
         fingerprint_payload.pop("tool")
         fingerprint_payload["operation"] = native.OPERATION
         fingerprint_payload["native_preview"] = native_preview
+    if lab_corpus is not None:
+        fingerprint_payload.pop('tool')
+        fingerprint_payload.update(operation=corpus_adapter.OPERATION, lab_corpus=lab_corpus)
     if entity_scope is not None:
         fingerprint_payload["entity_scope"] = entity_scope
     if solve_scope is not None:
@@ -926,6 +964,8 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
         execution["completion_provenance"] = completion_provenance
     if native_preview is not None:
         execution = {"operation": native.OPERATION, "native_preview": native_preview}
+    if lab_corpus is not None:
+        execution = {'operation': corpus_adapter.OPERATION, 'lab_corpus': lab_corpus}
     max_inflight = tenant_max_inflight()
     created = True
     if job_store_mode() == "postgres":
@@ -1001,6 +1041,11 @@ def _submit_job(tenant_id: str, tool: Dict[str, Any], params: Dict[str, Any], dw
                     conn.rollback()
                 raise
     if not created:
+        return job_id
+    if lab_corpus is not None:
+        executor = _executors.get(LANE_SLOW)
+        assert executor is not None
+        executor.submit(_run_lab_corpus, job_id)
         return job_id
     if native_preview is not None:
         if native_preview['schema'] == native.REMOTE_SCHEMA:
@@ -1403,7 +1448,9 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
                       _capability_owner: bool = False,
                       _completion_owner: bool = False,
                       _native_owner: Any = None,
-                      _native_deadline: Optional[float] = None) -> str:
+                      _native_deadline: Optional[float] = None,
+                      _corpus_owner: Any = None,
+                      _corpus_deadline: Optional[float] = None) -> str:
     """Apply one terminal callback exactly once.
 
     Returns ``applied``, ``duplicate``, ``conflict``, or ``not_owner``. A terminal
@@ -1442,6 +1489,19 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
         if durable is None:
             return "missing"
         durable_attempt = durable["attempt"]
+        import lab_corpus_executor as corpus_adapter
+        corpus = corpus_adapter.record_context(durable['execution'], durable)
+        if corpus is not None and status == 'complete':
+            if (_corpus_owner is not corpus_adapter._OWNER or not worker_id or _allow_closed
+                    or _corpus_deadline is None or not math.isfinite(_corpus_deadline)
+                    or time.monotonic() >= _corpus_deadline
+                    or provenance != {'attempt': durable_attempt, 'execution_path': 'local'}):
+                raise ValueError('Corpus success requires its owning attempt and deadline.')
+            corpus_adapter.validate_result(corpus, job_id, worker_id, durable_attempt,
+                                           result_env.get('result'))
+            corpus_adapter.read_sources(corpus)
+            if time.monotonic() >= _corpus_deadline:
+                raise ValueError('Corpus terminal deadline exhausted.')
         import native_preview_job as native_adapter
         native_record_context = native_adapter.record_context
         native = native_record_context(durable["execution"], durable)
@@ -1485,6 +1545,9 @@ def complete_callback(job_id: str, status: str, *, result_env: Optional[Dict[str
             # validate lease expiry against the timestamp from before those reads.
             now = time.time()
         remote_fence = {}
+        if corpus is not None and status == 'complete':
+            now = time.time()
+            remote_fence['deadline'] = now + max(0, _corpus_deadline - time.monotonic())
         if remote and (status == 'complete' or _native_owner is not None):
             rec = get_job(job_id)
             remote_fence['deadline'] = remote_adapter.deadline(rec, native)
@@ -1701,6 +1764,42 @@ def _retry_or_finish(job_id: str, worker_id: str, tenant_id: str, tool: Dict[str
             provenance=provenance)
 
 
+def _run_lab_corpus(job_id: str, *, _worker_id=None, _attempt=None) -> None:
+    """Own the actual child lifecycle inside the existing fenced job lease."""
+    import lab_corpus_executor as corpus_adapter
+    worker_id = _worker_id or str(uuid.uuid4())
+    attempt = _attempt if _attempt is not None else claim_lease(job_id, worker_id)
+    if attempt is None:
+        return
+    deadline = time.monotonic() + job_max_s()
+    provenance = {'attempt': attempt, 'execution_path': 'local'}
+
+    def cancelled():
+        rec = get_job(job_id)
+        lease = (rec or {}).get('lease') or {}
+        return (rec is None or rec['status'] != 'running'
+                or rec.get('progress') == CLOSED_PROGRESS or rec.get('attempt') != attempt
+                or lease.get('owner') != worker_id
+                or float(lease.get('expires_at') or 0) < time.time())
+
+    try:
+        durable = _pg_store.durable_context(job_id)
+        context = corpus_adapter.record_context(durable['execution'], durable)
+        if context is None:
+            raise ValueError('Missing corpus context.')
+        result = corpus_adapter.run(job_id, worker_id, attempt, context,
+            lambda: heartbeat_lease(job_id, worker_id), cancelled, deadline)
+        if cancelled():
+            return
+        complete_callback(job_id, 'complete', result_env={'ok': True, 'result': result},
+            worker_id=worker_id, provenance=provenance,
+            _corpus_owner=corpus_adapter._OWNER, _corpus_deadline=deadline)
+    except Exception:
+        if not cancelled():
+            complete_callback(job_id, 'failed', worker_id=worker_id, provenance=provenance,
+                error=error_obj(ErrorCode.INTERNAL, 'corpus execution could not be verified', False))
+
+
 def _run_native_preview(job_id: str, *, _worker_id=None, _attempt=None) -> None:
     """Synchronous native execution inside the existing authoritative lease."""
     import native_preview_job as native
@@ -1763,6 +1862,9 @@ def _run_job(job_id: str, tenant_id: str, tool: Dict[str, Any], params: Dict[str
 
     if job_store_mode() == "postgres":
         rec = get_job(job_id)
+        if rec is not None and rec.get('tool') == 'internal.lab-corpus-evaluate':
+            _run_lab_corpus(job_id, _worker_id=worker_id, _attempt=attempt)
+            return
         if rec is not None and rec.get("tool") == "internal.native-preview":
             _run_native_preview(job_id, _worker_id=worker_id, _attempt=attempt)
             return
@@ -2502,6 +2604,16 @@ def _redispatch_record(job_id: str) -> bool:
         _write_terminal_receipt(job_id)
         return True
     try:
+        import lab_corpus_executor as corpus_adapter
+        corpus = corpus_adapter.record_context(execution, rec)
+        if corpus is not None:
+            if job_store_mode() != 'postgres':
+                raise ValueError('Corpus recovery requires PostgreSQL.')
+            executor = _executors.get(LANE_SLOW)
+            if executor is None:
+                return False
+            executor.submit(_run_lab_corpus, job_id)
+            return True
         if native is not None:
             if job_store_mode() != "postgres":
                 raise ValueError("native recovery requires PostgreSQL")
