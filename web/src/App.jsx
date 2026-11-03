@@ -54,6 +54,7 @@ import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
 import SolarFlowSeat from './solar/SolarFlowSeat.jsx'
 import SolarWorkspaceTools from './solar/SolarWorkspaceTools.jsx'
+import { solarPublicationReceiptMatches } from './solar/solarProjectMaterializationClient.js'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
 import { DEFAULT_SOLAR_FLOW, MAX_FLOW_STEPS, admittedOverlays, solarFlowId, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
 import { resolvePublishedCatalogTool } from './site/publishedCatalogTool.js'
@@ -397,18 +398,29 @@ function LiveProjectMaterialIntake({ project, artifacts, onAttached }) {
     photos={<PhotoMaterialIntake projectId={project?.project_id} />} />
 }
 
-export async function seatProjectDrawingPublication(controller, receipt) {
+export async function seatProjectDrawingPublication(controller, receipt, isCurrent = () => true) {
+  if (!isCurrent()) return false
   const version = receipt?.drawing_version
   const before = controller.getSnapshot()
   if (!version || before.openProjectId !== version.project_id || before.orgId !== version.org_id) return false
   const workspace = await controller.rehydrate()
   const after = controller.getSnapshot()
-  if (after.openProjectId !== version.project_id || after.orgId !== version.org_id
+  if (!isCurrent() || after.openProjectId !== version.project_id || after.orgId !== version.org_id
     || after.canonicalVersionId !== before.canonicalVersionId
     || !workspace?.drawing_versions?.some((row) => row.version_id === version.version_id
       && row.drawing_id === version.drawing_id && row.project_id === version.project_id && row.org_id === version.org_id)) return false
   controller.selectCanonicalVersion(version.version_id)
   return true
+}
+
+export async function seatSolarProjectPublication(controller, receipt, captured, isCurrent) {
+  const current = controller.getSnapshot()
+  const selected = current.workspace?.drawing_versions?.find(row => row.version_id === current.canonicalVersionId)
+  if (!solarPublicationReceiptMatches(receipt, captured) || typeof isCurrent !== 'function' || !isCurrent()
+    || current.orgId !== captured?.organization_id || current.openProjectId !== captured?.project_id
+    || (current.canonicalVersionId ?? null) !== captured?.input_version_id
+    || (selected?.drawing_id ?? null) !== captured?.drawing_id) return false
+  return seatProjectDrawingPublication(controller, receipt, isCurrent)
 }
 
 export function projectEditorScope({ enabled, orgId, projectId, workspace, versionId }) {
@@ -5666,6 +5678,14 @@ export default function App() {
               />
               {!mock && (
                 <SolarWorkspaceTools
+                  projectScope={projectMode ? projectEditorBinding : null}
+                  getProjectScope={() => {
+                    const current = workspaceController.getSnapshot()
+                    const selected = current.workspace?.drawing_versions?.find(row => row.version_id === current.canonicalVersionId)
+                    return { organization_id: current.orgId, project_id: current.openProjectId,
+                      drawing_id: selected?.drawing_id ?? null, input_version_id: current.canonicalVersionId ?? null }
+                  }}
+                  onProjectDrawingPublished={(receipt, captured, isCurrent) => seatSolarProjectPublication(workspaceController, receipt, captured, isCurrent)}
                   drawingId={catalogRunContext?.drawingId ?? null}
                   projectId={catalogRunContext?.projectId ?? null}
                   drawingVersion={catalogRunContext?.drawingVersion ?? null}

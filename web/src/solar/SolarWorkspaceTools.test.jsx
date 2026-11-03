@@ -12,6 +12,8 @@ import * as importClients from './solarImportClient.js'
 import * as solarEdgePanels from './SolarEdgeImportPanel.jsx'
 import * as civilClients from './solarCivilClient.js'
 import * as civilPanels from './SolarCivilPanel.jsx'
+import * as publicationClients from './solarProjectMaterializationClient.js'
+import generationIntake from '../../../docs/parity/evidence/ground/generate/intake.json'
 import { FLOW_PANELS } from './solarWorkspacePanels.js'
 import { TRACKER_ROWS_PANEL_REASONS as TRACKER_SENTENCES } from './SolarTrackerRowsPanel.jsx'
 import SolarWorkspaceTools, { TERRAIN_WORKSPACE_REASONS, SOLAREDGE_WORKSPACE_REASONS } from './SolarWorkspaceTools.jsx'
@@ -1148,6 +1150,119 @@ afterEach(() => {
   vi.restoreAllMocks()
   vi.unstubAllGlobals()
   localStorage.removeItem('leaf.jwt')
+})
+
+describe('canonical project layout publication action', () => {
+  const id = n => `00000000-0000-0000-0000-${String(n).padStart(12, '0')}`
+  const scope = { organization_id: id(1), project_id: id(2), drawing_id: id(3), input_version_id: id(4) }
+  const physical = { physical_head: 'a'.repeat(64), physical_content_sha256: 'b'.repeat(64), physical_index: 2 }
+  const source = { schema: 'leaf.project-physical-layout.v1', organization_id: id(1), project_id: id(2),
+    drawing_id: id(3), parent_version_id: id(4), physical_source: physical, writer_available: true }
+  function fixture(extra = {}) {
+    const api = { read: vi.fn(async () => ({ ok: true, value: source })), publish: vi.fn(async captured => ({ ok: true,
+      value: { organization_id: id(1), project_id: id(2), drawing_id: id(3), parent_version_id: captured.input_version_id,
+        request_id: captured.request_id, source_sha256: 'c'.repeat(64), intake_sha256: 'd'.repeat(64),
+        ...(captured.mode === 'initial' ? { mode: 'initial', generation_source: { parameters_sha256: 'e'.repeat(64), physical_content_sha256: 'f'.repeat(64) } }
+          : { physical_source: physical }),
+        drawing_version: { org_id: id(1), project_id: id(2), drawing_id: id(3), version_id: id(6) } } })) }
+    vi.spyOn(publicationClients, 'createSolarProjectMaterializationClient').mockReturnValue(api)
+    const props = supplied({ drawingId: id(3), projectId: id(2), projectScope: scope,
+      onProjectDrawingPublished: vi.fn(async () => true), ...extra })
+    props.transport = { ...props.transport, publicationCheckout: {
+      acquireCheckout: vi.fn(async () => ({ capability: 'canonical-project-checkout' })),
+      releaseCheckout: vi.fn(async () => undefined),
+    } }
+    return { api, props }
+  }
+  async function read() {
+    fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Publish layout as editable drawing' }).disabled).toBe(false))
+  }
+  it('publishes the actual readback with a captured canonical parent and currentness callback', async () => {
+    const f = fixture(); render(<SolarWorkspaceTools {...f.props} />)
+    await read()
+    fireEvent.click(screen.getByRole('button', { name: 'Publish layout as editable drawing' }))
+    await waitFor(() => expect(f.props.onProjectDrawingPublished).toHaveBeenCalledOnce())
+    const [, captured, isCurrent] = f.props.onProjectDrawingPublished.mock.calls[0]
+    expect(captured).toMatchObject({ ...scope, ...physical, mode: 'successor' })
+    expect(f.props.transport.publicationCheckout.acquireCheckout).toHaveBeenCalledWith(captured)
+    expect(isCurrent()).toBe(true)
+    expect(screen.getByText('Layout published as an editable project drawing version.')).toBeTruthy()
+  })
+  it('blocks duplicate dispatch while the same write is pending', async () => {
+    const f = fixture(), pending = gp5Deferred()
+    f.api.publish.mockReturnValue(pending.promise)
+    render(<SolarWorkspaceTools {...f.props} />); await read()
+    const button = screen.getByRole('button', { name: 'Publish layout as editable drawing' })
+    fireEvent.click(button); fireEvent.click(button)
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
+    await act(async () => pending.resolve({ ok: false, code: 'PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE', outcomeUnknown: false }))
+    expect(screen.getByText(/licensed layout writer is not connected/)).toBeTruthy()
+    expect(f.props.onProjectDrawingPublished).not.toHaveBeenCalled()
+  })
+  it('reconciles an unknown outcome with the same request identity', async () => {
+    const f = fixture()
+    f.api.publish.mockResolvedValue({ ok: false, code: 'PROJECT_LAYOUT_OUTCOME_UNKNOWN', outcomeUnknown: true })
+    render(<SolarWorkspaceTools {...f.props} />); await read()
+    fireEvent.click(screen.getByRole('button', { name: 'Publish layout as editable drawing' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Reconcile layout publication' }).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Reconcile layout publication' }))
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledTimes(2))
+    expect(f.api.publish.mock.calls[0][0].request_id).toBe(f.api.publish.mock.calls[1][0].request_id)
+    expect(f.props.transport.publicationCheckout.acquireCheckout).toHaveBeenCalledOnce()
+    expect(f.props.transport.publicationCheckout.releaseCheckout).not.toHaveBeenCalled()
+  })
+  it('does not seat a late response after the selected canonical version changes', async () => {
+    const f = fixture(), pending = gp5Deferred()
+    f.api.publish.mockReturnValue(pending.promise)
+    const view = render(<SolarWorkspaceTools {...f.props} />); await read()
+    fireEvent.click(screen.getByRole('button', { name: 'Publish layout as editable drawing' }))
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
+    const captured = f.api.publish.mock.calls[0][0]
+    view.rerender(<SolarWorkspaceTools {...f.props} projectScope={{ ...scope, input_version_id: id(99) }} />)
+    await act(async () => pending.resolve({ ok: true, value: { drawing_version: { version_id: id(6) }, request_id: captured.request_id } }))
+    expect(f.props.onProjectDrawingPublished).not.toHaveBeenCalled()
+    expect(screen.getByText('The drawing or layout changed. Publication was not selected.')).toBeTruthy()
+  })
+  it('preserves publication and selection when the project refresh cannot seat the returned version', async () => {
+    const f = fixture({ onProjectDrawingPublished: vi.fn(async () => false) })
+    render(<SolarWorkspaceTools {...f.props} />); await read()
+    fireEvent.click(screen.getByRole('button', { name: 'Publish layout as editable drawing' }))
+    await waitFor(() => expect(screen.getByText(/could not be refreshed to the returned drawing version/)).toBeTruthy())
+  })
+  it('keeps a fresh project action visible with empty drawing selection and no dummy upload', async () => {
+    const initial = { ...scope, drawing_id: null, input_version_id: null }
+    const f = fixture({ drawingId: null, projectScope: initial, checkoutHeld: false })
+    f.api.read.mockResolvedValue({ ok: true, value: { ...source, mode: 'initial', drawing_id: null,
+      parent_version_id: null, physical_source: undefined, writer_available: false } })
+    render(<SolarWorkspaceTools {...f.props} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
+    await waitFor(() => expect(screen.getByText('The current layout is ready, but the licensed drawing writer is unavailable.')).toBeTruthy())
+    expect(f.api.read).toHaveBeenCalledWith(initial)
+    expect(f.api.publish).not.toHaveBeenCalled()
+  })
+  it('dispatches a fresh project using original parameters, no drawing path or canonical checkout', async () => {
+    const initial = { ...scope, drawing_id: null, input_version_id: null }
+    const f = fixture({ drawingId: null, projectScope: initial, checkoutHeld: false })
+    f.api.read.mockResolvedValue({ ok: true, value: { ...source, mode: 'initial', drawing_id: null,
+      parent_version_id: null, physical_source: undefined } })
+    render(<SolarWorkspaceTools {...f.props} />)
+    fireEvent.change(screen.getByLabelText('Site boundary (JSON)'), { target: { value: JSON.stringify(generationIntake.boundary) } })
+    fireEvent.change(screen.getByLabelText('Complete preset (JSON)'), { target: { value: JSON.stringify(generationIntake.active_preset) } })
+    fireEvent.click(screen.getByRole('button', { name: 'Read current layout for publication' }))
+    await waitFor(() => expect(screen.getByRole('button', { name: 'Generate editable project drawing' }).disabled).toBe(false))
+    fireEvent.click(screen.getByRole('button', { name: 'Generate editable project drawing' }))
+    await waitFor(() => expect(f.api.publish).toHaveBeenCalledOnce())
+    const c = f.api.publish.mock.calls[0][0]
+    expect(c).toMatchObject({ mode: 'initial', drawing_id: null, input_version_id: null })
+    expect(JSON.parse(c.parameters_json)).toEqual({ boundary: generationIntake.boundary,
+      preset: generationIntake.active_preset, drawing_units: 'm' })
+    expect(f.props.transport.publicationCheckout.acquireCheckout).not.toHaveBeenCalled()
+  })
+  it('does not expose the project publication action in standalone mode', () => {
+    render(<SolarWorkspaceTools {...supplied()} />)
+    expect(screen.queryByRole('button', { name: 'Publish layout as editable drawing' })).toBeNull()
+  })
 })
 
 // Synthetic route-shaped terrain fixtures, validated by the real client and panel.
