@@ -106,7 +106,7 @@ export default function LinkDeviceDrawer({
           setLinked(true)
           setEnrollment(null)
         }
-      } catch (e) { if (!cancelled) setLocalError(deviceError(e)) }
+      } catch (e) { if (!cancelled) setLocalError({ action: 'enroll', message: deviceError(e) }) }
       finally { refreshing = false }
     }, 3000)
     return () => { cancelled = true; clearInterval(timer) }
@@ -121,14 +121,14 @@ export default function LinkDeviceDrawer({
 
   if (!Array.isArray(devices) && !mock) return null
 
-  const act = async (task) => {
+  const act = async (task, action = 'enroll') => {
     if (unavailable || lock.current || !open) return
     const gen = epoch.current
     lock.current = true
     setWorking(true)
     setLocalError(null)
     try { await task(() => live.current && epoch.current === gen) }
-    catch (e) { if (live.current && epoch.current === gen) setLocalError(deviceError(e)) }
+    catch (e) { if (live.current && epoch.current === gen) setLocalError({ action, message: deviceError(e) }) }
     finally { if (epoch.current === gen) { setWorking(false); lock.current = false } }
   }
 
@@ -173,8 +173,9 @@ export default function LinkDeviceDrawer({
         <div className="ca-head"><span>Link a device</span><EscCap ref={close} onClick={() => onToggle?.(false)} label="Close devices panel" /></div>
         {mock && <p className="ca-note"><span className="dot square" />Demo devices. Actions are unavailable; no device is contacted.</p>}
         {loading && <div className="skeleton-stack" role="status" aria-label="Loading devices"><div className="skeleton-row" /></div>}
-        {error && <div className="field-err" role="alert"><span className="dot red" />{listFailed ? error.message : deviceError(error)}
-          {listFailed && <button className="chip-act" disabled={loading || mock} onClick={error.retry || onRefresh}>Retry</button>}
+        {/* Mutations are caught beside their action; registry errors outlive a drawer session. */}
+        {listFailed && <div className="field-err" role="alert"><span className="dot red" />{error.message}
+          <button className="chip-act" disabled={loading || mock} onClick={error.retry || onRefresh}>Retry</button>
         </div>}
         {!list.length && !loading && !listFailed && <p className="ca-copy">No devices yet. Link a device to manage Home Assistant here.</p>}
         {catalogLoading && <p className="ca-note" role="status">Loading package catalog. Install will be available when it loads.</p>}
@@ -201,8 +202,10 @@ export default function LinkDeviceDrawer({
                   if (!valid()) return
                   if (!Array.isArray(events)) throw new Error('Device activity could not be loaded. Try again.')
                   setActivity((current) => ({ ...current, [device.device_id]: projectAudit(events) }))
-                })}>Activity</button>
+                }, `activity:${device.device_id}`)}>Activity</button>
               </div>
+              {open && result && <p className={result.failed ? 'field-err' : 'ca-copy'} role={result.failed ? 'alert' : 'status'}><span className={`dot${result.pending ? ' pulse' : ''}`} />{result.message}</p>}
+              {open && localError?.action === `activity:${device.device_id}` && <p className="field-err" role="alert"><span className="dot red" />{localError.message}</p>}
               {state !== 'Revoked' && <div className="ca-account-actions ca-account-meta">
                 {confirm !== device.device_id ? <button className="chip-danger" disabled={unavailable} onClick={() => setConfirm(device.device_id)}>Revoke</button> : <>
                   <span className="confirm-q">Revoke {device.label}?</span>
@@ -211,11 +214,11 @@ export default function LinkDeviceDrawer({
                     if (!valid()) return
                     if (!response?.revoked_at) throw new Error('The device was not revoked. Try again.')
                     setConfirm(null)
-                  })}>Confirm revoke</button>
+                  }, `revoke:${device.device_id}`)}>Confirm revoke</button>
                   <button className="chip-neutral" disabled={unavailable} onClick={() => setConfirm(null)}>Keep</button>
                 </>}
               </div>}
-              {result && <p className={result.failed ? 'field-err' : 'ca-copy'} role={result.failed ? 'alert' : 'status'}><span className={`dot${result.pending ? ' pulse' : ''}`} />{result.message}</p>}
+              {open && localError?.action === `revoke:${device.device_id}` && <p className="field-err" role="alert"><span className="dot red" />{localError.message}</p>}
               {activity[device.device_id] && <section className="ca-setup" aria-label={`Activity for ${device.label}`}>
                 <p className="ca-note">Newest {activity[device.device_id].length} events (up to 50). Times are UTC.</p>
                 {!activity[device.device_id].length && <p className="ca-copy">No activity yet. Device actions appear here.</p>}
@@ -230,19 +233,19 @@ export default function LinkDeviceDrawer({
             <input value={label} onChange={(event) => setLabel(event.target.value)} maxLength={128} autoComplete="off" title="A label for this device only" enterKeyHint="done" disabled={unavailable} />
           </label>
           <button className="btn primary ca-act" disabled={unavailable || loading || listFailed || !label.trim() || !!enrollment && expiresIn > 0} onClick={enroll}>Link a device</button>
+          {localError?.action === 'enroll' && <p className="field-err" role="alert"><span className="dot red" />{localError.message}</p>}
           {enrollment && !mock && (expiresIn > 0 ? <>
             <p className="ca-copy">Run this one-use command on your device. Expires in {expiresIn} s.</p>
             <pre className="code" aria-label="Install command">{enrollment.install_command}</pre>
             <button className="chip-act" onClick={async () => {
               try { await navigator.clipboard.writeText(enrollment.install_command); if (live.current) setCopied(true) }
-              catch { if (live.current) setLocalError('Could not copy. Select and copy the command instead.') }
+              catch { if (live.current) setLocalError({ action: 'enroll', message: 'Could not copy. Select and copy the command instead.' }) }
             }}>Copy</button>
             {copied && <p className="ca-copy" role="status">Command copied</p>}
           </> : <p className="field-err" role="status">Link expired. Enter a label and link a device again.</p>)}
           {linked && <p className="ca-copy" role="status">Linked</p>}
           <p className="ca-note">Device and Home Assistant credentials stay on your device. No secret paste is needed.</p>
         </div>}
-        {localError && <p className="field-err" role="alert"><span className="dot red" />{localError}</p>}
       </div>}
     </span>
   )

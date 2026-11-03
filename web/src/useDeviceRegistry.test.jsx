@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import useDeviceRegistry from './useDeviceRegistry.js'
+import useDeviceRegistry, { deviceError, DeviceRequestError } from './useDeviceRegistry.js'
 
 vi.mock('./api.js', () => ({
   authHeaders: () => ({ Authorization: 'Bearer owner-test' }),
@@ -176,6 +176,110 @@ it('uses the exact enrollment, command, audit, revoke, and relay wire shapes', a
   expect(JSON.parse(sent('/relay-tokens').body)).toEqual({ package: 'homeassistant', label: 'Ops' })
   expect(sent('/revoke')).not.toHaveProperty('body')
   expect(fetch.mock.calls.some(([url]) => url === '/api/devices/d1/audit?limit=50')).toBe(true)
+})
+
+it.each([
+  ['enroll', ['Mac']],
+  ['command', ['d1', 'pkg.health', { package: 'homeassistant' }]],
+  ['revoke', ['d1']],
+  ['relayToken', ['d1', 'Ops']],
+])('rejects %s refusals with typed status and code for both server body shapes', async (method, args) => {
+  const { result } = renderHook(() => useDeviceRegistry({ projectId: 'p1' }))
+  await waitFor(() => expect(result.current.devices).toHaveLength(1))
+  for (const [body, code] of [
+    [{ error: { code: 'forbidden', message: 'private owner gate diagnostics' } }, 'forbidden'],
+    [{ detail: 'forbidden' }, 'forbidden'],
+    [{ detail: 'tenant owner authority required' }, null],
+  ]) {
+    fetch.mockResolvedValueOnce(json(body, 403))
+    await act(async () => {
+      const pending = result.current[method](...args)
+      await expect(pending).rejects.toBeInstanceOf(DeviceRequestError)
+      await expect(pending).rejects.toMatchObject({ status: 403, code, message: 'Device request failed.' })
+      await expect(pending).rejects.not.toHaveProperty('body')
+    })
+    expect(result.current.error).toBe('Only a project owner can link devices. Ask your workspace owner to make you an owner of this project.')
+    expect(result.current.busy).toBe(false)
+  }
+  expect(fetch).toHaveBeenCalledTimes(4)
+})
+
+it.each([
+  [422, { error: { code: 'version_unknown' } }, 'version_unknown', 'This version is not in the device catalog. Refresh the agent and retry.'],
+  [422, { error: { code: 'path_denied' } }, 'path_denied', 'This action is not allowed by the device catalog.'],
+  [422, { error: { code: 'package_unknown' } }, 'package_unknown', 'This package is not in the device catalog.'],
+  [422, { error: { code: 'unsupported_op' } }, 'unsupported_op', 'This agent does not support that action. Update the agent and retry.'],
+  [503, { error: { code: 'device_offline' } }, 'device_offline', 'This device is offline. Check its connection and retry.'],
+  [503, { error: { code: 'service_unavailable' } }, 'service_unavailable', 'Device management is temporarily unavailable. Try again.'],
+  [503, { error: { code: 'unknown_failure' } }, null, 'Device management is temporarily unavailable. Try again.'],
+  [422, { error: { code: 'unknown_failure', message: 'private diagnostics' } }, null, "That didn't work. Try again."],
+  [422, { error: { code: 'toString' } }, null, "That didn't work. Try again."],
+  [422, { detail: 'version_unknown' }, 'version_unknown', 'This version is not in the device catalog. Refresh the agent and retry.'],
+  [422, { detail: 'path_denied' }, 'path_denied', 'This action is not allowed by the device catalog.'],
+  [422, { error: { code: 'unknown_failure' }, detail: 'path_denied' }, 'path_denied', 'This action is not allowed by the device catalog.'],
+  [422, { detail: 'private diagnostics' }, null, "That didn't work. Try again."],
+])('keeps only known command error codes for HTTP %s with body %j', async (status, body, code, message) => {
+  const { result } = renderHook(() => useDeviceRegistry({ projectId: 'p1' }))
+  await waitFor(() => expect(result.current.devices).toHaveLength(1))
+  fetch.mockResolvedValueOnce(json(body, status))
+  await act(async () => {
+    const pending = result.current.command('d1', 'pkg.install', { package: 'homeassistant', version: 'catalog-v2' })
+    await expect(pending).rejects.toMatchObject({ status, code, message: 'Device request failed.' })
+    await expect(pending).rejects.not.toHaveProperty('body')
+    await expect(pending).rejects.not.toHaveProperty('detail')
+  })
+  expect(result.current.error).toBe(message)
+})
+
+it.each([
+  [401, 'Your session expired. Sign in again.'],
+  [403, 'Only a project owner can link devices. Ask your workspace owner to make you an owner of this project.'],
+  [429, 'Too many requests. Try again in a minute.'],
+])('prioritizes HTTP %s guidance over a known device code', (status, message) => {
+  expect(deviceError(new DeviceRequestError(status, 'device_offline'))).toBe(message)
+})
+
+it.each([undefined, '', 'unknown_failure', 'private diagnostics', 'toString', '__proto__', {}])('does not store an unrecognized error code: %j', (code) => {
+  expect(new DeviceRequestError(422, code).code).toBeNull()
+})
+
+it('uses safe guidance for command result codes without an HTTP status', () => {
+  expect(deviceError({ error: { code: 'path_denied' } })).toBe('This action is not allowed by the device catalog.')
+  expect(deviceError({ error: { code: 'unknown_failure', message: 'private diagnostics' } })).toBe("That didn't work. Try again.")
+})
+
+it.each([401, 403, 429, 503, 500])('preserves status %s even when a refusal body is not JSON', async (status) => {
+  const { result } = renderHook(() => useDeviceRegistry({ projectId: 'p1' }))
+  await waitFor(() => expect(result.current.devices).toHaveLength(1))
+  fetch.mockResolvedValueOnce({ ok: false, status, json: async () => { throw new SyntaxError('private proxy response') } })
+  await act(async () => {
+    await expect(result.current.enroll('Mac')).rejects.toMatchObject({ status, code: null, name: 'DeviceRequestError' })
+  })
+  expect(result.current.busy).toBe(false)
+  expect(result.current.error).not.toContain('private')
+})
+
+it('types network failures safely and clears the mutation error on retry', async () => {
+  const { result } = renderHook(() => useDeviceRegistry({ projectId: 'p1' }))
+  await waitFor(() => expect(result.current.devices).toHaveLength(1))
+  fetch.mockRejectedValueOnce(new TypeError('private connection diagnostics'))
+  await act(async () => {
+    await expect(result.current.enroll('Mac')).rejects.toMatchObject({ status: 0, code: null, name: 'DeviceRequestError' })
+  })
+  expect(result.current.error).toBe('Device management is temporarily unavailable. Try again.')
+  expect(result.current.busy).toBe(false)
+  let settle
+  fetch.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve }))
+  let pending
+  act(() => { pending = result.current.enroll('Mac') })
+  expect(result.current.error).toBeNull()
+  expect(result.current.busy).toBe(true)
+  await act(async () => {
+    settle(json({ enrollment_id: 'e1', install_command: 'official installer', expires_at: '2026-11-02T12:00:00Z' }, 201))
+    await pending
+  })
+  expect(result.current.error).toBeNull()
+  expect(result.current.busy).toBe(false)
 })
 
 it('does not refresh or return a credential from a mutation completing after switching to guest', async () => {
