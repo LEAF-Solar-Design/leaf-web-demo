@@ -223,3 +223,55 @@ def test_wait_fallback_still_returns_final_envelope(monkeypatch):
         c, "count-by-layer", headers=HDRS), headers=HDRS)
     assert r.status_code == 200
     assert r.json()["ok"] is True
+
+
+def test_trim_list_body_drops_solver_bodies():
+    from routers import jobs as jobs_router
+
+    result = {"solver_result": {"panels": [1, 2]}, "solver_input": {"roof": "demo"},
+              "cost": 42, "schema": "solver.v1"}
+    body = {"job_id": "trim-unit", "result": result}
+
+    trimmed = jobs_router._trim_list_body(body)
+
+    assert trimmed == {"job_id": "trim-unit", "result": {"cost": 42, "schema": "solver.v1"},
+                       "result_trimmed": True}
+    assert trimmed is not body
+    assert trimmed["result"] is not result
+    assert body == {"job_id": "trim-unit", "result": {
+        "solver_result": {"panels": [1, 2]}, "solver_input": {"roof": "demo"},
+        "cost": 42, "schema": "solver.v1"}}
+    assert body["result"] is result
+
+
+def test_trim_list_body_leaves_other_bodies():
+    from routers import jobs as jobs_router
+
+    for body in ({"result": None}, {"result": "pending"},
+                 {"result": {"cost": 42}}, "non-dict body"):
+        trimmed = jobs_router._trim_list_body(body)
+        assert trimmed == body
+        assert trimmed is body
+        assert "result_trimmed" not in trimmed
+
+
+def test_jobs_list_omits_solver_body_but_detail_keeps_it(monkeypatch):
+    record = {"job_id": "trim-route", "tenant_id": HDRS["X-Tenant-Id"],
+              "status": "complete", "result": {
+                  "solver_result": {"panels": [1, 2]}, "cost": 42}, "error": None}
+    monkeypatch.setattr(jobs, "list_jobs", lambda *args, **kwargs: [record])
+    monkeypatch.setattr(jobs, "get_job", lambda job_id: record if job_id == record["job_id"] else None)
+    monkeypatch.setattr(jobs.platform_link, "list_canonical_jobs", lambda *args, **kwargs: [])
+    c = _client()
+
+    listed = c.get("/api/jobs", headers=HDRS)
+    assert listed.status_code == 200
+    listed_job = next(job for job in listed.json()["jobs"] if job["job_id"] == record["job_id"])
+    assert "solver_result" not in listed_job["result"]
+    assert listed_job["result"]["cost"] == 42
+    assert listed_job["result_trimmed"] is True
+
+    detail = c.get(f"/api/jobs/{record['job_id']}", headers=HDRS)
+    assert detail.status_code == 200
+    assert detail.json()["result"]["solver_result"] == {"panels": [1, 2]}
+    assert "result_trimmed" not in detail.json()
