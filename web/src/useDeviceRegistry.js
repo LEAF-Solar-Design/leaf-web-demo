@@ -38,7 +38,7 @@ const demoCatalog = [{ package: 'homeassistant', display_name: 'Home Assistant',
 const errorWords = {
   install_failed: 'Home Assistant could not be installed. Try Install again.',
   paused: 'This device is paused. Resume the agent on the device, then retry.',
-  device_revoked: 'This device has been revoked. Link it again to continue.',
+  device_revoked: 'This device was revoked. Link it again.',
   device_offline: 'This device is offline. Check its connection and retry.',
   version_unknown: 'This version is not in the device catalog. Refresh the agent and retry.',
   package_unknown: 'This package is not in the device catalog.',
@@ -49,16 +49,33 @@ const errorWords = {
   path_denied: 'This action is not allowed by the device catalog.',
   invalid_args: 'The device could not accept these settings. Check them and retry.',
   not_linked: 'The Hue button has not been detected yet. Press it and try Continue again.',
-  forbidden: 'Only the project owner can link and manage devices.',
-  unauthorized: 'Sign in to manage devices.',
+  forbidden: 'Only a project owner can link devices. Ask your workspace owner to make you an owner of this project.',
+  unauthorized: 'Your session expired. Sign in again.',
   not_found: 'This device is no longer available in this project.',
-  rate_limited: 'Too many requests. Wait a moment and retry.',
+  rate_limited: 'Too many requests. Try again in a minute.',
   service_unavailable: 'Device management is temporarily unavailable. Try again.',
+}
+
+export class DeviceRequestError extends Error {
+  constructor(status, code = '') {
+    super('Device request failed.')
+    this.name = 'DeviceRequestError'
+    this.status = status
+    this.code = code
+  }
 }
 
 export function deviceError(error) {
   const code = error?.body?.error?.code || error?.error?.code || error?.code
   // Never render an arbitrary server error message, which could carry secrets.
+  if (typeof error?.status === 'number') {
+    if (error.status === 403) return errorWords.forbidden
+    if (error.status === 401) return errorWords.unauthorized
+    if (error.status === 409 && code === 'device_revoked') return errorWords.device_revoked
+    if (error.status === 429) return errorWords.rate_limited
+    if (error.status === 503 || error.status === 0) return errorWords.service_unavailable
+    return "That didn't work. Try again."
+  }
   return errorWords[code] || (code ? 'The device could not complete this action. Try again.' : humanizeError(error))
 }
 
@@ -96,17 +113,24 @@ export default function useDeviceRegistry({ mock = false, projectId } = {}) {
     requests.current.add(controller)
     const headers = { ...authHeaders(), ...(body === undefined ? {} : { 'Content-Type': 'application/json' }) }
     try {
-      const response = noteUnauthorized(await fetch(`${config.apiBase}${path}`, {
-        method, headers, signal: controller.signal, cache: 'no-store',
-        ...(body === undefined ? {} : { body: JSON.stringify(body) }),
-      }), path, headers.Authorization)
+      let response
+      try {
+        response = await fetch(`${config.apiBase}${path}`, {
+          method, headers, signal: controller.signal, cache: 'no-store',
+          ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+        })
+      } catch {
+        if (current.current !== scope || life !== lifetime.current) return null
+        throw new DeviceRequestError(0, 'network_error')
+      }
+      response = noteUnauthorized(response, path, headers.Authorization)
       if (current.current !== scope || life !== lifetime.current) return null
-      const result = response.status === 204 ? null : await response.json()
+      let result = null
+      try { result = response.status === 204 ? null : await response.json() }
+      catch (e) { if (response.ok) throw e }
       if (current.current !== scope || life !== lifetime.current) return null
       if (!response.ok) {
-        const failure = new Error('Device request failed.')
-        failure.body = result
-        throw failure
+        throw new DeviceRequestError(response.status, text(result?.error?.code) || text(result?.detail))
       }
       return result
     } finally { requests.current.delete(controller) }

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { useState } from 'react'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
 import LinkDeviceDrawer from './LinkDeviceDrawer.jsx'
 import useDeviceRegistry from '../useDeviceRegistry.js'
@@ -26,6 +26,107 @@ beforeEach(() => {
 })
 afterEach(() => { cleanup(); vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })
 const flush = async () => { await act(async () => { await Promise.resolve(); await Promise.resolve() }) }
+const ownerMessage = 'Only a project owner can link devices. Ask your workspace owner to make you an owner of this project.'
+
+it.each([
+  [403, { error: { code: 'forbidden', message: 'private owner gate diagnostics' } }, ownerMessage],
+  [403, { detail: 'tenant owner authority required' }, ownerMessage],
+  [403, 'private proxy response', ownerMessage],
+  [401, { detail: 'private session diagnostics' }, 'Your session expired. Sign in again.'],
+  [429, { error: { code: 'unexpected', message: 'private rate diagnostics' } }, 'Too many requests. Try again in a minute.'],
+  [503, { detail: 'private upstream diagnostics' }, 'Device management is temporarily unavailable. Try again.'],
+  [409, { error: { code: 'device_revoked', message: 'private device diagnostics' } }, 'This device was revoked. Link it again.'],
+  [409, { detail: 'private conflict diagnostics' }, "That didn't work. Try again."],
+  [500, { error: { code: 'forbidden', message: 'private failure diagnostics' } }, "That didn't work. Try again."],
+  [0, null, 'Device management is temporarily unavailable. Try again.'],
+])('shows a safe enrollment refusal for HTTP %s with body %j', async (status, body, message) => {
+  fetch.mockImplementation(async (url) => {
+    if (url.endsWith('/enrollments')) {
+      if (!status) throw new TypeError('private network diagnostics')
+      if (typeof body === 'string') return { ok: false, status, json: async () => { throw new SyntaxError(body) } }
+      return json(body, status)
+    }
+    return json(url.endsWith('/packages') ? { packages: catalog } : { devices: [] })
+  })
+  const { container } = render(<Harness />)
+  fireEvent.change(screen.getByLabelText('Device label'), { target: { value: 'New Mac' } })
+  const button = screen.getByRole('button', { name: 'Link a device' })
+  await waitFor(() => expect(button).not.toBeDisabled())
+  fireEvent.click(button)
+  expect(await within(button.parentElement).findByRole('alert')).toHaveTextContent(message)
+  expect(screen.getAllByRole('alert')).toHaveLength(1)
+  expect(button).not.toBeDisabled()
+  expect(container.innerHTML).not.toMatch(/private|tenant owner authority required|"error"|"detail"/)
+})
+
+it('clears an enrollment refusal when retrying, before the retry finishes', async () => {
+  render(<Harness />)
+  fireEvent.change(screen.getByLabelText('Device label'), { target: { value: 'New Mac' } })
+  const button = screen.getByRole('button', { name: 'Link a device' })
+  await waitFor(() => expect(button).not.toBeDisabled())
+  fetch.mockResolvedValueOnce(json({ detail: 'tenant owner authority required' }, 403))
+  fireEvent.click(button)
+  expect(await screen.findByRole('alert')).toHaveTextContent(ownerMessage)
+  let settle
+  fetch.mockImplementationOnce(() => new Promise((resolve) => { settle = resolve }))
+  fireEvent.click(button)
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  expect(button).toBeDisabled()
+  await act(async () => settle(json({ install_command: 'official installer', expires_at: new Date(Date.now() + 600000).toISOString() }, 201)))
+  expect(screen.getByLabelText('Install command')).toHaveTextContent('official installer')
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+it('clears an enrollment refusal on close and keeps it cleared on reopening', async () => {
+  render(<Harness />)
+  fireEvent.change(screen.getByLabelText('Device label'), { target: { value: 'New Mac' } })
+  const button = screen.getByRole('button', { name: 'Link a device' })
+  await waitFor(() => expect(button).not.toBeDisabled())
+  fetch.mockResolvedValueOnce(json({ error: { code: 'forbidden', message: 'private diagnostics' } }, 403))
+  fireEvent.click(button)
+  expect(await screen.findByRole('alert')).toHaveTextContent(ownerMessage)
+  fireEvent.click(screen.getByRole('button', { name: 'Close devices panel' }))
+  expect(screen.queryByText(ownerMessage)).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: /Devices/ }))
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
+it.each([
+  ['command', 403, { detail: 'tenant owner authority required' }, ownerMessage],
+  ['command', 409, { error: { code: 'device_revoked', message: 'private command diagnostics' } }, 'This device was revoked. Link it again.'],
+  ['revoke', 403, { error: { code: 'forbidden', message: 'private revoke diagnostics' } }, ownerMessage],
+  ['revoke', 503, { detail: 'private revoke diagnostics' }, 'Device management is temporarily unavailable. Try again.'],
+])('shows %s HTTP %s failures in the device row and clears them on retry and close', async (action, status, body, message) => {
+  let retry = false
+  let settle
+  fetch.mockImplementation(async (url) => {
+    if (url.endsWith(action === 'command' ? '/commands' : '/revoke')) {
+      if (retry) return new Promise((resolve) => { settle = resolve })
+      return json(body, status)
+    }
+    return json(url.endsWith('/packages') ? { packages: catalog } : { devices: [device()] })
+  })
+  const { container } = render(<Harness />)
+  const install = await screen.findByRole('button', { name: 'Install Home Assistant' })
+  await waitFor(() => expect(install).not.toBeDisabled())
+  if (action === 'revoke') fireEvent.click(screen.getByRole('button', { name: 'Revoke' }))
+  const button = action === 'command' ? install : screen.getByRole('button', { name: 'Confirm revoke' })
+  fireEvent.click(button)
+  const row = button.closest('.ca-account')
+  expect(await within(row).findByRole('alert')).toHaveTextContent(message)
+  expect(screen.getAllByRole('alert')).toHaveLength(1)
+  expect(container.innerHTML).not.toMatch(/private|tenant owner authority required/)
+  await waitFor(() => expect(button).not.toBeDisabled())
+  retry = true
+  fireEvent.click(button)
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  await act(async () => settle(json(body, status)))
+  expect(await within(row).findByRole('alert')).toHaveTextContent(message)
+  fireEvent.click(screen.getByRole('button', { name: 'Close devices panel' }))
+  expect(screen.queryByText(message)).not.toBeInTheDocument()
+  fireEvent.click(screen.getByRole('button', { name: /Devices/ }))
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
 
 it('renders nothing without device wiring', () => {
   const { container } = render(<LinkDeviceDrawer />)
