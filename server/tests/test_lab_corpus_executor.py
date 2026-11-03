@@ -82,6 +82,10 @@ def kernel_filter(tmp_path_factory):
     env = {'PATH': os.environ.get('PATH', '/usr/bin:/bin'), 'HOME': str(directory)}
     built = subprocess.run([compiler, '-O2', str(source), '-lseccomp', '-o', str(directory / 'generator')],
         capture_output=True, text=True, timeout=30, env=env)
+    if built.returncode != 0:
+        env = ephemeral_seccomp_toolchain(directory, env, compiler)
+        built = subprocess.run([compiler, '-O2', str(source), '-lseccomp', '-o', str(directory / 'generator')],
+            capture_output=True, text=True, timeout=30, env=env)
     assert built.returncode == 0, 'Canonical corpus cage generator failed: ' + built.stderr[:2048]
     output = directory / 'seccomp-dwg2dxf.bpf'
     generated = subprocess.run([str(directory / 'generator'), str(output)],
@@ -89,6 +93,58 @@ def kernel_filter(tmp_path_factory):
     assert generated.returncode == 0 and output.stat().st_size > 0
     print('L03_LINUX_CAGE producer_sha256=2953b0e75f8fcfe9dbb1cb3af681285275da8f5d58f4c2998631529ecf7b0cd6 filter_sha256=' + hashlib.sha256(output.read_bytes()).hexdigest())
     return output
+
+
+def ephemeral_seccomp_toolchain(directory, env, compiler):
+    """Extract authenticated APT supply privately; never install host packages."""
+    def command(argv, *, cwd=directory):
+        result = subprocess.run(argv, cwd=cwd, env=env, capture_output=True,
+                                text=True, timeout=90)
+        if result.returncode != 0:
+            # Repository diagnostics can contain operator-owned source URLs.
+            # Emit only the fixed stage, never raw download output or config.
+            raise AssertionError('Ephemeral canonical seccomp supply unavailable: '
+                                 + argv[0] + ' exit ' + str(result.returncode))
+        return result.stdout.strip()
+
+    def fields(text):
+        return dict(line.split(': ', 1) for line in text.splitlines() if ': ' in line and not line.startswith(' '))
+
+    arch = command(['dpkg', '--print-architecture'])
+    expected = {}
+    for name in ('libseccomp-dev', 'libseccomp2'):
+        policy = command(['apt-cache', 'policy', name])
+        candidate = next((line.split(':', 1)[1].strip() for line in policy.splitlines()
+                          if line.strip().startswith('Candidate:')), '')
+        assert candidate and candidate != '(none)', 'No authenticated seccomp package candidate.'
+        records = [fields(part) for part in command(['apt-cache', 'show', name + '=' + candidate]).split('\n\n')]
+        metadata = next((row for row in records if row.get('Package') == name
+                         and row.get('Version') == candidate and row.get('Architecture') == arch), None)
+        assert metadata and len(metadata.get('SHA256', '')) == 64, 'Missing trusted seccomp package digest.'
+        expected[name] = metadata
+        command(['apt-get', 'download', name + '=' + candidate])
+    packages = list(directory.glob('*.deb'))
+    assert len(packages) == 2, 'Unexpected ephemeral seccomp supply set.'
+    prefix = directory / 'toolchain'
+    prefix.mkdir()
+    observed = set()
+    for package in packages:
+        assert package.stat().st_size <= 32 * 1024 * 1024, 'Ephemeral package exceeds its bound.'
+        row = fields(command(['dpkg-deb', '--field', str(package), 'Package', 'Version', 'Architecture']))
+        metadata = expected.get(row.get('Package'))
+        assert metadata and row['Package'] not in observed, 'Unexpected ephemeral package identity.'
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+        assert (row['Version'] == metadata['Version'] and row['Architecture'] == arch
+                and digest == metadata['SHA256']), 'Ephemeral package identity mismatch.'
+        observed.add(row['Package'])
+        command(['dpkg-deb', '--extract', str(package), str(prefix)])
+        print('L03_EPHEMERAL_SUPPLY package=' + row['Package'] + ' version=' + row['Version']
+              + ' architecture=' + arch + ' sha256=' + digest)
+    assert observed == set(expected)
+    multiarch = command([compiler, '-print-multiarch'])
+    assert multiarch and '/' not in multiarch and '..' not in multiarch
+    library = str(prefix / 'usr/lib' / multiarch)
+    return dict(env, CPATH=str(prefix / 'usr/include'), LIBRARY_PATH=library, LD_LIBRARY_PATH=library)
 
 
 @pytest.fixture
@@ -282,8 +338,19 @@ def test_kernel_cage_real_cli_and_network_refusal(installed, tmp_path, monkeypat
         'corpus': descriptor(raw), 'suite': descriptor(suite),
         'capability_sha256': corpus.ARCHIVE_SHA256}
     monkeypatch.setattr(corpus, 'read_sources', lambda scope: {'corpus': raw, 'suite': suite})
-    result = corpus.run(str(uuid.uuid4()), 'linux-positive', 1, context,
-                        lambda: True, lambda: False, time.monotonic() + 30)
+    real_popen = corpus.subprocess.Popen
+    with tempfile.TemporaryFile(mode='w+b') as child_errors, monkeypatch.context() as patch:
+        def start(*args, **kwargs):
+            kwargs['stderr'] = child_errors
+            return real_popen(*args, **kwargs)
+        patch.setattr(corpus.subprocess, 'Popen', start)
+        try:
+            result = corpus.run(str(uuid.uuid4()), 'linux-positive', 1, context,
+                                lambda: True, lambda: False, time.monotonic() + 30)
+        except Exception as exc:
+            child_errors.seek(0)
+            pytest.fail(type(exc).__name__ + ': ' + str(exc) + '\n'
+                        + child_errors.read(8192).decode(errors='replace'))
     assert result['row_count'] == 6001 and result['context'] == context
     command = corpus._command(tmp_path)
     command = command[:command.index(sys.executable)] + [sys.executable, '-I', '-c',

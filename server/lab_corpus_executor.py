@@ -154,8 +154,16 @@ def _command(stage):
     if sys.platform == 'linux':
         if not KERNEL_FILTER.is_file():
             raise ValueError('Corpus kernel network isolation is unavailable.')
-        return ['/usr/bin/setpriv', '--no-new-privs', '--inh-caps=-all',
-                '--bounding-set=-all', '--seccomp-filter', str(KERNEL_FILTER), *argv]
+        status = dict(line.split(':', 1) for line in Path('/proc/self/status').read_text().splitlines()
+                      if ':' in line)
+        # An unprivileged app cannot change its bounding set. Require that it
+        # holds no usable/inheritable capabilities, then seal exec with NNP.
+        # A privileged launcher is refused rather than silently retaining power.
+        if os.geteuid() == 0 or any(int(status.get(key, '1').strip(), 16) != 0
+                for key in ('CapEff', 'CapPrm', 'CapInh', 'CapAmb')):
+            raise ValueError('Corpus execution requires an unprivileged app identity.')
+        return ['/usr/bin/setpriv', '--no-new-privs',
+                '--seccomp-filter', str(KERNEL_FILTER), *argv]
     raise ValueError('Corpus isolated runtime is unavailable.')
 
 
@@ -233,6 +241,11 @@ def _child(package, directory):
         _, hard = resource.getrlimit(resource.RLIMIT_AS)
         memory_limit = min(4 * 1024**3, hard) if hard != resource.RLIM_INFINITY else 4 * 1024**3
         resource.setrlimit(resource.RLIMIT_AS, (memory_limit, hard))
+    # Bootstrap the image's trusted numerical dependency while already inside
+    # the kernel cage and scrubbed environment. NumPy initializes ctypes' own
+    # Python API handle on Linux. Deny all further native loads before any
+    # corpus/suite data or evaluator module is read.
+    import numpy  # noqa: F401
     os.umask(0o077)
     sys.path.insert(0, str(package))
     roots = (package, stage, Path(sys.base_prefix).resolve(), Path(sys.prefix).resolve())
