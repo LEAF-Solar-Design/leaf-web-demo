@@ -63,6 +63,32 @@ async function build() {
 }
 
 describe('SolarEdgeImportPanel', () => {
+  it('explicitly describes the legacy view without an export callback', async () => {
+    setup()
+    await upload(); await build()
+    expect(screen.queryByRole('button', { name: 'Download report' })).toBeNull()
+    expect(screen.getByText('Report download is unavailable in this view.')).toBeTruthy()
+  })
+
+  it('locks report download and other steps while exporting and aborts on version change', async () => {
+    const held = deferred(), onDownloadReport = vi.fn(() => held.promise)
+    const { props, rerender } = setup({ drawingVersion: 3, onDownloadReport })
+    await upload(); await build()
+    const download = screen.getByRole('button', { name: 'Download report' })
+    const click = f3ClickHandler(download)
+    act(() => { click(); click() })
+    expect(onDownloadReport).toHaveBeenCalledTimes(1)
+    expect(download.disabled).toBe(true)
+    expect(uploadButton().disabled).toBe(true)
+    expect(acceptButton().disabled).toBe(true)
+    const signal = onDownloadReport.mock.calls[0][1].signal
+    rerender(<SolarEdgeImportPanel {...props} drawingVersion={4} />)
+    expect(signal.aborted).toBe(true)
+    await act(async () => held.resolve({ ok: true }))
+    expect(screen.queryByText('Report downloaded.')).toBeNull()
+    expect(screen.getByRole('button', { name: 'Download report' }).disabled).toBe(true)
+  })
+
   it('shows canonical source UUIDs without passing them through the legacy integer contract', async () => {
     const version = '44444444-4444-4444-4444-444444444444'
     const canonicalSource = { ...source(), input_version_id: version }
