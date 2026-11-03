@@ -350,6 +350,7 @@
     "server-project-material-inspection",
     "server-project-reference-materials",
     "server-project-solar-materialization",
+    "server-solar-native-layout-dxf",
     "server-project-checkout-custody",
     "server-conversational-project-write",
     "server-canonical-solve-approval",

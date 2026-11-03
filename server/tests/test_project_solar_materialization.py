@@ -35,19 +35,54 @@ def initial_body():
 
 
 def test_connected_initial_layout_needs_no_import_or_dummy_drawing(fresh):
+    import solar_native_layout_dxf as native
     lane, project = fresh
     route = f'/api/projects/{project}/solar-layout'
     response = lane.http.get(route)
     assert response.status_code == 200
     assert response.json()['drawing_id'] is None
     assert response.json()['parent_version_id'] is None
+    assert response.json()['writer_available'] is True
+    assert response.json()['serialization_available'] is True
     response = lane.http.post(route, json=initial_body(), headers={'Idempotency-Key': str(uuid4())})
-    assert response.status_code == 503
-    assert response.json()['error']['reason_code'] == 'PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE'
-    from leaf_platform import db
-    with db.cursor() as cur:
-        cur.execute('SELECT count(*) AS n FROM drawing_artifacts WHERE project_id=%s', (project,))
-        assert cur.fetchone()['n'] == 0
+    assert response.status_code == 200, response.text
+    receipt = response.json()
+    drawing, version = receipt['drawing_id'], receipt['drawing_version']['version_id']
+    assert receipt['parent_version_id'] is None and receipt['drawing_version']['seq'] == 1
+    base = f'/api/projects/{project}/drawings/{drawing}'
+    source = lane.http.get(base + f'/versions/{version}/dxf')
+    assert source.status_code == 200
+    decoded = native.decode_native_layout(source.content)
+    expected, parameters = layout.state.decode_document(decoded.xrecord['document'].encode()), decoded.parameters
+    assert decoded.frames and len(decoded.frames) == len(expected['state']['frames'])
+    assert parameters['generation']['boundary'] == initial_body()['boundary']
+    assert parameters['generation']['preset'] == initial_body()['preset']
+    assert decoded.scope == {'organization_id': str(lane.org), 'project_id': str(project), 'drawing_id': drawing}
+    context = layout.project.resolve_context(lane.tenant, project, layout.UUID(version), drawing_id=layout.UUID(drawing))
+    metadata = context.intake[layout.KEY]
+    assert ps.decode_document(metadata['document'].encode()) == decoded.document
+    assert metadata['parameters'] == decoded.parameters
+    assert len(context.intake['polylines']) == len(decoded.frames)
+    cap = lane.http.post(base + '/checkout').json()['checkout_capability']
+    saved = lane.http.post(base + f'/versions/{version}/editor', content=source.content,
+        headers={'Content-Type': 'application/dxf', 'Idempotency-Key': str(uuid4()), 'X-Checkout-Capability': cap})
+    assert saved.status_code == 200, saved.text
+    successor = saved.json()['drawing_version']['version_id']
+    saved_source = lane.http.get(base + f'/versions/{successor}/dxf')
+    assert saved_source.content == source.content
+    assert native.decode_native_layout(saved_source.content).document == decoded.document
+    restored = lane.http.post(base + f'/versions/{successor}/editor/restore', json={'version_id': version},
+        headers={'Idempotency-Key': str(uuid4()), 'X-Checkout-Capability': cap})
+    assert restored.status_code == 200, restored.text
+    restored_id = restored.json()['drawing_version']['version_id']
+    reopened = lane.http.get(base + f'/versions/{restored_id}/dxf')
+    assert reopened.content == source.content
+    assert native.decode_native_layout(reopened.content).parameters == decoded.parameters
+    # Exact remaining continuity gap: initial canonical intake has no legacy
+    # account-upload graph/head binding. Do not invent one after publication.
+    followup = lane.http.get(base + f'/versions/{restored_id}/solar-layout')
+    assert followup.status_code == 409
+    assert followup.json()['error']['reason_code'] == 'PROJECT_LAYOUT_GRAPH_REQUIRED'
 
 
 def test_initial_real_storage_metadata_replay_and_normal_history(fresh, monkeypatch):
@@ -171,10 +206,10 @@ def body():
     return {'physical_head': 'a' * 64, 'physical_content_sha256': 'b' * 64, 'physical_index': 0}
 
 
-def test_real_native_writer_absence_is_explicit():
+def test_native_writer_refusal_is_named_and_payload_free():
     with pytest.raises(editor.EditorError) as error:
         layout.materialize_native_layout(None, None, None, None, parameters={})
-    assert (error.value.code, error.value.status) == ('PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE', 503)
+    assert (error.value.code, error.value.status) == ('NATIVE_LAYOUT_SCOPE_INVALID', 422)
 
 
 @pytest.mark.parametrize('change', [

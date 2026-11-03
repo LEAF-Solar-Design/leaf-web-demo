@@ -1,9 +1,4 @@
-"""Publish an authoritative physical layout through canonical drawing custody.
-
-The native metadata writer is an explicit boundary. The geometry-only mutation
-Activity and intake DXF synthesizer cannot implement that writer. Its absence
-must never turn into a successful polyline-only layout publication.
-"""
+"""Publish complete native physical layouts through canonical drawing custody."""
 from copy import deepcopy
 import json
 from uuid import UUID, uuid5
@@ -11,6 +6,7 @@ from uuid import UUID, uuid5
 import project_drawing_editor as editor
 import solar_physical_head as physical
 import solar_physical_state as state
+import solar_native_layout_dxf as native_layout
 from solar_design_graph import validate_graph, GraphValidationError
 from solar_solve_results import digest
 
@@ -36,7 +32,12 @@ def initial_layout_source(tenant, project_id):
     org, _ = _initial_scope(tenant, project_id)
     return {'schema': SCHEMA, 'mode': 'initial', 'organization_id': str(org),
             'project_id': str(project_id), 'drawing_id': None, 'parent_version_id': None,
-            'writer_available': False, 'reason_code': 'PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE'}
+            **serialization_availability()}
+
+
+def serialization_availability():
+    return {'writer_available': True, 'serialization_available': True,
+            'native_execution_available': False, 'autocad_acceptance': False}
 
 
 def _initial_receipt(version, request_id, metadata):
@@ -189,8 +190,7 @@ def current_layout_source(tenant, project_id, drawing_id, parent_id):
         fail('PHYSICAL_SOURCE_INVALID')
     return {'schema': SCHEMA, 'organization_id': str(binding.organization_id),
             'project_id': str(project_id), 'drawing_id': str(drawing_id), 'parent_version_id': str(parent_id),
-            'physical_source': body, 'writer_available': False,
-            'reason_code': 'PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE'}
+            'physical_source': body, **serialization_availability()}
 
 
 def _load(context, body):
@@ -223,15 +223,12 @@ def _load(context, body):
 
 
 def materialize_native_layout(context, head, document, source, *, parameters):
-    """Required native physical-layout writer, deliberately not a geometry fallback.
-
-    solar_apply_plan builds native store/carrier plans from captured adapters;
-    write_loop's generic mutation Activity cannot write this neutral physical
-    document's complete native metadata. No existing executor accepts that input.
-    A real licensed implementation must replace this server-owned boundary and
-    independently verify its returned native bytes before enabling this route.
-    """
-    fail('LICENSED_WRITER_UNAVAILABLE', 503)
+    """Serialize native tags and complete scoped metadata without executing CAD."""
+    try:
+        return native_layout.materialize_native_layout(context, head, document, source,
+                                                       parameters=parameters)
+    except native_layout.NativeLayoutError as exc:
+        raise editor.EditorError(exc.code, 422) from None
 
 
 def _replay(tenant, org, proj, drawing, parent, request, body, actor, capability):
