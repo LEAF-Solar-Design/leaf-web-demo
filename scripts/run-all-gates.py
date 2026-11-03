@@ -3413,6 +3413,8 @@ def build_suites() -> List[Suite]:
         # The historical 752-test floor above covered the whole suite. Vitest
         # shards files, not test counts; require nonempty execution until CI
         # supplies measured per-shard floors (752 / 3 is not a safe floor).
+        # Includes src/solar/solarProjectMaterializationClient.test.js through
+        # the normal src/**/*.test.{js,jsx} discovery, including initial publication.
         *(Suite(f"web-vitest-{shard}", f"web npm run test:unit (vitest {shard}/3)", "vitest", WEB,
               [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1,
               allowed_vitest_skips=(
@@ -3680,7 +3682,7 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_project_reference_materials.py"), 25),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
-              _py_pytest("tests/test_project_solar_materialization.py"), 15),
+              _py_pytest("tests/test_project_solar_materialization.py"), 22),
         Suite("server-project-checkout-custody", "server private project checkout custody", "pytest", SERVER,
               _py_pytest("tests/test_project_checkout_custody.py"), 35),
         Suite("server-conversational-project-write", "server canonical conversational project write", "pytest", SERVER,

@@ -142,7 +142,8 @@ def _source(context, seen=None):
         return _source(project._read_intake(parent), seen)
     if not isinstance(source, dict):
         _fail("PROJECT_EDITOR_SOURCE_REQUIRED", 409)
-    if proof.get("schema") == "leaf.project-drawing-publication.v1":
+    if proof.get("schema") in ("leaf.project-drawing-publication.v1",
+                               project.graph_store().INITIAL_PUBLICATION_SCHEMA):
         digest = source.get("sha256")
         if (not _digest(digest) or source.get("ref") != version.oss_object
                 or version.oss_object != project.graph_store().publication_source_key(

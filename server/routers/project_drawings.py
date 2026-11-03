@@ -18,7 +18,7 @@ from envelopes import ErrorCode, err_envelope, with_envelope_fields
 router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
-    r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
+    r"^/api/projects/[^/]+/(?:solar-layout|drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
     r"drawings/[^/]+/versions/[^/]+/(?:solar-reads|imports/solaredge-pdf(?:/report)?|editor(?:/restore)?|dxf|solar-layout)|"
     r"drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
@@ -36,6 +36,7 @@ _FAILURES = {
     "SIP_R2_PUBLICATION_PARAMS_INVALID": (400, False),
     "SIP_R2_IDEMPOTENCY_CONFLICT": (409, False),
     "SIP_R2_PUBLICATION_REQUIRED": (409, False),
+    "PROJECT_LAYOUT_INITIAL_REQUIRES_EMPTY_PROJECT": (409, False),
 }
 
 
@@ -206,11 +207,11 @@ def _editor_dispatch(operation):
         return _dispatch(lambda: service.refuse("INTERNAL"))
 
 
-async def _editor_request(request, *, restore=False, layout=False):
-    expected = "application/json" if restore or layout else "application/dxf"
+async def _editor_request(request, *, restore=False, layout=False, initial=False):
+    expected = "application/json" if restore or layout or initial else "application/dxf"
     if request.headers.get("content-type", "").split(";", 1)[0].strip().lower() != expected:
         raise drawing_editor.EditorError("PROJECT_EDITOR_MEDIA_TYPE_REFUSED", 415)
-    maximum = 4096 if restore or layout else drawing_editor.MAX_DXF_BYTES
+    maximum = 2 * 1024 * 1024 if initial else (4096 if restore or layout else drawing_editor.MAX_DXF_BYTES)
     declared = request.headers.get("content-length")
     if declared and declared.isdigit() and int(declared) > maximum:
         raise drawing_editor.EditorError("PROJECT_EDITOR_TOO_LARGE", 413)
@@ -219,15 +220,16 @@ async def _editor_request(request, *, restore=False, layout=False):
         if len(raw) + len(chunk) > maximum:
             raise drawing_editor.EditorError("PROJECT_EDITOR_TOO_LARGE", 413)
         raw.extend(chunk)
-    if not restore and not layout:
+    if not restore and not layout and not initial:
         return bytes(raw)
     try:
         import json
         body = json.loads(bytes(raw).decode("utf-8"), object_pairs_hook=service._object_pairs,
                           parse_constant=service._nonfinite)
-        if layout:
+        if layout or initial:
             import project_solar_materialization
-            return project_solar_materialization.parameters(body)
+            return (project_solar_materialization.initial_parameters(body) if initial else
+                    project_solar_materialization.parameters(body))
         if type(body) is not dict or set(body) != {"version_id"}:
             raise ValueError()
         return drawing_editor.request_uuid(body["version_id"])
@@ -267,6 +269,36 @@ async def _project_editor_write(request, tenant, project_id, drawing_id, parent_
     return await run_in_threadpool(_editor_dispatch, lambda: operation(
         tenant, project_id, drawing_id, parent_version_id, body,
         request_id=request_id, capability=capability))
+
+
+@router.get("/api/projects/{project_id}/solar-layout")
+def project_initial_solar_layout_source_route(project_id: UUID,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[UUID] = Header(default=None), x_project_id: Optional[UUID] = Header(default=None)):
+    import project_solar_materialization as layout
+    def operation():
+        _headers(tenant, project_id, x_org_id, x_project_id)
+        return layout.initial_layout_source(tenant, project_id)
+    return _editor_dispatch(operation)
+
+
+@router.post("/api/projects/{project_id}/solar-layout")
+async def project_initial_solar_layout_route(project_id: UUID, request: Request,
+        tenant=Depends(deps.require_active_tenant),
+        x_org_id: Optional[UUID] = Header(default=None), x_project_id: Optional[UUID] = Header(default=None),
+        idempotency_key: Optional[str] = Header(default=None)):
+    import project_solar_materialization as layout
+    try:
+        _headers(tenant, project_id, x_org_id, x_project_id)
+        service._access(tenant, project_id, write=True)
+        request_id = drawing_editor.request_uuid(idempotency_key)
+        body = await _editor_request(request, initial=True)
+    except (service.ProjectContextError, drawing_editor.EditorError) as exc:
+        def refused():
+            raise exc
+        return _editor_dispatch(refused)
+    return await run_in_threadpool(_editor_dispatch, lambda: layout.publish_initial_layout(
+        tenant, project_id, body, request_id=request_id))
 
 
 @router.get("/api/projects/{project_id}/drawings/{drawing_id}/versions/{parent_version_id}/solar-layout")

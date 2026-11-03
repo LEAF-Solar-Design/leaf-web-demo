@@ -17,6 +17,145 @@ from test_w1_design_graph import graph
 from test_project_drawing_editor import lane, private_pg, checkout
 
 
+@pytest.fixture
+def fresh(lane):
+    from leaf_platform import db, store
+    project = store.create_project(lane.org, 'Parameter-only initial layout', authority_mode='postgres_canonical')
+    with db.cursor() as cur:
+        cur.execute('INSERT INTO project_member_bindings '
+                    '(membership_id,org_id,project_id,binding_id,role,invited_by_binding_id) '
+                    "VALUES (%s,%s,%s,%s,'editor',%s)",
+                    (uuid4(), lane.org, project.project_id, lane.actor, lane.actor))
+    return lane, project.project_id
+
+
+def initial_body():
+    from test_solar_frames_piles import GEN, PRESET
+    return {'boundary': deepcopy(GEN['boundary']), 'preset': deepcopy(PRESET), 'drawing_units': 'm'}
+
+
+def test_connected_initial_layout_needs_no_import_or_dummy_drawing(fresh):
+    lane, project = fresh
+    route = f'/api/projects/{project}/solar-layout'
+    response = lane.http.get(route)
+    assert response.status_code == 200
+    assert response.json()['drawing_id'] is None
+    assert response.json()['parent_version_id'] is None
+    response = lane.http.post(route, json=initial_body(), headers={'Idempotency-Key': str(uuid4())})
+    assert response.status_code == 503
+    assert response.json()['error']['reason_code'] == 'PROJECT_LAYOUT_LICENSED_WRITER_UNAVAILABLE'
+    from leaf_platform import db
+    with db.cursor() as cur:
+        cur.execute('SELECT count(*) AS n FROM drawing_artifacts WHERE project_id=%s', (project,))
+        assert cur.fetchone()['n'] == 0
+
+
+def test_initial_real_storage_metadata_replay_and_normal_history(fresh, monkeypatch):
+    lane, project = fresh
+    route, request, calls = f'/api/projects/{project}/solar-layout', uuid4(), []
+    body = initial_body()
+    def synthetic_writer(context, head, document, source, *, parameters):
+        assert context['project_id'] == project and head is None and source is None
+        assert parameters['generation']['boundary'] == body['boundary']
+        assert parameters['generation']['preset'] == body['preset']
+        assert document['state']['frames']
+        calls.append(deepcopy(document))
+        return lane.raw
+    monkeypatch.setattr(layout, 'materialize_native_layout', synthetic_writer)
+    first = lane.http.post(route, json=body, headers={'Idempotency-Key': str(request)})
+    assert first.status_code == 200, first.text
+    receipt = first.json()
+    drawing, version = receipt['drawing_id'], receipt['drawing_version']['version_id']
+    assert receipt['parent_version_id'] is None and receipt['mode'] == 'initial'
+    assert receipt['request_id'] == str(request)
+    assert receipt['drawing_version']['seq'] == 1
+    base = f'/api/projects/{project}/drawings/{drawing}'
+    source = lane.http.get(base + f'/versions/{version}/dxf')
+    assert source.status_code == 200 and source.content == lane.raw
+    context = layout.project.resolve_context(lane.tenant, project, layout.UUID(version), drawing_id=layout.UUID(drawing))
+    metadata = context.intake[layout.KEY]
+    assert ps.decode_document(metadata['document'].encode()) == calls[0]
+    assert metadata['request'] == body
+    assert metadata['generation_source']['parameters_sha256'] == digest(body)
+    replay = lane.http.post(route, json=body, headers={'Idempotency-Key': str(request)})
+    assert replay.json() == receipt and len(calls) == 1
+    conflict = lane.http.post(route, json={**body, 'drawing_units': 'ft'},
+                             headers={'Idempotency-Key': str(request)})
+    assert conflict.status_code == 409 and conflict.json()['error']['reason_code'] == 'SIP_R2_IDEMPOTENCY_CONFLICT'
+    cap = lane.http.post(base + '/checkout').json()['checkout_capability']
+    saved = lane.http.post(base + f'/versions/{version}/editor', content=lane.raw,
+        headers={'Content-Type': 'application/dxf', 'Idempotency-Key': str(uuid4()), 'X-Checkout-Capability': cap})
+    assert saved.status_code == 200, saved.text
+    successor = saved.json()['drawing_version']['version_id']
+    restored = lane.http.post(base + f'/versions/{successor}/editor/restore', json={'version_id': version},
+        headers={'Idempotency-Key': str(uuid4()), 'X-Checkout-Capability': cap})
+    assert restored.status_code == 200, restored.text
+    restored_context = layout.project.resolve_context(lane.tenant, project,
+        layout.UUID(restored.json()['drawing_version']['version_id']), drawing_id=layout.UUID(drawing))
+    assert restored_context.intake[layout.KEY] == metadata
+    assert lane.http.post(route, json=body, headers={'Idempotency-Key': str(request)}).json() == receipt
+
+
+def test_initial_existing_project_refuses_before_writer(lane, monkeypatch):
+    monkeypatch.setattr(layout, 'materialize_native_layout', lambda *_a, **_k: pytest.fail('unexpected writer'))
+    response = lane.http.post(f'/api/projects/{lane.project}/solar-layout', json=initial_body(),
+                              headers={'Idempotency-Key': str(uuid4())})
+    assert response.status_code == 409
+    assert response.json()['error']['reason_code'] == 'PROJECT_LAYOUT_INITIAL_REQUIRES_EMPTY_PROJECT'
+
+
+def test_initial_drain_refuses_before_writer(fresh, monkeypatch):
+    lane, project = fresh
+    monkeypatch.setattr(layout.project.write_loop, 'drawing_mutations_refusal', lambda: 'synthetic-drain')
+    monkeypatch.setattr(layout, 'materialize_native_layout', lambda *_a, **_k: pytest.fail('unexpected writer'))
+    response = lane.http.post(f'/api/projects/{project}/solar-layout', json=initial_body(),
+                              headers={'Idempotency-Key': str(uuid4())})
+    assert response.status_code == 503
+    assert response.json()['error']['reason_code'] == 'SIP_R1_WRITES_DRAINED'
+
+
+def test_initial_late_result_preserves_concurrent_drawing(fresh, monkeypatch):
+    from leaf_platform import store
+    lane, project = fresh
+    winners = []
+    def late_writer(*_a, **_k):
+        winners.append(store.create_drawing_artifact(lane.org, project, 'Concurrent winner'))
+        return lane.raw
+    monkeypatch.setattr(layout, 'materialize_native_layout', late_writer)
+    response = lane.http.post(f'/api/projects/{project}/solar-layout', json=initial_body(),
+                              headers={'Idempotency-Key': str(uuid4())})
+    assert response.status_code == 409
+    assert response.json()['error']['reason_code'] == 'PROJECT_LAYOUT_INITIAL_REQUIRES_EMPTY_PROJECT'
+    assert store.list_drawing_versions(lane.org, project) == []
+    assert len(winners) == 1
+
+
+def test_initial_foreign_project_refuses_before_writer(lane, monkeypatch):
+    from leaf_platform import store
+    foreign = store.create_project(store.create_org('Foreign initial layout').org_id,
+                                   'Foreign', authority_mode='postgres_canonical')
+    monkeypatch.setattr(layout, 'materialize_native_layout', lambda *_a, **_k: pytest.fail('unexpected writer'))
+    response = lane.http.post(f'/api/projects/{foreign.project_id}/solar-layout', json=initial_body(),
+                              headers={'Idempotency-Key': str(uuid4())})
+    assert response.status_code in (403, 404)
+
+
+def test_initial_failed_source_storage_creates_no_canonical_rows(fresh, monkeypatch):
+    from leaf_platform import store, db
+    lane, project = fresh
+    monkeypatch.setattr(layout, 'materialize_native_layout', lambda *_a, **_k: lane.raw)
+    def failed_put(*_a):
+        raise OSError('synthetic immutable storage outage')
+    monkeypatch.setattr(lane.backend, 'put_if_absent_or_verify', failed_put)
+    response = lane.http.post(f'/api/projects/{project}/solar-layout', json=initial_body(),
+                              headers={'Idempotency-Key': str(uuid4())})
+    assert response.status_code == 503
+    assert store.list_drawing_versions(lane.org, project) == []
+    with db.cursor() as cur:
+        cur.execute('SELECT count(*) AS n FROM drawing_artifacts WHERE project_id=%s', (project,))
+        assert cur.fetchone()['n'] == 0
+
+
 def test_connected_layout_route_rejects_a_parent_without_a_solar_graph(lane):
     response = lane.http.post(lane.base + f'/versions/{lane.parent.version_id}/solar-layout',
         json={'physical_head': 'a' * 64, 'physical_content_sha256': 'b' * 64, 'physical_index': 0},

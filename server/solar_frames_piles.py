@@ -501,6 +501,27 @@ def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, d
                     {"boundary": boundary, "preset": loaded}, drawing_units)
 
 
+def prepare_initial_frames(*, boundary, preset, drawing_units):
+    """Parameter-only kernel preparation, with no drawing or storage mutation."""
+    if type(drawing_units) is not str or drawing_units not in ps.UNITS:
+        raise FramesPilesError("FRAMES_PILES_DRAWING_UNITS_INVALID")
+    boundary = _boundary(boundary)
+    loaded, _ = load_preset(preset)
+    request = {"operation": GENERATE, "base": None, "drawing_units": drawing_units,
+               "boundary": boundary, "preset": json.loads(json.dumps(preset))}
+    state = {key: (list(value) if type(value) is list else value) for key, value in NEW_STATE}
+    try:
+        _generate(state, ps.UNITS[drawing_units], {"boundary": boundary, "preset": loaded})
+        terrain_standing(state, ps.UNITS[drawing_units])
+        document = ps.physical_document(state, drawing_units=drawing_units,
+            source_sha256=canonical_sha256(request), capability=GENERATE, parent=None,
+            frame=json.loads(json.dumps(ps.DEFAULT_FRAME)))
+    except frames.GroundFramesError as exc:
+        raise FramesPilesError(_kernel_refusal(exc)) from None
+    return document, {"schema": ps.PARAMETERS_SCHEMA, "operation": request,
+                      "generation": request, "piling": None}
+
+
 def detect_collisions(backend, tenant_id, drawing_id, *, base, project_id=None):
     """frame-collision-detect: overlap markers for the head's native frames."""
     base = _common(project_id, base)
