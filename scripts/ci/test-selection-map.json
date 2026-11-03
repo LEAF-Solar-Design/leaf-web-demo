@@ -240,6 +240,7 @@
     "server-broker-upload-resolver",
     "server-broker-usage-postgres",
     "server-build-queue",
+    "server-device-bridge-contract",
     "server-build-receipts",
     "server-builds-route",
     "server-cost-pooled",
