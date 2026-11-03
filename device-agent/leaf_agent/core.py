@@ -17,6 +17,8 @@ from .ops import Dispatcher, failure
 
 LOG = logging.getLogger("leaf_agent")
 HEARTBEAT_SECONDS = 30  # P0 requires at least one heartbeat each 30 seconds.
+OP_TIMEOUTS = {"pkg.install": 1500, "pkg.upgrade": 1500, "pkg.uninstall": 120}
+DEFAULT_OP_TIMEOUT = 30
 
 
 def configure_logging(config):
@@ -155,7 +157,7 @@ class Agent:
                 if expires <= datetime.now(timezone.utc):
                     outcome = failure("command_expired")
                 else:
-                    timeout = 900 if command["op"] == "pkg.install" else 30
+                    timeout = OP_TIMEOUTS.get(command["op"], DEFAULT_OP_TIMEOUT)
                     outcome = self.executor(Dispatcher(self.config, self.registry), command["op"], command["args"], timeout, self.operation_tick)
         except (ValueError, TypeError, KeyError, AttributeError):
             outcome = failure("invalid_args")

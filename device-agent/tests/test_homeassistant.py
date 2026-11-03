@@ -17,10 +17,11 @@ from urllib.parse import parse_qs
 import pytest
 
 from leaf_agent.config import write_json
+from leaf_agent.core import OP_TIMEOUTS
 from leaf_agent.packages import Registry
 from leaf_agent.packages.homeassistant import (
     CLIENT_ID, FLOW_KEYS, FLOW_PATH, HAError, HomeAssistant, InstallError,
-    LABEL, MAX_BODY, PINNED_VERSION, REQUIRES_PYTHON,
+    INSTALL_BUDGET_S, LABEL, MAX_BODY, PINNED_VERSION, REQUIRES_PYTHON,
 )
 
 
@@ -246,7 +247,7 @@ def local_handler(tmp_path, ha_server, **kwargs):
     return handler
 
 
-def install_stub(monkeypatch, *, available=None, fail_pip=False, clock=None, brew_version="3.14.8"):
+def install_stub(monkeypatch, *, available=None, fail_pip=False, clock=None, brew_version="3.14.8", pip_seconds=10):
     available = available if available is not None else {"/opt/homebrew/bin/python3.14": "3.14.8"}
     calls = []
     real_is_file = Path.is_file
@@ -281,9 +282,9 @@ def install_stub(monkeypatch, *, available=None, fail_pip=False, clock=None, bre
             available[str(venv / "bin/python")] = available[argv[0]]
         if argv[1:3] == ["-m", "pip"]:
             assert kwargs["stderr"] == subprocess.STDOUT
-            assert 0 < kwargs["timeout"] <= 900
+            assert 0 < kwargs["timeout"] <= INSTALL_BUDGET_S
             if clock:
-                clock.now += 10
+                clock.now += pip_seconds
             if fail_pip:
                 kwargs["stdout"].write("\n".join(f"pip diagnostic {number:02d}" for number in range(55)).encode())
                 raise subprocess.CalledProcessError(1, argv)
@@ -398,17 +399,90 @@ def test_install_failure_has_last_40_log_lines(tmp_path, monkeypatch):
     message = str(raised.value)
     assert "pip diagnostic 14" not in message and "pip diagnostic 15" in message and "pip diagnostic 54" in message
     assert len(message.splitlines()) == 41
+    state = json.loads((handler.root / "state.json").read_text())
+    assert state["status"] == "error" and state["error"] == message
     assert not any(item[0][0] == "launchctl" for item in calls)
 
 
-def test_health_wait_has_600_second_deadline(tmp_path, monkeypatch):
+def test_health_wait_uses_remaining_deadline(tmp_path, monkeypatch):
     clock = Clock()
+    clock.now = 100
     handler = HomeAssistant(tmp_path, clock=clock, sleep=clock.sleep)
     probes = []
     monkeypatch.setattr(handler, "_healthy", lambda timeout=5: probes.append(timeout) or False)
-    with pytest.raises(InstallError, match="600 seconds"):
-        handler._wait_healthy()
-    assert clock() == 600 and sum(clock.sleeps) == 600 and len(probes) == 120
+    with pytest.raises(InstallError, match="installation deadline"):
+        handler._wait_healthy(112)
+    assert clock() == 112 and clock.sleeps == [5, 5, 2] and probes == [5, 5, 2]
+    with pytest.raises(InstallError, match="installation deadline"):
+        handler._wait_healthy(112)
+    assert probes == [5, 5, 2]
+
+
+@pytest.mark.parametrize("op", ["pkg.install", "pkg.upgrade"])
+def test_install_budget_has_worker_margin(op):
+    assert INSTALL_BUDGET_S == 1440
+    assert INSTALL_BUDGET_S + 30 < OP_TIMEOUTS[op]
+
+
+@pytest.mark.parametrize("op", ["pkg.install", "pkg.upgrade"])
+@pytest.mark.parametrize("becomes_healthy", [True, False])
+def test_slow_pip_and_health_share_install_budget(tmp_path, monkeypatch, op, becomes_healthy):
+    clock = Clock()
+    clock.now = 50
+    runner, calls = install_stub(monkeypatch, clock=clock, pip_seconds=(INSTALL_BUDGET_S - 12) / 2)
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            runner=runner, clock=clock, sleep=clock.sleep)
+    if op == "pkg.upgrade":
+        write_json(handler.root / "state.json", {"package": "homeassistant", "version": PINNED_VERSION,
+                   "status": "installed", "last_health_at": None})
+        handler._service_path().parent.mkdir(parents=True)
+        handler._service_path().touch()
+    probes = []
+
+    def healthy(timeout=5):
+        probes.append((clock(), timeout))
+        return becomes_healthy and len(probes) >= 3
+
+    monkeypatch.setattr(handler, "_healthy", healthy)
+    if becomes_healthy:
+        assert handler.handle(op, {"version": PINNED_VERSION})["status"] == "running"
+        assert clock() == 50 + INSTALL_BUDGET_S - 2
+    else:
+        (handler.root / "install.log").parent.mkdir(parents=True, exist_ok=True)
+        (handler.root / "install.log").write_text("slow pip diagnostic\n")
+        with pytest.raises(InstallError, match="slow pip diagnostic") as raised:
+            handler.handle(op, {"version": PINNED_VERSION})
+        assert clock() == 50 + INSTALL_BUDGET_S
+        state = json.loads((handler.root / "state.json").read_text())
+        assert state["status"] == "error" and state["error"] == str(raised.value)
+    assert [timeout for _, timeout in probes[:3]] == [5, 5, 2]
+    assert clock.sleeps == ([5, 5] if becomes_healthy else [5, 5, 2])
+    pip_calls = [kwargs for argv, kwargs in calls if argv[1:3] == ["-m", "pip"]]
+    assert [kwargs["timeout"] for kwargs in pip_calls] == [INSTALL_BUDGET_S, (INSTALL_BUDGET_S + 12) / 2]
+
+
+@pytest.mark.parametrize("op", ["pkg.install", "pkg.upgrade"])
+def test_pip_budget_exhaustion_records_error_without_starting_service(tmp_path, monkeypatch, op):
+    clock = Clock()
+    runner, calls = install_stub(monkeypatch)
+
+    def timed_out(argv, **kwargs):
+        if argv[1:3] == ["-m", "pip"]:
+            kwargs["stdout"].write(b"pip exhausted budget\n")
+            clock.now += kwargs["timeout"]
+            raise subprocess.TimeoutExpired(argv, kwargs["timeout"])
+        return runner(argv, **kwargs)
+
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            runner=timed_out, clock=clock, sleep=clock.sleep)
+    write_json(handler.root / "state.json", {"package": "homeassistant", "version": PINNED_VERSION,
+               "status": "installed", "last_health_at": None})
+    with pytest.raises(InstallError, match="pip exhausted budget") as raised:
+        handler.handle(op, {"version": PINNED_VERSION})
+    assert clock() == INSTALL_BUDGET_S
+    state = json.loads((handler.root / "state.json").read_text())
+    assert state["status"] == "error" and state["error"] == str(raised.value)
+    assert not any(argv[:2] == ["launchctl", "bootstrap"] for argv, _ in calls)
 
 
 def test_reject_wrong_pin_and_missing_interpreter(tmp_path, monkeypatch):
@@ -630,16 +704,44 @@ def test_flow_rejects_other_handlers_and_path_injection(tmp_path, ha_server):
     assert all(method == "GET" for method, path, data, headers in ha_server.requests)
 
 
-def test_mac_uninstall_bootout_and_keychain_deletion(tmp_path):
+@pytest.mark.parametrize("returncode", [0, 3, 113])
+def test_mac_uninstall_bootout_and_keychain_deletion(tmp_path, returncode):
     calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=returncode)
+
     handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
-                            runner=lambda argv, **kwargs: calls.append(argv))
+                            runner=runner)
     handler._service_path().parent.mkdir(parents=True)
     handler._service_path().touch()
     handler.handle("pkg.uninstall", {"keep_data": False})
     assert calls[0] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
     assert [item[-1] for item in calls[1:]] == ["password", "token", "refresh_token"]
     assert all(item[:2] == ["/usr/bin/security", "delete-generic-password"] for item in calls[1:])
+    assert not handler._service_path().exists()
+
+
+@pytest.mark.parametrize("keep_data", [True, False])
+def test_mac_uninstall_without_plist_skips_bootout(tmp_path, keep_data):
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        if argv[0] == "launchctl":
+            raise AssertionError("No plist was written by the failed install")
+        return SimpleNamespace(returncode=0)
+
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501, runner=runner)
+    (handler.root / "venv").mkdir(parents=True)
+    (handler.root / "config").mkdir()
+    write_json(handler.root / "state.json", {"package": "homeassistant", "version": PINNED_VERSION,
+               "status": "error", "last_health_at": None})
+    assert handler.handle("pkg.uninstall", {"keep_data": keep_data}) == {"uninstalled": True}
+    assert not (handler.root / "venv").exists() and not (handler.root / "state.json").exists()
+    assert (handler.root / "config").exists() is keep_data
+    assert len(calls) == (0 if keep_data else 3)
 
 
 def test_service_stop_failure_preserves_data(tmp_path):
@@ -647,9 +749,35 @@ def test_service_stop_failure_preserves_data(tmp_path):
                             runner=lambda argv, **kwargs: SimpleNamespace(returncode=1))
     (handler.root / "venv").mkdir(parents=True)
     (handler.root / "config").mkdir()
+    handler._service_path().parent.mkdir(parents=True)
+    handler._service_path().touch()
     with pytest.raises(HAError, match="stop failed"):
         handler.handle("pkg.uninstall", {"keep_data": False})
     assert (handler.root / "venv").exists() and (handler.root / "config").exists()
+    assert handler._service_path().exists()
+
+
+@pytest.mark.parametrize("op,args", [("pkg.health", {}), ("pkg.uninstall", {"keep_data": True})])
+def test_mac_package_operations_with_locked_keychain(config, tmp_path, monkeypatch, op, args):
+    from leaf_agent.ops import Dispatcher
+
+    calls = []
+
+    def runner(argv, **kwargs):
+        calls.append(argv)
+        return SimpleNamespace(returncode=1)
+
+    handler = HomeAssistant(tmp_path / "managed", platform="darwin", user_home=tmp_path / "user", uid=501, runner=runner)
+    monkeypatch.setattr(handler, "_healthy", lambda timeout=5: False)
+    write_json(handler.root / "state.json", {"package": "homeassistant", "version": PINNED_VERSION,
+               "status": "installed", "last_health_at": None})
+    with pytest.raises(HAError, match="Credential read failed"):
+        handler.auth_headers()
+    calls.clear()
+    registry = Registry(config.home)
+    registry.register("homeassistant", handler)
+    result = Dispatcher(config, registry).dispatch(op, {"package": "homeassistant", **args})
+    assert result["status"] == "ok" and not calls
 
 
 def test_health_through_dispatcher_is_credential_free(config, tmp_path, ha_server, caplog):

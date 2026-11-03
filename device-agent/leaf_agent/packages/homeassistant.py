@@ -51,6 +51,7 @@ from ..config import Config, atomic_write, write_json
 
 PINNED_VERSION = "2026.10.4"
 REQUIRES_PYTHON = ">=3.14.2"
+INSTALL_BUDGET_S = 1440  # Leave 60 seconds for error persistence before the worker deadline.
 LABEL = "ai.leaf.homeassistant"
 CLIENT_ID = "http://127.0.0.1:8123/"
 FLOW_PATH = "/api/config/config_entries/flow"
@@ -318,6 +319,8 @@ class HomeAssistant:
     def _stop(self, *, remove=False):
         path = self._service_path()
         if self.platform == "darwin":
+            if not path.exists():
+                return
             uid = os.getuid() if self.uid is None else self.uid
             result = self.runner(["launchctl", "bootout", f"gui/{uid}", str(path)], check=False, capture_output=True, timeout=15)
             absent_codes = {3, 113}
@@ -374,9 +377,12 @@ class HomeAssistant:
             for candidate in dict.fromkeys(candidates):
                 if not candidate or not Path(candidate).is_file():
                     continue
+                remaining = deadline - self.clock()
+                if remaining <= 0:
+                    raise TimeoutError("Installation deadline exceeded")
                 try:
                     result = self.runner([candidate, "-c", "import sys; print('.'.join(map(str, sys.version_info[:3])))"],
-                                         check=True, capture_output=True, text=True, timeout=min(15, max(.001, deadline - self.clock())))
+                                         check=True, capture_output=True, text=True, timeout=min(15, remaining))
                     version = tuple(int(value) for value in result.stdout.strip().split("."))
                     if len(version) == 3 and version >= minimum:
                         return candidate
@@ -398,20 +404,24 @@ class HomeAssistant:
         with (self.root / "install.log").open("ab") as stream:
             self.runner(argv, check=True, stdout=stream, stderr=subprocess.STDOUT, timeout=remaining)
 
-    def _wait_healthy(self):
-        deadline = self.clock() + 600
-        while self.clock() < deadline:
-            if self._healthy(timeout=min(5, deadline - self.clock())):
-                return
+    def _wait_healthy(self, deadline):
+        while True:
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                break
+            if self._healthy(timeout=min(5, remaining)):
+                if self.clock() < deadline:
+                    return
+                break
             remaining = deadline - self.clock()
             if remaining > 0:
                 self.sleep(min(5, remaining))
-        raise InstallError("Home Assistant did not become healthy within 600 seconds")
+        raise InstallError("Home Assistant did not become healthy before installation deadline")
 
     def _install(self, *, upgrade=False):
+        deadline = self.clock() + INSTALL_BUDGET_S
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
         try:
-            deadline = self.clock() + 900
             python = self._python(deadline)
             if upgrade or self._service_path().exists():
                 self._stop()
@@ -424,27 +434,30 @@ class HomeAssistant:
             pip = str(venv / "bin/python")
             self._install_command([pip, "-m", "pip", "install", "--upgrade", "pip", "wheel"], deadline)
             self._install_command([pip, "-m", "pip", "install", "homeassistant==" + PINNED_VERSION], deadline)
+            if self.clock() >= deadline:
+                raise TimeoutError("Installation deadline exceeded")
             config = self.root / "config/configuration.yaml"
             if not config.exists():
                 atomic_write(config, b"default_config:\nhttp:\n  server_host: 127.0.0.1\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n")
             write_json(self.root / "state.json", {"package": "homeassistant", "version": PINNED_VERSION,
                        "status": "installed", "last_health_at": None})
             self._start()
-            self._wait_healthy()
+            self._wait_healthy(deadline)
             state = self.state()
             return {**state, "python": python, "requires_python": REQUIRES_PYTHON}
         except Exception:
             state = self._load("state.json", None) or {"package": "homeassistant", "version": PINNED_VERSION, "last_health_at": None}
             state["status"] = "error"
-            write_json(self.root / "state.json", state)
             try:
                 with (self.root / "install.log").open("rb") as stream:
                     stream.seek(0, 2)
                     stream.seek(max(0, stream.tell() - 16384))
                     tail = "\n".join(stream.read().decode("utf-8", errors="replace").splitlines()[-40:])
-            except FileNotFoundError:
+            except OSError:
                 tail = "No installer output"
-            raise InstallError("Home Assistant installation failed\n" + tail) from None
+            state["error"] = "Home Assistant installation failed\n" + tail
+            write_json(self.root / "state.json", state)
+            raise InstallError(state["error"]) from None
 
     def _uninstall(self, keep_data):
         self._stop(remove=True)

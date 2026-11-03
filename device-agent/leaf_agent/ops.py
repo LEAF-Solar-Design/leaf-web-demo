@@ -110,14 +110,14 @@ class Dispatcher:
         if op == "ha.flow.step" and (not isinstance(args["flow_id"], str) or not 1 <= len(args["flow_id"]) <= 128):
             return failure("invalid_args")
         try:
-            auth = handler.auth_headers()
-            secrets = [part for value in auth.values() for part in (value, value.removeprefix("Bearer "))]
             if op == "http.proxy":
+                auth = handler.auth_headers()
+                secrets = [part for value in auth.values() for part in (value, value.removeprefix("Bearer "))]
                 return self.proxy(args, entry, auth, secrets)
             data = handler.handle(op, args)
             # Check JSON serialization locally; no exception data leaves the device.
             json.dumps(data, allow_nan=False)
-            return {"status": "ok", "data": redact(data, secrets)}
+            return {"status": "ok", "data": redact(data, [])}
         except (TimeoutError, socket.timeout):
             return failure("timeout", status="error")
         except Exception:
