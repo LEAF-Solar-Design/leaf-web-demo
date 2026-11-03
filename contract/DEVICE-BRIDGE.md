@@ -93,6 +93,30 @@ as specified in the next section. Routes accept no undocumented body fields.
 | `DELETE /api/devices/{device_id}/relay-tokens/{token_id}` | User, owner + `link_service` | No body | 204, no body; idempotent for a known token | Common errors |
 | `GET /api/devices/relay-openapi/{package}.json` | Public | No body | 200 deterministic OpenAPI JSON bytes; `X-Leaf-Document-Sha256` header | 404 `package_unknown` |
 | `ANY /api/device-relay/{package}/{path...}` | Relay bearer only | Optional JSON body and query; accepts and drops `Idempotency-Key`; rules below | Upstream status, `content-type`, JSON body | 401 `relay_token_invalid`; 403 `relay_token_mismatch` or `relay_path_denied`; 413 `payload_too_large`; 415 `json_required`; 502 `upstream_error`; 503 `device_offline`; 504 `device_timeout` |
+| `GET /api/devices/packages` | User, any tenant member | No body | 200 `{packages:[PackageCatalogEntry]}`; server catalog with the pinned install version | Common errors |
+| `GET /api/devices/agent/package.tar.gz` | Public | No body | 200 deterministic agent archive; immutable cache-control and SHA-256 ETag | Common errors |
+| `GET /api/devices/agent/install.sh` | Public | No body; allowed public origin from request host/forwarded host | 200 POSIX installer with public origin and archive SHA-256 | 400 `invalid_request` for an unapproved origin |
+
+### P2 route behavior amendment
+
+Concurrent polls from the same device are permitted. Shared atomic command
+leasing prevents concurrent delivery of the same command during its lease.
+`poll_in_progress` is reserved and is not emitted by P2.
+
+Results are schema-validated as a whole before any completion. A schema-invalid
+batch returns 400 `invalid_payload` without completing any command. Valid
+results are then processed independently: identical retries count as accepted;
+unknown, foreign, unleased, expired, or conflicting command results are skipped
+and do not count toward `{accepted:n}`. Completion is not batch-transactional.
+The prior per-command 404/409 result errors are superseded by this rule.
+
+Invalid user command shapes return 400 `command_invalid` before enqueueing.
+Package, pinned-version, and proxy-path checks still use the named 422 errors.
+Every route in this slice returns 404 in production unless
+`LEAF_DEVICE_BRIDGE_ENABLED=1`; non-production environments enable the routes.
+The enrollment install command is exactly
+`curl -fsSL <origin>/api/devices/agent/install.sh | LEAF_ENROLL_TOKEN=<token> sh`.
+The installer supplies its validated HTTPS origin without another caller variable.
 
 An enrollment token is 32 cryptographically random bytes encoded as unpadded
 base64url (43 characters). Its TTL is 600 seconds. Studio stores only
