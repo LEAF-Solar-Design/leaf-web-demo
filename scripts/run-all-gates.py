@@ -389,7 +389,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_string_decode_memo.py"), 30),
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
-              SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
+              SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 94),
         # sf-units-ground-conversion: converted Ground frame geometry is metres in both drawing units; 12 cases.
         Suite("server-solar-ground-conversion-units", "server tests/test_solar_ground_conversion_units.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion_units.py"), 12),
@@ -2050,7 +2050,7 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
               _py_pytest("tests/test_sip_r3a_graph.py"), 24),
         Suite("server-sip-r3b-tools", "server canonical Solar tool chain", "pytest", SERVER,
-      _py_pytest("tests/test_sip_r3b_tools.py"), 24),
+      _py_pytest("tests/test_sip_r3b_tools.py"), 25),
         Suite("platform-sip-r3b-tools", "platform canonical Solar tool publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
               uses_database=True, db_gated=True, database_skip_reasons=(
