@@ -755,6 +755,55 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(appRun.submitCalls).toHaveLength(0);
   });
 
+  it.each(["success", "commit", "manifest", "effective", "digest", "session", "turn", "script"])(
+    "authored_view carries pinned structured identity without execution (%s)", async mode => {
+      const appRun = new FakeAppRunClient();
+      const digest = `sha256:${"a".repeat(64)}`;
+      appRun.catalog = [{ name: "arbitrary-view", kind: mode === "script" ? "script" : "view",
+        description: "An authored view", capabilities: ["drawing.read"],
+        execution_class: mode === "script" ? "batch" : "instant", batch_fallback: true,
+        catalog_digest: mode === "digest" ? `sha256:${"b".repeat(64)}` : digest,
+        catalog_commit: mode === "commit" ? undefined : "c".repeat(40),
+        tool_manifest_sha256: mode === "manifest" ? "a".repeat(64) : digest,
+        effective_catalog_digest: mode === "effective" ? `sha256:${"d".repeat(64)}` : "d".repeat(64) }];
+      const results: SpineToolResult[] = [];
+      const runner: SpineConverseRunner = { async *run(input) {
+        results.push(await input.tools.execute("run_capability", { tool: "arbitrary-view", params: {} }));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+      } };
+      const store = new FakeSessionStore(), gate = new FakeGateClient();
+      const loop = new ConverseLoop({ runner, appRun, store, gate });
+      const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+      const turn = await loop.handleMessage({ sessionId: session.session_id, tenantId: session.tenant_id,
+        text: "Open my authored view", contextPacket: PACKET,
+        ...(mode === "session" ? {} : { authoritySessionId: "app-view-session" }),
+        ...(mode === "turn" ? {} : { authorityTurnId: "app-view-turn" }) });
+      await turn.done;
+      const events = await store.eventsAfter(session.session_id, 0);
+      const result = ofType(events, "tool_result")[0]!.data;
+      if (mode === "script") {
+        expect(appRun.submitCalls).toHaveLength(1);
+        expect(ofType(events, "job_linked")).toHaveLength(1);
+        expect(result.result).toBeUndefined();
+        return;
+      }
+      expect(appRun.submitCalls).toHaveLength(0);
+      expect(ofType(events, "job_linked")).toHaveLength(0);
+      if (mode !== "success") {
+        expect(result.ok).toBe(false);
+        expect(result.result).toBeUndefined();
+        expect(results[0]!.isError).toBe(true);
+      } else {
+        const descriptor = { contract: "leaf.authored-view.v1", kind: "view", route: "view",
+          tool: "arbitrary-view", tenant_id: "demo-tenant", session_id: "app-view-session", turn_id: "app-view-turn",
+          catalog_commit: "c".repeat(40), effective_catalog_digest: "d".repeat(64),
+          tool_manifest_sha256: digest, catalog_digest: digest };
+        expect(result).toMatchObject({ tool: "run_capability", ok: true, result: descriptor });
+        expect(JSON.parse(results[0]!.content)).toEqual(descriptor);
+        expect(gate.checks.some(check => check.action === "run_read_tool")).toBe(true);
+      }
+    });
+
   it("run_capability on a READ tool dispatches inline via the wait path", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     appRun.drawingHead = 1;

@@ -27,6 +27,229 @@ from pathlib import Path
 
 import pytest
 
+
+@pytest.fixture
+def authored_view_lane(monkeypatch, tmp_path):
+    """Independent published Git + durable pin lane; never the template fixture.
+
+    Membership and session storage are explicit platform boundary doubles. Git,
+    pin storage, catalog provenance folding and the HTTP route are real.
+    """
+    import json
+    import subprocess
+    from types import SimpleNamespace
+    from fastapi import FastAPI
+    from fastapi.testclient import TestClient
+    import customization_service as catalogs
+    from customization_models import ChangeState
+    from customization_store import SQLiteCustomizationStore
+    import deps
+    import platform_link
+    import session_store
+    from routers.tools import router
+
+    tenant = "11111111-1111-4111-8111-111111111111"
+    project = "22222222-2222-4222-8222-222222222222"
+    session = {"session_id": "view-session", "tenant_id": f"project:{tenant}:{project}",
+               "org_id": tenant, "project_id": project}
+    sessions = {session["session_id"]: session}
+    membership = {"allowed": True}
+    def access(actor, requested, *, write, **_kwargs):
+        if str(actor) != tenant or requested != project:
+            raise LookupError("private project")
+        if not membership["allowed"]:
+            raise platform_link.ProjectSessionForbidden("private membership")
+        assert write is False
+        return tenant
+    monkeypatch.setattr(platform_link, "require_project_access", access)
+    monkeypatch.setattr(session_store, "get_session", sessions.get)
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_DB", str(tmp_path / "catalog.db"))
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_STORE", "sqlite")
+    monkeypatch.setenv("LEAF_TENANT_GIT_DIR", str(tmp_path / "bare"))
+    monkeypatch.setenv("LEAF_EFFECTIVE_TENANTS_DIR", str(tmp_path / "effective"))
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R5_MODE", "off")
+    monkeypatch.setenv("LEAF_CUSTOMIZATION_R6_MODE", "off")
+    monkeypatch.setattr(deps, "_AUTHORED", [])
+    for attr in ("ENGINE_REGISTRY", "CATALOG_TOOLS_STORE", "WRITE_TOOLS_STORE", "AUTHORED_STORE"):
+        path = tmp_path / f"{attr}.json"
+        path.write_text('{"tools": []}', encoding="utf-8")
+        monkeypatch.setattr(deps, attr, path)
+    monkeypatch.setattr(deps.solar_tools, "registry_records", lambda: [])
+    repo = tmp_path / "working"
+    repo.mkdir()
+    bare = tmp_path / "bare" / f"{tenant}.git"
+    bare.parent.mkdir()
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(repo), *args], stderr=subprocess.PIPE).decode().strip()
+    git("init")
+    git("config", "user.email", "view-fixture@example.invalid")
+    git("config", "user.name", "View fixture")
+    subprocess.check_call(["git", "init", "--bare", str(bare)], stdout=subprocess.DEVNULL)
+    git("remote", "add", "origin", str(bare))
+    store = SQLiteCustomizationStore(tmp_path / "catalog.db")
+    store.initialize()
+    serial = [0]
+    html = '<!doctype html><meta charset="utf-8"><h1>Arbitrary café view</h1><script>document.title="view"</script>\n'
+    tool = {"name": "fixture-view", "kind": "view", "entry": "tools/fixture-view/nested/custom.htm",
+            "version": "1.0.0", "description": "Registered HTML", "capabilities": [],
+            "params": {"type": "object", "properties": {}}}
+    def publish(*, body=None, changes=None, symlink=False):
+        serial[0] += 1
+        row = {**tool, **(changes or {})}
+        path = repo / tool["entry"]
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.unlink(missing_ok=True)
+        if symlink:
+            path.symlink_to("../../private.html")
+        else:
+            path.write_bytes(html.encode() if body is None else body)
+        raw = json.dumps({"tools": [row]}, ensure_ascii=False).encode()
+        (repo / "registry.json").write_bytes(raw)
+        git("add", ".")
+        git("commit", "--allow-empty", "-m", f"published view {serial[0]}")
+        commit = git("rev-parse", "HEAD")
+        git("push", "origin", "HEAD:refs/heads/main")
+        change = store.create_change_set(tenant_id=tenant, idempotency_key=f"create-{serial[0]}",
+            base_commit=commit, desired_platform_release="platform@sha256:abc",
+            workspace_contract_digest="d" * 64, author_subject="fixture-author")
+        def advance(state):
+            nonlocal change
+            change = store.transition(tenant_id=tenant, change_set_id=change.change_set_id,
+                next_state=state, expected_version=change.version,
+                idempotency_key=f"{serial[0]}-{state.value}", approver_subject="fixture-approver")
+        advance(ChangeState.STAGING)
+        change = store.record_staged(tenant_id=tenant, change_set_id=change.change_set_id,
+            expected_version=change.version, idempotency_key=f"staged-{serial[0]}", staged_commit=commit,
+            catalog_digest=hashlib.sha256(raw).hexdigest(), platform_release="platform@sha256:abc",
+            workspace_contract_digest="d" * 64)
+        for state in (ChangeState.AWAITING_APPROVAL, ChangeState.APPROVED, ChangeState.PUBLISHING):
+            advance(state)
+        store.publish(tenant_id=tenant, change_set_id=change.change_set_id, expected_version=change.version,
+                      idempotency_key=f"publish-{serial[0]}")
+        return {"project_id": project, "session_id": session["session_id"], "catalog_commit": commit,
+                "effective_catalog_digest": hashlib.sha256(raw).hexdigest(),
+                "tool_manifest_sha256": deps.catalog_tool_digest(row), "catalog_digest": deps.catalog_tool_digest(row)}
+    query = publish()
+    app = FastAPI()
+    app.include_router(router)
+    app.dependency_overrides[deps.require_tenant] = lambda: tenant
+    client = TestClient(app)
+    def get(params=None, actor=tenant):
+        app.dependency_overrides[deps.require_tenant] = lambda: actor
+        return client.get("/api/tools/fixture-view/view-source", params=query if params is None else params)
+    return SimpleNamespace(get=get, query=query, publish=publish, html=html, session=session,
+                           sessions=sessions, membership=membership, store=store, tenant=tenant, bare=bare)
+
+
+def test_authored_view_pinned_source(authored_view_lane, monkeypatch):
+    import tool_loader
+    import broker_client
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("authored view must not execute Python or broker work")
+    monkeypatch.setattr(tool_loader, "run_tool_dynamic", forbidden)
+    monkeypatch.setattr(broker_client, "run_via_broker", forbidden)
+    response = authored_view_lane.get()
+    assert response.status_code == 200, response.text
+    body = response.json()
+    assert body["html"] == authored_view_lane.html
+    assert body["sha256"] == hashlib.sha256(authored_view_lane.html.encode()).hexdigest()
+    assert body["size_bytes"] == len(authored_view_lane.html.encode())
+    assert body["media_type"] == "text/html"
+    assert body["entry"] == "tools/fixture-view/nested/custom.htm"
+    assert response.headers["cache-control"] == "no-store"
+    assert all(body[key] == value for key, value in authored_view_lane.query.items())
+
+
+def test_authored_view_ignores_materialized_source(authored_view_lane):
+    import customization_service as catalogs
+    lane = authored_view_lane
+    assert lane.get().status_code == 200
+    cached = catalogs.effective_catalog_dir(lane.tenant)
+    (cached / "tools/fixture-view/nested/custom.htm").write_text("<h1>Wrong checkout bytes</h1>", encoding="utf-8")
+    response = lane.get()
+    assert response.status_code == 200, response.text
+    assert response.json()["html"] == lane.html
+
+
+def test_authored_view_requires_winning_tenant_provenance(authored_view_lane, monkeypatch):
+    import deps
+    lane = authored_view_lane
+    winners = deps.effective_tools_with_provenance(lane.tenant)
+    monkeypatch.setattr(deps, "effective_tools_with_provenance", lambda _tenant: [
+        (tool, deps.TOOL_SOURCE_AUTHORED if tool.get("name") == "fixture-view" else source)
+        for tool, source in winners])
+    response = lane.get()
+    assert response.status_code == 409, response.text
+    assert "html" not in response.json()
+
+
+@pytest.mark.parametrize("case", ["tenant", "project", "session", "legacy", "missing_org", "membership", "stale", "manifest", "registry"])
+def test_authored_view_authority_refusals(authored_view_lane, case):
+    lane = authored_view_lane
+    query = dict(lane.query)
+    actor = lane.tenant
+    if case == "tenant": actor = "33333333-3333-4333-8333-333333333333"
+    if case == "project": query["project_id"] = "44444444-4444-4444-8444-444444444444"
+    if case == "session": query["session_id"] = "missing"
+    if case == "legacy":
+        lane.session.pop("org_id"); lane.session.pop("project_id"); lane.session["tenant_id"] = lane.tenant
+    if case == "missing_org": lane.session.pop("org_id")
+    if case == "membership": lane.membership["allowed"] = False
+    if case == "stale": query["catalog_commit"] = "0" * 40
+    if case == "manifest": query.update(tool_manifest_sha256="sha256:" + "0" * 64, catalog_digest="sha256:" + "0" * 64)
+    if case == "registry":
+        import sqlite3
+        with sqlite3.connect(lane.store.database_path) as conn:
+            conn.execute("UPDATE effective_catalogs SET catalog_digest = ?", ("0" * 64,))
+        query["effective_catalog_digest"] = "0" * 64
+    response = lane.get(query, actor)
+    assert response.status_code in {403, 404, 409, 422}, response.text
+    assert "html" not in response.json()
+    assert str(lane.bare) not in response.text
+
+
+@pytest.mark.parametrize("case", ["script", "traversal", "symlink", "oversize", "utf8"])
+def test_authored_view_source_refusals(authored_view_lane, case, monkeypatch):
+    import customization_service as catalogs
+    lane = authored_view_lane
+    kwargs = {}
+    if case == "script": kwargs["changes"] = {"kind": "script"}
+    if case == "traversal": kwargs["changes"] = {"entry": "tools/../private.html"}
+    if case == "symlink": kwargs["symlink"] = True
+    if case == "oversize": kwargs["body"] = b"x" * (1024 * 1024 + 1)
+    if case == "utf8": kwargs["body"] = b"\xff"
+    query = lane.publish(**kwargs)
+    source_oid = catalogs._git(lane.bare, "rev-parse", f"{query['catalog_commit']}:tools/fixture-view/nested/custom.htm")
+    original = catalogs._git_blob
+    def bounded(bare, identity):
+        # Registry reads may use the normal catalog helper. The view source
+        # cannot be read at all after an oversize tree stat.
+        if case == "oversize" and identity == source_oid:
+            pytest.fail("oversize source blob was read")
+        return original(bare, identity)
+    monkeypatch.setattr(catalogs, "_git_blob", bounded)
+    response = lane.get(query)
+    assert response.status_code in {422, 503}, response.text
+    assert "html" not in response.json()
+
+
+@pytest.mark.parametrize("change", ["pin", "session", "membership"])
+def test_authored_view_rechecks_after_read(authored_view_lane, monkeypatch, change):
+    import customization_service as catalogs
+    lane = authored_view_lane
+    original = catalogs._git_blob
+    def read(bare, identity):
+        raw = original(bare, identity)
+        if ":" not in identity and raw == lane.html.encode():
+            if change == "pin":
+                monkeypatch.setattr(catalogs, "effective_catalog_pin", lambda _tenant: None)
+            elif change == "session": lane.sessions.clear()
+            else: lane.membership["allowed"] = False
+        return raw
+    monkeypatch.setattr(catalogs, "_git_blob", read)
+    response = lane.get()
+    assert response.status_code in {403, 404, 409}, response.text
+
 SERVER_DIR = Path(__file__).resolve().parent.parent
 if str(SERVER_DIR) not in sys.path:
     sys.path.insert(0, str(SERVER_DIR))

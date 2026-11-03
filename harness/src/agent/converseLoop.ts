@@ -767,6 +767,10 @@ export class ConverseLoop {
           if (typeof catalogDigest !== "string" || !catalogDigest) {
             throw new Error("run_capability requires a current server-issued catalog digest");
           }
+          if (entry?.kind === "view") {
+            return { action: "run_read_tool", args: { tool: target, params: {},
+              dwg: session.drawing_id, catalog_digest: catalogDigest } };
+          }
           // A local dry run is non-mutating, so it uses the read rung. This
           // prevents preview approval from becoming a confirm-once grant for
           // the later real write. Live APS stays on its cost-bearing rung.
@@ -1006,6 +1010,7 @@ export class ConverseLoop {
 
       let result: SpineToolResult;
       let pageProposalResult: Record<string, unknown> | undefined;
+      let authoredViewResult: Record<string, unknown> | undefined;
       try {
         if (tool === "propose_project_photo_assignments") {
           args = ProjectPhotoAssignmentRequest.parse(args);
@@ -1184,6 +1189,7 @@ export class ConverseLoop {
               turnState: state,
               ...instant,
               capturePageProposal: value => { pageProposalResult = value; },
+              captureAuthoredView: value => { authoredViewResult = value; },
             },
           );
         }
@@ -1204,6 +1210,8 @@ export class ConverseLoop {
         ok: !result.isError,
         summary: resultSummary(tool, result),
         ...(publicationResult ? { result: publicationResult } : {}),
+        ...(tool === "run_capability" && !result.isError && authoredViewResult
+          ? { result: authoredViewResult } : {}),
         ...((tool === "propose_project_page" || tool === "propose_project_photo_assignments") && !result.isError && pageProposalResult
           ? { result: pageProposalResult } : {}),
       });
@@ -1231,6 +1239,7 @@ export class ConverseLoop {
       authorityTurnId?: string;
       pageProposalSource?: PageProposalSource;
       capturePageProposal?: (value: Record<string, unknown>) => void;
+      captureAuthoredView?: (value: Record<string, unknown>) => void;
     },
   ): Promise<SpineToolResult> {
     const { appRun, instantExecutor } = this.ports;
@@ -1325,6 +1334,25 @@ export class ConverseLoop {
         const catalogDigest = catalogEntry?.catalog_digest;
         if (typeof catalogDigest !== "string" || !catalogDigest) {
           return err("run_capability requires a current server-issued catalog digest");
+        }
+        if (catalogEntry?.kind === "view") {
+          const commit = catalogEntry.catalog_commit, manifest = catalogEntry.tool_manifest_sha256;
+          const effective = catalogEntry.effective_catalog_digest;
+          const identity = (value: unknown, pattern: RegExp) => typeof value === "string" && pattern.test(value);
+          const authority = (value: unknown) => typeof value === "string" && value.trim() === value && value.length > 0 && value.length <= 200 && !/[\p{C}]/u.test(value);
+          if (!identity(target, /^[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])/) || target.length > 200
+              || !identity(commit, /^[0-9a-f]{40}(?![\s\S])/)
+              || !identity(manifest, /^sha256:[0-9a-f]{64}(?![\s\S])/)
+              || !identity(effective, /^[0-9a-f]{64}(?![\s\S])/)
+              || catalogDigest !== manifest || !authority(ctx.authoritySessionId) || !authority(ctx.authorityTurnId)) {
+            return err("view capability lacks pinned catalog identity or current session authority");
+          }
+          const descriptor = { contract: "leaf.authored-view.v1", route: "view", tool: target, kind: "view",
+            tenant_id: tenantId, session_id: ctx.authoritySessionId, turn_id: ctx.authorityTurnId,
+            catalog_commit: commit, effective_catalog_digest: effective,
+            tool_manifest_sha256: manifest, catalog_digest: catalogDigest };
+          ctx.captureAuthoredView?.(descriptor);
+          return ok(JSON.stringify(descriptor));
         }
         const capability = await ctx.capabilityOf(target);
         const drawingVersion =

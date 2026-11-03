@@ -8,12 +8,75 @@ import { readActiveScope, subscribeActiveScope } from '../auth/activeScope.js'
 import { subscribeProjectPageProposals } from './projectPageProposalDelivery.js'
 import { readEditingStyle, writeEditingStyle } from '../lib/editingStylePreference.js'
 import CanvasToolbar from './CanvasToolbar.jsx'
+import { authHeaders, getStoredOrgId, noteUnauthorized } from '../api.js'
+import { getStoredActorBindingId } from '../projects/api.js'
 import ElementInspector from './ElementInspector.jsx'
 import PortfolioEditor from './PortfolioEditor.jsx'
 import './browserAssetGround.css'
 
-// Only ReleaseOutputs supplies decoded HTML after the trusted artifact retrieval.
+// Verified release outputs and registered views share this scope-fenced renderer.
 export const BrowserArtifactContext = createContext(null)
+
+async function retrieveAuthoredView(request, projectId, current, signal) {
+  const source = request.result
+  const valid = (value, pattern) => typeof value === 'string' && pattern.test(value)
+  const authority = value => typeof value === 'string' && value.trim() === value && value.length > 0 && value.length <= 200 && !/[\p{C}]/u.test(value)
+  if (!current() || request.projectId !== projectId || source.kind !== 'view' || source.route !== 'view'
+    || !authority(source.session_id) || !authority(source.turn_id)
+    || source.session_id !== request.provenance?.sessionId || source.turn_id !== request.provenance?.turnId
+    || !Number.isSafeInteger(request.provenance?.seq) || request.provenance.seq < 1
+    || source.tenant_id !== getStoredOrgId()
+    || !valid(source.tool, /^[a-z0-9]+(?:-[a-z0-9]+)*(?![\s\S])/) || source.tool.length > 200
+    || !valid(source.catalog_commit, /^[0-9a-f]{40}(?![\s\S])/)
+    || !valid(source.effective_catalog_digest, /^[0-9a-f]{64}(?![\s\S])/)
+    || !valid(source.tool_manifest_sha256, /^sha256:[0-9a-f]{64}(?![\s\S])/)
+    || source.catalog_digest !== source.tool_manifest_sha256) return null
+  const query = new URLSearchParams({ project_id: projectId, session_id: source.session_id,
+    catalog_commit: source.catalog_commit, effective_catalog_digest: source.effective_catalog_digest,
+    tool_manifest_sha256: source.tool_manifest_sha256, catalog_digest: source.catalog_digest })
+  const path = `/api/tools/${encodeURIComponent(source.tool)}/view-source?${query}`
+  const headers = { ...authHeaders() }
+  if (!headers.Authorization) return null
+  const org = getStoredOrgId(), actor = getStoredActorBindingId()
+  if (org) headers['X-Org-Id'] = org
+  if (actor) headers['X-Actor-Binding-Id'] = actor
+  const response = noteUnauthorized(await fetch(path, { headers, method: 'GET', cache: 'no-store',
+    credentials: 'same-origin', redirect: 'error', signal }), path, headers.Authorization)
+  if (!current() || signal.aborted || !response.ok || response.redirected
+    || !response.headers.get('Content-Type')?.startsWith('application/json')
+    || response.headers.get('Cache-Control') !== 'no-store') return null
+  // JSON may escape each source byte; bound the transport too, before parsing.
+  const reader = response.body?.getReader()
+  if (!reader) return null
+  const chunks = []
+  let length = 0
+  try {
+    for (;;) {
+      const { value, done } = await reader.read()
+      if (done) break
+      length += value.byteLength
+      if (!current() || signal.aborted || length > 8 * 1024 * 1024) return null
+      chunks.push(value)
+    }
+  } finally { await reader.cancel().catch(() => {}) }
+  const bytes = new Uint8Array(length)
+  let offset = 0
+  for (const chunk of chunks) { bytes.set(chunk, offset); offset += chunk.byteLength }
+  const result = JSON.parse(new TextDecoder('utf-8', { fatal: true }).decode(bytes))
+  for (const key of ['contract', 'route', 'kind', 'tool', 'tenant_id', 'session_id', 'catalog_commit',
+    'effective_catalog_digest', 'tool_manifest_sha256', 'catalog_digest']) {
+    if (result[key] !== source[key]) return null
+  }
+  if (result.project_id !== projectId || result.media_type !== 'text/html' || typeof result.html !== 'string'
+    || !Number.isSafeInteger(result.size_bytes) || result.size_bytes < 0 || result.size_bytes > 1024 * 1024
+    || !valid(result.sha256, /^[0-9a-f]{64}(?![\s\S])/)) return null
+  const htmlBytes = new TextEncoder().encode(result.html)
+  if (htmlBytes.length !== result.size_bytes
+    || new TextDecoder('utf-8', { fatal: true, ignoreBOM: true }).decode(htmlBytes) !== result.html) return null
+  const digest = await crypto.subtle.digest('SHA-256', htmlBytes)
+  const sha = Array.from(new Uint8Array(digest), value => value.toString(16).padStart(2, '0')).join('')
+  return current() && !signal.aborted && sha === result.sha256 ? { html: result.html, name: `${source.tool}.html` } : null
+}
 
 export function BrowserAssetGround({ browserActive = false, browserPanel: controlledPanel, onBrowserPanel: setControlledPanel,
   projectId, accountScope, signedIn, profile = 'browser', profiles, onSelect, onDescribe, onEnterWorkspace, sampleEntry, canApplyLayout = false, ...boardProps }) {
@@ -87,10 +150,24 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
     const activeScope = readActiveScope()
     if (!signedIn || !accountScope || accountScope === 'guest' || !projectId || !activeScope) return
     const seen = new Set()
-    return subscribeProjectPageProposals(request => {
+    let pendingView = null
+    const unsubscribe = subscribeProjectPageProposals(request => {
       const current = () => live.current && scope.current === currentScope && request.isCurrent()
         && request.accountScope === accountScope && composerDraftAccountScope() === accountScope
         && request.activeScope === activeScope && readActiveScope() === activeScope
+      if (request.result?.contract === 'leaf.authored-view.v1') {
+        if (pendingView && !pendingView.current()) { pendingView.controller.abort(); pendingView = null }
+        if (!current() || request.projectId !== projectId || seen.has(request.key) || pendingView) return false
+        const token = { current, controller: new AbortController() }
+        pendingView = token
+        void retrieveAuthoredView(request, projectId, current, token.controller.signal).then(artifact => {
+          if (artifact && pendingView === token && current() && acceptArtifact(artifact)) {
+            seen.add(request.key)
+            if (seen.size > 128) seen.delete(seen.values().next().value)
+          }
+        }).catch(() => {}).finally(() => { if (pendingView === token) pendingView = null })
+        return true
+      }
       if (!current() || request.result?.source?.project_id !== projectId || seen.has(request.key) || pendingProposal.current) return false
       const incoming = { ...request, scope: currentScope, isCurrent: current, consumed: accepted => {
         if (pendingProposal.current !== incoming) return
@@ -109,6 +186,7 @@ export function BrowserAssetGround({ browserActive = false, browserPanel: contro
       onBrowserPanel('project')
       return true
     })
+    return () => { pendingView?.controller.abort(); unsubscribe() }
   }, [currentScope]) // callbacks are captured with this editor lifetime
   const acceptArtifact = ({ html, name }) => {
     if (!live.current || scope.current !== currentScope || !signedIn || !accountScope || accountScope === 'guest' || !projectId
