@@ -57,6 +57,8 @@
   line-height: 1.6;
   color: var(--page-muted);
 }
+.project-page__action { margin: 1.5rem 0 0; font-family: Arial, sans-serif; font-size: .875rem; line-height: 1.6; color: var(--page-muted); overflow-wrap: anywhere; }
+.project-page__action a { color: inherit; text-decoration: underline; }
 .project-page__edit {
   all: unset;
   cursor: text;
