@@ -88,6 +88,19 @@ def _reads_physical_head(module):
     return getattr(module, "READS_PHYSICAL_HEAD", False) is True
 
 
+def _reads_source_binding(module):
+    return getattr(module, "READS_SOURCE_BINDING", False) is True
+
+
+def _source_argument(tool, drawing_id, context):
+    if not _reads_source_binding(_load_builtin(tool)):
+        return {}
+    return {"source_binding": {"drawing_id": drawing_id,
+                               "drawing_version": context["resolved_version"],
+                               "graph_sha256": context["graph_sha256"],
+                               "project_id": context["project_id"]}}
+
+
 def _current_physical_head(backend, tenant_id, drawing_id, project_id, *, version="head"):
     """The selected version's physical head: None when no state was ever published,
     else {"head": view, "document": document}. Uses load_physical_head's bounded version
@@ -173,7 +186,7 @@ _UNSET = object()
 
 
 def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256=None,
-                 physical_head=_UNSET, pvcase_source=None):
+                 physical_head=_UNSET, pvcase_source=None, source_binding=_UNSET):
     try:
         module = _load_builtin(tool)
         extra = {}
@@ -187,6 +200,10 @@ def _read_output(tool, graph, builtin_params, sink=None, *, version_graph_sha256
             # The document was decoded for this call alone; only the head view is compared below.
             extra["physical_head"] = None if physical_head is None else {
                 "head": copy.deepcopy(physical_head["head"]), "document": physical_head["document"]}
+        if _reads_source_binding(module):
+            if source_binding is _UNSET:
+                raise GraphValidationError("READ_OUTPUT_INVALID")
+            extra["source_binding"] = copy.deepcopy(source_binding)
         output = module.run(copy.deepcopy(graph), copy.deepcopy(builtin_params), **extra)
         if _reads_physical_head(module):
             # The terminal proof re-reads the head the output names, so the output must name it.
@@ -256,7 +273,8 @@ def run_local_graph_read(backend, tenant_id, tool, params, *, drawing_id, source
                                 **_history_argument(tool, backend, tenant_id, drawing_id),
                                 **_physical_argument(tool, backend, tenant_id, drawing_id,
                                                      context["project_id"],
-                                                     version=context["resolved_version"]))
+                                                     version=context["resolved_version"]),
+                                **_source_argument(tool, drawing_id, context))
     return {
         "schema_version": RESULT_SCHEMA, "adapter": ADAPTER_KIND,
         "tenant_id": tenant_id, "job_id": job_id, "tool": tool,
@@ -309,7 +327,8 @@ def graph_read_provenance(result, params, tenant_id, job_id, tool, source_versio
                                     **_history_argument(tool, backend, tenant_id, drawing_id),
                                     **_physical_argument(tool, backend, tenant_id, drawing_id,
                                                          context["project_id"], result["output"],
-                                                         proof=True, version=source_version))
+                                                         proof=True, version=source_version),
+                                    **_source_argument(tool, drawing_id, context))
         output_sha256 = digest(output)
         if (type(result["output"]) is not dict or output != result["output"]
                 or output_sha256 != result["output_sha256"]
