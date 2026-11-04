@@ -6,7 +6,7 @@ import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCens
   SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
 import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { assertCountControlIdentity } from './fixtures.mjs'
-import { activeToolbarProfile, enumerateControls, SHELL_WRAPPER_SCOPES, resolveCensus } from './controlCensus.mjs'
+import { CENSUS_TRACE, activeToolbarProfile, enumerateControls, SHELL_WRAPPER_SCOPES, resolveCensus } from './controlCensus.mjs'
 import { readControlInventory } from '../../walk/controlInventory.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -14,6 +14,17 @@ import { ENGINE_WASM_ROUTE, solarAvailabilityProbe, requireSeededSolarReady } fr
 import { setupStep, stackInstanceRef, UnsupportedLocalError, holdJobRoutes, discloseControlPanel, assertEffect, unsupportedBeforeSetup, UI_UNREACHABLE_STATES, VERSIONLESS_DRAWING_REASON, SOLAR_PANEL_CALIBRATION_REASON, workerCatalog, toolAvailabilityEvidence, FIXTURE_PICK_POINTS, exposedCalibrationPoints, solarCalibrationFailure, injectWalkEntities } from './fixtures.mjs'
 
 const map = buildFeatureMap()
+
+test('WL70 census failure trace disables snapshots, screenshots and sources', () => {
+  assert.ok(Object.isFrozen(CENSUS_TRACE))
+  assert.deepEqual(CENSUS_TRACE, { mode: 'retain-on-failure', snapshots: false, screenshots: false, sources: false })
+})
+
+test('WL70 rendered control census configures its trace before other suite statements', () => {
+  const source = readFileSync(new URL('./control-inventory.spec.mjs', import.meta.url), 'utf8')
+  assert.match(source, /import\s*\{[^}]*\bCENSUS_TRACE\b[^}]*\}\s*from\s*['"]\.\/controlCensus\.mjs['"]/)
+  assert.match(source, /test\.describe\('rendered control census',\s*\(\)\s*=>\s*\{\s*test\.use\(\{\s*trace:\s*CENSUS_TRACE\s*\}\)/)
+})
 
 function profilePage({ values = [], selectedName = null } = {}) {
   return { getByRole: (role, options) => {
