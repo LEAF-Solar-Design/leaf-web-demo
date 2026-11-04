@@ -294,6 +294,7 @@ export function DrawingIdentityProvider({
     source: identity.source,
     origin: identity.origin,
     tenantKind: identity.tenantKind ?? null,
+    uploadSource: identity.uploadSource ?? null,
     setFromUpload,
     setFromQuery,
     selectNoticeDrawing,

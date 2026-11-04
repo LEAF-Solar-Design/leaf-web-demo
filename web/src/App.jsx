@@ -104,6 +104,7 @@ import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import AddonsPanel from './components/AddonsPanel.jsx'
 import CostTransparencyPanel from './components/CostTransparencyPanel.jsx'
 import useTenantMcpRegistry from './useTenantMcpRegistry.js'
+import useDeviceRegistry from './useDeviceRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
 import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
@@ -168,7 +169,7 @@ import {
   config, authHeaders, getSessionIdentity, getSession, getTools, getCapabilities, runTool, runToolAsync,
   getJob, recordToEnvelope, publishStagedAuthor, getDrawingIntake,
   getDrawingVersions, undoDrawing, redoDrawing, takeCheckout, releaseCheckout, nlPrompt,
-  createOrg, listProjects, createProject, openProject, subscribeUnauthorized,
+  createOrg, listProjects, createProject, openProject, importUploadedDrawingVersion, subscribeUnauthorized,
   saveEditedDrawingVersion,
   saveDrawingVersionPlan,
   fetchDrawingDxf,
@@ -500,12 +501,12 @@ function ProjectDrawingEngineOpener({ scope, target }) {
   return failure ? <button className="btn ghost" onClick={() => setRetry((value) => value + 1)}>Retry saved drawing</button> : null
 }
 
-function promoteStandaloneUpload({ receipt }, attempt, current, setFromUpload) {
+function promoteStandaloneUpload({ receipt, status }, attempt, current, setFromUpload) {
   if (!attempt || current.token !== attempt.token || current.pane !== 'material'
     || current.selection !== attempt.selection) return
   if (typeof receipt?.drawing_id !== 'string' || !receipt.drawing_id) return
   // No asynchronous work between the current-context check and promotion.
-  setFromUpload(receipt)
+  setFromUpload({ ...receipt, extracted_version: status?.extracted_version })
 }
 
 export function StandaloneMaterialUpload({ token, pane, selection, getContext, onPolicy, onReady, onBack }) {
@@ -625,7 +626,7 @@ export default function App() {
   // this change moves ownership and nothing else. The console keeps its
   // module-const behavior — the seed is frozen at mount and nothing in this
   // shell promotes an upload only through the standalone adapter below.
-  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, setFromUpload, selectNoticeDrawing, isScopeCurrent } = useDrawingIdentity()
+  const { drawingId: REQUESTED_DRAWING_ID, source: DRAWING_SOURCE, uploadSource, setFromUpload, selectNoticeDrawing, isScopeCurrent } = useDrawingIdentity()
   const requestedDrawingIdRef = useRef(REQUESTED_DRAWING_ID)
   // The same load fence carries local-source ownership and its generation.
   requestedDrawingIdRef.current = REQUESTED_DRAWING_ID
@@ -1165,6 +1166,7 @@ export default function App() {
     listProjects,
     createProject,
     openProject,
+    importUpload: importUploadedDrawingVersion,
   }), [])
   const workspaceController = useWorkspaceController({
     mock,
@@ -1192,6 +1194,8 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const deviceRegistry = useDeviceRegistry({ mock: mock || knownGuest, projectId: openProjectId })
+  const [linkDeviceOpen, setLinkDeviceOpen] = useState(false)
   useDrawingScopeReset(openProjectId)
   useLayoutEffect(() => {
     // A project or drawing change retires any queued product-tab switch.
@@ -2624,10 +2628,21 @@ export default function App() {
     return createWorkspaceOrg(givenName)
   }, [createWorkspaceOrg])
 
-  const onCreateProject = useCallback(async (givenName) => {
+  const onCreateProject = useCallback(async (givenName, options = {}) => {
     if (typeof givenName !== 'string' || !givenName.trim()) return
+    if (options.fromDrawing) {
+      const source = uploadSource
+      if (mock || !isScopeCurrent() || !source || source.drawingId !== REQUESTED_DRAWING_ID) {
+        setProjectPane('material')
+        return null
+      }
+      return createWorkspaceProject(givenName, {
+        drawingUpload: source,
+        isSourceCurrent: () => isScopeCurrent() && requestedDrawingIdRef.current === source.drawingId,
+      })
+    }
     return createWorkspaceProject(givenName)
-  }, [createWorkspaceProject])
+  }, [createWorkspaceProject, uploadSource, mock, isScopeCurrent, REQUESTED_DRAWING_ID])
 
   const prepareRunParams = useCallback((tool, params, options) => {
     const isWrite = (tool.capabilities || []).includes('drawing.write')
@@ -5109,6 +5124,27 @@ export default function App() {
         onRefresh: mcpRegistry.refresh,
         onHealth: mcpRegistry.health,
         onUnlink: mcpRegistry.unlink,
+      }}
+      devices={!mock && (knownGuest || !openProjectId) ? null : {
+        mock,
+        projectId: openProjectId,
+        devices: deviceRegistry.devices,
+        loading: deviceRegistry.loading,
+        busy: deviceRegistry.busy,
+        error: deviceRegistry.error,
+        catalog: deviceRegistry.catalog,
+        catalogLoading: deviceRegistry.catalogLoading,
+        catalogError: deviceRegistry.catalogError,
+        onLoadCatalog: deviceRegistry.loadCatalog,
+        open: linkDeviceOpen,
+        onToggle: setLinkDeviceOpen,
+        onEnroll: deviceRegistry.enroll,
+        onRefresh: deviceRegistry.refresh,
+        onCommand: deviceRegistry.command,
+        onGetCommand: deviceRegistry.getCommand,
+        onAudit: deviceRegistry.audit,
+        onRevoke: deviceRegistry.revoke,
+        onRelayToken: deviceRegistry.relayToken,
       }}
     >
     <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-drawer={studioShell && !browserAssetActive ? studioDrawer : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"

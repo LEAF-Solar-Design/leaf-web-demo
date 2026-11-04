@@ -182,6 +182,7 @@ COPY engine/    /app/engine/
 RUN python /app/server/lab_corpus_executor.py --install
 COPY platform/  /app/platform/
 COPY contract/  /app/contract/
+COPY device-agent/ /app/device-agent/
 COPY data/      /app/data/
 COPY scripts/reconcile_customization_authority.py /app/scripts/reconcile_customization_authority.py
 COPY scripts/reconcile_sessions_authority.py /app/scripts/reconcile_sessions_authority.py

@@ -1,0 +1,16 @@
+[
+  {
+    "package": "homeassistant",
+    "display_name": "Home Assistant",
+    "version": "2026.10.4",
+    "port": 8123,
+    "health_path": "/api/",
+    "relay_allow": [
+      {"method": "GET", "path_prefix": "/api/states"},
+      {"method": "POST", "path_prefix": "/api/services/light/"},
+      {"method": "POST", "path_prefix": "/api/services/scene/"},
+      {"method": "POST", "path_prefix": "/api/services/homeassistant/turn_off"},
+      {"method": "POST", "path_prefix": "/api/services/homeassistant/turn_on"}
+    ]
+  }
+]
