@@ -850,14 +850,26 @@ def test_takeoff_version_follow_and_unbound_guard(backend, monkeypatch):
             assert store.undo(backend, TENANT, "solar", holder="fixture-owner", fence=fence) == 2
             assert takeoff_read(backend, 2)["output"]["summary"]["head"] == a
             older = takeoff_read(backend, 1)
-            assert older["output"]["summary"]["head"] == b
-            assert all(line["reason"] == "PHYSICAL_STATE_AHEAD_OF_VERSION" and line["quantity"] is None
+            # V3's historical-head rule excludes a tip sourced after an unbound version.
+            assert older["output"]["summary"]["head"] is None
+            assert all(line["reason"] == "PHYSICAL_STATE_ABSENT" and line["quantity"] is None
                        for line in takeoff_physical_lines(older))
             assert all(line["status"] == "computed" for line in takeoff_lines(older).values()
                        if line["source"]["kind"] == "graph")
             assert takeoff_proof(backend, older)
     finally:
         store._physical_memo_clear()
+
+
+def test_takeoff_physical_state_ahead_of_version_guard():
+    physical = takeoff_wrapper()
+    physical["head"]["state"]["source_version"] = 3
+    result = takeoff_direct(physical=physical, source=takeoff_binding(1))
+    assert takeoff_physical_lines(result)
+    assert all(line["reason"] == "PHYSICAL_STATE_AHEAD_OF_VERSION" and line["quantity"] is None
+               for line in takeoff_physical_lines(result))
+    assert all(line["status"] == "computed" for line in takeoff_lines(result).values()
+               if line["source"]["kind"] == "graph")
 
 
 def test_takeoff_tenant_isolation(backend, monkeypatch):
