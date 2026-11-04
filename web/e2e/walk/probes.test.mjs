@@ -6,7 +6,7 @@ import { effectAssertion, resolveProbe, normalizedControlKey, requireControlCens
   SOLAR_CHAIN_STAGES, SOLAR_TOOL_SETUP, solarChainSteps, projectSharedShellProbe, PROJECT_WORKSPACE_PROBES } from './probes.mjs'
 import { jobMonitorLauncherRecipe } from './probes.mjs'
 import { assertCountControlIdentity } from './fixtures.mjs'
-import { CENSUS_TRACE, activeToolbarProfile, enumerateControls, SHELL_WRAPPER_SCOPES, resolveCensus } from './controlCensus.mjs'
+import { CENSUS_TRACE, activeToolbarProfile, enumerateControls, MAX_ENUMERATION_ATTEMPTS, SHELL_WRAPPER_SCOPES, resolveCensus } from './controlCensus.mjs'
 import { readControlInventory } from '../../walk/controlInventory.mjs'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
@@ -67,7 +67,9 @@ test('WL61 census leaves ambiguous or absent profile controls undefined without 
   assert.equal(await activeToolbarProfile(profilePage()), undefined)
 })
 
-function enumerationPage(rows) {
+function enumerationPage(rows, { rowsForEvaluation = () => rows } = {}) {
+  let evaluateAllCalls = 0
+  let currentRows = rows
   const node = (tagName, attributes, parentElement = null) => ({
     tagName, parentElement,
     getAttribute: name => attributes[name] ?? null,
@@ -75,17 +77,68 @@ function enumerationPage(rows) {
     getClientRects: () => [{}],
     matches: () => false,
   })
-  const elements = rows.map(({ name, ancestors = [] }) => {
-    const parent = ancestors.reduce((parent, { role, name }) =>
-      node('DIV', { role, 'aria-label': name }, parent), null)
-    return node('BUTTON', { 'aria-label': name }, parent)
+  const elementsFor = rows => rows.map(({ name, ancestors = [], inert = false, tag = 'BUTTON', role }) => {
+    const parent = ancestors.reduce((parent, { role, name, inert = false }) =>
+      node('DIV', { role, 'aria-label': name, ...(inert ? { inert: '' } : {}) }, parent), null)
+    return node(tag, { 'aria-label': name, ...(role ? { role } : {}), ...(inert ? { inert: '' } : {}) }, parent)
   })
-  return { locator: () => ({
-    evaluateAll: async (read, options) => new Function('elements', 'options', 'getComputedStyle',
-      `return (${read})(elements, options)`)(elements, options, () => ({ display: 'block', visibility: 'visible' })),
-    nth: index => ({ ariaSnapshot: async () => `- button ${JSON.stringify(rows[index].name)}` }),
+  return { get evaluateAllCalls() { return evaluateAllCalls }, locator: () => ({
+    evaluateAll: async (read, options) => {
+      currentRows = rowsForEvaluation(++evaluateAllCalls)
+      return new Function('elements', 'options', 'getComputedStyle',
+        `return (${read})(elements, options)`)(elementsFor(currentRows), options, () => ({ display: 'block', visibility: 'visible' }))
+    },
+    nth: index => ({ ariaSnapshot: async () => `- button ${JSON.stringify(currentRows[index].name)}` }),
   }) }
 }
+
+test('WL76 inert controls and descendants are invisible and disabled while siblings remain visible', async () => {
+  const page = enumerationPage([
+    { name: 'Inert ancestor', ancestors: [{ inert: true }] },
+    { name: 'Inert control', inert: true },
+    { name: 'Operable sibling' },
+  ])
+  const controls = await enumerateControls(page)
+  assert.deepEqual(controls.map(({ name, visible, disabled }) => ({ name, visible, disabled })), [
+    { name: 'Inert ancestor', visible: false, disabled: true },
+    { name: 'Inert control', visible: false, disabled: true },
+    { name: 'Operable sibling', visible: true, disabled: false },
+  ])
+  assert.equal(page.evaluateAllCalls, 2)
+})
+
+test('WL76 a stable enumeration preserves control fields and filters containers in two reads', async () => {
+  const page = enumerationPage([{ name: 'Toolbar', role: 'toolbar' }, { name: 'Save' }])
+  assert.deepEqual(await enumerateControls(page), [{ index: 1, role: 'button', name: 'Save', scope: 'document',
+    disabled: false, visible: true, raw_name: 'Save', name_key: 'Save', disabled_reason: '' }])
+  assert.equal(page.evaluateAllCalls, 2)
+})
+
+test('WL76 a changed signature or length retries and returns the next attempt controls', async () => {
+  const initial = [{ name: 'Before' }]
+  for (const changed of [
+    [{ name: 'After' }],
+    [{ name: 'Before', tag: 'INPUT' }],
+    [{ name: 'Before', role: 'switch' }],
+    [{ name: 'Before' }, { name: 'Added' }],
+    [],
+    [{ name: 'Before', role: 'toolbar' }],
+  ]) {
+    const page = enumerationPage(initial, { rowsForEvaluation: call => call === 1 ? initial : changed })
+    const controls = await enumerateControls(page)
+    assert.deepEqual(controls, await enumerateControls(enumerationPage(changed)))
+    assert.equal(page.evaluateAllCalls, 4)
+  }
+})
+
+test('WL76 a perpetually changing page rejects after three attempts and six reads', async () => {
+  assert.equal(MAX_ENUMERATION_ATTEMPTS, 3)
+  const page = enumerationPage([], { rowsForEvaluation: call => [{ name: `Control ${call}` }] })
+  await assert.rejects(enumerateControls(page), {
+    message: 'control census: the page changed during enumeration on 3 attempts',
+  })
+  assert.equal(page.evaluateAllCalls, 6)
+})
 
 test('WL68 shell wrapper scopes are frozen and limited to the Studio sidebar region', () => {
   assert.ok(Object.isFrozen(SHELL_WRAPPER_SCOPES))

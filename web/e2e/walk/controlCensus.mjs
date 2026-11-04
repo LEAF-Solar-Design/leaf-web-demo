@@ -8,6 +8,7 @@ export const CENSUS_TRACE = Object.freeze({ mode: 'retain-on-failure', snapshots
 // The studio shell wraps the same rail column in a named region, which is not part of a control's identity.
 export const SHELL_WRAPPER_SCOPES = Object.freeze(['region:"Studio sidebar"'])
 export const INTERACTIVE_SELECTOR = 'button,a[href],area[href],input:not([type="hidden"]),select,textarea,summary,[contenteditable]:not([contenteditable="false"]),[role],[tabindex]'
+export const MAX_ENUMERATION_ATTEMPTS = 3
 const interactiveRoles = ['button', 'link', 'checkbox', 'radio', 'switch', 'textbox', 'searchbox', 'combobox',
   'listbox', 'option', 'slider', 'spinbutton', 'tab', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'treeitem',
   'gridcell', 'columnheader', 'rowheader', 'scrollbar']
@@ -25,7 +26,8 @@ function snapshotIdentity(snapshot, fallback) {
 
 export async function enumerateControls(page) {
   const all = page.locator(INTERACTIVE_SELECTOR)
-  const controls = await all.evaluateAll((elements, { roles, containers, shellWrapperScopes }) => elements.map((element, index) => {
+  const read = (elements, { roles, containers, shellWrapperScopes }) => elements.map((element, index) => {
+    const signature = `${element.tagName.toLowerCase()}|${element.getAttribute('role') || ''}|${element.getAttribute('aria-label') || ''}`
     const tag = element.tagName.toLowerCase(), explicitRole = element.getAttribute('role')?.split(/\s+/)[0]
     const nativeRoles = { button: 'button', a: 'link', area: 'link', select: element.multiple ? 'listbox' : 'combobox',
       textarea: 'textbox', summary: 'button', main: 'main', nav: 'navigation', aside: 'complementary',
@@ -35,11 +37,11 @@ export async function enumerateControls(page) {
       button: 'button', submit: 'button', reset: 'button', search: 'searchbox' }
     const role = explicitRole || nativeRoles[tag] || (tag === 'input' ? inputRoles[element.type] || 'textbox'
       : element.isContentEditable ? 'textbox' : 'generic')
-    if (containers.includes(role)) return null
+    if (containers.includes(role)) return { signature, control: null }
     const interactive = ['button', 'input', 'select', 'textarea', 'summary'].includes(tag)
       || (['a', 'area'].includes(tag) && element.hasAttribute('href'))
       || roles.includes(explicitRole) || element.isContentEditable || (element.hasAttribute('tabindex') && element.tabIndex >= 0)
-    if (!interactive) return null
+    if (!interactive) return { signature, control: null }
     const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim()
     const label = (node) => {
       const ids = node.getAttribute('aria-labelledby')?.trim().split(/\s+/)
@@ -52,7 +54,7 @@ export async function enumerateControls(page) {
     const chain = []
     for (let node = element; node; node = node.parentElement) {
       const style = getComputedStyle(node)
-      if (node.hidden || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)) visible = false
+      if (node.hidden || node.hasAttribute('inert') || style.display === 'none' || ['hidden', 'collapse'].includes(style.visibility)) visible = false
       if (node.getAttribute('aria-disabled') === 'true' || node.hasAttribute('inert')) disabled = true
       if (node === element) continue
       const landmark = node.getAttribute('role')?.split(/\s+/)[0]
@@ -66,14 +68,21 @@ export async function enumerateControls(page) {
         if (!shellWrapperScopes.includes(scope)) chain.unshift(scope)
       }
     }
-    return { index, role, name: label(element), scope: chain.join(' > ') || 'document', disabled, visible }
-  }), { roles: interactiveRoles, containers: containerRoles, shellWrapperScopes: SHELL_WRAPPER_SCOPES })
-  for (const control of controls.filter(Boolean)) {
-    if (control.visible) Object.assign(control, snapshotIdentity(await all.nth(control.index).ariaSnapshot(), control))
-    Object.assign(control, controlNameAttributes(control.name))
-    if (control.disabled_reason) control.disabled = true
+    return { signature, control: { index, role, name: label(element), scope: chain.join(' > ') || 'document', disabled, visible } }
+  })
+  for (let attempt = 0; attempt < MAX_ENUMERATION_ATTEMPTS; attempt++) {
+    const rows = await all.evaluateAll(read, { roles: interactiveRoles, containers: containerRoles, shellWrapperScopes: SHELL_WRAPPER_SCOPES })
+    const controls = rows.map(({ control }) => control).filter(Boolean)
+    for (const control of controls) {
+      if (control.visible) Object.assign(control, snapshotIdentity(await all.nth(control.index).ariaSnapshot(), control))
+      Object.assign(control, controlNameAttributes(control.name))
+      if (control.disabled_reason) control.disabled = true
+    }
+    const signatures = await all.evaluateAll(elements => elements.map(element =>
+      `${element.tagName.toLowerCase()}|${element.getAttribute('role') || ''}|${element.getAttribute('aria-label') || ''}`))
+    if (signatures.length === rows.length && signatures.every((signature, index) => signature === rows[index].signature)) return controls
   }
-  return controls.filter(Boolean)
+  throw new Error('control census: the page changed during enumeration on 3 attempts')
 }
 
 const groupNames = { draw: 'Draw', modify: 'Modify', clipboard: 'Clipboard', properties: 'Properties',
