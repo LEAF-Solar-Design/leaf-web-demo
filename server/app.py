@@ -409,6 +409,8 @@ app.include_router(drawings.router)  # M2 write loop: versioned drawing endpoint
 from routers import project_drawings  # noqa: E402
 app.middleware("http")(project_drawings.no_store_responses)
 app.include_router(project_drawings.router)
+from routers import project_physical  # noqa: E402
+app.include_router(project_physical.router)
 app.include_router(solar_terrain.router)  # Head-bound Ground terrain preview operations
 app.include_router(solar_tracker_rows.router)
 app.include_router(solar_modules.router)

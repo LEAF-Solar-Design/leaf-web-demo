@@ -781,6 +781,8 @@
     "server-text-match",
     "server-text-match-request-sites",
     "server-text-match-operator-sites",
+    "server-project-physical-routes",
+    "platform-project-physical-commit",
     "server-sip-r6-read",
     "server-sip-r6-artifacts",
     "server-sip-r6-routes",

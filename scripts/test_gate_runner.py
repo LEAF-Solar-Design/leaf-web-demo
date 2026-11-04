@@ -138,10 +138,30 @@ def test_sip_r1_gate_registration():
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
     assert suites["platform-static"].expected == 268  # +3 import source kind contract.
     assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
-    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
+    assert suites["gate-runner-selftest"].expected == 273  # S1a physical registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
+
+
+def test_project_physical_gate_registration():
+    runner = _load_runner()
+    catalog = runner.build_suites()
+    suites = {suite.id: suite for suite in catalog}
+    selection = json.loads((SCRIPTS / "ci/test-selection-map.json").read_text(encoding="utf-8"))
+    for suite_id, directory, target, floor, database in (
+            ("server-project-physical-routes", "server", "tests/test_project_physical_routes.py", 15, False),
+            ("platform-project-physical-commit", "platform", "tests/test_project_physical_commit.py", 4, True)):
+        suite = suites[suite_id]
+        assert suite.id == suite_id
+        assert suite.kind == "pytest" and suite.cwd == REPO / directory
+        assert suite.argv == runner._py_pytest(target) and suite.expected == floor
+        assert suite.uses_database is database and suite.db_gated is database
+        assert suite.allowed_skip_reasons == ()
+        assert suite.database_skip_reasons == (
+            (r"PostgreSQL integration test requires DATABASE_URL",) if database else ())
+        assert [row.id for row in catalog].count(suite_id) == 1
+        assert selection["mandatory_suite_ids"].count(suite_id) == 1
 
 
 def test_sip_r6_gate_registration():
@@ -4462,7 +4482,7 @@ def test_R14C_32_mandatory_registration():
     mandatory = selection["mandatory_suite_ids"]
     assert mandatory.count("platform-sip-r14-exchange") == 1
     assert mandatory[-3:-1] == ["platform-sip-r14-exchange", "platform-sip-r14-sizing"]
-    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
+    assert suites["gate-runner-selftest"].expected == 273  # S1a physical registration.
 
 
 def test_sip_r14_exchange_gate_registration():
@@ -4558,7 +4578,7 @@ def test_sip_r3e_gate_registration():
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
     # LD1b adds one demo classification regression to the 1178 platform rows.
     assert suites["platform"].expected == 1205
-    assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
+    assert suites["gate-runner-selftest"].expected == 273  # S1a physical registration.
 
 
 def test_demo_actor_gate_registration():
@@ -4663,7 +4683,7 @@ def test_w1c_commit_solve_gate_registration():
             uses_database=database, db_gated=database,
             database_skip_reasons=((r"PostgreSQL integration test requires DATABASE_URL",) if database else ()))
         assert selection["mandatory_suite_ids"].count(suite_id) == 1
-    assert suites["gate-runner-selftest"].expected == 272
+    assert suites["gate-runner-selftest"].expected == 273  # S1a physical registration.
 
 
 def test_lab_git_mirror_gate_registration():

@@ -48,6 +48,7 @@ import write_loop  # first: it puts the drawing store (da/store.py) on the path 
 import solar_ground_frames as frames
 import solar_ground_terrain as terrain
 import solar_physical_head as ph
+from solar_physical_source import LegacySource
 import solar_physical_state as ps
 from solar_design_graph import GraphValidationError
 from solar_graph_context import resolve_graph_context
@@ -206,8 +207,10 @@ def _kernel_refusal(exc):
     return "FRAMES_PILES_STATE_INVALID"
 
 
-def _context(backend, tenant_id, drawing_id, project_id):
+def _context(backend, tenant_id, drawing_id, project_id, *, source=None):
     try:
+        if source is not None:
+            return {"project_id": source.project_id()}
         return resolve_graph_context(backend, tenant_id, drawing_id, "head", project_id=project_id)
     except GraphValidationError as exc:
         code = {"PROJECT_MISMATCH": "FRAMES_PILES_PROJECT_MISMATCH",
@@ -336,11 +339,12 @@ def _range(state, mpu, inputs):
 _RUN = {GENERATE: _generate, COLLISION: _collision, PILING: _piling, RANGE: _range}
 
 
-def _operate(backend, tenant_id, drawing_id, operation, base, project_id, request, inputs, drawing_units=None):
+def _operate(backend, tenant_id, drawing_id, operation, base, project_id, request, inputs, drawing_units=None, *, source=None):
     """The shared transaction: context, head, retry, stale base, units, run, publish."""
-    context = _context(backend, tenant_id, drawing_id, project_id)
+    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    context = _context(backend, tenant_id, drawing_id, project_id, source=source)
     project = context["project_id"]
-    head, head_document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=project)
+    head, head_document = source.parent()
     request_sha256 = canonical_sha256(request)
     if (head is not None and head["parent"] == base and head_document["capability"] == operation
             and head_document["source"]["sha256"] == request_sha256):
@@ -383,7 +387,7 @@ def _operate(backend, tenant_id, drawing_id, operation, base, project_id, reques
                        terrain_view, summary, standing)
     document = ps.physical_document(state, drawing_units=units, source_sha256=request_sha256,
                                     capability=operation, parent=base, frame=frame)
-    published = ph.publish_physical_state(backend, tenant_id, drawing_id, document, project_id=project)
+    published = source.publish(document)
     return _result(operation, "published" if published["created"] else "retry", published["created"],
                    drawing_id, project, base, document, published["head"], terrain_view, summary, standing)
 
@@ -484,7 +488,7 @@ def _common(project_id, base):
     return _base(base)
 
 
-def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, drawing_units, project_id=None):
+def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, drawing_units, project_id=None, source=None):
     """frame-generate: pack frames into `boundary` (drawing units) with the plugin preset object."""
     base = _common(project_id, base)
     if type(drawing_units) is not str or drawing_units not in ps.UNITS:
@@ -494,32 +498,32 @@ def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, d
     request = {"operation": GENERATE, "base": base, "drawing_units": drawing_units, "boundary": boundary,
                "preset": preset}
     return _operate(backend, tenant_id, drawing_id, GENERATE, base, project_id, request,
-                    {"boundary": boundary, "preset": loaded}, drawing_units)
+                    {"boundary": boundary, "preset": loaded}, drawing_units, source=source)
 
 
-def detect_collisions(backend, tenant_id, drawing_id, *, base, project_id=None):
+def detect_collisions(backend, tenant_id, drawing_id, *, base, project_id=None, source=None):
     """frame-collision-detect: overlap markers for the head's native frames."""
     base = _common(project_id, base)
     request = {"operation": COLLISION, "base": base}
-    return _operate(backend, tenant_id, drawing_id, COLLISION, base, project_id, request, {})
+    return _operate(backend, tenant_id, drawing_id, COLLISION, base, project_id, request, {}, source=source)
 
 
-def generate_piles(backend, tenant_id, drawing_id, *, base, preset, pile_template, project_id=None):
+def generate_piles(backend, tenant_id, drawing_id, *, base, preset, pile_template, project_id=None, source=None):
     """piling-generate: piles for the head's native frames, on the head's terrain."""
     base = _common(project_id, base)
     loaded, preset_store = load_preset(preset)
     pile_store = load_pile_store(pile_template, loaded, preset_store)
     request = {"operation": PILING, "base": base, "preset": preset, "pile_template": pile_template}
     return _operate(backend, tenant_id, drawing_id, PILING, base, project_id, request,
-                    {"preset": loaded, "pile_store": pile_store})
+                    {"preset": loaded, "pile_store": pile_store}, source=source)
 
 
-def check_pile_lengths(backend, tenant_id, drawing_id, *, base, preset, project_id=None):
+def check_pile_lengths(backend, tenant_id, drawing_id, *, base, preset, project_id=None, source=None):
     """pile-length-range-check: markers for piles outside the preset's length window."""
     base = _common(project_id, base)
     loaded, _ = load_preset(preset)
     request = {"operation": RANGE, "base": base, "preset": preset}
-    return _operate(backend, tenant_id, drawing_id, RANGE, base, project_id, request, {"preset": loaded})
+    return _operate(backend, tenant_id, drawing_id, RANGE, base, project_id, request, {"preset": loaded}, source=source)
 
 
 # ------------------------------------------------------------------- preview --

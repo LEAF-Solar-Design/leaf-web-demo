@@ -2087,6 +2087,13 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",
               )),
+        # S1a: canonical project Ground Physical routes and fenced publication.
+        Suite("server-project-physical-routes", "server project Ground Physical routes",
+              "pytest", SERVER, _py_pytest("tests/test_project_physical_routes.py"), 15),
+        Suite("platform-project-physical-commit", "platform project Ground Physical fenced commit",
+              "pytest", REPO / "platform", _py_pytest("tests/test_project_physical_commit.py"), 4,
+              uses_database=True, db_gated=True,
+              database_skip_reasons=(r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("server-sip-r6-read", "server project Solar reads",
               "pytest", SERVER, _py_pytest("tests/test_sip_r6_read.py"), 6),
         Suite("server-sip-r6-artifacts", "server project Solar artifacts",
@@ -3250,7 +3257,8 @@ def build_suites() -> List[Suite]:
               # W1C-3 adds the commit suite registration contract.
               # SEL-303b adds the mirror/stage-policy registration contract.
               # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
-              ["test_studio_walk_regression_gate.py"], 272),
+              # S1a adds one project physical registration test (272 -> 273).
+              ["test_studio_walk_regression_gate.py"], 273),
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),

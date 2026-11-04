@@ -39,6 +39,7 @@ import re
 import write_loop  # first: it puts da/ on sys.path, which solar_physical_head's `import store` needs
 import solar_ground_terrain as terrain
 import solar_physical_head as ph
+from solar_physical_source import LegacySource
 import solar_physical_state as ps
 from solar_design_graph import GraphValidationError
 from solar_graph_context import resolve_graph_context
@@ -237,8 +238,10 @@ def _report_summary(report):
     return {key: report[key] for key in keys}
 
 
-def _context(backend, tenant_id, drawing_id, project_id):
+def _context(backend, tenant_id, drawing_id, project_id, *, source=None):
     try:
+        if source is not None:
+            return {"project_id": source.project_id()}
         return resolve_graph_context(backend, tenant_id, drawing_id, "head", project_id=project_id)
     except GraphValidationError as exc:
         code = {"PROJECT_MISMATCH": "TERRAIN_PROJECT_MISMATCH",
@@ -258,12 +261,13 @@ def _preflight(project_id, expected_head):
     _expected_head(expected_head)
 
 
-def _current(backend, tenant_id, drawing_id, project_id, expected_head):
+def _current(backend, tenant_id, drawing_id, project_id, expected_head, *, source=None):
     """(context, head view, head document) for a mutating operation: the graph context, then
     the current head (TERRAIN_STATE_NOT_FOUND when there is none, then TERRAIN_HEAD_MOVED
     when it is not the expected one). _preflight has run."""
-    context = _context(backend, tenant_id, drawing_id, project_id)
-    head, document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=context["project_id"])
+    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    context = _context(backend, tenant_id, drawing_id, project_id, source=source)
+    head, document = source.parent()
     if head is None:
         raise TerrainAdapterError("TERRAIN_STATE_NOT_FOUND")
     if expected_head is not None and head["state"]["artifact_id"] != expected_head:
@@ -282,7 +286,7 @@ def _with_record(state, capability, record):
     return records
 
 
-def _publish(backend, tenant_id, drawing_id, context, head, document, state, capability):
+def _publish(backend, tenant_id, drawing_id, context, head, document, state, capability, *, source=None):
     """Publish `state` as a child of the head (created False and nothing written when it
     equals the head's state)."""
     if state == document["state"]:
@@ -290,8 +294,10 @@ def _publish(backend, tenant_id, drawing_id, context, head, document, state, cap
     child = ps.physical_document(state, drawing_units=document["units"]["drawing_units"],
                                  source_sha256=document["source"]["sha256"], capability=capability,
                                  parent=head["state"]["artifact_id"], frame=document["frame"])
-    published = ph.publish_physical_state(backend, tenant_id, drawing_id, child,
-                                          project_id=context["project_id"])
+    if source is None:
+        source = LegacySource(backend, tenant_id, drawing_id, context["project_id"])
+        source.context = context
+    published = source.publish(child)
     return published["created"], published["head"]
 
 
@@ -302,12 +308,13 @@ def _result(operation, created, drawing_id, project_id, frame, grid, record, rep
             "replaced": replaced, **extra, "head": head}
 
 
-def render_mesh(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None):
+def render_mesh(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None, source=None):
     """LEAFTERRAINMESH over the current head: render the mesh from the head's grid in the
     head's units and publish a child whose mesh_faces is the face count drawn, with the
     mesh's preview record. `replaced` is the head's mesh_faces (the faces the plugin erases)."""
     _preflight(project_id, expected_head)
-    context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head)
+    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head, source=source)
     frame = document_frame(document)
     grid = document_grid(document)
     mesh = mesh_of(document)
@@ -318,13 +325,13 @@ def render_mesh(backend, tenant_id, drawing_id, *, project_id=None, expected_hea
     state["mesh_faces"] = len(mesh)
     state["status_records"] = _with_record(state, MESH_CAPABILITY, record)
     created, head_view = _publish(backend, tenant_id, drawing_id, context, head, document, state,
-                                  MESH_CAPABILITY)
+                                  MESH_CAPABILITY, source=source)
     return _result("mesh", created, drawing_id, context["project_id"], frame, grid_summary(grid, mpu),
                    record, replaced, head_view)
 
 
 def check_tracker_slope(backend, tenant_id, drawing_id, *, limits=None, project_id=None,
-                        expected_head=None):
+                        expected_head=None, source=None):
     """LEAFTRACKERSLOPEVIOLATIONS over the current head: read the state's tracker frames,
     validate them on the head's grid against the limits, and publish a child whose
     slope_markers are the violation overlays (each {"role": "slope", "bbox": [x_min, y_min,
@@ -332,7 +339,8 @@ def check_tracker_slope(backend, tenant_id, drawing_id, *, limits=None, project_
     head's marker count (the overlays the plugin erases first)."""
     _preflight(project_id, expected_head)
     resolved = resolve_limits(limits)
-    context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head)
+    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head, source=source)
     frame = document_frame(document)
     grid = document_grid(document)
     mpu = frame["meters_per_unit"]
@@ -363,17 +371,18 @@ def check_tracker_slope(backend, tenant_id, drawing_id, *, limits=None, project_
     state["slope_markers"] = markers
     state["status_records"] = _with_record(state, SLOPE_CAPABILITY, record)
     created, head_view = _publish(backend, tenant_id, drawing_id, context, head, document, state,
-                                  SLOPE_CAPABILITY)
+                                  SLOPE_CAPABILITY, source=source)
     return _result("slope", created, drawing_id, context["project_id"], frame, grid_summary(grid, mpu),
                    record, replaced, head_view, report=summary)
 
 
-def clear_tracker_slope(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None):
+def clear_tracker_slope(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None, source=None):
     """LEAFCLEARTRACKERSLOPEVIOLATIONS over the current head: publish a child with no slope
     markers and no slope record. Needs no grid. Nothing is published when the head has no
     markers and no slope record."""
     _preflight(project_id, expected_head)
-    context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head)
+    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head, source=source)
     frame = document_frame(document)
     current = document["state"]
     replaced = len(current.get("slope_markers", []))
@@ -384,7 +393,7 @@ def clear_tracker_slope(backend, tenant_id, drawing_id, *, project_id=None, expe
         state["slope_markers"] = []
         state["status_records"] = _with_record(state, SLOPE_CAPABILITY, None)
         created, head_view = _publish(backend, tenant_id, drawing_id, context, head, document, state,
-                                      SLOPE_CAPABILITY)
+                                      SLOPE_CAPABILITY, source=source)
     return _result("slope-clear", created, drawing_id, context["project_id"], frame, None, None,
                    replaced, head_view)
 

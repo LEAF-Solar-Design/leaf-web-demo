@@ -19,6 +19,7 @@ router = APIRouter()
 _NO_STORE = {"Cache-Control": "no-store"}
 _PROJECT_DRAWING_PATH = re.compile(
     r"^/api/projects/[^/]+/(?:drawing-versions/[^/]+/context|drawings/[^/]+/checkout|"
+    r"drawings/[^/]+/versions/[^/]+/physical(?:/operations|/imports/landxml|/reads)?|"
     r"drawings/[^/]+/versions/[^/]+/solar-reads|drawings/[^/]+/solar-artifacts/[^/]+)/?$")
 _FAILURES = {
     "demo_actor_refused": (403, False),

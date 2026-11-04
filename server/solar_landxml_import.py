@@ -42,6 +42,7 @@ import solar_artifacts
 import solar_geo_formats as geo
 import solar_ground_terrain as terrain
 import solar_physical_head as ph
+from solar_physical_source import LegacySource
 import solar_physical_state as ps
 import write_loop
 from solar_design_graph import GraphValidationError
@@ -243,8 +244,10 @@ def terrain_grid(points, *, horizontal_scale, elevation_scale, target_cells):
     return grid
 
 
-def _context(backend, tenant_id, drawing_id, project_id):
+def _context(backend, tenant_id, drawing_id, project_id, *, source=None):
     try:
+        if source is not None:
+            return {"project_id": source.project_id()}
         return resolve_graph_context(backend, tenant_id, drawing_id, "head", project_id=project_id)
     except GraphValidationError as exc:
         code = {"PROJECT_MISMATCH": "LANDXML_PROJECT_MISMATCH",
@@ -256,7 +259,7 @@ def _context(backend, tenant_id, drawing_id, project_id):
 
 
 def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_units, crs,
-                           target_cells=DEFAULT_TARGET_CELLS, project_id=None):
+                           target_cells=DEFAULT_TARGET_CELLS, project_id=None, source=None):
     """Store the LandXML source and publish its terrain grid as the drawing's physical head.
 
     drawing_units is "m" or "ft"; crs is "none" or "EPSG:n"; target_cells is 2 to 200.
@@ -273,6 +276,7 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
     if (type(target_cells) is not int
             or not MIN_TARGET_CELLS <= target_cells <= MAX_TARGET_CELLS):
         raise LandXmlImportError("LANDXML_TARGET_CELLS_INVALID")
+    physical_source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
     source = inspect_landxml(data)
     if source["file_crs"] is not None and source["file_crs"] != crs:
         raise LandXmlImportError("LANDXML_CRS_MISMATCH")
@@ -282,9 +286,9 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
     grid = terrain_grid(source["points"], horizontal_scale=horizontal_scale,
                         elevation_scale=elevation_scale, target_cells=target_cells)
 
-    context = _context(backend, tenant_id, drawing_id, project_id)
+    context = _context(backend, tenant_id, drawing_id, project_id, source=physical_source)
     project = context["project_id"]
-    head, head_document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=project)
+    head, head_document = physical_source.parent()
     if head is None:
         frame = json.loads(json.dumps(ps.DEFAULT_FRAME))
         frame["crs"] = crs
@@ -302,8 +306,7 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
     document = ps.physical_document(state, drawing_units=drawing_units, source_sha256=source["sha256"],
                                     capability=CAPABILITY, parent=parent, frame=frame)
 
-    sink = solar_artifacts.ArtifactSink(backend, tenant_id, drawing_id, context, SOURCE_TOOL,
-                                        source["sha256"], False)
+    sink = physical_source.source_sink(SOURCE_TOOL, source["sha256"])
     try:
         source_ref = sink.finish(sink.prepare(solar_artifacts.ArtifactOutput(
             {"capability": CAPABILITY}, SOURCE_MEDIA_TYPE, SOURCE_FILENAME, data)))
@@ -315,7 +318,7 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
             and head_document["state"].get("grid") == grid):
         created, head_view = False, head
     else:
-        published = ph.publish_physical_state(backend, tenant_id, drawing_id, document, project_id=project)
+        published = physical_source.publish(document)
         created, head_view = published["created"], published["head"]
     return {
         "schema": RESULT_SCHEMA, "created": created, "drawing_id": drawing_id, "project_id": project,

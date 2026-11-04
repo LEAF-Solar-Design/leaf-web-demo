@@ -7,6 +7,7 @@ import solar_frames_piles as fp
 import solar_ground_buildout as bo
 import solar_physical_head as ph
 import solar_physical_state as ps
+from solar_physical_source import LegacySource
 
 MAX_CIVIL_BODY_BYTES = 2_400_000
 RESULT_SCHEMA = "leaf.solar-civil-operation.v1"
@@ -69,11 +70,12 @@ def _grade_result(outcome, created, drawing_id, project, base, document, head, s
 
 
 def grade_pad(backend, tenant_id, drawing_id, *, base, boundary, mode="Auto", value_du=None,
-              project_id=None):
+              project_id=None, source=None):
     base = fp._common(project_id, base)
     boundary = _grade_inputs(boundary, mode, value_du)
-    project = fp._context(backend, tenant_id, drawing_id, project_id)["project_id"]
-    head, document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=project)
+    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    project = fp._context(backend, tenant_id, drawing_id, project_id, source=source)["project_id"]
+    head, document = source.parent()
     digest = fp.canonical_sha256({"operation": GRADE, "base": base,
                                   "boundary": [[float(v) + 0.0 for v in point] for point in boundary],
                                   "mode": mode, "value_du": None if value_du is None else float(value_du) + 0.0})
@@ -117,25 +119,31 @@ def grade_pad(backend, tenant_id, drawing_id, *, base, boundary, mode="Auto", va
     child = ps.physical_document(state, drawing_units=document["units"]["drawing_units"],
                                  source_sha256=digest, capability=GRADE, parent=base,
                                  frame=document["frame"])
-    published = ph.publish_physical_state(backend, tenant_id, drawing_id, child, project_id=project)
+    published = source.publish(child)
     created = published["created"]
     return _grade_result("published" if created else "retry", created, drawing_id, project,
                          base, child, published["head"], summary if created else None)
 
 
-def operate(backend, tenant_id, drawing_id, body, *, project_id=None):
+def operate(backend, tenant_id, drawing_id, body, *, project_id=None, source=None):
     b = validate_body(body)
     operation = b["operation"]
     kwargs = {key: value for key, value in b.items() if key not in ("operation", "expected_head")}
     call = {fp.GENERATE: fp.generate_frames, fp.COLLISION: fp.detect_collisions,
             fp.PILING: fp.generate_piles, fp.RANGE: fp.check_pile_lengths, GRADE: grade_pad}[operation]
-    return call(backend, tenant_id, drawing_id, base=b["expected_head"], project_id=project_id, **kwargs)
+    return call(backend, tenant_id, drawing_id, base=b["expected_head"], project_id=project_id, source=source, **kwargs)
 
 
 def load_civil(backend, tenant_id, drawing_id, *, project_id=None):
     project = fp._context(backend, tenant_id, drawing_id, project_id)["project_id"]
-    head, document, preview = fp.load_frames_piles(backend, tenant_id, drawing_id, project_id=project)
-    return {"schema": VIEW_SCHEMA, "stored": head is not None, "head": head, "preview": preview,
+    head, document, _ = fp.load_frames_piles(backend, tenant_id, drawing_id, project_id=project)
+    return civil_view(head, document)
+
+
+def civil_view(head, document):
+    """Pure civil body for a bound pair; (None, None) is unbound."""
+    return {"schema": VIEW_SCHEMA, "stored": head is not None, "head": head,
+            "preview": None if head is None else fp.state_summary(document["state"]),
             "standing": None if head is None else fp.terrain_standing(
                 document["state"], document["units"]["meters_per_unit"]),
             "grade_pads": 0 if head is None else len(document["state"].get("grade_pads", []))}
