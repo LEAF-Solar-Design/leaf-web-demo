@@ -406,17 +406,36 @@ def test_malformed_http_storage_refuses_start(tmp_path, monkeypatch, content):
     assert not any(argv[:2] == ["launchctl", "bootstrap"] for argv, _ in calls)
 
 
-def test_lan_reachable_stops_and_fails(tmp_path, monkeypatch, ha_server):
-    runner, calls = install_stub(monkeypatch)
-    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("remove_fails", [False, True])
+def test_lan_reachable_stops_and_fails(tmp_path, monkeypatch, ha_server, platform, remove_fails):
+    interpreter = tmp_path / "python3.14"
+    interpreter.touch()
+    stub, calls = install_stub(monkeypatch, available={str(interpreter): "3.14.8"})
+
+    def runner(argv, **kwargs):
+        result = stub(argv, **kwargs)
+        if remove_fails and (argv[:2] == ["launchctl", "bootout"] or argv[:3] == ["systemctl", "--user", "disable"]):
+            raise HAError("Home Assistant service stop failed")
+        return result
+
+    handler = HomeAssistant(tmp_path, platform=platform, user_home=tmp_path / "user", uid=501,
                             runner=runner, port=ha_server.port)
+    monkeypatch.setattr(handler, "_python", lambda deadline: str(interpreter))
     monkeypatch.setattr(handler, "_lan_reachable", lambda: True)
     with pytest.raises(InstallError, match="^Home Assistant is reachable beyond localhost; stopped$"):
         handler.handle("pkg.install", {"version": PINNED_VERSION})
     argv = [item[0] for item in calls]
-    assert argv[-2][:2] == ["launchctl", "bootstrap"]
-    assert argv[-1][:2] == ["launchctl", "bootout"]
+    if platform == "darwin":
+        assert argv[-2][:2] == ["launchctl", "bootstrap"]
+        assert argv[-1] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
+    else:
+        assert ["systemctl", "--user", "disable", "--now", LABEL + ".service"] in argv
+        if not remove_fails:
+            assert argv[-1] == ["systemctl", "--user", "daemon-reload"]
+    assert handler._service_path().exists() is remove_fails
     state = json.loads((handler.root / "state.json").read_text())
+    assert state["package"] == "homeassistant" and state["version"] == PINNED_VERSION
     assert state["status"] == "error"
     assert state["error"] == "Home Assistant is reachable beyond localhost; stopped"
 

@@ -482,8 +482,10 @@ class HomeAssistant:
             self._start()
             self._wait_healthy(deadline)
             if self._lan_reachable():
-                self._stop()
-                raise InstallError("Home Assistant is reachable beyond localhost; stopped")
+                try:
+                    self._stop(remove=True)
+                finally:
+                    raise InstallError("Home Assistant is reachable beyond localhost; stopped")
             state = self.state()
             return {**state, "python": python, "requires_python": REQUIRES_PYTHON}
         except Exception as exc:
