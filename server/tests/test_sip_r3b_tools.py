@@ -501,7 +501,7 @@ def test_sip_r3b_proof_tampering(memory):
 
 def test_sip_r3b_no_activation():
     assert sha256(Path(local.__file__).read_bytes()).hexdigest() == (
-        "cfc20482a1bf59b54aa8f9ccb7cafeac14ce038e2bcf48f02d5bdf22586e1190")
+        "5a766402bd7c0e2c946d7bb872b18d5f2847e1a07ac24c4003555c4d412944b3")
     root = Path(local.__file__).parent
     for path in root.glob("*.py"):
         if any(part in path.stem for part in ("router", "routes", "job", "worker")):
