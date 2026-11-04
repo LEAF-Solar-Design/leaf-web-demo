@@ -1359,6 +1359,8 @@ class TestLegacyAdoption:
     def test_key_constants_and_codes(self, monkeypatch):
         legacy = self.legacy
         assert legacy.freeze_key(TENANT, DRAWING) == PREFIX + "physical-legacy/freeze.json"
+        assert legacy.intent_key(TENANT, DRAWING) == PREFIX + "physical-legacy/intent.json"
+        assert legacy.INTENT_SCHEMA == "leaf.physical-legacy-intent.v1"
         assert "/physical/" not in legacy.freeze_key(TENANT, DRAWING)
         assert legacy.FREEZE_SCHEMA == "leaf.solar-physical-legacy-freeze.v1"
         assert legacy.MAX_RECORD_BYTES == 1024
@@ -1494,7 +1496,7 @@ class TestLegacyAdoption:
         from leaf_cloud_client import canonical_bytes
         assert all(canonical_bytes(record) == backend.get(self.legacy.freeze_key(TENANT, DRAWING))
                    for record in records)
-        assert sum("physical-legacy/" in k for k in backend.drawing_object_keys(TENANT, DRAWING)) == 1
+        assert sum("physical-legacy/" in k for k in backend.drawing_object_keys(TENANT, DRAWING)) == 2
 
     def test_frozen_reads_ignore_later_entries(self, backend, graph, monkeypatch):
         tip = publish(backend)["head"]
@@ -1525,15 +1527,22 @@ class TestLegacyAdoption:
     def test_unbound_publish_unchanged_when_not_frozen(self, backend, monkeypatch, switch_on):
         recording = self.Recording(backend)
         key = self.legacy.freeze_key(TENANT, DRAWING)
+        intent = self.legacy.intent_key(TENANT, DRAWING)
         if switch_on:
             monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
             assert self.legacy.refuse_if_frozen(recording, TENANT, DRAWING) is None
-            assert recording.keys == [key]
+            assert recording.keys == [key, intent]
         else:
             assert publish(recording)["created"]
+            # One freeze and one intent read before append, and one of each after.
             assert recording.keys.count(key) == 2
-            assert not any("physical-legacy" in k and k != key for k in recording.keys)
+            assert recording.keys.count(intent) == 2
             assert self._view(backend) == ph._head(backend, TENANT, DRAWING, PROJECT)[0]
+            retry = self.Recording(backend)
+            assert publish(retry)["created"] is False
+            # An unfrozen idempotent retry reads each key exactly once.
+            assert retry.keys.count(key) == 1
+            assert retry.keys.count(intent) == 1
 
     def test_retry_of_head_after_freeze_returns_existing(self, backend, monkeypatch):
         first = publish(backend)
@@ -1546,7 +1555,81 @@ class TestLegacyAdoption:
         assert retry["created"] is False
         assert retry["head"] == first["head"]
         assert backend.drawing_object_keys(TENANT, DRAWING) == before
-        assert recording.keys.count(self.legacy.freeze_key(TENANT, DRAWING)) == 0
+        # A completed record takes one read and avoids the intent read.
+        assert recording.keys.count(self.legacy.freeze_key(TENANT, DRAWING)) == 1
+        assert recording.keys.count(self.legacy.intent_key(TENANT, DRAWING)) == 0
+
+    def test_freeze_inflight_race_refused(self, backend, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        tip = publish(backend)["head"]
+        index = tip["index"] + 1
+        entry_key = ph.entry_key(TENANT, DRAWING, index)
+        paused = threading.Event()
+        release = threading.Event()
+        publisher_thread = threading.current_thread()
+        futures = []
+
+        def after_tip_read():
+            if threading.current_thread() is not publisher_thread:
+                paused.set()
+                assert release.wait(timeout=10)
+
+        monkeypatch.setattr(self.legacy, "_after_tip_read", after_tip_read)
+        freeze = self._freeze
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            class FreezeDuringAppend(self.Recording):
+                def put_if_absent_or_verify(self, key, raw):
+                    if key == entry_key and not futures:
+                        futures.append(pool.submit(freeze, self.inner))
+                        assert paused.wait(timeout=10)
+                    return super().put_if_absent_or_verify(key, raw)
+
+            try:
+                result = publish(FreezeDuringAppend(backend), tip["state"]["artifact_id"], 3)
+                assert result["created"] is True
+                record = self.legacy._read_freeze(backend, TENANT, DRAWING)
+                assert record["legacy_last_index"] == result["head"]["index"] == index
+            finally:
+                release.set()
+            # The original freezer loses to the helper's later tip and returns its record.
+            assert futures[0].result(timeout=10) == record
+        status = self.legacy.legacy_status(backend, TENANT, DRAWING)
+        assert status["freeze"] == record
+        assert status["stranded_after_freeze"] is False
+
+    def test_intent_without_record_is_repaired(self, backend):
+        from leaf_cloud_client import canonical_bytes
+        tip = publish(backend)["head"]
+        legacy = self.legacy
+        backend.put_if_absent_or_verify(legacy.intent_key(TENANT, DRAWING), canonical_bytes(
+            {"schema": legacy.INTENT_SCHEMA, "tenant_id": TENANT, "drawing_id": DRAWING}))
+        refused("PHYSICAL_LEGACY_FROZEN", publish, backend, tip["state"]["artifact_id"], 3)
+        record = legacy._read_freeze(backend, TENANT, DRAWING)
+        assert record["legacy_last_index"] == tip["index"]
+        assert self._freeze(backend) == record
+        assert ph._head(backend, TENANT, DRAWING, PROJECT)[0] == tip
+
+    @pytest.mark.parametrize("defect", ["oversize", "non-canonical", "schema", "drawing", "extra"])
+    def test_corrupt_intent(self, backend, defect):
+        from leaf_cloud_client import canonical_bytes
+        legacy = self.legacy
+        record = {"schema": legacy.INTENT_SCHEMA, "tenant_id": TENANT, "drawing_id": DRAWING}
+        if defect == "schema":
+            record["schema"] = "wrong"
+        elif defect == "drawing":
+            record["drawing_id"] = "other"
+        elif defect == "extra":
+            record["extra"] = True
+        raw = canonical_bytes(record)
+        if defect == "oversize":
+            raw += b" " * legacy.MAX_RECORD_BYTES
+        elif defect == "non-canonical":
+            raw += b"\n"
+        backend.put(legacy.intent_key(TENANT, DRAWING), raw)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        refused("PHYSICAL_LEGACY_CORRUPT", legacy.refuse_if_frozen, backend, TENANT, DRAWING)
+        refused("PHYSICAL_LEGACY_CORRUPT", self._freeze, backend)
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
 
     def test_freeze_racing_publish_is_refused(self, backend, monkeypatch):
         tip = publish(backend)["head"]
@@ -1574,6 +1657,22 @@ class TestLegacyAdoption:
         view, _ = legacy.legacy_view(backend, TENANT, DRAWING, 1, project_id=PROJECT)
         assert view == tip
         assert view["index"] == records[0]["legacy_last_index"] < index
+
+    def test_retry_of_stranded_entry_refused(self, backend, monkeypatch):
+        self.test_freeze_racing_publish_is_refused(backend, monkeypatch)
+        tip, _ = ph._head(backend, TENANT, DRAWING, PROJECT)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        recording = self.Recording(backend, readonly=True)
+        refused("PHYSICAL_LEGACY_FROZEN", publish, recording, tip["parent"], 3)
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_retry_of_frozen_head_after_stranded_tip_returns_existing(self, backend, monkeypatch):
+        self.test_freeze_racing_publish_is_refused(backend, monkeypatch)
+        included, _ = ph._view_at(ph._Log(backend, TENANT, DRAWING), 0, PROJECT)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        result = publish(self.Recording(backend, readonly=True))
+        assert result == {"schema": ph.PUBLISH_SCHEMA, "created": False, "head": included}
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
 
     def test_freeze_after_append_keeps_success(self, backend, monkeypatch):
         tip = publish(backend)["head"]

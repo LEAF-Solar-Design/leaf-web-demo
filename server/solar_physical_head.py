@@ -256,7 +256,8 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
     before its entry is created leaves an unreferenced artifact and an unchanged head; the
     retry reuses the artifact at the same drawing revision. New publications read the freeze
     before and after appending; a racing freeze that excludes the entry leaves it stranded
-    in the immutable log and refuses publication, while idempotent retries read no freeze."""
+    in the immutable log and refuses publication. An idempotent retry reads the freeze
+    once (and the intent once when no freeze exists), accepting only an included entry."""
     if write_loop.drawing_mutations_refusal() is not None:
         raise PhysicalHeadError("PHYSICAL_HEAD_WRITES_DRAINED")
     if project_id is not None:
@@ -268,9 +269,17 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
     content_sha256 = hashlib.sha256(data).hexdigest()
     parent = document["parent"]
     head, _ = _head(backend, tenant_id, drawing_id, project_id)
+    frozen_index = solar_physical_legacy.resolved_last_index(backend, tenant_id, drawing_id)
     if head is not None and head["parent"] == parent and head["state"]["content_sha256"] == content_sha256:
-        return {"schema": PUBLISH_SCHEMA, "created": False, "head": head}
-    solar_physical_legacy.refuse_if_frozen(backend, tenant_id, drawing_id)
+        if frozen_index is None or head["index"] <= frozen_index:
+            return {"schema": PUBLISH_SCHEMA, "created": False, "head": head}
+    # A stranded tip may hide an included retry; compare with the frozen entry too.
+    if frozen_index is not None and frozen_index >= 0:
+        included, _ = _view_at(_Log(backend, tenant_id, drawing_id), frozen_index, project_id)
+        if included["parent"] == parent and included["state"]["content_sha256"] == content_sha256:
+            return {"schema": PUBLISH_SCHEMA, "created": False, "head": included}
+    if frozen_index is not None:
+        raise solar_physical_legacy.PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN")
     if parent != (None if head is None else head["state"]["artifact_id"]):
         raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT")
     index = 0 if head is None else head["index"] + 1
@@ -285,7 +294,7 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
         raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT") from None
     except (OSError, RuntimeError, ValueError):
         raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
-    frozen_index = solar_physical_legacy.frozen_last_index(backend, tenant_id, drawing_id)
+    frozen_index = solar_physical_legacy.resolved_last_index(backend, tenant_id, drawing_id)
     if frozen_index is not None and frozen_index < index:
         raise solar_physical_legacy.PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN")
     head = {"schema": HEAD_SCHEMA, "drawing_id": drawing_id, "project_id": stored["project_id"],

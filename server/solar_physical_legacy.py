@@ -1,6 +1,6 @@
-"""Legacy physical adoption: no clock, no network, no write on any read path.
+"""Legacy physical adoption: no clock or network; intent readers repair freezes.
 
-One write-once blob per drawing is written only by a version-bound publication.
+An immutable intent and freeze record serialize legacy adoption with publication.
 All failures use payload-free codes and fail closed. Legacy readers follow ancestry
 from the state's source version, never pinning state to the first version read.
 """
@@ -13,6 +13,8 @@ import solar_physical_head as ph
 from leaf_cloud_client import canonical_bytes
 
 FREEZE_SCHEMA = "leaf.solar-physical-legacy-freeze.v1"
+INTENT_SCHEMA = "leaf.physical-legacy-intent.v1"
+_after_tip_read = None  # Test-only interleaving seam for complete_freeze.
 MAX_RECORD_BYTES = 1024
 SWITCH_ENV = "LEAF_SOLAR_PHYSICAL_VERSIONED"
 CODES = frozenset({
@@ -37,6 +39,36 @@ def freeze_key(tenant_id, drawing_id):
         return store.drawing_prefix(tenant_id, drawing_id) + "/physical-legacy/freeze.json"
     except (ValueError, TypeError):
         raise PhysicalLegacyError("PHYSICAL_LEGACY_ID_INVALID") from None
+
+
+def intent_key(tenant_id, drawing_id):
+    return freeze_key(tenant_id, drawing_id).rsplit("/", 1)[0] + "/intent.json"
+
+
+def _intent_record(tenant_id, drawing_id):
+    return {"schema": INTENT_SCHEMA, "tenant_id": tenant_id, "drawing_id": drawing_id}
+
+
+def _read_intent(backend, tenant_id, drawing_id):
+    key = intent_key(tenant_id, drawing_id)
+    try:
+        raw = backend.get(key)
+    except KeyError:
+        return False
+    except (OSError, RuntimeError, ValueError) as exc:
+        if getattr(getattr(exc, "response", None), "status_code", None) == 404:
+            return False
+        raise PhysicalLegacyError("PHYSICAL_LEGACY_STORE_UNAVAILABLE") from None
+    try:
+        if type(raw) is not bytes or not raw or len(raw) > MAX_RECORD_BYTES:
+            raise ValueError()
+        record = json.loads(raw.decode("utf-8", errors="strict"))
+        if (type(record) is not dict or record != _intent_record(tenant_id, drawing_id)
+                or canonical_bytes(record) != raw):
+            raise ValueError()
+    except (ValueError, TypeError, UnicodeError, RecursionError):
+        raise PhysicalLegacyError("PHYSICAL_LEGACY_CORRUPT") from None
+    return True
 
 
 def _read_freeze(backend, tenant_id, drawing_id):
@@ -92,9 +124,18 @@ def _check_project(record, project_id):
 
 
 def freeze_legacy(backend, tenant_id, drawing_id, *, project_id):
+    """Claim intent before completing a freeze; readers repair a crash after the claim.
+
+    Every record writer reads the tip after durable intent. An append beyond that tip
+    sees intent in its post-check and resolves the winning record before acknowledging.
+    Only entries included by the winning record can therefore be acknowledged.
+
+    No production caller may invoke this until every publisher runs this protocol:
+    a V3b-era publisher ignores intent.
+    """
     if type(project_id) is not str or not 1 <= len(project_id) <= ph.MAX_PROJECT_ID_CHARS:
         raise PhysicalLegacyError("PHYSICAL_LEGACY_ID_INVALID")
-    key = freeze_key(tenant_id, drawing_id)
+    freeze_key(tenant_id, drawing_id)
     if write_loop.drawing_mutations_refusal() is not None:
         raise PhysicalLegacyError("PHYSICAL_LEGACY_WRITES_DRAINED")
     if not ph._atomic_backend(backend):
@@ -102,6 +143,18 @@ def freeze_legacy(backend, tenant_id, drawing_id, *, project_id):
     record = _read_freeze(backend, tenant_id, drawing_id)
     if record is not None:
         return _check_project(record, project_id)
+    _tip(backend, tenant_id, drawing_id, project_id)  # Refuse before any write.
+    try:
+        backend.put_if_absent_or_verify(intent_key(tenant_id, drawing_id),
+                                        canonical_bytes(_intent_record(tenant_id, drawing_id)))
+    except store.ImmutableConflict:
+        raise PhysicalLegacyError("PHYSICAL_LEGACY_CORRUPT") from None
+    except (OSError, RuntimeError, ValueError):
+        raise PhysicalLegacyError("PHYSICAL_LEGACY_STORE_UNAVAILABLE") from None
+    return _check_project(complete_freeze(backend, tenant_id, drawing_id), project_id)
+
+
+def _tip(backend, tenant_id, drawing_id, project_id):
     try:
         view, _ = ph._head(backend, tenant_id, drawing_id, project_id)
     except ph.PhysicalHeadError as exc:
@@ -110,6 +163,15 @@ def freeze_legacy(backend, tenant_id, drawing_id, *, project_id):
                 "PHYSICAL_HEAD_ID_INVALID": "PHYSICAL_LEGACY_ID_INVALID"}.get(
                     exc.code, "PHYSICAL_LEGACY_CORRUPT")
         raise PhysicalLegacyError(code) from None
+    return view
+
+
+def complete_freeze(backend, tenant_id, drawing_id):
+    """Complete a durable intent, returning the immutable winning freeze record."""
+    key = freeze_key(tenant_id, drawing_id)
+    view = _tip(backend, tenant_id, drawing_id, None)
+    if _after_tip_read is not None:
+        _after_tip_read()
     record = {"schema": FREEZE_SCHEMA, "tenant_id": tenant_id, "drawing_id": drawing_id,
               "project_id": None if view is None else view["project_id"],
               "legacy_last_index": -1 if view is None else view["index"],
@@ -125,20 +187,28 @@ def freeze_legacy(backend, tenant_id, drawing_id, *, project_id):
         winner = _read_freeze(backend, tenant_id, drawing_id)
         if winner is None:
             raise PhysicalLegacyError("PHYSICAL_LEGACY_CORRUPT") from None
-        return _check_project(winner, project_id)
+        return winner
     except (OSError, RuntimeError, ValueError):
         raise PhysicalLegacyError("PHYSICAL_LEGACY_STORE_UNAVAILABLE") from None
     return record
 
 
-def frozen_last_index(backend, tenant_id, drawing_id) -> int | None:
-    """Read the freeze once, returning its last legacy index or None when absent."""
+def resolved_last_index(backend, tenant_id, drawing_id) -> int | None:
+    """Read the record first, helping complete an intent when no record exists."""
     record = _read_freeze(backend, tenant_id, drawing_id)
-    return None if record is None else record["legacy_last_index"]
+    if record is not None:
+        return record["legacy_last_index"]
+    if _read_intent(backend, tenant_id, drawing_id):
+        return complete_freeze(backend, tenant_id, drawing_id)["legacy_last_index"]
+    return None
+
+
+def frozen_last_index(backend, tenant_id, drawing_id) -> int | None:
+    return resolved_last_index(backend, tenant_id, drawing_id)
 
 
 def refuse_if_frozen(backend, tenant_id, drawing_id):
-    if frozen_last_index(backend, tenant_id, drawing_id) is not None:
+    if resolved_last_index(backend, tenant_id, drawing_id) is not None:
         raise PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN")
 
 
