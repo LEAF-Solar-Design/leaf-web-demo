@@ -11,6 +11,7 @@ import { cloneDocument, selectionIdentity, singleFieldChange } from './portfolio
 import { appearanceStyle, textStyle } from './pageDesign.js'
 import ElementInspector, { InlineText } from './ElementInspector.jsx'
 import './projectPageEditor.css'
+import { validatePageAction, validateFirstPageProposal, firstPageChanges } from './projectPageClient.js'
 
 const EMPTY_PAGE = { label: 'Your page', headline: 'Coming soon', description: '', status: '', theme: 'cream', alignment: 'center' }
 const TEXT_FIELDS = [['label', 'Page label', 120], ['headline', 'Headline', 240], ['description', 'Description', 1200], ['status', 'Status text', 80]]
@@ -24,12 +25,19 @@ export function PagePreview({ document, onSelectField, projectId, onInlineChange
     ? <button type="button" className="project-page__edit" aria-label={`Edit ${field}`} onClick={() => onSelectField(field)}>{document[field]}</button>
     : document[field]
   const design = field => textStyle(onInlineChange && selectedElement === `${selectionIdentity(document)}:textStyles.${field}` ? { ...document.textStyles?.[field], hidden: undefined } : document.textStyles?.[field])
+  let safeAction = false
+  if (document.action) {
+    try { validatePageAction(document.action); safeAction = true } catch { /* incomplete links remain plain text */ }
+  }
   return <main className="project-page" data-element={`${selectionIdentity(document)}:appearance`} data-theme={document.theme} data-alignment={document.alignment} style={appearanceStyle(document.appearance)}>
     <div className="project-page__content">
       <p className="project-page__label" data-element={`${selectionIdentity(document)}:textStyles.label`} style={design('label')}>{text('label')}</p>
       <h1 className="project-page__headline" data-element={`${selectionIdentity(document)}:textStyles.headline`} style={design('headline')}>{text('headline')}</h1>
       {(document.description || onInlineChange) && <p className="project-page__description" data-element={`${selectionIdentity(document)}:textStyles.description`} style={design('description')}>{text('description')}</p>}
       {(document.status || onInlineChange) && <p className="project-page__status" data-element={`${selectionIdentity(document)}:textStyles.status`} style={design('status')}>{text('status')}</p>}
+      {document.action && <p className="project-page__action">{safeAction
+        ? <a href={document.action.href} rel="noreferrer" target="_blank">{document.action.label}</a>
+        : document.action.label}</p>}
     </div>
   </main>
 }
@@ -41,6 +49,7 @@ export default function ProjectPageEditor(props) {
 function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selectedField, incomingProposal, selectedElement, onSelectElement }) {
   const [draft, setDraft] = useState(null)
   const [saved, setSaved] = useState(null)
+  const [pageAbsent, setPageAbsent] = useState(false)
   const [busy, setBusy] = useState(null)
   const [error, setError] = useState(null)
   const [notice, setNotice] = useState('')
@@ -108,6 +117,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       sourceSnapshot.current = { saved: null, draft: null }
       history.current = { past: [], future: [], key: null, time: 0 }
       setSaved(null)
+      setPageAbsent(false)
       setError(null)
       setBusy(null)
       setSuspended(true)
@@ -187,6 +197,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     setProposal(null)
     const page = await loadProjectPage(projectId, { signal })
     if (!current()) return
+    setPageAbsent(!page)
     if (!page) { setNotice('No saved page yet. Choose Create a page to begin.'); return }
     setSaved(page); replaceDraft(page.document, page)
     show(page.document)
@@ -249,7 +260,8 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   }
   const change = (field, value) => {
     const document = cloneDocument(sourceSnapshot.current.draft)
-    document[field] = value
+    if (field === 'action' && !value.label && !value.href) delete document.action
+    else document[field] = value
     changePortfolio(document, { coalesceKey: field })
   }
   const travel = direction => {
@@ -264,11 +276,13 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
     sourceSnapshot.current = { ...sourceSnapshot.current, draft: document }
     setProposal(null); setDraft(document); setNotice(''); show(document)
   }
-  const proposalBlocked = !enabled || Boolean(busy) || dirty || Boolean(validation) || !saved || Boolean(error?.conflict) || Boolean(native?.active)
+  const firstPageReady = !saved && !error?.conflict && (draft ? equalDocument(draft, EMPTY_PAGE) : pageAbsent)
+  const proposalBlocked = !enabled || Boolean(busy) || ((dirty || !saved) && !firstPageReady) || Boolean(validation) || Boolean(error?.conflict) || Boolean(native?.active)
   useEffect(() => {
     if (!incomingProposal) return
     if (intake.current?.request !== incomingProposal) intake.current = { request: incomingProposal, opened: false, done: false }
     const pending = intake.current
+    const firstPageResult = incomingProposal.result?.source?.revision === 0
     if (pending.done) return
     const finish = accepted => {
       pending.done = true
@@ -280,13 +294,21 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         || !incomingProposal.isCurrent()) { finish(false); return }
       // A load started by this request must settle before reviewing its snapshot.
       if (pending.opened && busy === 'loading') return
-      if (busy || operation.current || dirty || validation || error?.conflict || nativeSession.current?.active || native?.active) {
+      if (busy || operation.current || (dirty && !(firstPageResult && firstPageReady)) || validation || error?.conflict || nativeSession.current?.active || native?.active) {
         finish(false); return
       }
       if (!draft && !saved && !pending.opened) {
         if (proposal) { finish(false); return }
         pending.opened = true
         void open()
+        return
+      }
+      if (firstPageResult) {
+        if (saved || !firstPageReady || proposal) { finish(false); return }
+        const value = validateFirstPageProposal(projectId, incomingProposal.result)
+        const document = JSON.parse(JSON.stringify(value.proposed_document))
+        setProposal({ firstPage: true, snapshot: { ...sourceSnapshot.current, isCurrent: incomingProposal.isCurrent }, document, changes: firstPageChanges(document) })
+        finish(true)
         return
       }
       if (proposalBlocked || !draft || draft.schema !== 'leaf.portfolio.v1' || proposal) { finish(false); return }
@@ -319,7 +341,17 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       else setProposal({ snapshot: { ...sourceSnapshot.current, isCurrent: incomingProposal.isCurrent }, document, changes })
       finish(true)
     } catch { finish(false) }
-  }, [incomingProposal, saved, draft, busy, enabled, dirty, validation, error, native]) // existing fenced operations own loading
+  }, [incomingProposal, saved, draft, busy, enabled, dirty, validation, error, native, pageAbsent]) // existing fenced operations own loading
+  const generateFirstPage = () => {
+    if (!live.current || proposalBlocked || operation.current || !firstPageReady || !instruction.trim() || Array.from(instruction).length > 4000) return
+    const snapshot = sourceSnapshot.current
+    void perform('proposing', async (signal, current) => {
+      setProposal(null)
+      const result = await proposeProjectPage(projectId, null, instruction, { signal })
+      if (!current() || sourceSnapshot.current.saved !== snapshot.saved || sourceSnapshot.current.draft !== snapshot.draft) return
+      setProposal({ firstPage: true, snapshot, document: result.proposed_document, changes: firstPageChanges(result.proposed_document) })
+    })
+  }
   const generateProposal = () => {
     if (!live.current || proposalBlocked || operation.current || !instruction.trim() || Array.from(instruction).length > 4000
       || draft?.schema !== 'leaf.portfolio.v1') return
@@ -342,6 +374,13 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   const useProposal = () => {
     if (!live.current || !proposal || proposalBlocked || operation.current || nativeSession.current?.active || sourceSnapshot.current.saved !== proposal.snapshot.saved
       || sourceSnapshot.current.draft !== proposal.snapshot.draft || (proposal.snapshot.isCurrent && !proposal.snapshot.isCurrent())) { setProposal(null); return }
+    if (proposal.firstPage) {
+      const document = cloneDocument(proposal.document, sourceSnapshot.current.draft)
+      setProposal(null)
+      replaceDraft(document, null); setSaved(null); setError(null); show(document)
+      setNotice('Review the draft, then Save page.')
+      return
+    }
     const document = proposal.document
     if (!proposal.photo) portfolioTextChanges(saved.document, document)
     changePortfolio(cloneDocument(document, sourceSnapshot.current.draft), { coalesceKey: null })
@@ -436,6 +475,26 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
   const nativeStatus = native?.job?.status
   const nativeLabel = nativeStatus === 'complete' ? native.url ? 'Ready' : native.active ? 'Building' : 'Screenshot unavailable'
     : ({ queued: 'Queued', running: 'Building', failed: 'Failed', cancelled: 'Cancelled' })[nativeStatus]
+  const renderProposalReview = () => {
+    if (!proposal) return null
+    const title = proposal.firstPage ? 'Review proposed page' : proposal.photo ? 'Review proposed photo assignments' : 'Review proposed text'
+    return <section aria-label={title} className="project-page-editor__proposal-review">
+      <h4>{title}</h4>
+      <p className="project-page-editor__note">Your draft and preview stay as they are until you use these changes.</p>
+      {proposal.photo && <p>Use proposed assignments to review the draft, then Save page.</p>}
+      <ol>{proposal.changes.map((change, index) => <li key={index}>
+        {proposal.photo ? <><h5>{change.material_name}</h5>
+          <dl><dt>Original photo ID</dt><dd>{change.material_id}</dd><dt>Target gallery</dt><dd>{change.gallery_title} ({change.gallery_slug})</dd>
+            <dt>Caption</dt><dd>{change.title || '(Empty)'}</dd><dt>Alt text</dt><dd>{change.alt}</dd></dl></> : <>
+          <h5>{change.label}</h5>
+          <dl><dt>Current text</dt><dd>{change.before || '(Empty)'}</dd><dt>Proposed text</dt><dd>{change.after || '(Empty)'}</dd></dl></>}
+      </li>)}</ol>
+      <div className="project-page-editor__actions">
+        <button type="button" onClick={useProposal} disabled={proposalBlocked}>{proposal.photo ? 'Use proposed assignments' : 'Use proposed changes'}</button>
+        <button type="button" onClick={() => { setProposal(null); setNotice('Proposal discarded. Your draft is unchanged.') }}>Discard proposal</button>
+      </div>
+    </section>
+  }
 
   return <section className="project-page-editor" aria-label="Page editor" ref={editor} onFocusCapture={event => {
     const row = actionRow.current
@@ -452,6 +511,19 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       <button type="button" onClick={open} disabled={!enabled || Boolean(busy)}>{busy === 'loading' ? 'Opening…' : draft ? 'Reload saved page' : 'Open page'}</button>
     </div>
     <label><span>Import portfolio content</span><input type="file" accept=".json,application/json" disabled={!enabled || Boolean(busy)} onChange={importContent} /></label>
+    {firstPageReady && <section className="project-page-editor__proposal" aria-label="Describe your page">
+      <h3>Describe your page</h3>
+      <p className="project-page-editor__note">Describe the page in plain language. Include a contact email or https link if you want a contact button. Review before using it; nothing is saved or published.</p>
+      <label htmlFor={`${id}-first-instruction`}><span>What should this page say?</span>
+        <textarea id={`${id}-first-instruction`} rows={3} maxLength={4000} value={instruction} disabled={!enabled || Boolean(busy)} onChange={event => setInstruction(event.target.value)} />
+      </label>
+      <div className="project-page-editor__actions">
+        <button type="button" onClick={generateFirstPage} disabled={proposalBlocked || !instruction.trim() || Array.from(instruction).length > 4000}>{busy === 'proposing' ? 'Writing a first draft…' : 'Write a first draft'}</button>
+        {busy === 'proposing' && <button type="button" onClick={cancelProposal}>Cancel generation</button>}
+      </div>
+      {proposal?.firstPage && renderProposalReview()}
+      {proposalNotice && <p role="status">{notice}</p>}
+    </section>}
     {draft && <>
       <div className="project-page-editor__save-row" ref={actionRow}>
         <button type="button" onClick={save} disabled={!enabled || Boolean(busy) || !dirty || Boolean(validation) || error?.conflict}>Save page</button>
@@ -468,22 +540,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
           <button type="button" onClick={generateProposal} disabled={proposalBlocked || !instruction.trim() || Array.from(instruction).length > 4000}>{busy === 'proposing' ? 'Generating proposal…' : 'Generate proposal'}</button>
           {busy === 'proposing' && <button type="button" onClick={cancelProposal}>Cancel generation</button>}
         </div>
-        {proposal && <section aria-label={proposal.photo ? 'Review proposed photo assignments' : 'Review proposed text'} className="project-page-editor__proposal-review">
-          <h4>{proposal.photo ? 'Review proposed photo assignments' : 'Review proposed text'}</h4>
-          <p className="project-page-editor__note">Your draft and preview stay as they are until you use these changes.</p>
-          {proposal.photo && <p>Use proposed assignments to review the draft, then Save page.</p>}
-          <ol>{proposal.changes.map((change, index) => <li key={index}>
-            {proposal.photo ? <><h5>{change.material_name}</h5>
-              <dl><dt>Original photo ID</dt><dd>{change.material_id}</dd><dt>Target gallery</dt><dd>{change.gallery_title} ({change.gallery_slug})</dd>
-                <dt>Caption</dt><dd>{change.title || '(Empty)'}</dd><dt>Alt text</dt><dd>{change.alt}</dd></dl></> : <>
-              <h5>{change.label}</h5>
-              <dl><dt>Current text</dt><dd>{change.before || '(Empty)'}</dd><dt>Proposed text</dt><dd>{change.after || '(Empty)'}</dd></dl></>}
-          </li>)}</ol>
-          <div className="project-page-editor__actions">
-            <button type="button" onClick={useProposal} disabled={proposalBlocked}>{proposal.photo ? 'Use proposed assignments' : 'Use proposed changes'}</button>
-            <button type="button" onClick={() => { setProposal(null); setNotice('Proposal discarded. Your draft is unchanged.') }}>Discard proposal</button>
-          </div>
-        </section>}
+        {renderProposalReview()}
         {proposalNotice && <p role="status">{notice}</p>}
       </section>}
       {validation && <div className="project-page-editor__validation">
@@ -505,6 +562,9 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
         <label htmlFor={`${id}-alignment`}><span>Alignment</span><select id={`${id}-alignment`} value={draft.alignment} onChange={event => change('alignment', event.target.value)}>
           <option value="center">Centered</option><option value="left">Left</option>
         </select></label>
+        {[['label', 'Contact button label', 60], ['href', 'Contact link', 2048]].map(([field, label, limit]) => <label key={field} htmlFor={`${id}-action-${field}`}>
+          <span>{label}</span><input id={`${id}-action-${field}`} maxLength={limit} value={draft.action?.[field] || ''} onChange={event => change('action', { label: draft.action?.label || '', href: draft.action?.href || '', [field]: event.target.value })} />
+        </label>)}
         </>}
       </fieldset>
       <div className="project-page-editor__actions">
@@ -527,6 +587,7 @@ function ScopedPageEditor({ projectId, accountScope, onPreview, onSession, selec
       </section>}
     </>}
     {error && <p className="project-page-editor__error" role="alert">{error.message}</p>}
+    {proposalNotice && !firstPageReady && draft?.schema !== 'leaf.portfolio.v1' && <p role="status">{notice}</p>}
     {notice && !proposalNotice && <p role="status">{notice}</p>}
   </section>
 }

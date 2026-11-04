@@ -5,11 +5,30 @@ import { DESIGN_FIELDS, validateNodeDesign } from './pageDesign.js'
 
 const FIELDS = ['alignment', 'description', 'headline', 'label', 'status', 'theme']
 const LIMITS = { label: 120, headline: 240, description: 1200, status: 80 }
+export const NO_PAGE_DIGEST = '0'.repeat(64)
+
+export function validatePageAction(action) {
+  if (!action || typeof action !== 'object' || Array.isArray(action)
+    || Object.keys(action).sort().join(',') !== 'href,label'
+    || typeof action.label !== 'string' || !action.label.trim() || Array.from(action.label).length > 60
+    || /[\p{Cc}\p{Cf}\p{Cs}<>]/u.test(action.label)
+    || /(?:[a-z][a-z0-9+.-]*:\/\/|\b(?:https?|ftp|file|data|javascript):|\bwww\.)/i.test(action.label)) {
+    throw new Error('Check the contact button label.')
+  }
+  if (typeof action.href !== 'string' || action.href.length < 1 || Array.from(action.href).length > 2048
+    || /[\s\p{Cc}\p{Cf}\p{Cs}<>"'`]/u.test(action.href)
+    || !(/^https:\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]{1,5})?(?:[/?#](?:[A-Za-z0-9._~!$&()*+,;=:@/?#-]|%[0-9A-Fa-f]{2})*)?(?![\s\S])/.test(action.href)
+      || /^mailto:[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+(?![\s\S])/.test(action.href))) {
+    throw new Error('Check the contact link. Use an https or mailto link.')
+  }
+  return action
+}
 
 export function validatePageDocument(document) {
   if (document && Object.hasOwn(document, 'schema')) return validatePortfolioDocument(document)
   if (!document || typeof document !== 'object' || Array.isArray(document)
-    || Object.keys(document).filter(key => !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+    || Object.keys(document).filter(key => key !== 'action' && !Object.hasOwn(DESIGN_FIELDS.page, key)).sort().join(',') !== FIELDS.join(',')) throw new Error('The page has an unsupported format.')
+  if (Object.hasOwn(document, 'action')) validatePageAction(document.action)
   validateNodeDesign(document, 'page')
   for (const [field, limit] of Object.entries(LIMITS)) {
     const value = document[field]
@@ -190,14 +209,7 @@ async function readProposal(response, signal) {
   }
 }
 
-export function validateProjectPageProposal(projectId, saved, value) {
-  if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)) proposalInvalid()
-  let document
-  try {
-    if (new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024) proposalInvalid()
-    document = validatePortfolioDocument(saved.document)
-  } catch { return proposalInvalid() }
-  const source = { project_id: projectId, revision: saved.revision, digest: saved.digest }
+function validateProposalEnvelope(value, source) {
   if (!closed(value, 'source proposed_document proposed_digest edits model usage')
     || !closed(value.source, 'project_id revision digest') || canonical(value.source) !== canonical(source)
     || !validDigest(value.proposed_digest) || typeof value.model !== 'string' || !value.model.trim()
@@ -214,6 +226,33 @@ export function validateProjectPageProposal(projectId, saved, value) {
   for (const [key, count] of Object.entries(value.usage)) {
     if (!usageKeys.includes(key) || !Number.isSafeInteger(count) || count < 0) proposalInvalid()
   }
+}
+
+export function validateFirstPageProposal(projectId, value) {
+  try {
+    if (!validUuid(projectId) || new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024) proposalInvalid()
+    validateProposalEnvelope(value, { project_id: projectId, revision: 0, digest: NO_PAGE_DIGEST })
+    if (Object.hasOwn(value.proposed_document, 'schema')) proposalInvalid()
+    validatePageDocument(value.proposed_document)
+    return value
+  } catch { return proposalInvalid() }
+}
+
+export function firstPageChanges(document) {
+  return [
+    ['Page label', document.label], ['Headline', document.headline], ['Description', document.description],
+    ['Status text', document.status], ['Contact button label', document.action?.label], ['Contact link', document.action?.href],
+  ].filter(([, after]) => after).map(([label, after]) => ({ label, before: '', after }))
+}
+
+export function validateProjectPageProposal(projectId, saved, value) {
+  if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)) proposalInvalid()
+  let document
+  try {
+    if (new TextEncoder().encode(JSON.stringify(value)).length > 1024 * 1024) proposalInvalid()
+    document = validatePortfolioDocument(saved.document)
+  } catch { return proposalInvalid() }
+  validateProposalEnvelope(value, { project_id: projectId, revision: saved.revision, digest: saved.digest })
   const changes = portfolioTextChanges(document, value.proposed_document)
   const values = value.edits.map(edit => edit.value)
   for (const change of changes) {
@@ -279,9 +318,15 @@ export async function validateProjectPhotoAssignmentProposal(projectId, saved, i
 
 export async function proposeProjectPage(projectId, saved, instruction, { signal } = {}) {
   const path = pagePath(projectId)
-  if (!validUuid(projectId) || !Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)
+  if (!validUuid(projectId) || (saved !== null && (!Number.isSafeInteger(saved?.revision) || saved.revision < 1 || !validDigest(saved?.digest)))
     || typeof instruction !== 'string' || !instruction.trim() || Array.from(instruction).length > 4000) {
     throw new Error('Save the portfolio and enter a text change of 1 to 4000 characters.')
+  }
+  if (saved === null) {
+    return request(`${path}/proposals`, { signal, proposal: true, method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ expected_revision: 0, expected_digest: NO_PAGE_DIGEST, instruction }),
+    }, async (response, requestSignal) => validateFirstPageProposal(projectId, await readProposal(response, requestSignal)))
   }
   let document
   try { document = validatePortfolioDocument(saved.document) } catch { return proposalInvalid() }

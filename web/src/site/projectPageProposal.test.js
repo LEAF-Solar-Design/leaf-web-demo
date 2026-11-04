@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createHash, webcrypto } from 'node:crypto'
 import { loadProjectPage, portfolioTextChanges, proposeProjectPage, validateProjectPageProposal, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
+import { validatePageDocument, validatePageAction, NO_PAGE_DIGEST, validateFirstPageProposal, firstPageChanges } from './projectPageClient.js'
 
 const unauthorized = vi.hoisted(() => vi.fn())
 vi.mock('../api.js', () => ({ config: { apiBase: 'https://api.example.test' },
@@ -22,6 +23,77 @@ const result = () => ({ source: { project_id: PROJECT, revision: 7, digest: 'a'.
 const reply = value => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } })
 const propose = (source = saved(), instruction = 'Shorten the headline', options) => proposeProjectPage(PROJECT, source, instruction, options)
 const INVALID = 'The text proposal could not be verified. Try again.'
+
+const firstDocument = () => ({ label: 'Bakery', headline: 'Fresh bread soon', description: 'Made locally', status: 'Opening soon', theme: 'cream', alignment: 'center',
+  action: { label: 'Contact us', href: 'mailto:hello@example.com' } })
+const firstResult = () => ({ source: { project_id: PROJECT, revision: 0, digest: NO_PAGE_DIGEST }, proposed_document: firstDocument(),
+  proposed_digest: 'd'.repeat(64), edits: [], model: 'fixture', usage: {} })
+
+describe('first page proposals and contact actions', () => {
+  it.each(['https://example.com/contact?from=page#email', 'mailto:hello+page@example.com'])('accepts contact action %s', href => {
+    const value = { ...firstDocument(), action: { label: 'Contact us', href } }
+    expect(validatePageDocument(value)).toBe(value)
+  })
+
+  it.each(['http://example.com', 'javascript:alert(1)', 'data:text/html,x', '/relative', 'https://user@example.com',
+    'https://exa mple.com', 'mailto:a@b.co?subject=x', 'https://example.com\n', 'https://example.com/%zz'])('rejects contact href %s', href => {
+    expect(() => validatePageDocument({ ...firstDocument(), action: { label: 'Contact us', href } })).toThrow('Check the contact link.')
+  })
+
+  it.each([
+    { label: 'Contact', href: 'https://example.com', extra: true }, { label: 'Contact' },
+    { label: '', href: 'https://example.com' }, { label: '   ', href: 'https://example.com' },
+    { label: 'x'.repeat(61), href: 'https://example.com' }, { label: 'Visit https://example.com', href: 'https://example.com' },
+    { label: 'Contact\nnow', href: 'https://example.com' }, { label: 'Contact\u200b', href: 'https://example.com' },
+  ])('rejects malformed contact action %#', action => {
+    expect(() => validatePageDocument({ ...firstDocument(), action })).toThrow()
+    expect(() => validatePageAction(action)).toThrow()
+  })
+
+  it('keeps the no-action document unchanged', () => {
+    const value = firstDocument(); delete value.action
+    const encoded = JSON.stringify(value)
+    expect(validatePageDocument(value)).toBe(value)
+    expect(JSON.stringify(value)).toBe(encoded)
+  })
+
+  it('posts the first revision sentinel and validates the response', async () => {
+    const value = firstResult(), fetch = vi.fn().mockResolvedValue(reply(value))
+    vi.stubGlobal('fetch', fetch)
+    expect(await proposeProjectPage(PROJECT, null, 'brief')).toEqual(value)
+    expect(fetch.mock.calls[0][0]).toBe(`https://api.example.test/api/projects/${PROJECT}/page/proposals`)
+    expect(fetch.mock.calls[0][1].method).toBe('POST')
+    expect(JSON.parse(fetch.mock.calls[0][1].body)).toEqual({ expected_revision: 0, expected_digest: NO_PAGE_DIGEST, instruction: 'brief' })
+  })
+
+  it.each([
+    value => { value.source.revision = 1 }, value => { value.source.digest = 'a'.repeat(64) },
+    value => { value.source.project_id = OTHER }, value => { value.proposed_document.schema = 'leaf.portfolio.v1' },
+    value => { value.extra = true }, value => { value.proposed_document.action.href = 'javascript:alert(1)' },
+    value => { value.edits = [{ id: 'a', value: 'ok', extra: true }] }, value => { value.usage.extra = 1 },
+    value => { value.model = 'x'.repeat(1024 * 1024) },
+  ])('rejects invalid first-page result %#', async mutate => {
+    const value = firstResult(); mutate(value)
+    expect(() => validateFirstPageProposal(PROJECT, value)).toThrow(INVALID)
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue(reply(value)))
+    await expect(proposeProjectPage(PROJECT, null, 'brief')).rejects.toThrow(INVALID)
+  })
+
+  it.each([undefined, { revision: 0 }, {}, { revision: 1, digest: 'invalid' }])('rejects non-null invalid saved input %# before HTTP', async source => {
+    const fetch = vi.fn(); vi.stubGlobal('fetch', fetch)
+    await expect(proposeProjectPage(PROJECT, source, 'brief')).rejects.toThrow()
+    expect(fetch).not.toHaveBeenCalled()
+  })
+
+  it('orders first-page changes and skips empty fields', () => {
+    expect(firstPageChanges(firstDocument())).toEqual([
+      ['Page label', 'Bakery'], ['Headline', 'Fresh bread soon'], ['Description', 'Made locally'], ['Status text', 'Opening soon'],
+      ['Contact button label', 'Contact us'], ['Contact link', 'mailto:hello@example.com'],
+    ].map(([label, after]) => ({ label, before: '', after })))
+    const value = firstDocument(); delete value.action; value.description = ''; value.status = ''
+    expect(firstPageChanges(value).map(change => change.label)).toEqual(['Page label', 'Headline'])
+  })
+})
 
 const photoDigest = document => createHash('sha256').update(JSON.stringify(document, (_, value) => value && typeof value === 'object' && !Array.isArray(value)
   ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)).digest('hex')

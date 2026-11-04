@@ -91,6 +91,131 @@ const ask = () => {
 const incoming = (result = proposalResult()) => ({ result, accountScope: 'account-a', activeScope: 'account-a',
   isCurrent: () => true, consumed: vi.fn() })
 
+const firstPageResult = () => ({ source: { project_id: PROJECT, revision: 0, digest: '0'.repeat(64) },
+  proposed_document: { ...document, headline: 'Fresh bread soon', action: { label: 'Email us', href: 'mailto:hello@example.com' } },
+  proposed_digest: 'd'.repeat(64), edits: [], model: 'fixture', usage: {} })
+const askFirstPage = () => {
+  fireEvent.change(screen.getByLabelText('What should this page say?'), { target: { value: 'A bakery page with a contact email' } })
+  fireEvent.click(button('Write a first draft'))
+}
+
+describe('first page brief and contact review', () => {
+  it('reviews a brief before applying it, previews the contact link, and saves revision zero', async () => {
+    loadProjectPage.mockResolvedValueOnce(null)
+    proposeProjectPage.mockResolvedValueOnce(firstPageResult())
+    const previews = vi.fn()
+    function FirstPagePreview() {
+      const [value, setValue] = useState(null)
+      return <><ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={next => { previews(next); setValue(next.document) }} />
+        <section aria-label="First page preview"><PagePreview document={value} /></section></>
+    }
+    render(<FirstPagePreview />)
+    fireEvent.click(button('Open page'))
+    await screen.findByRole('region', { name: 'Describe your page' })
+    askFirstPage()
+    const review = await screen.findByRole('region', { name: 'Review proposed page' })
+    expect(within(review).getByRole('heading', { name: 'Contact link', exact: true })).toBeTruthy()
+    expect(proposeProjectPage).toHaveBeenCalledExactlyOnceWith(PROJECT, null, 'A bakery page with a contact email', { signal: expect.any(AbortSignal) })
+    expect(previews).not.toHaveBeenCalled()
+    expect(screen.queryByLabelText('Headline')).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Use proposed changes'))
+    expect(screen.getByLabelText('Headline').value).toBe('Fresh bread soon')
+    expect(screen.getByLabelText('Contact link').value).toBe('mailto:hello@example.com')
+    expect(within(screen.getByRole('region', { name: 'First page preview' })).getByRole('link', { name: 'Email us' }).getAttribute('href')).toBe('mailto:hello@example.com')
+    expect(screen.getAllByText('Review the draft, then Save page.')).toHaveLength(1)
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    fireEvent.click(button('Save page'))
+    await waitFor(() => expect(saveProjectPage).toHaveBeenCalledTimes(1))
+    expect(saveProjectPage.mock.lastCall.slice(0, 3)).toEqual([PROJECT, firstPageResult().proposed_document, 0])
+  })
+
+  it('accepts assistant intake after opening a project with no page', async () => {
+    const request = incoming(firstPageResult()), onPreview = vi.fn()
+    loadProjectPage.mockResolvedValueOnce(null)
+    setup({ incomingProposal: request, onPreview })
+    await screen.findByRole('region', { name: 'Review proposed page' })
+    expect(loadProjectPage).toHaveBeenCalledExactlyOnceWith(PROJECT, { signal: expect.any(AbortSignal) })
+    expect(request.consumed).toHaveBeenCalledExactlyOnceWith(true)
+    expect(onPreview).not.toHaveBeenCalled()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+  })
+
+  it('rejects assistant first-page intake when a saved page loads', async () => {
+    const request = incoming(firstPageResult())
+    setup({ incomingProposal: request })
+    await screen.findByDisplayValue('A page')
+    await waitFor(() => expect(request.consumed).toHaveBeenCalledExactlyOnceWith(false))
+    expect(screen.queryByRole('region', { name: 'Review proposed page' })).toBeNull()
+  })
+
+  it('preserves an edited unsaved draft against assistant intake', () => {
+    const onPreview = vi.fn(), view = setup({ onPreview })
+    fireEvent.click(button('Create a page'))
+    fireEvent.change(screen.getByLabelText('Headline'), { target: { value: 'My own page' } })
+    const request = incoming(firstPageResult())
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" onPreview={onPreview} incomingProposal={request} />)
+    expect(request.consumed).toHaveBeenCalledExactlyOnceWith(false)
+    expect(screen.getByLabelText('Headline').value).toBe('My own page')
+    expect(onPreview.mock.lastCall[0].document.headline).toBe('My own page')
+    expect(loadProjectPage).not.toHaveBeenCalled()
+    expect(screen.queryByRole('region', { name: 'Review proposed page' })).toBeNull()
+  })
+
+  it('allows assistant review over an untouched Create a page draft', async () => {
+    const view = setup()
+    fireEvent.click(button('Create a page'))
+    const request = incoming(firstPageResult())
+    view.rerender(<ProjectPageEditor projectId={PROJECT} accountScope="account-a" incomingProposal={request} />)
+    await screen.findByRole('region', { name: 'Review proposed page' })
+    expect(request.consumed).toHaveBeenCalledExactlyOnceWith(true)
+    expect(screen.getByLabelText('Headline').value).toBe('Coming soon')
+  })
+
+  it('keeps the first-save conflict visible and does not offer another first draft', async () => {
+    proposeProjectPage.mockResolvedValueOnce(firstPageResult())
+    saveProjectPage.mockRejectedValueOnce(Object.assign(new Error('The saved page changed elsewhere. Your draft is still here. Reload the saved page to continue.'), { status: 409 }))
+    setup(); fireEvent.click(button('Create a page')); askFirstPage()
+    await screen.findByRole('region', { name: 'Review proposed page' })
+    fireEvent.click(button('Use proposed changes'))
+    fireEvent.click(button('Save page'))
+    expect((await screen.findByRole('alert')).textContent).toContain('The saved page changed elsewhere.')
+    expect(button('Save page')).toBeDisabled()
+    expect(screen.queryByRole('region', { name: 'Describe your page' })).toBeNull()
+    expect(screen.getByLabelText('Contact link').value).toBe('mailto:hello@example.com')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(0)
+  })
+
+  it('writes a contact action, removes it when cleared, and blocks incomplete saves', () => {
+    const onPreview = vi.fn(); setup({ onPreview })
+    fireEvent.click(button('Create a page'))
+    const original = onPreview.mock.lastCall[0].document
+    expect(screen.getByLabelText('Contact button label').maxLength).toBe(60)
+    expect(screen.getByLabelText('Contact link').maxLength).toBe(2048)
+    fireEvent.change(screen.getByLabelText('Contact button label'), { target: { value: 'Contact us' } })
+    expect(button('Save page')).toBeDisabled()
+    expect(screen.getByRole('alert').textContent).toContain('Check the contact link.')
+    fireEvent.change(screen.getByLabelText('Contact link'), { target: { value: 'https://example.com/contact' } })
+    expect(onPreview.mock.lastCall[0].document.action).toEqual({ label: 'Contact us', href: 'https://example.com/contact' })
+    expect(button('Save page')).not.toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Contact button label'), { target: { value: '' } })
+    expect(button('Save page')).toBeDisabled()
+    fireEvent.change(screen.getByLabelText('Contact link'), { target: { value: '' } })
+    expect(onPreview.mock.lastCall[0].document).toEqual(original)
+    expect(onPreview.mock.lastCall[0].document).not.toHaveProperty('action')
+    expect(button('Save page')).not.toBeDisabled()
+    expect(screen.queryByRole('alert')).toBeNull()
+  })
+
+  it('renders hostile and incomplete preview links as plain text', () => {
+    const view = render(<PagePreview document={{ ...document, action: { label: 'Contact us', href: 'javascript:alert(1)' } }} />)
+    expect(screen.getByText('Contact us')).toBeTruthy()
+    expect(screen.queryByRole('link')).toBeNull()
+    view.rerender(<PagePreview document={{ ...document, action: { label: 'Contact us', href: '' } }} />)
+    expect(screen.queryByRole('link')).toBeNull()
+  })
+})
+
 const assignmentDigest = value => createHash('sha256').update(JSON.stringify(value, (_, item) => item && typeof item === 'object' && !Array.isArray(item)
   ? Object.fromEntries(Object.keys(item).sort().map(key => [key, item[key]])) : item)).digest('hex')
 const assignmentRequest = () => {
