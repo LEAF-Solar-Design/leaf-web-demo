@@ -717,6 +717,29 @@ def test_wiz_by_host_and_group_light_menu(tmp_path, ha_server):
     assert (FLOW_PATH + "/group-user", {"next_step_id": "light"}) in posts
 
 
+def test_group_flow_accepts_studio_group_type(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    data = {"group_type": "light", "name": "Living room", "entities": ["light.one", "light.two"]}
+    result = handler.handle("ha.flow.start", {"handler": "group", "data": data})
+    assert result == {"flow_id": "group-user", "type": "create_entry", "title": "Living room"}
+    assert data == {"group_type": "light", "name": "Living room", "entities": ["light.one", "light.two"]}
+
+
+def test_group_flow_rejects_other_group_type(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    with pytest.raises(HAError, match="^Unsupported group type$"):
+        handler.handle("ha.flow.start", {"handler": "group", "data": {"group_type": "switch"}})
+    assert ha_server.requests == []
+
+
+def test_group_flow_drops_unknown_keys(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    result = handler.handle("ha.flow.start", {"handler": "group", "data": {
+        "name": "Living room", "entities": ["light.one", "light.two"], "color": "blue",
+    }})
+    assert result == {"flow_id": "group-user", "type": "create_entry", "title": "Living room"}
+
+
 def test_group_start_without_data_and_step(tmp_path, ha_server):
     handler = local_handler(tmp_path, ha_server)
     result = handler.handle("ha.flow.start", {"handler": "group"})
