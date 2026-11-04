@@ -127,7 +127,7 @@ export class ConverseSdkRunner {
               }
               if (enabled && z) tools.push(target.tool(
                 "propose_project_page",
-                "Propose saved portfolio TEXT changes for private review. Use the current project context page revision and digest. Does not save or publish; unrelated to drawing overlays or customize_platform.",
+                "Propose saved portfolio TEXT changes for private review. Use the current project context page revision and digest. Does not save or publish; unrelated to drawing overlays or customize_platform. When the project context page is null, propose a first coming-soon page with expected_revision 0 and expected_digest of 64 zeros.",
                 { instruction: z.string(), expected_revision: z.number(), expected_digest: z.string() },
                 async args => {
                   const failure: TextResult = { content: [{ type: "text", text: "Portfolio proposal failed." }], isError: true };

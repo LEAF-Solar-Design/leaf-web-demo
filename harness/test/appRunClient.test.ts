@@ -150,6 +150,26 @@ describe("bounded project portfolio proposal reader", () => {
     } finally { vi.useRealTimers(); }
   });
 
+  it("sends revision zero with the no-page digest to the fixed callback", async () => {
+    const firstBody = { ...body, expected_revision: 0, expected_digest: "0".repeat(64) };
+    const fetcher = vi.fn<typeof fetch>().mockResolvedValue(new Response("{}", {
+      headers: { "content-type": "application/json" },
+    }));
+    expect(await client(fetcher).proposeProjectPage("tenant", "app-session", firstBody, authority)).toEqual({});
+    expect(fetcher).toHaveBeenCalledExactlyOnceWith("https://app.invalid/api/sessions/app-session/page/proposals",
+      expect.objectContaining({ body: JSON.stringify(firstBody) }));
+  });
+
+  it.each([
+    { ...body, expected_revision: 0 },
+    { ...body, expected_revision: -1, expected_digest: "0".repeat(64) },
+  ])("rejects an invalid first-page source before HTTP: %j", async invalidBody => {
+    const fetcher = vi.fn<typeof fetch>();
+    await expect(client(fetcher).proposeProjectPage("tenant", "app-session", invalidBody, authority))
+      .rejects.toBeInstanceOf(AppRunClientError);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
   it("rejects caller-selected authority and extra fields before fetching", async () => {
     const fetcher = vi.fn<typeof fetch>();
     await expect(client(fetcher).proposeProjectPage("tenant", "foreign", body, authority)).rejects.toBeInstanceOf(AppRunClientError);

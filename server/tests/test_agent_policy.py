@@ -188,6 +188,7 @@ def test_shipped_catalog_loads_with_v1_shape():
     assert proposal.dispatch == {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/proposals"]}
     assert proposal.args_schema["required"] == ["instruction", "expected_revision", "expected_digest"]
     assert proposal.args_schema["additionalProperties"] is False
+    assert proposal.args_schema["properties"]["expected_revision"]["minimum"] == 0
 
     save = pol.actions["save_integration_element"]
     assert (save.rung, save.required_capability, save.policy) == (3, "converse", "auto")

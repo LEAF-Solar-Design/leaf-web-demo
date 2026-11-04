@@ -140,6 +140,7 @@ describe("host portfolio SDK facade", () => {
     await collect(runnerWith(mock, { zodImport: () => import("zod") }), makeInput({ tools: executor, canUseTool: permission }));
     const tool = mock.tools.find(tool => tool.name === "propose_project_page")!;
     expect(Object.keys(tool.schema)).toEqual(["instruction", "expected_revision", "expected_digest"]);
+    expect(tool.description).toContain("expected_revision 0");
     const { z } = await import("zod");
     const args = { instruction: "Shorten", expected_revision: 7, expected_digest: "a".repeat(64) };
     expect(z.strictObject(tool.schema as import("zod").ZodRawShape).parse(args)).toEqual(args);

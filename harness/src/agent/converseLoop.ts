@@ -559,7 +559,7 @@ export class ConverseLoop {
             : packet, intent);
       }
       const run = this.ports.runner.run({
-        systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
+        systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text. When project_material_context page is null, use propose_project_page with expected_revision 0 and expected_digest of 64 zeros to propose the first coming-soon page from the user's brief. Put a contact link in the instruction only if the user stated that exact email address or https URL." +
           "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos.",
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
@@ -1261,7 +1261,9 @@ export class ConverseLoop {
         const checked = validatePageProposal(value, source);
         if (!checked) return err("Invalid portfolio proposal response.");
         ctx.capturePageProposal?.(checked);
-        return ok(`Portfolio text proposed from revision ${source.revision}; private review only. Nothing saved or published.`);
+        return ok(source.revision === 0
+          ? "First page proposed from the brief; private review only. Nothing saved or published."
+          : `Portfolio text proposed from revision ${source.revision}; private review only. Nothing saved or published.`);
       }
       case "integration_datasets":
       case "integration_action_catalog":
@@ -1998,6 +2000,7 @@ function sanitizeCustomizeEdits(
 }
 
 interface PageProposalSource { project_id: string; revision: number; digest: string }
+const NO_PAGE_DIGEST = "0".repeat(64);
 const proposalUuid = z.string().regex(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![\s\S])/)
   .refine(value => value !== "00000000-0000-0000-0000-000000000000");
 const proposalDigest = z.string().regex(/^[0-9a-f]{64}(?![\s\S])/);
@@ -2008,6 +2011,9 @@ const proposalSourceSchema = z.strictObject({
 function pageProposalSource(packet: Record<string, unknown>, tenantId: string): PageProposalSource | undefined {
   const section = asRecord(packet.project_material_context);
   if (section.schema !== "leaf.project-material-context.v1" || section.org_id !== tenantId) return undefined;
+  if (section.page === null && proposalUuid.safeParse(section.project_id).success) {
+    return { project_id: section.project_id as string, revision: 0, digest: NO_PAGE_DIGEST };
+  }
   const page = asRecord(section.page);
   const parsed = proposalSourceSchema.safeParse({
     project_id: section.project_id, revision: page.revision, digest: page.digest,
@@ -2061,6 +2067,25 @@ const pageProposalSchema = z.strictObject({
     cache_creation_tokens: proposalCount.optional(), cache_read_tokens: proposalCount.optional(),
     cost_tokens: proposalCount.optional(),
   }),
+});
+
+const firstPageProposalSchema = z.strictObject({
+  source: z.strictObject({ project_id: proposalUuid, revision: z.literal(0), digest: z.literal(NO_PAGE_DIGEST) }),
+  proposed_document: z.strictObject({
+    label: proposalText(1, 120), headline: proposalText(1, 240), description: proposalText(0, 1200),
+    status: proposalText(0, 80), theme: z.literal("cream"), alignment: z.literal("center"),
+    action: z.strictObject({
+      label: proposalText(1, 60).refine(value => !value.includes("\n")),
+      href: z.string().max(2048).refine(value =>
+        /^https:\/\/[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]{1,5})?(?:[/?#](?:[A-Za-z0-9._~!$&()*+,;=:@/?#-]|%[0-9A-Fa-f]{2})*)?(?![\s\S])/.test(value) ||
+        (value.startsWith("mailto:") &&
+          /^[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+(?![\s\S])/.test(value.slice(7)))),
+    }).optional(),
+  }),
+  proposed_digest: pageProposalSchema.shape.proposed_digest,
+  model: pageProposalSchema.shape.model,
+  edits: pageProposalSchema.shape.edits,
+  usage: pageProposalSchema.shape.usage,
 });
 
 // Optional producer design fields are closed as well. Keep the existing text
@@ -2191,6 +2216,15 @@ function validatePhotoAssignmentProposal(
 function validatePageProposal(value: unknown, source: PageProposalSource): Record<string, unknown> | undefined {
   try {
     if (Buffer.byteLength(JSON.stringify(value), "utf8") > 1024 * 1024) return undefined;
+    if (source.revision === 0) {
+      const parsed = firstPageProposalSchema.safeParse(value);
+      if (!parsed.success) return undefined;
+      const result = parsed.data;
+      if (result.source.project_id !== source.project_id || result.source.revision !== source.revision ||
+          result.source.digest !== source.digest || new Set(result.edits.map(edit => edit.id)).size !== result.edits.length ||
+          Buffer.byteLength(JSON.stringify(result.proposed_document), "utf8") > 512 * 1024) return undefined;
+      return result;
+    }
     const parsed = pageProposalSchema.safeParse(value);
     if (!parsed.success) return undefined;
     const result = parsed.data;

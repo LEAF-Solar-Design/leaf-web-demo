@@ -944,7 +944,7 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
             "rate_limit_category": "low", "timeout_s": 45, "audit_extra": [],
         },
         "propose_project_page": {
-            "description": "Propose saved portfolio text for private review in the active project conversation. Does not save or publish.",
+            "description": "Propose saved portfolio text, or a project's first coming-soon page, for private review in the active project conversation. Does not save or publish.",
             "rung": 2, "required_capability": "converse",
             "policy": "auto", "tenant_tightenable": True,
             "dispatch": {"kind": "app_api", "routes": ["POST /api/sessions/{session_id}/page/proposals"]},
@@ -952,7 +952,7 @@ _HARDCODED_DEFAULTS: Dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "instruction": {"type": "string", "minLength": 1, "maxLength": 4000},
-                    "expected_revision": {"type": "integer", "minimum": 1, "maximum": 9007199254740991},
+                    "expected_revision": {"type": "integer", "minimum": 0, "maximum": 9007199254740991},
                     "expected_digest": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
                 },
                 "required": ["instruction", "expected_revision", "expected_digest"],

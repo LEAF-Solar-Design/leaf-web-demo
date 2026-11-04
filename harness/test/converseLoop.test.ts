@@ -120,9 +120,12 @@ describe("private portfolio proposal projection", () => {
   async function runProposal(options: {
     args?: Record<string, unknown>; value?: Record<string, unknown>;
     deny?: boolean; noContext?: boolean; noAuthority?: boolean; tool?: string;
+    page?: unknown;
   } = {}) {
     const appRun = new FakeAppRunClient();
     appRun.pageProposalResult = options.value ?? proposal();
+    const photoAssignments = vi.fn().mockResolvedValue({});
+    Object.assign(appRun, { proposeProjectPhotoAssignments: photoAssignments });
     const gate = new FakeGateClient();
     const check = vi.spyOn(gate, "check").mockResolvedValue({ decision: options.deny ? "deny" : "allow" });
     const store = new FakeSessionStore();
@@ -143,12 +146,94 @@ describe("private portfolio proposal projection", () => {
       sessionId: session.session_id, tenantId: org, text: "Shorten my portfolio headline",
       contextPacket: options.noContext ? PACKET : { ...PACKET, project_material_context: {
         schema: "leaf.project-material-context.v1", org_id: org, project_id: project,
-        page: { revision: 7, digest: body.expected_digest },
+        ...(Object.hasOwn(options, "page")
+          ? (options.page === undefined ? {} : { page: options.page })
+          : { page: { revision: 7, digest: body.expected_digest } }),
       } }, ...(options.noAuthority ? {} : { authoritySessionId: "app-session", authorityTurnId: "app-turn" }),
     });
     await turn.done;
-    return { appRun, check, results, events: await store.eventsAfter(session.session_id, 0) };
+    return { appRun, check, results, photoAssignments, events: await store.eventsAfter(session.session_id, 0) };
   }
+
+  const firstBody = { instruction: "Create a coming-soon page; contact cakes@example.com", expected_revision: 0,
+    expected_digest: "0".repeat(64) };
+  const firstProposal = () => ({
+    ...proposal(), source: { project_id: project, revision: 0, digest: firstBody.expected_digest },
+    proposed_document: { label: "Jessica", headline: "Cakes coming soon", description: "Handmade cakes",
+      status: "Coming soon", theme: "cream", alignment: "center",
+      action: { label: "Contact", href: "mailto:cakes@example.com" } },
+  });
+
+  it("proposes the first page from explicit no-page context and projects its private result", async () => {
+    const value = firstProposal();
+    const { appRun, results, events } = await runProposal({ page: null, args: firstBody, value });
+    expect(results[0]?.isError).toBeUndefined();
+    expect(results[0]?.content).toBe("First page proposed from the brief; private review only. Nothing saved or published.");
+    expect(appRun.pageProposalCalls).toEqual([{
+      tenantId: org, sessionId: "app-session", body: firstBody,
+      authority: { sessionId: "app-session", turnId: "app-turn" },
+    }]);
+    expect(ofType(events, "tool_result")[0]?.data).toMatchObject({
+      tool: "propose_project_page", ok: true, result: value,
+    });
+  });
+
+  it.each([
+    { page: null, args: { ...body, expected_revision: 1 } },
+    { page: { revision: 7, digest: body.expected_digest }, args: firstBody },
+    { page: undefined, args: firstBody },
+  ])("refuses a source inconsistent with the context before HTTP: %j", async options => {
+    const { appRun, results, events } = await runProposal(options);
+    expect(appRun.pageProposalCalls).toHaveLength(0);
+    expect(results[0]?.isError).toBe(true);
+    expect(ofType(events, "tool_result")[0]?.data).not.toHaveProperty("result");
+  });
+
+  it.each([
+    "revision", "digest", "schema", "extra", "headline", "javascript", "http", "userinfo",
+    "mailto-query", "missing-href", "duplicate-edits", "portfolio",
+  ])("never projects an invalid first-page response: %s", async failure => {
+    const value: Record<string, unknown> = firstProposal();
+    const document: Record<string, unknown> = { ...firstProposal().proposed_document };
+    value.proposed_document = document;
+    if (failure === "revision") value.source = { ...firstProposal().source, revision: 1 };
+    if (failure === "digest") value.source = { ...firstProposal().source, digest: "a".repeat(64) };
+    if (failure === "schema") document.schema = "leaf.portfolio.v1";
+    if (failure === "extra") document.extra = "unexpected";
+    if (failure === "headline") document.headline = "";
+    const invalidLinks: Record<string, string> = {
+      javascript: "javascript:alert(1)", http: "http://example.com", userinfo: "https://user@example.com",
+      "mailto-query": "mailto:a@b.co?subject=x",
+    };
+    if (invalidLinks[failure]) document.action = { label: "Contact", href: invalidLinks[failure] };
+    if (failure === "missing-href") document.action = { label: "Contact" };
+    if (failure === "duplicate-edits") value.edits = [{ id: "f0002", value: "a" }, { id: "f0002", value: "b" }];
+    if (failure === "portfolio") value.proposed_document = proposal().proposed_document;
+    const { results, events } = await runProposal({ page: null, args: firstBody, value });
+    expect(results[0]?.isError).toBe(true);
+    expect(ofType(events, "tool_result")[0]?.data).not.toHaveProperty("result");
+  });
+
+  it("refuses a coming-soon document returned for a saved page", async () => {
+    const value = { ...proposal(), proposed_document: firstProposal().proposed_document };
+    const { results, events } = await runProposal({ value });
+    expect(results[0]?.isError).toBe(true);
+    expect(ofType(events, "tool_result")[0]?.data).not.toHaveProperty("result");
+  });
+
+  it("refuses photo assignment at revision zero without calling the client", async () => {
+    const { appRun, photoAssignments, results, events } = await runProposal({
+      page: null, tool: "propose_project_photo_assignments", args: {
+        expected_revision: 0, expected_digest: firstBody.expected_digest,
+        operations: [{ op: "assign", material_id: "33333333-3333-4333-8333-333333333333",
+          sha256: "b".repeat(64), preview_sha256: "c".repeat(64), gallery_slug: "cakes", title: "", alt: "Cake" }],
+      },
+    });
+    expect(results[0]?.isError).toBe(true);
+    expect(photoAssignments).not.toHaveBeenCalled();
+    expect(appRun.pageProposalCalls).toHaveLength(0);
+    expect(ofType(events, "tool_result")[0]?.data).not.toHaveProperty("result");
+  });
 
   it("emits the complete 94-photo UI result and short model text after the normal gate", async () => {
     const { appRun, check, results, events } = await runProposal();

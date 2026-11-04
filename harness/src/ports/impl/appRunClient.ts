@@ -40,9 +40,9 @@ import {
 export const ProjectPageProposalRequest = z.strictObject({
   instruction: z.string().refine(value => value.trim().length > 0 &&
     Array.from(value).length <= 4000 && !/[\p{Cs}]/u.test(value)),
-  expected_revision: z.number().int().positive().refine(Number.isSafeInteger),
+  expected_revision: z.number().int().nonnegative().refine(Number.isSafeInteger),
   expected_digest: z.string().regex(/^[0-9a-f]{64}(?![\s\S])/),
-});
+}).refine(value => value.expected_revision !== 0 || value.expected_digest === "0".repeat(64));
 
 /** Mixed app/harness deployments must not turn an ignored range into a whole-file success. */
 function validatePlatformSourceRange(result: Record<string, unknown>, path: string, requested: PlatformSourceRange): void {

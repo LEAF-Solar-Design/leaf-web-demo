@@ -310,8 +310,9 @@ def test_roles_file_gained_no_operator_role():
 # catalog/JPEG inspection. Removing that entry reproduces the preceding pin
 # 6df63b574aa1130698de053541055bd550db676ad2c575a553e1caa2707b5df8;
 # every existing action and top-level policy setting remains identical.
+# RC-B01 lets propose_project_page take revision 0 for a first page; its rung, policy and dispatch are unchanged.
 FROZEN_TENANT_POLICY_SHA256 = (
-    "542a65cab9e69b59390093821a29117bde9ef3496d05a4ffe776c578f967b9bf")
+    "e651094167a7d0903b4c4ab97be89a15f6326127d4590adbffecf75c47d1f179")
 
 FROZEN_TENANT_ACTIONS = {
     "request_confirmation": "always-confirm",
