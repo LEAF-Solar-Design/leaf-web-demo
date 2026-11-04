@@ -9,9 +9,10 @@ memory), so of two writers that build on the same head exactly one creates entry
 other is refused PHYSICAL_HEAD_CONFLICT. A backend that inherits the base class's
 exists-then-put (the APS OSS backend) cannot make that promise and publication refuses it.
 
-The log is per drawing, not per drawing version: a graph commit, undo or redo of the drawing
-leaves the physical head where it is, and the head reports the revision its state was written
-against. Entries are contiguous from 0 (entry n is written only after entry n-1 was read), so
+The log is per drawing. With version binding enabled a read follows the reference on the
+selected drawing version; an unbound version reads the log tip. Resolution adds one manifest
+read and at most one object read (64 MiB for intake, 16 MiB for bundles), none on a memo hit.
+Entries are contiguous from 0 (entry n is written only after entry n-1 was read), so
 the head is found by binary search in at most 13 log reads, its predecessor included. The log
 holds at most 4,096 entries. Every read and write fails closed with a named, payload-free code.
 No clock, network, graph write or re-encoding of the state lives here: the state bytes are the
@@ -149,6 +150,12 @@ def _head(backend, tenant_id, drawing_id, project_id):
     index = log.last()
     if index < 0:
         return None, None
+    return _view_at(log, index, project_id)
+
+
+def _view_at(log, index, project_id):
+    """Read and verify an exact entry and its predecessor, without discovering the tip."""
+    backend, tenant_id, drawing_id = log.backend, log.tenant_id, log.drawing_id
     entry = log.entry(index)
     if index == 0:
         if entry["parent"] is not None:
@@ -173,19 +180,54 @@ def _head(backend, tenant_id, drawing_id, project_id):
     return view, content
 
 
-def physical_head(backend, tenant_id, drawing_id, *, project_id):
-    """The drawing's current physical head (None when no state was ever published): at most 13
-    log reads (the search and the head's predecessor) plus the head artifact's metadata and
-    content (the store verifies its digest)."""
-    _project_id(project_id)
-    return _head(backend, tenant_id, drawing_id, project_id)[0]
+def _version_head(backend, tenant_id, drawing_id, project_id, version):
+    if version != "head" and (type(version) is not int or version < 1):
+        raise PhysicalHeadError("PHYSICAL_HEAD_ID_INVALID")
+    if not store.physical_versioned_enabled():
+        return _head(backend, tenant_id, drawing_id, project_id)
+    try:
+        _, ref = store.read_version_physical(
+            backend, tenant_id, drawing_id, version, project_id=project_id)
+    except store.PhysicalReferenceScopeMismatch:
+        raise PhysicalHeadError("PHYSICAL_HEAD_PROJECT_MISMATCH") from None
+    except (store.PhysicalReferenceInvalid, KeyError):
+        raise PhysicalHeadError("PHYSICAL_HEAD_CORRUPT") from None
+    except ValueError:
+        raise PhysicalHeadError("PHYSICAL_HEAD_ID_INVALID") from None
+    except (OSError, RuntimeError):
+        raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
+    if ref is None:
+        return _head(backend, tenant_id, drawing_id, project_id)
+    view, content = _view_at(_Log(backend, tenant_id, drawing_id), ref["head_index"], project_id)
+    if (view["state"]["artifact_id"] != ref["state_artifact_id"]
+            or view["state"]["content_sha256"] != ref["state_content_sha256"]):
+        raise PhysicalHeadError("PHYSICAL_HEAD_CORRUPT")
+    return view, content
 
 
-def load_physical_head(backend, tenant_id, drawing_id, *, project_id):
-    """(view, document) of the current head, or (None, None); the document is decoded from the
-    bytes the head read already verified, so the artifact is read once."""
+def physical_head(backend, tenant_id, drawing_id, *, project_id, version="head"):
+    """The selected version's physical view. Bound reads use two log entries and two
+    artifact gets; resolution uses one manifest and at most one bounded object (memoized).
+    Unbound reads retain the at-most-13-read tip search."""
     _project_id(project_id)
-    view, content = _head(backend, tenant_id, drawing_id, project_id)
+    return _version_head(backend, tenant_id, drawing_id, project_id, version)[0]
+
+
+def load_physical_head(backend, tenant_id, drawing_id, *, project_id, version="head"):
+    """(view, document) following the selected version; same bounded read budget as
+    physical_head. Decode the already verified content without another artifact read."""
+    _project_id(project_id)
+    view, content = _version_head(backend, tenant_id, drawing_id, project_id, version)
+    return _document(view, content)
+
+
+def load_physical_entry(backend, tenant_id, drawing_id, index, *, project_id):
+    """Read one named immutable entry, failing closed when it is absent or corrupt."""
+    _project_id(project_id)
+    return _document(*_view_at(_Log(backend, tenant_id, drawing_id), index, project_id))
+
+
+def _document(view, content):
     if view is None:
         return None, None
     try:

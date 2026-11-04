@@ -2,7 +2,9 @@
 Ground physical state store (server/solar_physical_state.py). Every expected value below was
 measured by running the module against the FilesystemBackend the physical-state tests seed."""
 import hashlib
+import copy
 import json
+import os
 import re
 import sys
 import threading
@@ -25,6 +27,7 @@ from test_solar_physical_state import (  # noqa: E402
 from test_w1_design_graph import graph  # noqa: E402,F401
 from test_w1_solve_commit import seed, seed_graphless  # noqa: E402
 from test_w1_local_graph_adapter import held, run as commit  # noqa: E402
+from test_drawing_upload_authority_postgres import postgres_authority  # noqa: E402,F401
 
 LOG = PREFIX + "physical/"
 
@@ -669,3 +672,634 @@ def test_physical_head_oss_error_without_response_is_unavailable(backend, monkey
 
     oss = _oss(monkeypatch, _objects(backend), fail)
     refused("PHYSICAL_HEAD_STORE_UNAVAILABLE", ph.physical_head, oss, TENANT, DRAWING, project_id=PROJECT)
+
+
+def _binding_ref(view):
+    return {"head_index": view["index"], "state_artifact_id": view["state"]["artifact_id"],
+            "state_content_sha256": view["state"]["content_sha256"]}
+
+
+def _binding_request(backend, graph, apply_id="binding-graph", physical=None):
+    v, _, row = store.resolve_version_entry(backend, TENANT, DRAWING)
+    previous = None
+    if (row.get("note") or "").startswith("solar-bundle:"):
+        previous = store.read_graph_bundle(backend, TENANT, DRAWING)["graph"]["rev"]
+    value = copy.deepcopy(graph)
+    value.update(rev=0 if previous is None else previous + 1, parent_rev=previous,
+                 source_hash=hashlib.sha256(b"binding DWG").hexdigest())
+    request = {"graph": value, "intake": {"layers": []}, "mapping": {},
+               "project_id": PROJECT, "apply_id": apply_id, "source_version": v,
+               "source_sha256": row["sha256"], "source_rev": previous}
+    if physical is not None:
+        request["physical"] = physical
+    return request
+
+
+def _binding_bundle(backend, graph, fence, apply_id="binding-graph", physical=None):
+    request = _binding_request(backend, graph, apply_id, physical)
+    return write_loop.apply_graph_version(backend, TENANT, DRAWING, b"binding DWG", request,
+                                          holder="fixture-owner", fence=fence)
+
+
+def _binding_commit(backend, checkout_fence, ref, parent=1, apply_id="binding", **kw):
+    args = dict(project_id=PROJECT, parent_version=parent, physical=ref,
+                holder="fixture-owner", fence=checkout_fence, apply_id=apply_id)
+    args.update(kw)
+    return write_loop.commit_physical_version(backend, TENANT, DRAWING, **args)
+
+
+def _binding_payload(backend, payload, parent=1, fence=1):
+    from leaf_cloud_client import canonical_bytes
+    data = payload if type(payload) is bytes else canonical_bytes(payload)
+    return write_loop._put_bytes_version(backend, TENANT, DRAWING, data, parent,
+                                         {"tool": "binding-fixture"},
+                                         holder="fixture-owner", fence=fence)
+
+
+def _binding_intake(backend, version=1):
+    return json.loads(backend.get(store.drawing_version_key(TENANT, DRAWING, version)))
+
+
+def _binding_plant_bundle(backend, version, value):
+    raw = value if type(value) is bytes else store._bundle_json(value)
+    digest = hashlib.sha256(raw).hexdigest()
+    backend.put(store._graph_bundle_key(TENANT, DRAWING, digest), raw)
+    manifest = store.load_manifest(backend, TENANT, DRAWING)
+    next(e for e in manifest["versions"] if e["v"] == version)["note"] = "solar-bundle:" + digest
+    store.save_manifest(backend, TENANT, DRAWING, manifest)
+    store._physical_memo_clear()
+
+
+class TestVersionBinding:
+    @pytest.fixture(autouse=True)
+    def version_binding_enabled(self, monkeypatch):
+        monkeypatch.setenv("LEAF_SOLAR_PHYSICAL_VERSIONED", "1")
+        store._physical_memo_clear()
+        yield
+        store._physical_memo_clear()
+
+    def test_reference_contract(self):
+        assert store.PHYSICAL_REF_KEYS == {"head_index", "state_artifact_id", "state_content_sha256"}
+        assert store.PHYSICAL_MAX_INDEX == ph.MAX_LOG_ENTRIES - 1 == 4095
+        assert store.PHYSICAL_INTAKE_KEY == "solar_physical"
+        assert store.PHYSICAL_BUNDLE_KEY == "physical"
+        assert store.PHYSICAL_INTAKE_MAX_BYTES == write_loop.MAX_OUTPUT_INTAKE_BYTES == 64 * 1024 * 1024
+        assert store.PHYSICAL_MEMO_MAX == 1024
+        ref = {"head_index": 0, "state_artifact_id": "a" * 64, "state_content_sha256": "b" * 64}
+        assert store.check_physical_reference(ref) == ref
+        assert store.check_physical_reference(ref) is not ref
+        bad = [None, [], dict(ref, extra=1), {k: v for k, v in ref.items() if k != "head_index"}]
+        bad += [dict(ref, head_index=i) for i in (True, -1, 4096, 0.0)]
+        bad += [dict(ref, state_artifact_id=s) for s in ("A" * 64, "a" * 63)]
+        for value in bad:
+            with pytest.raises(store.PhysicalReferenceInvalid, match="^invalid physical reference$"):
+                store.check_physical_reference(value)
+
+    def test_unbound_bundle_commit_is_byte_identical(self, backend, graph):
+        with held(backend) as fence:
+            request = _binding_request(backend, graph)
+            v = _binding_bundle(backend, graph, fence)
+        bundle = store.read_graph_bundle(backend, TENANT, DRAWING, v)
+        bundle.pop("version")
+        assert set(bundle) == {"graph", "intake", "mapping", "receipt"}
+        expected = {k: request[k] for k in ("graph", "intake", "mapping")}
+        receipt = {k: request[k] for k in
+                   ("project_id", "apply_id", "source_version", "source_sha256", "source_rev")}
+        receipt.update(tenant_id=TENANT, drawing_id=DRAWING,
+                       hashes={k: hashlib.sha256(store._bundle_json(v)).hexdigest()
+                               for k, v in expected.items()})
+        receipt["hashes"]["dwg"] = hashlib.sha256(b"binding DWG").hexdigest()
+        expected["receipt"] = receipt
+        golden = store._bundle_json(expected)
+        _, _, row = store.resolve_version_entry(backend, TENANT, DRAWING, v)
+        assert row["note"] == "solar-bundle:" + hashlib.sha256(golden).hexdigest()
+        assert store._bundle_json(bundle) == golden
+
+    def test_bundle_commit_with_reference_and_inheritance(self, backend, graph):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            first = _binding_bundle(backend, graph, fence, physical=ref)
+            second = _binding_bundle(backend, graph, fence, "inherit")
+        for v in (first, second):
+            assert store.read_version_physical(backend, TENANT, DRAWING, v) == (v, ref)
+
+    def test_invalid_reference_refused_head_unchanged(self, backend, graph):
+        with held(backend) as fence:
+            before = store.load_manifest(backend, TENANT, DRAWING)
+            with pytest.raises(store.PhysicalReferenceInvalid):
+                _binding_bundle(backend, graph, fence, physical={"head_index": True})
+            assert store.load_manifest(backend, TENANT, DRAWING) == before
+
+    @pytest.mark.parametrize("bound", [False, True])
+    def test_restore_copies_reference_and_refuses_mismatch(self, backend, graph, bound):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            source = _binding_bundle(backend, graph, fence, physical=ref if bound else None)
+            _binding_bundle(backend, graph, fence, "later", physical=ref)
+            restored = store.read_graph_bundle(backend, TENANT, DRAWING, source)
+            request = _binding_request(backend, graph, "restore")
+            request.update({k: restored[k] for k in ("graph", "intake", "mapping")})
+            request["restore_version"] = source
+            if bound:
+                request["physical"] = ref
+            bad = dict(request, physical=dict(ref, head_index=5))
+            with pytest.raises(ValueError, match="restore must copy"):
+                write_loop.apply_graph_version(backend, TENANT, DRAWING, b"binding DWG", bad,
+                                                holder="fixture-owner", fence=fence)
+            v = write_loop.apply_graph_version(backend, TENANT, DRAWING, b"binding DWG", request,
+                                                holder="fixture-owner", fence=fence)
+        assert store.read_version_physical(backend, TENANT, DRAWING, v)[1] == (ref if bound else None)
+
+    def test_restore_of_unbound_version_drops_reference(self, backend, graph):
+        from routers.drawings import restore_drawing_version
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            unbound = _binding_bundle(backend, graph, fence)
+            _binding_bundle(backend, graph, fence, "bound", physical=ref)
+            restore_drawing_version(TENANT, DRAWING, unbound, actor="restore", backend=backend,
+                                    holder="fixture-owner", fence=fence)
+        assert store.read_version_physical(backend, TENANT, DRAWING)[1] is None
+
+    @pytest.mark.parametrize("bundle", [False, True])
+    def test_undo_redo_select_reference(self, backend, graph, bundle):
+        first = publish(backend)["head"]
+        with held(backend) as fence:
+            parent = _binding_bundle(backend, graph, fence) if bundle else 1
+            v, _ = _binding_commit(backend, fence, _binding_ref(first), parent)
+            second = publish(backend, first["state"]["artifact_id"], 3)["head"]
+            w, _ = _binding_commit(backend, fence, _binding_ref(second), v, "second")
+            assert store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence) == v
+            assert head(backend) == first
+            assert store.redo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence) == w
+            assert head(backend) == second
+
+    def test_corrupt_bundle_reference_fails_closed(self, backend, graph):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            v = _binding_bundle(backend, graph, fence, physical=ref)
+            _binding_bundle(backend, graph, fence, "later")
+            bundle = store.read_graph_bundle(backend, TENANT, DRAWING, v)
+            bundle["physical"]["head_index"] = True
+            _binding_plant_bundle(backend, v, bundle)
+            with pytest.raises(store.PhysicalReferenceInvalid):
+                store.read_graph_bundle(backend, TENANT, DRAWING, v)
+            with pytest.raises(store.PhysicalReferenceInvalid):
+                store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+        refused("PHYSICAL_HEAD_CORRUPT", ph.load_physical_head, backend, TENANT, DRAWING,
+                version=v, project_id=PROJECT)
+
+    def test_intake_reference_read_and_substring_false_positive(self, backend):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            v = _binding_payload(backend, dict(_binding_intake(backend), solar_physical=ref), fence=fence)
+            assert store.read_version_physical(backend, TENANT, DRAWING, v) == (v, ref)
+            for payload in ({"value": "solar_physical"}, b'not JSON "solar_physical"',
+                            {"solar_physical": ref}):
+                w = _binding_payload(backend, payload, parent=v, fence=fence)
+                assert store.read_version_physical(backend, TENANT, DRAWING, w) == (w, None)
+
+    def test_intake_graph_commit_inherits_and_replays(self, backend):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            v, _ = _binding_commit(backend, fence, ref)
+            result = commit(backend, source_version=v, fence=fence)
+            again = commit(backend, source_version=v, fence=fence)
+        assert again["replayed"] is True
+        assert store.read_version_physical(backend, TENANT, DRAWING, result["new_version"]["version"])[1] == ref
+
+    def test_plain_dwg_version_unbound_and_commit_refused(self, backend):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            v = _binding_payload(backend, b"plain DWG", fence=fence)
+            assert store.read_version_physical(backend, TENANT, DRAWING, v) == (v, None)
+            with pytest.raises(ValueError, match="physical commit requires a graph version"):
+                _binding_commit(backend, fence, ref, v)
+
+    @pytest.mark.parametrize("bundle", [False, True])
+    def test_commit_physical_version_bundle_and_intake(self, backend, graph, bundle):
+        fixed = {"head_index": 0, "state_artifact_id": "0" * 64, "state_content_sha256": "1" * 64}
+        assert store.physical_ref_note(fixed) == (
+            "solar-physical:41e5754788f718edd0c83dd0cb372258f0a971d0af8c9f187b813f66932abe19")
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            parent = _binding_bundle(backend, graph, fence) if bundle else 1
+            original = backend.get(store.drawing_version_key(TENANT, DRAWING, parent))
+            v, created = _binding_commit(backend, fence, ref, parent)
+            assert created and v > parent
+            assert _binding_commit(backend, fence, ref, parent) == (v, False)
+            before = store.load_manifest(backend, TENANT, DRAWING)
+            assert _binding_commit(backend, fence, ref, v, "noop") == (v, False)
+            assert store.load_manifest(backend, TENANT, DRAWING) == before
+        new = backend.get(store.drawing_version_key(TENANT, DRAWING, v))
+        if bundle:
+            assert new == original
+            old_bundle = store.read_graph_bundle(backend, TENANT, DRAWING, parent)
+            new_bundle = store.read_graph_bundle(backend, TENANT, DRAWING, v)
+            assert all(old_bundle[k] == new_bundle[k] for k in ("graph", "intake", "mapping"))
+            assert new_bundle["receipt"]["physical_only"] is True
+        else:
+            assert json.loads(new) == dict(json.loads(original), solar_physical=ref)
+            assert before["versions"][-1]["note"] == store.physical_ref_note(ref)
+
+    @pytest.mark.parametrize("bundle", [False, True])
+    def test_commit_physical_version_refusals(self, backend, graph, monkeypatch, bundle):
+        first = publish(backend)["head"]
+        ref = _binding_ref(first)
+        with held(backend) as fence:
+            parent = _binding_bundle(backend, graph, fence) if bundle else 1
+            bad_inputs = [{"holder": None}, {"holder": store.ANONYMOUS_HOLDER},
+                          {"holder": "another"}, {"fence": 0}, {"fence": True},
+                          {"apply_id": "bad/id"}, {"parent_version": True},
+                          {"physical": dict(ref, head_index=99)},
+                          {"physical": dict(ref, state_artifact_id="0" * 64)},
+                          {"physical": dict(ref, state_content_sha256="0" * 64)},
+                          {"project_id": "foreign"}]
+            for overrides in bad_inputs:
+                before = store.load_manifest(backend, TENANT, DRAWING)
+                expected_error = store.CheckoutDenied if {"holder", "fence"} & overrides.keys() else ValueError
+                with pytest.raises(expected_error):
+                    _binding_commit(backend, fence, ref, parent, **overrides)
+                assert store.load_manifest(backend, TENANT, DRAWING) == before
+            before = store.load_manifest(backend, TENANT, DRAWING)
+            with monkeypatch.context() as patch:
+                patch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+                with pytest.raises(ValueError, match="drawing mutations are disabled"):
+                    _binding_commit(backend, fence, ref, parent)
+            assert store.load_manifest(backend, TENANT, DRAWING) == before
+            v, _ = _binding_commit(backend, fence, ref, parent)
+            second = _binding_ref(publish(backend, first["state"]["artifact_id"], 3)["head"])
+            before = store.load_manifest(backend, TENANT, DRAWING)
+            with pytest.raises(ValueError, match="apply id was reused"):
+                _binding_commit(backend, fence, second, parent)
+            with pytest.raises(ValueError, match="stale (parent|drawing head)"):
+                _binding_commit(backend, fence, second, parent, "stale")
+            assert store.load_manifest(backend, TENANT, DRAWING) == before
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            with pytest.raises(ValueError, match="apply id was reused"):
+                _binding_commit(backend, fence, ref, v)
+            expired = store.load_manifest(backend, TENANT, DRAWING)
+            expired["checkout"]["expires"] = "2000-01-01T00:00:00+00:00"
+            store.save_manifest(backend, TENANT, DRAWING, expired)
+            with pytest.raises(store.CheckoutDenied):
+                _binding_commit(backend, fence, ref, parent)
+            assert store.load_manifest(backend, TENANT, DRAWING) == expired
+
+    def test_bound_read_returns_bound_entry_not_tip(self, backend):
+        first = publish(backend)["head"]
+        with held(backend) as fence:
+            v, _ = _binding_commit(backend, fence, _binding_ref(first))
+        second = publish(backend, first["state"]["artifact_id"], 3)["head"]
+        publish(backend, second["state"]["artifact_id"], 4)
+        view, document = ph.load_physical_head(backend, TENANT, DRAWING, project_id=PROJECT, version=v)
+        assert view == first and document == doc()
+
+    def test_bound_view_equals_tip_view_when_same_entry(self, backend):
+        first = publish(backend)["head"]
+        with held(backend) as fence:
+            _binding_commit(backend, fence, _binding_ref(first))
+        assert head(backend) == ph._head(backend, TENANT, DRAWING, PROJECT)[0]
+
+    def test_default_off_preserves_tip_reads_and_refuses_commits(self, backend, monkeypatch):
+        first = publish(backend)["head"]
+        with held(backend) as fence:
+            v, _ = _binding_commit(backend, fence, _binding_ref(first))
+            second = publish(backend, first["state"]["artifact_id"], 3)["head"]
+            monkeypatch.delenv("LEAF_SOLAR_PHYSICAL_VERSIONED")
+            assert ph.load_physical_head(backend, TENANT, DRAWING,
+                                         project_id=PROJECT, version=v)[0] == second
+            with pytest.raises(ValueError, match="physical version binding is disabled"):
+                _binding_commit(backend, fence, _binding_ref(second), v, "disabled")
+
+    def test_graph_apply_id_cannot_replay_as_physical_commit(self, backend, graph):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            parent = _binding_bundle(backend, graph, fence, "parent")
+            _binding_bundle(backend, graph, fence, "shared", physical=ref)
+            before = store.load_manifest(backend, TENANT, DRAWING)
+            with pytest.raises(ValueError, match="apply id was reused with different content"):
+                _binding_commit(backend, fence, ref, parent, "shared")
+            assert store.load_manifest(backend, TENANT, DRAWING) == before
+
+    @pytest.mark.parametrize("bundle", [False, True])
+    def test_replay_requires_active_matching_checkout(self, backend, graph, monkeypatch, bundle):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            parent = _binding_bundle(backend, graph, fence) if bundle else 1
+            _binding_commit(backend, fence, ref, parent)
+            expired = store.load_manifest(backend, TENANT, DRAWING)
+            expired["checkout"]["expires"] = "2000-01-01T00:00:00+00:00"
+            store.save_manifest(backend, TENANT, DRAWING, expired)
+
+            def no_reference_read(*args, **kwargs):
+                pytest.fail("unauthorized replay read a physical reference")
+
+            monkeypatch.setattr(store, "read_version_physical", no_reference_read)
+            with pytest.raises(store.CheckoutDenied):
+                _binding_commit(backend, fence, ref, parent)
+            assert store.load_manifest(backend, TENANT, DRAWING) == expired
+
+    @pytest.mark.parametrize("project", [None, [], "foreign", {}, {"id": "foreign"}])
+    def test_intake_parent_project_refusal(self, backend, project):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            payload = _binding_intake(backend)
+            payload["solar_design_graph"]["project"] = project
+            parent = _binding_payload(backend, payload, fence=fence)
+            before = store.load_manifest(backend, TENANT, DRAWING)
+            with pytest.raises(store.PhysicalReferenceScopeMismatch):
+                _binding_commit(backend, fence, ref, parent)
+            assert store.load_manifest(backend, TENANT, DRAWING) == before
+
+    def test_raced_replay_rechecks_checkout(self, backend, monkeypatch):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            real_put = write_loop._put_bytes_version
+            raced_manifest = []
+
+            def race(*args, **kwargs):
+                real_put(*args, **kwargs)
+                expired = store.load_manifest(backend, TENANT, DRAWING)
+                expired["checkout"]["expires"] = "2000-01-01T00:00:00+00:00"
+                store.save_manifest(backend, TENANT, DRAWING, expired)
+                raced_manifest.append(expired)
+                raise ValueError("stale drawing head: expected 1")
+
+            monkeypatch.setattr(write_loop, "_put_bytes_version", race)
+            with pytest.raises(store.CheckoutDenied):
+                _binding_commit(backend, fence, ref)
+            assert store.load_manifest(backend, TENANT, DRAWING) == raced_manifest[0]
+
+    @pytest.mark.parametrize("version", [True, False, 0, -1, "1", "latest", None, 1.0])
+    def test_invalid_version_is_refused(self, backend, version):
+        with pytest.raises(ValueError, match="invalid version"):
+            store.read_version_physical(backend, TENANT, DRAWING, version)
+        refused("PHYSICAL_HEAD_ID_INVALID", ph.load_physical_head, backend, TENANT, DRAWING,
+                project_id=PROJECT, version=version)
+
+    def test_memo_returns_fresh_references(self, backend):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            v, _ = _binding_commit(backend, fence, ref)
+        _, got = store.read_version_physical(backend, TENANT, DRAWING, v)
+        got["head_index"] = 99
+        assert store.read_version_physical(backend, TENANT, DRAWING, v)[1] == ref
+
+    @pytest.mark.parametrize("error,code", [
+        (store.PhysicalReferenceScopeMismatch(), "PHYSICAL_HEAD_PROJECT_MISMATCH"),
+        (store.PhysicalReferenceInvalid(), "PHYSICAL_HEAD_CORRUPT"),
+        (KeyError("bound object"), "PHYSICAL_HEAD_CORRUPT"),
+        (ValueError("version not in manifest"), "PHYSICAL_HEAD_ID_INVALID"),
+        (OSError("store fault"), "PHYSICAL_HEAD_STORE_UNAVAILABLE"),
+        (RuntimeError("store fault"), "PHYSICAL_HEAD_STORE_UNAVAILABLE"),
+    ])
+    def test_reference_read_error_mapping(self, backend, monkeypatch, error, code):
+        def fail(*args, **kwargs):
+            raise error
+        monkeypatch.setattr(store, "read_version_physical", fail)
+        refused(code, ph.load_physical_head, backend, TENANT, DRAWING, project_id=PROJECT)
+
+    @pytest.mark.parametrize("defect", ["head", "versions", "bytes", "sha256", "note"])
+    def test_malformed_manifest_is_not_unbound(self, backend, defect):
+        manifest = store.load_manifest(backend, TENANT, DRAWING)
+        if defect in {"head", "versions"}:
+            manifest[defect] = None
+        else:
+            del manifest["versions"][0][defect]
+        store.save_manifest(backend, TENANT, DRAWING, manifest)
+        refused("PHYSICAL_HEAD_CORRUPT", ph.load_physical_head, backend, TENANT, DRAWING,
+                project_id=PROJECT)
+
+    def test_unbound_reads_unchanged(self, backend, monkeypatch):
+        for populated in (False, True):
+            if populated:
+                publish(backend)
+            expected, content = ph._head(backend, TENANT, DRAWING, PROJECT)
+            view, document = ph.load_physical_head(backend, TENANT, DRAWING, project_id=PROJECT)
+            assert view == expected
+            assert document == (None if content is None else ps.decode_document(content))
+            # OSS has only log/artifacts and answers 404 for the manifest.
+            oss = _oss(monkeypatch, _objects(backend))
+            assert ph.load_physical_head(oss, TENANT, DRAWING, project_id=PROJECT) == (view, document)
+        assert ph.load_physical_head(store.InMemoryBackend(), TENANT, DRAWING,
+                                     project_id=PROJECT) == (None, None)
+
+    @pytest.mark.parametrize("field,value", [("head_index", 9), ("state_artifact_id", "0" * 64),
+                                            ("state_content_sha256", "0" * 64)])
+    def test_reference_entry_mismatch_fails_closed(self, backend, field, value):
+        ref = dict(_binding_ref(publish(backend)["head"]), **{field: value})
+        with held(backend) as fence:
+            v = _binding_payload(backend, dict(_binding_intake(backend), solar_physical=ref), fence=fence)
+        refused("PHYSICAL_HEAD_CORRUPT", ph.load_physical_head, backend, TENANT, DRAWING,
+                project_id=PROJECT, version=v)
+
+    def test_project_and_tenant_isolation(self, backend):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            v, _ = _binding_commit(backend, fence, ref)
+        for warmed in (False, True):
+            store._physical_memo_clear()
+            if warmed:
+                assert head(backend) is not None
+            refused("PHYSICAL_HEAD_PROJECT_MISMATCH", ph.load_physical_head, backend, TENANT, DRAWING,
+                    project_id="foreign", version=v)
+        class Recording:
+            def __init__(self):
+                self.keys = []
+            def get(self, key):
+                self.keys.append(key)
+                return backend.get(key)
+        recording = Recording()
+        assert ph.physical_head(recording, "tenant-b", DRAWING, project_id=PROJECT) is None
+        assert recording.keys and all(k.startswith("tenants/tenant-b/") for k in recording.keys)
+
+    def test_bound_read_is_bounded(self, backend, graph):
+        first = publish(backend)["head"]
+        second = publish(backend, first["state"]["artifact_id"], 3)["head"]
+        with held(backend) as fence:
+            v = _binding_bundle(backend, graph, fence, physical=_binding_ref(second))
+        publish(backend, second["state"]["artifact_id"], 4)
+        class Recording(Counting):
+            def __init__(self, inner):
+                super().__init__(inner)
+                self.keys = []
+            def get(self, key):
+                self.keys.append(key)
+                return super().get(key)
+        recording = Recording(backend)
+        for memo in (False, True):
+            recording.keys.clear()
+            recording.log_reads.clear()
+            assert ph.load_physical_head(recording, TENANT, DRAWING, project_id=PROJECT, version=v)[0] == second
+            assert recording.log_reads == [1, 0]
+            assert recording.keys.count(store.manifest_key(TENANT, DRAWING)) == 1
+            assert sum("/bundles/" in k or "/v/" in k for k in recording.keys) == (0 if memo else 1)
+            assert sum("/artifacts/" in k for k in recording.keys) == 2
+
+    def test_local_read_and_proof_follow_source_version(self, backend):
+        import solar_local_read as local
+        first = publish(backend)["head"]
+        with held(backend) as fence:
+            v, _ = _binding_commit(backend, fence, _binding_ref(first))
+        publish(backend, first["state"]["artifact_id"], 3)
+        current = local._current_physical_head(backend, TENANT, DRAWING, PROJECT, version=v)
+        assert current["head"] == first
+        output = {"head": first}
+        assert local._recorded_physical_head(backend, TENANT, DRAWING, PROJECT, output,
+                                             version=v) == current
+        with pytest.raises(ValueError):
+            local._recorded_physical_head(backend, TENANT, DRAWING, PROJECT,
+                                          {"head": head(backend, PROJECT) | {"index": 1}}, version=v)
+        with pytest.raises(ValueError):
+            local._recorded_physical_head(backend, TENANT, DRAWING, PROJECT, {"head": None}, version=v)
+        params = {"drawing_id": DRAWING}
+        result = local.run_local_graph_read(backend, TENANT, "solar-terrain-read", params,
+                                            drawing_id=DRAWING, source_version=v, job_id="binding-read")
+        assert result["output"]["head"] == first
+        assert local.graph_read_provenance(result, params, TENANT, "binding-read", "solar-terrain-read",
+                                           v, backend=backend) is not None
+        tampered = copy.deepcopy(result)
+        tampered["output"]["head"]["index"] = 1
+        with pytest.raises(ValueError, match="graph read terminal proof rejected"):
+            local.graph_read_provenance(tampered, params, TENANT, "binding-read", "solar-terrain-read",
+                                        v, backend=backend)
+
+    def test_terrain_get_and_civil_reopen_follow_head_version(self, backend, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from envelopes import install_error_handlers
+        from routers import solar_terrain as route
+        first = publish(backend)["head"]
+        with held(backend) as fence:
+            v, _ = _binding_commit(backend, fence, _binding_ref(first))
+            second = publish(backend, first["state"]["artifact_id"], 3)["head"]
+            _binding_commit(backend, fence, _binding_ref(second), v, "next")
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+        monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+        monkeypatch.delenv("APS_LIVE", raising=False)
+        app = FastAPI()
+        install_error_handlers(app)
+        app.include_router(route.router)
+        with TestClient(app) as client:
+            for view in ("", "&view=civil"):
+                response = client.get(f"/api/drawings/{DRAWING}/terrain?project_id={PROJECT}" + view,
+                                      headers={"X-Tenant-Id": TENANT})
+                assert response.status_code == 200, response.text
+                assert response.json()["head"] == first
+
+    def test_postgres_commit_physical_version_and_undo(self, backend, graph, tmp_path, monkeypatch, request):
+        # Exercise the PostgreSQL stale-prefix retry without requiring a database in
+        # this hermetic suite. The registered authority suite owns live DB setup.
+        first = publish(backend)["head"]
+        ref = _binding_ref(first)
+        with held(backend) as fence:
+            real_put = write_loop._put_bytes_version
+            raced = []
+            def race(*args, **kwargs):
+                raced.append(real_put(*args, **kwargs))
+                raise ValueError("stale drawing head: expected 1")
+            with monkeypatch.context() as patch:
+                patch.setattr(write_loop, "_put_bytes_version", race)
+                assert _binding_commit(backend, fence, ref) == (raced[0], False)
+            assert _binding_commit(backend, fence, ref) == (raced[0], False)
+            assert store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence) == 1
+        if os.environ.get("DATABASE_URL"):
+            # The suite remains hermetic without DATABASE_URL; with one, exercise
+            # the real authority using the established migration/pool fixture.
+            request.getfixturevalue("postgres_authority")
+            import uuid
+            tenant, drawing = "binding-" + uuid.uuid4().hex[:12], "physical"
+            memory = store.InMemoryBackend()
+            source = tmp_path / "pg-binding.json"
+            from solar_sizing_client import digest
+            source.write_text(json.dumps({"solar_design_graph": graph,
+                                          "solar_design_graph_sha256": digest(graph)}))
+            store.ingest_drawing(memory, tenant, str(source), drawing_id=drawing)
+            fence = store.acquire_checkout_fence(memory, tenant, drawing, "owner", 300)
+            entry = ph.publish_physical_state(memory, tenant, drawing, doc(), project_id=PROJECT)["head"]
+            args = dict(project_id=PROJECT, parent_version=1, physical=_binding_ref(entry),
+                        holder="owner", fence=fence, apply_id="pg-binding")
+            v, created = write_loop.commit_physical_version(memory, tenant, drawing, **args)
+            assert created
+            assert write_loop.commit_physical_version(memory, tenant, drawing, **args) == (v, False)
+            assert store.undo(memory, tenant, drawing, holder="owner", fence=fence) == 1
+            next_entry = ph.publish_physical_state(memory, tenant, drawing,
+                                                   doc(entry["state"]["artifact_id"], 3),
+                                                   project_id=PROJECT)["head"]
+            args.update(physical=_binding_ref(next_entry), apply_id="pg-race")
+            raced.clear()
+            with monkeypatch.context() as patch:
+                patch.setattr(write_loop, "_put_bytes_version", race)
+                assert write_loop.commit_physical_version(memory, tenant, drawing, **args) == (raced[0], False)
+
+    @pytest.mark.parametrize("defect", ["deleted-bundle", "receipt", "tenant", "project", "json",
+                                       "deleted-intake", "hash", "intake-project", "oss"])
+    def test_missing_or_malformed_bound_record_fails_closed(self, backend, graph, monkeypatch, defect):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            if defect in {"deleted-intake", "hash", "intake-project"}:
+                payload = dict(_binding_intake(backend), solar_physical=ref)
+                if defect == "intake-project":
+                    del payload["solar_design_graph"]["project"]["id"]
+                v = _binding_payload(backend, payload, fence=fence)
+                key = store.drawing_version_key(TENANT, DRAWING, v)
+            else:
+                v = _binding_bundle(backend, graph, fence, physical=ref)
+                bundle = store.read_graph_bundle(backend, TENANT, DRAWING, v)
+                if defect in {"receipt", "tenant", "project"}:
+                    if defect == "receipt":
+                        del bundle["receipt"]
+                    else:
+                        del bundle["receipt"]["tenant_id" if defect == "tenant" else "project_id"]
+                    _binding_plant_bundle(backend, v, bundle)
+                elif defect == "json":
+                    _binding_plant_bundle(backend, v, b'not JSON "physical"')
+                _, _, row = store.resolve_version_entry(backend, TENANT, DRAWING, v)
+                key = store._graph_bundle_key(TENANT, DRAWING, row["note"].split(":")[1])
+        if defect in {"deleted-bundle", "deleted-intake", "oss"}:
+            inner = backend
+            class Missing:
+                def get(self, requested):
+                    if requested == key:
+                        if defect == "oss":
+                            raise requests.HTTPError(response=_response(404))
+                        raise KeyError(key)
+                    return inner.get(requested)
+            backend = Missing()
+        elif defect == "hash":
+            backend.put(key, b"different immutable bytes")
+        store._physical_memo_clear()
+        refused("PHYSICAL_HEAD_CORRUPT", ph.load_physical_head, backend, TENANT, DRAWING,
+                project_id=PROJECT, version=v)
+        assert not store._physical_memo
+
+    def test_unbound_read_cost(self, backend, graph, monkeypatch):
+        manifest = store.load_manifest(backend, TENANT, DRAWING)
+        manifest["versions"][0]["bytes"] = store.PHYSICAL_INTAKE_MAX_BYTES + 1
+        store.save_manifest(backend, TENANT, DRAWING, manifest)
+        class ManifestOnly:
+            def get(self, key):
+                assert key == store.manifest_key(TENANT, DRAWING)
+                return backend.get(key)
+        assert store.read_version_physical(ManifestOnly(), TENANT, DRAWING) == (1, None)
+        # Restore the row before using the fixture as a graph source.
+        manifest["versions"][0]["bytes"] = len(backend.get(store.drawing_version_key(TENANT, DRAWING, 1)))
+        store.save_manifest(backend, TENANT, DRAWING, manifest)
+        store._physical_memo_clear()
+        with held(backend) as fence:
+            v = _binding_bundle(backend, graph, fence)
+        loads = json.loads
+        seen = []
+        def checked_loads(raw, *args, **kwargs):
+            assert b'"receipt"' not in (raw if type(raw) is bytes else raw.encode())
+            seen.append(raw)
+            return loads(raw, *args, **kwargs)
+        with monkeypatch.context() as patch:
+            patch.setattr(store.json, "loads", checked_loads)
+            assert store.read_version_physical(backend, TENANT, DRAWING, v) == (v, None)
+        assert len(seen) == 1  # the manifest only
+        for i in range(store.PHYSICAL_MEMO_MAX + 5):
+            manifest["versions"][0]["sha256"] = f"{i:064x}"
+            manifest["versions"][0]["bytes"] = store.PHYSICAL_INTAKE_MAX_BYTES + 1
+            store.save_manifest(backend, TENANT, DRAWING, manifest)
+            assert store.read_version_physical(ManifestOnly(), TENANT, DRAWING, 1) == (1, None)
+        assert len(store._physical_memo) == store.PHYSICAL_MEMO_MAX
