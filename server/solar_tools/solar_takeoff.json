@@ -1,0 +1,61 @@
+{
+  "schema": "leaf.solar-tool.v1",
+  "name": "solar-takeoff",
+  "builtin": "builtins/solar_takeoff.py",
+  "family": "schedules",
+  "adapter": "local-graph-read",
+  "entitlement": "run_read",
+  "requires_persisted_graph": true,
+  "seedable": false,
+  "invalid_request_code": "INVALID_TAKEOFF_REQUEST",
+  "readiness": {
+    "kind": "facets",
+    "facets": []
+  },
+  "engine": "server-builtin",
+  "interaction": {
+    "mode": "form"
+  },
+  "record_store": "registry",
+  "record": {
+    "name": "solar-takeoff",
+    "version": "1.0.0",
+    "description": "Incomplete preview takeoff with no prices. Pile spacing is in 0.1 m steps.",
+    "kind": "script",
+    "family_id": "schedules",
+    "engine_op": "solar_takeoff",
+    "entry": "builtins/solar_takeoff.py",
+    "params": {
+      "type": "object",
+      "properties": {
+        "drawing_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "pile_spacing_m": {
+          "type": "number",
+          "minimum": 0.5,
+          "maximum": 100
+        }
+      },
+      "required": [],
+      "additionalProperties": false
+    },
+    "returns": {
+      "type": "object"
+    },
+    "capabilities": [
+      "drawing.read"
+    ],
+    "allow_local_fallback": false
+  },
+  "ledger": [
+    "bill-of-materials",
+    "pad-grading"
+  ],
+  "trusted_inputs": [],
+  "maturity": "preview",
+  "wave": 4,
+  "order": 70,
+  "scenario": "ge-takeoff"
+}

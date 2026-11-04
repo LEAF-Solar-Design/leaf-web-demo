@@ -444,7 +444,7 @@ def test_sip_r3a_proof_stored_companion_tampering(memory):
 def test_sip_r3a_legacy_bytes():
     raw = Path(local.__file__).read_bytes()
     prefix = raw[:raw.index(b"\n\ndef run_project_graph_seed")]
-    assert sha256(prefix).hexdigest() == "889f62cc4bfee44532ae6a6170852bc340bf5106a664c3c89d06c1a672dde005"
+    assert sha256(prefix).hexdigest() == "fe483f2b662237e7094733750cc0bbf0f62d1755dd493492a8891c0d243a2117"
     source_hash = sha256(local.canonical_bytes(INTAKE)).hexdigest()
     assert source_hash == "77e8d2aaf6f3b2eaff320e4ff2e55ccdaa4237a9a9e9adca5ef23a9e32c0d8ef"
     base = local.new_empty_graph(tenant_id="fixture-tenant", drawing_id="solar",

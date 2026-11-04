@@ -15,6 +15,8 @@ const flowError = (data) => {
 export default function HomeAssistantSetup({ deviceId, mock = false, active = true, disabled = false, onCommand, onGetCommand, onRelayToken }) {
   const [steps, setSteps] = useState({})
   const [hue, setHue] = useState(null)
+  const [hueHost, setHueHost] = useState('')
+  const [hueHostError, setHueHostError] = useState(null)
   const [seconds, setSeconds] = useState(0)
   const [bulbs, setBulbs] = useState([])
   const [host, setHost] = useState('')
@@ -36,6 +38,8 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
     live.current = active
     setSteps({})
     setHue(null)
+    setHueHost('')
+    setHueHostError(null)
     setRelay(null)
     setBulbs([])
     setLights([])
@@ -48,7 +52,7 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
   }, [active, deviceId, mock])
 
   useEffect(() => {
-    if (!active || !hue) return undefined
+    if (!active || !hue || hue.stepId === 'manual') return undefined
     const tick = () => setSeconds(Math.max(0, Math.ceil((hue.deadline - Date.now()) / 1000)))
     tick()
     const timer = setInterval(tick, 1000)
@@ -77,8 +81,10 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
     const id = string(data?.flow_id) || hue?.id
     if (data?.type === 'create_entry' && !error) { setHue(null); return true }
     if (id && data?.type !== 'abort') {
-      setHue({ id, deadline: Date.now() + 30000 })
-      setStep('hue', error ? 'Needs attention' : 'Waiting for button', error)
+      const stepId = string(data?.step_id)
+      setHue({ id, stepId, deadline: Date.now() + 30000 })
+      setHueHostError(null)
+      setStep('hue', error ? 'Needs attention' : stepId === 'manual' ? 'Enter bridge IP' : 'Waiting for button', error)
     } else {
       setHue(null)
       setStep('hue', 'Needs attention', error || 'The Hue setup did not provide a link step. Try linking again.')
@@ -148,9 +154,22 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
           <button className="chip-act" disabled={busy} onClick={() => execute('hue', 'ha.flow.start', { handler: 'hue' }, acceptHue)}>Link Hue bridge</button>
           {status('hue')}
           {hue && <div className="ca-setup">
+            {hue.stepId === 'manual' ? <>
+              <label className={`ca-field${hueHostError ? ' field-invalid' : ''}`}>
+                <span className="ca-field-k">Hue bridge IP address</span>
+                <input value={hueHost} autoComplete="off" inputMode="decimal" enterKeyHint="done" maxLength={15}
+                  aria-invalid={!!hueHostError} onChange={(event) => { setHueHost(event.target.value); setHueHostError(null) }} disabled={busy} />
+              </label>
+              {hueHostError && <p className="field-err" role="alert">{hueHostError}</p>}
+              <button className="chip-act" disabled={busy || !hueHost.trim()} onClick={() => {
+                if (!ipv4(hueHost.trim())) { setHueHostError('Enter an IPv4 address, such as 192.168.1.20.'); return }
+                void execute('hue', 'ha.flow.step', { flow_id: hue.id, data: { host: hueHost.trim() } }, acceptHue)
+              }}>Use this bridge</button>
+            </> : <>
             <p className="ca-copy">Press the round button on top of your Hue bridge, then click Continue</p>
             <p className="ca-copy">{seconds > 0 ? `${seconds} s remaining` : 'Button window expired. Press the button again, then Continue.'}</p>
             <button className="chip-act" disabled={busy} onClick={() => execute('hue', 'ha.flow.step', { flow_id: hue.id, data: {} }, acceptHue)}>Continue</button>
+            </>}
           </div>}
         </li>
         <li>

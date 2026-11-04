@@ -43,6 +43,44 @@ it.each(['error', 'refused'])('does not claim onboarding success for a %s result
   expect(screen.queryByText('sensitive failure payload')).not.toBeInTheDocument()
 })
 
+it('hue manual step asks for the bridge IP and submits host', async () => {
+  outcomes.push(
+    ok({ type: 'form', step_id: 'manual', flow_id: 'f1' }),
+    ok({ type: 'form', step_id: 'link', flow_id: 'f1' }),
+  )
+  render(<Harness />)
+  fireEvent.click(screen.getByRole('button', { name: 'Link Hue bridge' }))
+  const field = await screen.findByLabelText('Hue bridge IP address')
+  expect(step('Link Hue bridge').getByText('Enter bridge IP')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Continue' })).not.toBeInTheDocument()
+  expect(screen.queryByText(/Press the round button/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/s remaining|Button window expired/)).not.toBeInTheDocument()
+  fireEvent.change(field, { target: { value: '10.0.0.226' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Use this bridge' }))
+  expect(await screen.findByText('Press the round button on top of your Hue bridge, then click Continue')).toBeInTheDocument()
+  expect(screen.getByRole('button', { name: 'Continue' })).toBeInTheDocument()
+  expect(screen.getByText('30 s remaining')).toBeInTheDocument()
+  expect(screen.queryByLabelText('Hue bridge IP address')).not.toBeInTheDocument()
+  expect(commands).toEqual([
+    { op: 'ha.flow.start', args: { handler: 'hue' } },
+    { op: 'ha.flow.step', args: { flow_id: 'f1', data: { host: '10.0.0.226' } } },
+  ])
+})
+
+it('hue manual step rejects an invalid IP', async () => {
+  outcomes.push(ok({ type: 'form', step_id: 'manual', flow_id: 'f1' }))
+  render(<Harness />)
+  fireEvent.click(screen.getByRole('button', { name: 'Link Hue bridge' }))
+  const field = await screen.findByLabelText('Hue bridge IP address')
+  fireEvent.change(field, { target: { value: '999.0.0.226' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Use this bridge' }))
+  expect(screen.getByRole('alert')).toHaveTextContent('Enter an IPv4 address, such as 192.168.1.20.')
+  expect(field).toHaveAttribute('aria-invalid', 'true')
+  expect(commands).toEqual([{ op: 'ha.flow.start', args: { handler: 'hue' } }])
+  fireEvent.change(field, { target: { value: '10.0.0.226' } })
+  expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+})
+
 it('walks Hue link, retains the flow after not_linked and retries Continue to success', async () => {
   outcomes.push(
     ok({ flow_id: 'hue-flow', type: 'form', step_id: 'link' }),

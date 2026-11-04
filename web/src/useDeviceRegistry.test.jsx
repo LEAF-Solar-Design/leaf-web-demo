@@ -248,6 +248,13 @@ it('uses safe guidance for command result codes without an HTTP status', () => {
   expect(deviceError({ error: { code: 'unknown_failure', message: 'private diagnostics' } })).toBe("That didn't work. Try again.")
 })
 
+it('deviceError maps code no_wiz_light to useful connection guidance', () => {
+  const message = 'No WiZ light answered at that address. Check the light is powered on and the IP is right. On a Mac, also allow Python under System Settings > Privacy & Security > Local Network.'
+  expect(deviceError({ code: 'no_wiz_light' })).toBe(message)
+  expect(deviceError({ error: { code: 'no_wiz_light' } })).toBe(message)
+  expect(deviceError(new DeviceRequestError(422, 'no_wiz_light'))).toBe(message)
+})
+
 it.each([401, 403, 429, 503, 500])('preserves status %s even when a refusal body is not JSON', async (status) => {
   const { result } = renderHook(() => useDeviceRegistry({ projectId: 'p1' }))
   await waitFor(() => expect(result.current.devices).toHaveLength(1))
