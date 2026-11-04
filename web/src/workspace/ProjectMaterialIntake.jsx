@@ -18,9 +18,11 @@ export default function ProjectMaterialIntake({ project, upload = {}, intake = {
   const fileName = intake.target?.fileName || 'drawing'
   const failed = intake.phase === 'attach-failed' || upload.phase === 'failed'
   const error = intake.phase === 'attach-failed' ? intake.error : upload.error
+  const sequence = intake.drawing?.seq
+  const versionLabel = Number.isInteger(sequence) && sequence > 0 ? ` as version ${sequence}` : ''
   let sentence = project ? `Material attaches to ${target}` : 'Open a project first.'
   if (failed) sentence = materialError(error)
-  else if (intake.phase === 'attached') sentence = `Attached ${intake.drawing?.name || fileName} as version ${intake.drawing?.version} to ${target}`
+  else if (intake.phase === 'attached') sentence = `Attached ${intake.drawing?.name || fileName}${versionLabel} to ${target}`
   else if (intake.phase === 'attaching') sentence = `Attaching to ${target}`
   else if (upload.phase === 'uploading') sentence = `Uploading ${fileName}`
   else if (upload.phase === 'extracting' || upload.phase === 'loading') sentence = `Extracting ${fileName}`

@@ -1,11 +1,23 @@
 import { afterEach, expect, it, vi } from 'vitest'
 import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import ProjectMaterialIntake from './ProjectMaterialIntake.jsx'
+import { createMaterialIntakeController } from './createMaterialIntakeController.js'
 
 afterEach(cleanup)
 const project = { project_id: 'p1', name: 'Roof A' }
 const target = { projectId: 'p1', projectName: 'Roof A', fileName: 'site.dwg' }
 const upload = { policy: { enabled: true }, phase: 'idle' }
+
+// Public DrawingVersion.to_dict() shape returned by the normal import route.
+// Drawing name belongs to the upload target, not to this version record.
+const drawingVersion = {
+  version_id: '11111111-1111-4111-8111-111111111111',
+  drawing_id: '22222222-2222-4222-8222-222222222222', project_id: 'p1', org_id: 'o1', seq: 2,
+  oss_object: 'fixture.dwg', intake_ref: 'fixture.intake.json', created_by: 'fixture-actor',
+  provenance: { schema: 'leaf.drawing-import.v1', source: { kind: 'account_upload', version: 2 } },
+  idempotency_key: 'fixture-import', created_at: '2026-09-17T12:00:00Z',
+  deleted_at: null, purge_requested_at: null, purge_completed_at: null,
+}
 
 it('B3 row8 renders phase sentences, retry, disabled intake and material lists', () => {
   const retry = vi.fn()
@@ -21,7 +33,7 @@ it('B3 row8 renders phase sentences, retry, disabled intake and material lists',
   expect(screen.getByText('Attaching to Roof A')).toBeTruthy()
   rerender(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'pending', target, beginRefused: 'Wait for the current upload to finish.' }} />)
   expect(screen.getByText('Wait for the current upload to finish.')).toBeTruthy()
-  rerender(<ProjectMaterialIntake project={{ name: 'Roof B' }} upload={upload} intake={{ phase: 'attached', target, drawing: { name: 'site.dwg', version: 2 } }} />)
+  rerender(<ProjectMaterialIntake project={{ name: 'Roof B' }} upload={upload} intake={{ phase: 'attached', target, drawing: drawingVersion }} />)
   expect(screen.getByText('Attached site.dwg as version 2 to Roof A')).toBeTruthy()
   rerender(<ProjectMaterialIntake project={project} upload={upload} intake={{ phase: 'attach-failed', target, error: 'Import unavailable.' }} onRetry={retry} />)
   expect(screen.getByRole('status').textContent).toBe('Import unavailable.')
@@ -39,6 +51,28 @@ it('B3 row8 renders phase sentences, retry, disabled intake and material lists',
   expect(screen.getByText('Survey')).toBeTruthy()
   expect(screen.getByText('ready')).toBeTruthy()
   expect(screen.getByText(new Date(created).toLocaleDateString())).toBeTruthy()
+})
+
+it('renders the public import sequence through the real material controller', async () => {
+  const controller = createMaterialIntakeController({ services: {
+    importUpload: vi.fn(async () => ({ drawingVersion, replayed: false })),
+  } })
+  controller.begin(target)
+  await controller.onUploadReady({ receipt: { drawing_id: 'source-upload' }, status: { extracted_version: 2 } })
+  expect(controller.getSnapshot().drawing).toBe(drawingVersion)
+  expect(drawingVersion).not.toHaveProperty('version')
+  expect(drawingVersion).not.toHaveProperty('name')
+  render(<ProjectMaterialIntake project={project} upload={upload} intake={controller.getSnapshot()} />)
+  expect(screen.getByRole('status').textContent).toBe('Attached site.dwg as version 2 to Roof A')
+  controller.dispose()
+})
+
+it('confirms attachment without inventing a sequence when it is unavailable', () => {
+  const { seq: _sequence, ...withoutSequence } = drawingVersion
+  render(<ProjectMaterialIntake project={project} upload={upload}
+    intake={{ phase: 'attached', target, drawing: withoutSequence }} />)
+  expect(screen.getByRole('status').textContent).toBe('Attached site.dwg to Roof A')
+  expect(screen.getByRole('status').textContent).not.toMatch(/undefined|null|version/)
 })
 
 it('B3 row9 forwards the selected file through the upload control', () => {
