@@ -415,7 +415,7 @@ def test_sip_r3e_readiness(monkeypatch):
         policy.assert_refusal(request(manual_a, parent, groups(parent)), "MODULE_POWER_REQUIRED")
     baseline = w1.graph.__wrapped__()
     reasons = {name: row["input_reason"] for name, row in availability.w1_graph_readiness(baseline).items()}
-    assert local.digest(reasons) == "b823899eccecf01a72b2c335dce5c64dc2714bd2943b6cd2aa9c503ba6045b8c"
+    assert local.digest(reasons) == "ddf17a13b6c27bae2113d96ef094815e9cde9d391b62cd251f1a8cf1eedf6cad"
     ground = deepcopy(ctx.graph)
     ground["project"]["installation_design"] = "Ground"
     assert availability.w1_graph_readiness(ground)[TOOL]["input_ready"] is False

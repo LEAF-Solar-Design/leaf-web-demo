@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pickle
 import plistlib
+import socket
 import struct
 import subprocess
 import threading
@@ -248,6 +249,7 @@ def local_handler(tmp_path, ha_server, **kwargs):
 
 
 def install_stub(monkeypatch, *, available=None, fail_pip=False, clock=None, brew_version="3.14.8", pip_seconds=10):
+    monkeypatch.setattr(HomeAssistant, "_lan_reachable", lambda self: False)
     available = available if available is not None else {"/opt/homebrew/bin/python3.14": "3.14.8"}
     calls = []
     real_is_file = Path.is_file
@@ -337,8 +339,112 @@ def test_install_existing_python_plist_and_health_wait(tmp_path, monkeypatch, ha
     assert plist["ProgramArguments"] == [str(handler.root / "venv/bin/hass"), "-c", str(handler.root / "config")]
     assert plist["RunAtLoad"] and plist["KeepAlive"] and plist["ThrottleInterval"] == 30
     assert plist["StandardOutPath"] == plist["StandardErrorPath"] == str(handler.root / "hass.log")
-    assert (handler.root / "config/configuration.yaml").read_text() == "default_config:\nhttp:\n  server_host: 127.0.0.1\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n"
+    assert (handler.root / "config/configuration.yaml").read_text() == "default_config:\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n"
     assert set(handler.state()) == {"package", "version", "status", "last_health_at"}
+
+
+def test_install_seeds_loopback_http_storage(tmp_path, monkeypatch, ha_server):
+    runner, calls = install_stub(monkeypatch)
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            port=ha_server.port)
+    snapshots = []
+
+    def run(argv, **kwargs):
+        if argv[:2] == ["launchctl", "bootstrap"]:
+            snapshots.append(json.loads((handler.root / "config/.storage/http").read_text()))
+        return runner(argv, **kwargs)
+
+    handler.runner = run
+    handler.handle("pkg.install", {"version": PINNED_VERSION})
+    storage = json.loads((handler.root / "config/.storage/http").read_text())
+    assert snapshots == [storage]
+    assert storage["version"] == 2 and storage["minor_version"] == 2 and storage["key"] == "http"
+    assert storage["data"]["stable"]["server_host"] == ["127.0.0.1"]
+    assert storage["data"]["pending"] is None and storage["data"]["yaml_migration_done"] is True
+    assert storage["data"]["stable"]["created_at"].endswith("+00:00")
+    if os.name != "nt":
+        assert (handler.root / "config/.storage").stat().st_mode & 0o777 == 0o700
+
+
+def test_upgrade_repairs_existing_http_storage(tmp_path, monkeypatch, ha_server):
+    runner, calls = install_stub(monkeypatch)
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            runner=runner, port=ha_server.port)
+    handler._service_path().parent.mkdir(parents=True)
+    handler._service_path().touch()
+    storage = {"version": 2, "minor_version": 2, "key": "http", "extra": "preserved", "data": {
+        "stable": {"server_port": 8123, "cors_allowed_origins": ["https://example.org"]},
+        "pending": {"server_host": ["0.0.0.0"]}, "yaml_migration_done": False, "other": 42}}
+    path = handler.root / "config/.storage/http"
+    write_json(path, storage)
+    ensure = handler._ensure_loopback_bind
+
+    def repair():
+        assert any(argv[:2] == ["launchctl", "bootout"] for argv, _ in calls)
+        assert not any(argv[:2] == ["launchctl", "bootstrap"] for argv, _ in calls)
+        ensure()
+
+    monkeypatch.setattr(handler, "_ensure_loopback_bind", repair)
+    handler.handle("pkg.upgrade", {"version": PINNED_VERSION})
+    storage["data"]["stable"]["server_host"] = ["127.0.0.1"]
+    storage["data"]["pending"] = None
+    storage["data"]["yaml_migration_done"] = True
+    assert json.loads(path.read_text()) == storage
+
+
+@pytest.mark.parametrize("content", ["{", "null", '{"data": {"stable": []}}', '{"data": {}}'])
+def test_malformed_http_storage_refuses_start(tmp_path, monkeypatch, content):
+    runner, calls = install_stub(monkeypatch)
+    handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
+                            runner=runner)
+    path = handler.root / "config/.storage/http"
+    path.parent.mkdir(parents=True)
+    path.write_text(content)
+    with pytest.raises(InstallError):
+        handler.handle("pkg.install", {"version": PINNED_VERSION})
+    assert path.read_text() == content
+    assert not any(argv[:2] == ["launchctl", "bootstrap"] for argv, _ in calls)
+
+
+@pytest.mark.parametrize("platform", ["darwin", "linux"])
+@pytest.mark.parametrize("remove_fails", [False, True])
+def test_lan_reachable_stops_and_fails(tmp_path, monkeypatch, ha_server, platform, remove_fails):
+    interpreter = tmp_path / "python3.14"
+    interpreter.touch()
+    stub, calls = install_stub(monkeypatch, available={str(interpreter): "3.14.8"})
+
+    def runner(argv, **kwargs):
+        result = stub(argv, **kwargs)
+        if remove_fails and (argv[:2] == ["launchctl", "bootout"] or argv[:3] == ["systemctl", "--user", "disable"]):
+            raise HAError("Home Assistant service stop failed")
+        return result
+
+    handler = HomeAssistant(tmp_path, platform=platform, user_home=tmp_path / "user", uid=501,
+                            runner=runner, port=ha_server.port)
+    monkeypatch.setattr(handler, "_python", lambda deadline: str(interpreter))
+    monkeypatch.setattr(handler, "_lan_reachable", lambda: True)
+    with pytest.raises(InstallError, match="^Home Assistant is reachable beyond localhost; stopped$"):
+        handler.handle("pkg.install", {"version": PINNED_VERSION})
+    argv = [item[0] for item in calls]
+    if platform == "darwin":
+        assert argv[-2][:2] == ["launchctl", "bootstrap"]
+        assert argv[-1] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
+    else:
+        assert ["systemctl", "--user", "disable", "--now", LABEL + ".service"] in argv
+        if not remove_fails:
+            assert argv[-1] == ["systemctl", "--user", "daemon-reload"]
+    assert handler._service_path().exists() is remove_fails
+    state = json.loads((handler.root / "state.json").read_text())
+    assert state["package"] == "homeassistant" and state["version"] == PINNED_VERSION
+    assert state["status"] == "error"
+    assert state["error"] == "Home Assistant is reachable beyond localhost; stopped"
+
+
+def test_lan_reachable_false_when_refused(tmp_path):
+    with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as closed:
+        closed.bind(("0.0.0.0", 0))
+        handler = HomeAssistant(tmp_path, port=closed.getsockname()[1])
+        assert handler._lan_reachable() is False
 
 
 def test_brew_fallback_and_upgrade_order(tmp_path, monkeypatch, ha_server):
