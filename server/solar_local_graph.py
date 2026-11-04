@@ -83,14 +83,15 @@ def _solaredge_report(backend, tenant_id, drawing_id, version, graph_sha256, par
         backend, tenant_id, drawing_id, version, graph_sha256, params)
 
 
-def _physical_state(backend, tenant_id, drawing_id, project_id):
-    """The drawing's current Ground physical head as {"view", "document"}, both None when no state
-    was ever published (solar_physical_head.load_physical_head: at most 13 log reads plus the head
-    artifact, read once). Any head refusal is PHYSICAL_STATE_UNAVAILABLE, payload-free."""
+def _physical_state(backend, tenant_id, drawing_id, project_id, version="head"):
+    """The selected version's Ground physical state as {"view", "document"}, both None when
+    no state was ever published. Uses load_physical_head's bounded version resolution and
+    artifact verification. Any head refusal is PHYSICAL_STATE_UNAVAILABLE, payload-free."""
     import solar_physical_state as ps  # first: its write_loop import puts da/ (store) on sys.path
     import solar_physical_head as ph
     try:
-        view, document = ph.load_physical_head(backend, tenant_id, drawing_id, project_id=project_id)
+        view, document = ph.load_physical_head(backend, tenant_id, drawing_id,
+                                               project_id=project_id, version=version)
     except (ps.PhysicalStateError, OSError, RuntimeError, TypeError, KeyError):
         raise GraphValidationError("PHYSICAL_STATE_UNAVAILABLE") from None
     return {"view": view, "document": document}
@@ -271,7 +272,8 @@ def _resolve_trusted(tool, backend, tenant_id, drawing_id, version, graph_sha256
             resolved[name] = _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, version, graph_sha256, params)
         elif name == "physical_state":
-            resolved[name] = _TRUSTED_RESOLVERS[name](backend, tenant_id, drawing_id, project_id)
+            resolved[name] = _TRUSTED_RESOLVERS[name](backend, tenant_id, drawing_id,
+                                                     project_id, version=version)
         elif name == "pvcase_source":
             resolved[name] = _TRUSTED_RESOLVERS[name](
                 backend, tenant_id, drawing_id, version, graph_sha256, params,

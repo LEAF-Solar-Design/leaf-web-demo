@@ -7,6 +7,7 @@ from pathlib import Path
 import solar_tools
 import solar_artifacts
 import write_loop  # before solar_physical_head: it puts da/ on sys.path for that module's `import store`
+import store
 import solar_physical_head
 import solar_physical_state
 from leaf_cloud_client import canonical_bytes
@@ -87,14 +88,13 @@ def _reads_physical_head(module):
     return getattr(module, "READS_PHYSICAL_HEAD", False) is True
 
 
-def _current_physical_head(backend, tenant_id, drawing_id, project_id):
-    """The drawing's current physical head for a read: None when no state was ever published,
-    else {"head": view, "document": document}. One bounded head search (at most 13 log reads)
-    and one artifact read; never writes. A physical state or head refusal passes through with
-    its own PHYSICAL_* code."""
+def _current_physical_head(backend, tenant_id, drawing_id, project_id, *, version="head"):
+    """The selected version's physical head: None when no state was ever published,
+    else {"head": view, "document": document}. Uses load_physical_head's bounded version
+    resolution; never writes. A physical state or head refusal retains its PHYSICAL_* code."""
     try:
         view, document = solar_physical_head.load_physical_head(
-            backend, tenant_id, drawing_id, project_id=project_id)
+            backend, tenant_id, drawing_id, project_id=project_id, version=version)
     except solar_physical_state.PhysicalStateError as exc:
         raise GraphValidationError(exc.code) from None
     except (OSError, RuntimeError, ValueError, LookupError, TypeError, AttributeError, ArithmeticError):
@@ -102,7 +102,7 @@ def _current_physical_head(backend, tenant_id, drawing_id, project_id):
     return None if view is None else {"head": view, "document": document}
 
 
-def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output):
+def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output, *, version=None):
     """The physical head a finished read recorded under output["head"], re-read for its
     terminal proof. The head log is append-only and a later import or operation moves the
     current head, so the proof re-reads the entry the output names: the log entry at the
@@ -119,9 +119,17 @@ def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output):
     A malformed or mismatched record raises a ValueError, LookupError, TypeError or
     AttributeError, each of which graph_read_provenance turns into its one rejection."""
     recorded = output["head"]
+    if version is not None and store.physical_versioned_enabled():
+        _, ref = store.read_version_physical(backend, tenant_id, drawing_id, version,
+                                             project_id=project_id)
+        if ref is not None and (recorded is None or recorded["index"] != ref["head_index"]
+                or recorded["state"]["artifact_id"] != ref["state_artifact_id"]
+                or recorded["state"]["content_sha256"] != ref["state_content_sha256"]):
+            raise ValueError()
     if recorded is None:
         if solar_physical_head.physical_head(backend, tenant_id, drawing_id,
-                                             project_id=project_id) is not None:
+                                             project_id=project_id,
+                                             **({} if version is None else {"version": version})) is not None:
             raise ValueError()
         return None
     index, parent = recorded["index"], recorded["parent"]
@@ -148,7 +156,7 @@ def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output):
 
 
 def _physical_argument(tool, backend, tenant_id, drawing_id, project_id, recorded_output=None,
-                       *, proof=False):
+                       *, proof=False, version="head"):
     """{} for every builtin that does not declare the physical head need, so its call is
     unchanged; else {"physical_head": ...}: the current head for a read, the recorded head for
     its terminal proof."""
@@ -156,8 +164,9 @@ def _physical_argument(tool, backend, tenant_id, drawing_id, project_id, recorde
         return {}
     if proof:
         return {"physical_head": _recorded_physical_head(
-            backend, tenant_id, drawing_id, project_id, recorded_output)}
-    return {"physical_head": _current_physical_head(backend, tenant_id, drawing_id, project_id)}
+            backend, tenant_id, drawing_id, project_id, recorded_output, version=version)}
+    return {"physical_head": _current_physical_head(backend, tenant_id, drawing_id, project_id,
+                                                   version=version)}
 
 
 _UNSET = object()
@@ -246,7 +255,8 @@ def run_local_graph_read(backend, tenant_id, tool, params, *, drawing_id, source
                                                    builtin_params, project_id=context["project_id"]),
                                 **_history_argument(tool, backend, tenant_id, drawing_id),
                                 **_physical_argument(tool, backend, tenant_id, drawing_id,
-                                                     context["project_id"]))
+                                                     context["project_id"],
+                                                     version=context["resolved_version"]))
     return {
         "schema_version": RESULT_SCHEMA, "adapter": ADAPTER_KIND,
         "tenant_id": tenant_id, "job_id": job_id, "tool": tool,
@@ -299,7 +309,7 @@ def graph_read_provenance(result, params, tenant_id, job_id, tool, source_versio
                                     **_history_argument(tool, backend, tenant_id, drawing_id),
                                     **_physical_argument(tool, backend, tenant_id, drawing_id,
                                                          context["project_id"], result["output"],
-                                                         proof=True))
+                                                         proof=True, version=source_version))
         output_sha256 = digest(output)
         if (type(result["output"]) is not dict or output != result["output"]
                 or output_sha256 != result["output_sha256"]
