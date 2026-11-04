@@ -86,6 +86,8 @@ from routers import (
     templates as templates_router,
     tenant,
     tenant_mcp,
+    devices,
+    device_relay,
     tools,
     uploads,
     usage, overlay, cost as cost_router)
@@ -420,6 +422,8 @@ app.include_router(__import__("routers.lab_mirror_ops", fromlist=["router"]).rou
 app.include_router(ops_metrics.router)  # APS observability read-API: fleet metrics + in-flight tail + ledger<->job drill-down (X-Ops-Secret)
 app.include_router(tenant.router)  # wave 4: per-tenant Claude grant linking (proxy to harness store)
 app.include_router(tenant_mcp.router)  # slice 8b: tenant MCP server registry (server-side OAuth connect)
+app.include_router(devices.router)  # Device bridge: tenant management and signed outbound agent polling
+app.include_router(device_relay.router)
 app.include_router(site.router)  # public site-facing namespace for the leaf_website Next app (/api/site/*)
 app.include_router(uploads.router)  # §19 guest/account drawing uploads (+ /api/site/guest-upload-policy in site.router)
 app.include_router(telemetry.router)  # P2 product-event ingest (always 202; identity server-stamped; docs/PLATFORM_TELEMETRY.md)

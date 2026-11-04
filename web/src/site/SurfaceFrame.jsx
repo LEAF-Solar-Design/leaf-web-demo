@@ -40,6 +40,7 @@ import EntitlementGate from '../components/EntitlementGate.jsx'
 import JobInboxComponent from '../components/JobInbox.jsx'
 import JobRailComponent from '../components/JobRail.jsx'
 import LinkServiceDrawer from '../components/LinkServiceDrawer.jsx'
+import LinkDeviceDrawer from '../components/LinkDeviceDrawer.jsx'
 import ProductSurfaceTabs, { ProductSurfaceFrame } from '../components/ProductSurfaceTabs.jsx'
 import ToastComponent from '../components/Toast.jsx'
 
@@ -209,6 +210,7 @@ export default function SurfaceFrame({
   toast = null,
   conversations = null,
   integrations = null,
+  devices = null,
   signedIn = false,
   onSignOut = null,
   // Slice 9b. Whatever ladder fields the scene can supply for a registry
@@ -254,6 +256,7 @@ export default function SurfaceFrame({
     toast,
     conversations,
     integrations,
+    devices,
     signedIn,
     onSignOut,
     contextMenuCtx,
@@ -563,10 +566,11 @@ function Conversations() {
 function Integrations() {
   const frame = useSlot()
   const wiring = frame?.integrations
-  if (!wiring) return null
+  if (!wiring && !frame?.devices) return null
   if (frame.contract.integrations?.link !== 'standard-flow') return null
   return (
-    <LinkServiceDrawer
+    <>
+    {wiring && <LinkServiceDrawer
       mock={wiring.mock}
       servers={wiring.servers}
       loading={wiring.loading}
@@ -579,7 +583,29 @@ function Integrations() {
       onRefresh={wiring.onRefresh}
       onHealth={wiring.onHealth}
       onUnlink={wiring.onUnlink}
-    />
+    />}
+    {frame.devices && <LinkDeviceDrawer
+      key={frame.devices.projectId || 'no-project'}
+      mock={frame.devices.mock}
+      devices={frame.devices.devices}
+      loading={frame.devices.loading}
+      busy={frame.devices.busy}
+      error={frame.devices.error}
+      open={frame.devices.open}
+      onToggle={frame.devices.onToggle}
+      onEnroll={frame.devices.onEnroll}
+      onRefresh={frame.devices.onRefresh}
+      onCommand={frame.devices.onCommand}
+      onGetCommand={frame.devices.onGetCommand}
+      onAudit={frame.devices.onAudit}
+      onRevoke={frame.devices.onRevoke}
+      onRelayToken={frame.devices.onRelayToken}
+      catalog={frame.devices.catalog}
+      catalogLoading={frame.devices.catalogLoading}
+      catalogError={frame.devices.catalogError}
+      onLoadCatalog={frame.devices.onLoadCatalog}
+    />}
+    </>
   )
 }
 

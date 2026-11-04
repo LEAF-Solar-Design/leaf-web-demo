@@ -93,6 +93,40 @@ as specified in the next section. Routes accept no undocumented body fields.
 | `DELETE /api/devices/{device_id}/relay-tokens/{token_id}` | User, owner + `link_service` | No body | 204, no body; idempotent for a known token | Common errors |
 | `GET /api/devices/relay-openapi/{package}.json` | Public | No body | 200 deterministic OpenAPI JSON bytes; `X-Leaf-Document-Sha256` header | 404 `package_unknown` |
 | `ANY /api/device-relay/{package}/{path...}` | Relay bearer only | Optional JSON body and query; accepts and drops `Idempotency-Key`; rules below | Upstream status, `content-type`, JSON body | 401 `relay_token_invalid`; 403 `relay_token_mismatch` or `relay_path_denied`; 413 `payload_too_large`; 415 `json_required`; 502 `upstream_error`; 503 `device_offline`; 504 `device_timeout` |
+| `GET /api/devices/packages` | User, any tenant member | No body | 200 `{packages:[PackageCatalogEntry]}`; server catalog with the pinned install version | Common errors |
+| `GET /api/devices/agent/package.tar.gz` | Public | No body | 200 deterministic agent archive; immutable cache-control and SHA-256 ETag | Common errors |
+| `GET /api/devices/agent/install.sh` | Public | No body; allowed public origin from request host/forwarded host | 200 POSIX installer with public origin and archive SHA-256 | 400 `invalid_request` for an unapproved origin |
+
+### P2 route behavior amendment
+
+Concurrent polls from the same device are permitted. Shared atomic command
+leasing prevents concurrent delivery of the same command during its lease.
+`poll_in_progress` is reserved and is not emitted by P2.
+
+Results are schema-validated as a whole before any completion. A schema-invalid
+batch returns 400 `invalid_payload` without completing any command. Valid
+results are then processed independently: identical retries count as accepted;
+unknown, foreign, unleased, expired, or conflicting command results are skipped
+and do not count toward `{accepted:n}`. Completion is not batch-transactional.
+The prior per-command 404/409 result errors are superseded by this rule.
+
+Invalid user command shapes return 400 `command_invalid` before enqueueing.
+Package, pinned-version, and proxy-path checks still use the named 422 errors.
+Every route in this slice returns 404 in production unless
+`LEAF_DEVICE_BRIDGE_ENABLED=1`; non-production environments enable the routes.
+The enrollment install command is exactly
+`curl -fsSL <origin>/api/devices/agent/install.sh | LEAF_ENROLL_TOKEN=<token> sh`.
+The installer supplies its validated HTTPS origin without another caller variable.
+
+Device public origins are distinct from the website redirect host list.
+`platform.leafdesign.ai` and `platform-staging.leafdesign.ai` use their own
+HTTPS origins. The `studio.leafautomation.ai` door maps to
+`https://platform.leafdesign.ai`, matching `deploy/studio-door/vercel.json`;
+agents and relay clients receive the canonical platform origin, never the door.
+For local/test use, `LEAF_DEVICE_PUBLIC_ORIGINS` adds comma-separated HTTPS
+origins without replacing these mappings. Production ignores that variable.
+Unknown hosts, duplicate host/forwarded-host/forwarded-proto headers, and
+non-HTTPS requests return 400 `invalid_request`.
 
 An enrollment token is 32 cryptographically random bytes encoded as unpadded
 base64url (43 characters). Its TTL is 600 seconds. Studio stores only
@@ -412,3 +446,91 @@ the later route/agent slices.
 The JSON fixtures contain public synthetic values. Their all-`A` enrollment
 token encodes 32 zero bytes to test the wire shape; it is never issued or accepted
 by a live server. Production enrollments must use fresh random bytes.
+
+## P3 relay and health amendment
+
+An `ok` Result for `pkg.health` has `data` exactly equal to a `PackageState`.
+`status: running` in that PackageState means the package is healthy.
+
+The following P3 rules supersede earlier relay timing and size descriptions.
+`POST /api/devices/{device_id}/relay-tokens` requires project ownership and
+`link_service`, accepts exactly `{package, label}`, and requires that the
+catalog package has relay permissions and appears in the device's package
+states. An absent installed package returns 422 `package_not_installed`.
+Its 201 response is `{token_id, relay_token, relay_origin, path_prefix}`;
+only this response exposes the credential. `relay_origin` is the same
+validated public HTTPS origin as enrollment. `path_prefix` is exactly
+`/api/device-relay/<package>`; the relay path never contains a device ID.
+The token alone selects its device and package.
+
+`GET /api/devices/{device_id}/relay-tokens` requires project read access and
+returns `{tokens:[{token_id, package, label, created_at, revoked_at,
+last_used_at}]}`, including revoked entries but no secrets or secret hashes.
+Deleting a known token through that device's token route is idempotent and
+returns 204. Unknown, foreign-tenant, foreign-project, or foreign-device
+token identifiers return 404. Mint/list/revoke actions are audited. Device
+revocation invalidates all its relay tokens. Credential responses use
+`Cache-Control: no-store`.
+
+Relay requests require a single bearer authorization header. Invalid or
+revoked tokens return 401 `relay_token_invalid`; a path package differing
+from the token's package returns 403 `relay_token_mismatch`. The catalog's
+method and normalized path allowlist applies, with segment-boundary prefix
+matching. Dot segments, doubled slashes, backslashes, percent-encoded paths
+(including encoded slashes), and query keys longer than 128 characters
+return 403 `relay_path_denied`. Duplicate or empty query keys return 400
+`invalid_request`. Query values never participate in path matching.
+
+Bodies must be empty or valid JSON and at most 256 KiB (262,144 raw bytes).
+Nonempty non-JSON media types return 415 `json_required`; malformed JSON
+returns 400 `invalid_request`; oversized bodies return 413
+`payload_too_large`. Relay tokens have an in-process bucket of 10 requests
+per second and burst 20, keyed by token ID, with at most 10,000 LRU entries.
+An exhausted bucket returns 429 `rate_limited`.
+
+A device last seen 90 seconds ago or earlier returns 503 `device_offline`
+without enqueueing. The server enqueues `http.proxy` with
+`{package, method, path, query, body_json}` and TTL 15 seconds, then waits up
+to 8 seconds, asynchronously polling every 100 ms. No result returns 504
+`device_timeout`; the queued command subsequently expires at its 15-second
+TTL. The request's `Idempotency-Key` is accepted and ignored. Caller headers,
+including that key, cookies, host, and authorization, are never command
+arguments. The agent supplies its own local credentials and JSON content type.
+
+An `ok` proxy Result supplies `data.status` and `data.body`. P4's
+`data.body_json` is also accepted for compatibility. The relay returns the
+upstream status and serialized JSON with `Content-Type: application/json`;
+204/304 responses have no body. Device headers are never returned. Malformed
+or oversized upstream JSON (over 1 MiB serialized) becomes 502
+`upstream_error`. An error/refused Result returns 502 `{error: <code>}`.
+Other route errors retain the standard device error envelope.
+
+Every authenticated relay call is audited with actor `relay:<token_id>`,
+operation `http.proxy`, target `<METHOD> <path>` (bounded to the audit
+schema's 256 characters), outcome `ok`, `error`, or `refused`, and the raw
+request body's SHA-256. Rejected oversized streams hash the bytes consumed
+before rejection. No bodies, query values, caller headers, or credentials
+are included in the audit. Requests whose token cannot be resolved have no
+authenticated actor. The production `LEAF_DEVICE_BRIDGE_ENABLED=1` gate
+applies to token management, relay calls, and the public OpenAPI endpoint.
+
+`GET /api/devices/relay-openapi/homeassistant.json` is public and returns
+deterministic OpenAPI 3.0.3 JSON: sorted keys, compact separators, no
+timestamps, `servers: [{url: <validated public origin>}]`, and HTTP bearer
+security scheme `bearer`. `X-Leaf-Document-Sha256` hashes the exact response
+bytes. At origin `https://platform.leafautomation.ai`, that digest is
+`913a4329f910e6a8b768282dafb58594aa2c1f017ac7bdbb495705905fedd695`.
+It exposes these JSON operations, each returning an array of loose state
+objects on 200:
+
+- `GET /api/device-relay/homeassistant/api/states`: `listStates`.
+- `POST /api/device-relay/homeassistant/api/services/light/turn_on`:
+  `lightTurnOn`, required `entity_id` (string or string array), optional
+  `brightness_pct` 0..100, `rgb_color` three integer channels 0..255,
+  `color_temp_kelvin` 2000..6500, and `transition` 0..60 seconds.
+- `POST /api/device-relay/homeassistant/api/services/light/turn_off`:
+  `lightTurnOff`, required `entity_id`, optional `transition`.
+- `POST /api/device-relay/homeassistant/api/services/scene/turn_on`:
+  `sceneTurnOn`, required `entity_id`.
+
+The server Home Assistant catalog pin is `2026.10.4`.

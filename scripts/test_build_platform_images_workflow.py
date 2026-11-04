@@ -3573,7 +3573,11 @@ def check_docs_noop_filter(text: str) -> None:
     # step's own 95-minute deadline; check_staging_relay_convergence asserts
     # that relationship rather than the literal.
     assert dispatch_job["timeout-minutes"] == 95 + 80 + 15 == 190
-    assert dispatch_job["concurrency"] == {"group": "reconcile-staging-fleet", "cancel-in-progress": False}
+    assert dispatch_job["concurrency"] == {"group": "dispatch-staging-fleet", "cancel-in-progress": False}
+    reconcile_wf = _strict_yaml(
+        (WORKFLOW.parent / "reconcile-staging-fleet.yml").read_text(encoding="utf-8")
+    )
+    assert dispatch_job["concurrency"]["group"] != reconcile_wf["concurrency"]["group"]
     # BUILD_RUN_ATTEMPT moved from the manifest step to the JOB on 2026-08-07
     # with the convergence receipt. The manifest step names the build's own
     # supply set and marker with it, and the receipt publish step names the
