@@ -418,6 +418,42 @@ class HomeAssistant:
                 self.sleep(min(5, remaining))
         raise InstallError("Home Assistant did not become healthy before installation deadline")
 
+    def _ensure_loopback_bind(self):
+        path = self.root / "config/.storage/http"
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        try:
+            storage = _json(path.read_text(encoding="utf-8"))
+        except FileNotFoundError:
+            storage = {"version": 2, "minor_version": 2, "key": "http", "data": {
+                "stable": {"server_port": 8123, "server_host": ["127.0.0.1"],
+                           "cors_allowed_origins": ["https://cast.home-assistant.io"],
+                           "login_attempts_threshold": -1, "ip_ban_enabled": True,
+                           "ssl_profile": "modern", "use_x_frame_options": True,
+                           "created_at": datetime.now(timezone.utc).isoformat(),
+                           "error": None, "error_message": None},
+                "pending": None, "yaml_migration_done": True}}
+        except (ValueError, UnicodeError):
+            raise InstallError("Malformed Home Assistant HTTP storage") from None
+        if (not isinstance(storage, dict) or not isinstance(storage.get("data"), dict) or
+                not isinstance(storage["data"].get("stable"), dict)):
+            raise InstallError("Malformed Home Assistant HTTP storage")
+        storage["data"]["stable"]["server_host"] = ["127.0.0.1"]
+        storage["data"]["pending"] = None
+        storage["data"]["yaml_migration_done"] = True
+        atomic_write(path, json.dumps(storage, allow_nan=False).encode())
+
+    def _lan_reachable(self) -> bool:
+        try:
+            with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as probe:
+                probe.connect(("10.255.255.255", 1))
+                host = probe.getsockname()[0]
+            if host.startswith("127.") or host == "0.0.0.0":
+                return False
+            with socket.create_connection((host, self.port), timeout=1):
+                return True
+        except OSError:
+            return False
+
     def _install(self, *, upgrade=False):
         deadline = self.clock() + INSTALL_BUDGET_S
         self.root.mkdir(parents=True, exist_ok=True, mode=0o700)
@@ -438,14 +474,19 @@ class HomeAssistant:
                 raise TimeoutError("Installation deadline exceeded")
             config = self.root / "config/configuration.yaml"
             if not config.exists():
-                atomic_write(config, b"default_config:\nhttp:\n  server_host: 127.0.0.1\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n")
+                atomic_write(config, b"default_config:\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n")
             write_json(self.root / "state.json", {"package": "homeassistant", "version": PINNED_VERSION,
                        "status": "installed", "last_health_at": None})
+            # HA must never listen beyond localhost; fails closed
+            self._ensure_loopback_bind()
             self._start()
             self._wait_healthy(deadline)
+            if self._lan_reachable():
+                self._stop()
+                raise InstallError("Home Assistant is reachable beyond localhost; stopped")
             state = self.state()
             return {**state, "python": python, "requires_python": REQUIRES_PYTHON}
-        except Exception:
+        except Exception as exc:
             state = self._load("state.json", None) or {"package": "homeassistant", "version": PINNED_VERSION, "last_health_at": None}
             state["status"] = "error"
             try:
@@ -456,6 +497,8 @@ class HomeAssistant:
             except OSError:
                 tail = "No installer output"
             state["error"] = "Home Assistant installation failed\n" + tail
+            if isinstance(exc, InstallError) and str(exc) == "Home Assistant is reachable beyond localhost; stopped":
+                state["error"] = str(exc)
             write_json(self.root / "state.json", state)
             raise InstallError(state["error"]) from None
 
