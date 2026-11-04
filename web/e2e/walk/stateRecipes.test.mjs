@@ -68,7 +68,15 @@ test('WL72 U2 serialized geometry observer matches the served chunk and legacy w
 
 test('WL72 U3 engine marker remains present in the vendored worker', () => {
   assert.equal(ENGINE_WORKER_MARKER, 'engine_bg.wasm')
-  assert.ok(readFileSync(new URL('../../../vendor/acadrust-worker/worker-browser.mjs', import.meta.url), 'utf8')
+  const vendor = new URL('../../../vendor/', import.meta.url)
+  const workerDirs = readdirSync(vendor, { withFileTypes: true })
+    .filter(entry => entry.isDirectory())
+    .filter(entry => {
+      const files = readdirSync(new URL(`${entry.name}/`, vendor))
+      return files.includes('pkg-web') || files.includes('worker-browser.mjs')
+    })
+  assert.equal(workerDirs.length, 1)
+  assert.ok(readFileSync(new URL(`${workerDirs[0].name}/worker-browser.mjs`, vendor), 'utf8')
     .includes(ENGINE_WORKER_MARKER))
 })
 

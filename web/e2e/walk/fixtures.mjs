@@ -33,7 +33,7 @@ import { actionResponse, isUuid, projectBinding, observeProjectTraffic, readCont
 
 export { expect }
 
-// A string literal from vendor/acadrust-worker/worker-browser.mjs.
+// A string literal from the CAD engine's browser worker.
 export const ENGINE_WORKER_MARKER = 'engine_bg.wasm'
 
 export function engineWorkerChunkPath(distDir = fileURLToPath(new URL('../../dist', import.meta.url))) {
