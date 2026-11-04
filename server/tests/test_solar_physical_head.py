@@ -1303,3 +1303,705 @@ class TestVersionBinding:
             store.save_manifest(backend, TENANT, DRAWING, manifest)
             assert store.read_version_physical(ManifestOnly(), TENANT, DRAWING, 1) == (1, None)
         assert len(store._physical_memo) == store.PHYSICAL_MEMO_MAX
+
+
+class TestLegacyAdoption:
+    @pytest.fixture(autouse=True)
+    def legacy_mode(self, monkeypatch):
+        import solar_physical_legacy
+        self.legacy = solar_physical_legacy
+        monkeypatch.delenv("LEAF_SOLAR_PHYSICAL_VERSIONED", raising=False)
+        store._physical_memo_clear()
+        yield
+        store._physical_memo_clear()
+
+    class Recording(Counting):
+        def __init__(self, inner, readonly=False):
+            super().__init__(inner)
+            self.keys = []
+            self.readonly = readonly
+
+        def get(self, key):
+            self.keys.append(key)
+            return super().get(key)
+
+        def put(self, *args, **kwargs):
+            assert not self.readonly, "read attempted a write"
+            return self.inner.put(*args, **kwargs)
+
+        def put_if_absent_or_verify(self, *args, **kwargs):
+            assert not self.readonly, "read attempted an immutable write"
+            return self.inner.put_if_absent_or_verify(*args, **kwargs)
+
+    def _freeze(self, backend, project_id=PROJECT):
+        return self.legacy.freeze_legacy(backend, TENANT, DRAWING, project_id=project_id)
+
+    def _view(self, backend, version="head", project_id=PROJECT):
+        return ph.physical_head(backend, TENANT, DRAWING, version=version, project_id=project_id)
+
+    def _source_at_two(self, backend, graph):
+        with held(backend) as fence:
+            v = _binding_bundle(backend, graph, fence)
+        return v, publish(backend, project_id=PROJECT)["head"]
+
+    def _append_bound_entry(self, backend, previous):
+        stored = ps.store_physical_state(backend, TENANT, DRAWING,
+                                         doc(previous["state"]["artifact_id"], 3), project_id=PROJECT)
+        state = stored["state"]
+        index = previous["index"] + 1
+        backend.put_if_absent_or_verify(
+            ph.entry_key(TENANT, DRAWING, index),
+            ph.entry_bytes(index, PROJECT, previous["state"]["artifact_id"],
+                           state["artifact_id"], state["content_sha256"]))
+        return {"head_index": index, "state_artifact_id": state["artifact_id"],
+                "state_content_sha256": state["content_sha256"]}
+
+    def test_key_constants_and_codes(self, monkeypatch):
+        legacy = self.legacy
+        assert legacy.freeze_key(TENANT, DRAWING) == PREFIX + "physical-legacy/freeze.json"
+        assert legacy.intent_key(TENANT, DRAWING) == PREFIX + "physical-legacy/intent.json"
+        assert legacy.INTENT_SCHEMA == "leaf.physical-legacy-intent.v1"
+        assert "/physical/" not in legacy.freeze_key(TENANT, DRAWING)
+        assert legacy.FREEZE_SCHEMA == "leaf.solar-physical-legacy-freeze.v1"
+        assert legacy.MAX_RECORD_BYTES == 1024
+        assert legacy.SWITCH_ENV == "LEAF_SOLAR_PHYSICAL_VERSIONED"
+        assert legacy.CODES == {
+            "PHYSICAL_LEGACY_CORRUPT", "PHYSICAL_LEGACY_PROJECT_MISMATCH",
+            "PHYSICAL_LEGACY_STORE_UNAVAILABLE", "PHYSICAL_LEGACY_STORE_UNSAFE",
+            "PHYSICAL_LEGACY_ID_INVALID", "PHYSICAL_LEGACY_WRITES_DRAINED", "PHYSICAL_LEGACY_FROZEN"}
+        assert isinstance(legacy.PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN"), ps.PhysicalStateError)
+        for value in (None, "0", "1", "true", "on"):
+            if value is None:
+                monkeypatch.delenv(legacy.SWITCH_ENV, raising=False)
+            else:
+                monkeypatch.setenv(legacy.SWITCH_ENV, value)
+            assert legacy.versioned_mode() == store.physical_versioned_enabled()
+
+    def test_switch_off_read_path_untouched(self, backend, graph):
+        publish(backend)
+        with held(backend) as fence:
+            _binding_bundle(backend, graph, fence)
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+        recording = self.Recording(backend, readonly=True)
+        expected, content = ph._head(backend, TENANT, DRAWING, PROJECT)
+        assert ph.load_physical_head(recording, TENANT, DRAWING, project_id=PROJECT) == (
+            expected, ps.decode_document(content))
+        assert not any("physical-legacy" in key for key in recording.keys)
+
+    def test_no_log_absent(self, backend, monkeypatch):
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        assert self._view(backend) is None
+
+    def test_source_version_and_descendants_show_tip(self, backend, graph, monkeypatch):
+        tip = publish(backend)["head"]
+        with held(backend) as fence:
+            v = _binding_bundle(backend, graph, fence)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        assert self._view(backend, 1) == self._view(backend, v) == tip
+        assert self.legacy.legacy_reference(backend, TENANT, DRAWING, v,
+                                            project_id=PROJECT) == _binding_ref(tip)
+
+    def test_ancestor_of_source_version_absent(self, backend, graph, monkeypatch):
+        v, tip = self._source_at_two(backend, graph)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        assert self._view(backend, 1) is None
+        assert self._view(backend, v) == tip
+
+    def test_undo_below_source_absent_and_redo_restores(self, backend, graph, monkeypatch):
+        v, tip = self._source_at_two(backend, graph)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        with held(backend) as fence:
+            assert store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence) == 1
+            assert self._view(backend) is None
+            assert store.redo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence) == v
+            assert self._view(backend) == tip
+
+    def test_pinned_preflip_undo_case(self, backend, graph, monkeypatch):
+        first = publish(backend)["head"]
+        with held(backend) as fence:
+            v = _binding_bundle(backend, graph, fence)
+            tip = publish(backend, first["state"]["artifact_id"], 3)["head"]
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            branch = _binding_bundle(backend, graph, fence, "branch")
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        assert self._view(backend, 1) is None
+        assert self._view(backend, v) == tip
+        assert self._view(backend, branch) is None
+
+    def test_commits_after_adoption_keep_state(self, backend, graph, monkeypatch):
+        tip = publish(backend)["head"]
+        payload = _binding_intake(backend)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        assert self._view(backend) == tip
+        with held(backend) as fence:
+            bundle = _binding_bundle(backend, graph, fence)
+            intake = _binding_payload(backend, payload, parent=bundle, fence=fence)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        readonly = self.Recording(backend, readonly=True)
+        assert self._view(readonly, bundle) == self._view(readonly, intake) == tip
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_reads_write_nothing(self, backend, graph, monkeypatch):
+        readonly = self.Recording(backend, readonly=True)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        assert self._view(readonly) is None
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+        monkeypatch.delenv(self.legacy.SWITCH_ENV)
+        v, tip = self._source_at_two(backend, graph)
+        with held(backend) as fence:
+            child = _binding_bundle(backend, graph, fence, "child")
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            branch = _binding_payload(backend, _binding_intake(backend), fence=fence)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        for version, expected in ((1, None), (v, tip), (child, tip), (branch, None), ("head", None)):
+            assert self._view(readonly, version) == expected
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_freeze_records_tip_and_is_idempotent(self, backend, monkeypatch):
+        tip = publish(backend)["head"]
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        record = self._freeze(backend)
+        assert record == {"schema": self.legacy.FREEZE_SCHEMA, "tenant_id": TENANT,
+                          "drawing_id": DRAWING, "project_id": PROJECT, "legacy_last_index": 0,
+                          "state": tip["state"]["artifact_id"],
+                          "content_sha256": tip["state"]["content_sha256"], "source_version": 1}
+        key = self.legacy.freeze_key(TENANT, DRAWING)
+        raw = backend.get(key)
+        recording = self.Recording(backend)
+        assert self._freeze(recording) == record
+        assert recording.keys == [key]
+        assert backend.get(key) == raw
+
+    def test_freeze_empty_log(self, backend, monkeypatch):
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        record = self._freeze(backend)
+        assert record["legacy_last_index"] == -1
+        assert all(record[k] is None for k in ("project_id", "state", "content_sha256", "source_version"))
+        assert self._freeze(backend, "another-project") == record
+        assert self._view(backend) is None
+
+    def test_freeze_threaded_one_record(self, backend, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        publish(backend)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        barrier = threading.Barrier(8)
+        def freeze(_):
+            barrier.wait(timeout=10)
+            return self._freeze(backend)
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            records = list(pool.map(freeze, range(8)))
+        from leaf_cloud_client import canonical_bytes
+        assert all(canonical_bytes(record) == backend.get(self.legacy.freeze_key(TENANT, DRAWING))
+                   for record in records)
+        assert sum("physical-legacy/" in k for k in backend.drawing_object_keys(TENANT, DRAWING)) == 2
+
+    def test_frozen_reads_ignore_later_entries(self, backend, graph, monkeypatch):
+        tip = publish(backend)["head"]
+        with held(backend) as fence:
+            child = _binding_bundle(backend, graph, fence)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        self._freeze(backend)
+        ref = self._append_bound_entry(backend, tip)
+        assert self._view(backend, child) == tip
+        with held(backend) as fence:
+            bound, _ = _binding_commit(backend, fence, ref, child, "v3-test-13")
+        assert _binding_ref(self._view(backend, bound)) == ref
+        assert self._view(backend, child) == tip
+
+    @pytest.mark.parametrize("switch_on", [False, True])
+    def test_unbound_publish_refused_when_frozen(self, backend, monkeypatch, switch_on):
+        tip = publish(backend)["head"]
+        self._freeze(backend)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        if switch_on:
+            monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+            refused("PHYSICAL_LEGACY_FROZEN", self.legacy.refuse_if_frozen, backend, TENANT, DRAWING)
+        else:
+            refused("PHYSICAL_LEGACY_FROZEN", publish, backend, tip["state"]["artifact_id"], 3)
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    @pytest.mark.parametrize("switch_on", [False, True])
+    def test_unbound_publish_unchanged_when_not_frozen(self, backend, monkeypatch, switch_on):
+        recording = self.Recording(backend)
+        key = self.legacy.freeze_key(TENANT, DRAWING)
+        intent = self.legacy.intent_key(TENANT, DRAWING)
+        if switch_on:
+            monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+            assert self.legacy.refuse_if_frozen(recording, TENANT, DRAWING) is None
+            assert recording.keys == [key, intent]
+        else:
+            assert publish(recording)["created"]
+            # One freeze and one intent read before append, and one of each after.
+            assert recording.keys.count(key) == 2
+            assert recording.keys.count(intent) == 2
+            assert self._view(backend) == ph._head(backend, TENANT, DRAWING, PROJECT)[0]
+            retry = self.Recording(backend)
+            assert publish(retry)["created"] is False
+            # An unfrozen idempotent retry reads each key exactly once.
+            assert retry.keys.count(key) == 1
+            assert retry.keys.count(intent) == 1
+
+    def test_retry_of_head_after_freeze_returns_existing(self, backend, monkeypatch):
+        first = publish(backend)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        self._freeze(backend)
+        monkeypatch.delenv(self.legacy.SWITCH_ENV)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        recording = self.Recording(backend)
+        retry = publish(recording)
+        assert retry["created"] is False
+        assert retry["head"] == first["head"]
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+        # A completed record takes one read and avoids the intent read.
+        assert recording.keys.count(self.legacy.freeze_key(TENANT, DRAWING)) == 1
+        assert recording.keys.count(self.legacy.intent_key(TENANT, DRAWING)) == 0
+
+    def test_freeze_inflight_race_refused(self, backend, monkeypatch):
+        from concurrent.futures import ThreadPoolExecutor
+        tip = publish(backend)["head"]
+        index = tip["index"] + 1
+        entry_key = ph.entry_key(TENANT, DRAWING, index)
+        paused = threading.Event()
+        release = threading.Event()
+        publisher_thread = threading.current_thread()
+        futures = []
+
+        def after_tip_read():
+            if threading.current_thread() is not publisher_thread:
+                paused.set()
+                assert release.wait(timeout=10)
+
+        monkeypatch.setattr(self.legacy, "_after_tip_read", after_tip_read)
+        freeze = self._freeze
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            class FreezeDuringAppend(self.Recording):
+                def put_if_absent_or_verify(self, key, raw):
+                    if key == entry_key and not futures:
+                        futures.append(pool.submit(freeze, self.inner))
+                        assert paused.wait(timeout=10)
+                    return super().put_if_absent_or_verify(key, raw)
+
+            try:
+                result = publish(FreezeDuringAppend(backend), tip["state"]["artifact_id"], 3)
+                assert result["created"] is True
+                record = self.legacy._read_freeze(backend, TENANT, DRAWING)
+                assert record["legacy_last_index"] == result["head"]["index"] == index
+            finally:
+                release.set()
+            # The original freezer loses to the helper's later tip and returns its record.
+            assert futures[0].result(timeout=10) == record
+        status = self.legacy.legacy_status(backend, TENANT, DRAWING)
+        assert status["freeze"] == record
+        assert status["stranded_after_freeze"] is False
+
+    def test_intent_without_record_is_repaired(self, backend):
+        from leaf_cloud_client import canonical_bytes
+        tip = publish(backend)["head"]
+        legacy = self.legacy
+        backend.put_if_absent_or_verify(legacy.intent_key(TENANT, DRAWING), canonical_bytes(
+            {"schema": legacy.INTENT_SCHEMA, "tenant_id": TENANT, "drawing_id": DRAWING}))
+        refused("PHYSICAL_LEGACY_FROZEN", publish, backend, tip["state"]["artifact_id"], 3)
+        record = legacy._read_freeze(backend, TENANT, DRAWING)
+        assert record["legacy_last_index"] == tip["index"]
+        assert self._freeze(backend) == record
+        assert ph._head(backend, TENANT, DRAWING, PROJECT)[0] == tip
+
+    @pytest.mark.parametrize("defect", ["oversize", "non-canonical", "schema", "drawing", "extra"])
+    def test_corrupt_intent(self, backend, defect):
+        from leaf_cloud_client import canonical_bytes
+        legacy = self.legacy
+        record = {"schema": legacy.INTENT_SCHEMA, "tenant_id": TENANT, "drawing_id": DRAWING}
+        if defect == "schema":
+            record["schema"] = "wrong"
+        elif defect == "drawing":
+            record["drawing_id"] = "other"
+        elif defect == "extra":
+            record["extra"] = True
+        raw = canonical_bytes(record)
+        if defect == "oversize":
+            raw += b" " * legacy.MAX_RECORD_BYTES
+        elif defect == "non-canonical":
+            raw += b"\n"
+        backend.put(legacy.intent_key(TENANT, DRAWING), raw)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        refused("PHYSICAL_LEGACY_CORRUPT", legacy.refuse_if_frozen, backend, TENANT, DRAWING)
+        refused("PHYSICAL_LEGACY_CORRUPT", self._freeze, backend)
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_freeze_racing_publish_is_refused(self, backend, monkeypatch):
+        tip = publish(backend)["head"]
+        index = tip["index"] + 1
+        entry_key = ph.entry_key(TENANT, DRAWING, index)
+        records = []
+        legacy = self.legacy
+
+        class FreezeBeforeAppend(self.Recording):
+            def put_if_absent_or_verify(self, key, raw):
+                if key == entry_key and not records:
+                    with monkeypatch.context() as patch:
+                        patch.setenv(legacy.SWITCH_ENV, "1")
+                        records.append(legacy.freeze_legacy(
+                            self.inner, TENANT, DRAWING, project_id=PROJECT))
+                return super().put_if_absent_or_verify(key, raw)
+
+        refused("PHYSICAL_LEGACY_FROZEN", publish, FreezeBeforeAppend(backend),
+                tip["state"]["artifact_id"], 3)
+        assert len(records) == 1
+        status = legacy.legacy_status(backend, TENANT, DRAWING)
+        assert status["stranded_after_freeze"] is True
+        assert status["log_last_index"] == index
+        assert status["freeze"] == records[0]
+        view, _ = legacy.legacy_view(backend, TENANT, DRAWING, 1, project_id=PROJECT)
+        assert view == tip
+        assert view["index"] == records[0]["legacy_last_index"] < index
+
+    def test_retry_of_stranded_entry_refused(self, backend, monkeypatch):
+        self.test_freeze_racing_publish_is_refused(backend, monkeypatch)
+        tip, _ = ph._head(backend, TENANT, DRAWING, PROJECT)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        recording = self.Recording(backend, readonly=True)
+        refused("PHYSICAL_LEGACY_FROZEN", publish, recording, tip["parent"], 3)
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_retry_of_frozen_head_after_stranded_tip_returns_existing(self, backend, monkeypatch):
+        self.test_freeze_racing_publish_is_refused(backend, monkeypatch)
+        included, _ = ph._view_at(ph._Log(backend, TENANT, DRAWING), 0, PROJECT)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        result = publish(self.Recording(backend, readonly=True))
+        assert result == {"schema": ph.PUBLISH_SCHEMA, "created": False, "head": included}
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_freeze_after_append_keeps_success(self, backend, monkeypatch):
+        tip = publish(backend)["head"]
+        index = tip["index"] + 1
+        entry_key = ph.entry_key(TENANT, DRAWING, index)
+        records = []
+        legacy = self.legacy
+
+        class FreezeAfterAppend(self.Recording):
+            def put_if_absent_or_verify(self, key, raw):
+                result = super().put_if_absent_or_verify(key, raw)
+                if key == entry_key and not records:
+                    with monkeypatch.context() as patch:
+                        patch.setenv(legacy.SWITCH_ENV, "1")
+                        records.append(legacy.freeze_legacy(
+                            self.inner, TENANT, DRAWING, project_id=PROJECT))
+                return result
+
+        result = publish(FreezeAfterAppend(backend), tip["state"]["artifact_id"], 3)
+        assert result["created"] is True
+        assert result["head"]["index"] == index
+        assert len(records) == 1
+        assert records[0]["legacy_last_index"] == index
+        status = legacy.legacy_status(backend, TENANT, DRAWING)
+        assert status["freeze"] == records[0]
+        assert status["stranded_after_freeze"] is False
+
+    def test_freeze_drained_refused(self, backend, monkeypatch):
+        monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
+        recording = self.Recording(backend)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        refused("PHYSICAL_LEGACY_WRITES_DRAINED", self._freeze, recording)
+        assert recording.keys == []
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_freeze_store_unsafe_refused(self, backend):
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        refused("PHYSICAL_LEGACY_STORE_UNSAFE", self._freeze, Naive(backend))
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_restore_bundle_carries_legacy_ref(self, backend, graph, monkeypatch):
+        # Amendment E: only a source's recorded binding is carried by restore.
+        from routers import drawings
+        tip = publish(backend)["head"]
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        ref = self.legacy.legacy_reference(backend, TENANT, DRAWING, 1, project_id=PROJECT)
+        with held(backend) as fence:
+            source = _binding_bundle(backend, graph, fence, physical=ref)
+            _binding_bundle(backend, graph, fence, "later")
+            restored = drawings.restore_drawing_version(
+                TENANT, DRAWING, source, actor="restore", holder="fixture-owner", fence=fence, backend=backend)
+        assert store.read_graph_bundle(backend, TENANT, DRAWING, restored.version)["physical"] == ref
+        assert self._view(backend) == tip
+
+    def test_restore_intake_carries_legacy_ref(self, backend, monkeypatch):
+        from routers import drawings
+        from leaf_cloud_client import canonical_bytes
+        tip = publish(backend)["head"]
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        ref = self.legacy.legacy_reference(backend, TENANT, DRAWING, 1, project_id=PROJECT)
+        payload = dict(_binding_intake(backend), solar_physical=ref)
+        with held(backend) as fence:
+            source = _binding_payload(backend, payload, fence=fence)
+            restored = drawings.restore_drawing_version(
+                TENANT, DRAWING, source, actor="restore", holder="fixture-owner", fence=fence, backend=backend)
+        raw = backend.get(store.drawing_version_key(TENANT, DRAWING, restored.version))
+        assert raw == canonical_bytes(payload)
+        assert json.loads(raw)["solar_physical"] == ref
+        assert json.loads(backend.get(write_loop.intake_cache_key(TENANT, DRAWING, restored.version))) == payload
+        assert self._view(backend) == tip
+
+    def test_restore_of_non_descendant_absent(self, backend, graph, monkeypatch):
+        from routers import drawings
+        self._source_at_two(backend, graph)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        with held(backend) as fence:
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            restored = drawings.restore_drawing_version(
+                TENANT, DRAWING, 1, actor="restore", holder="fixture-owner", fence=fence, backend=backend)
+        assert "solar_physical" not in _binding_intake(backend, restored.version)
+        assert store.read_version_physical(backend, TENANT, DRAWING)[1] is None
+        assert self._view(backend) is None
+
+    def test_restore_request_physical_mismatch_refused(self, backend, graph, monkeypatch):
+        ref = _binding_ref(publish(backend)["head"])
+        with held(backend) as fence:
+            source = _binding_bundle(backend, graph, fence)
+            restored = store.read_graph_bundle(backend, TENANT, DRAWING, source)
+            request = _binding_request(backend, graph, "restore")
+            request.update({k: restored[k] for k in ("graph", "intake", "mapping")})
+            request.update(restore_version=source, physical=ref)
+            for enabled in ("1", "0"):
+                monkeypatch.setenv(self.legacy.SWITCH_ENV, enabled)
+                with pytest.raises(ValueError, match="restore must copy the complete graph bundle"):
+                    write_loop.apply_graph_version(backend, TENANT, DRAWING, b"binding DWG", request,
+                                                    holder="fixture-owner", fence=fence)
+
+    def test_project_mismatch(self, backend, monkeypatch):
+        publish(backend, project_id=PROJECT)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        for frozen in (False, True):
+            if frozen:
+                self._freeze(backend)
+            before = backend.drawing_object_keys(TENANT, DRAWING)
+            refused("PHYSICAL_HEAD_PROJECT_MISMATCH", self._view, backend, project_id="foreign")
+            assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_tenant_isolation(self, backend, monkeypatch):
+        publish(backend)
+        self._freeze(backend)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        recording = self.Recording(backend, readonly=True)
+        assert ph.physical_head(recording, "tenant-b", DRAWING, project_id=PROJECT) is None
+        assert self.legacy.legacy_view(recording, "tenant-b", DRAWING, 1, project_id=PROJECT) == (None, None)
+        assert recording.keys and all(k.startswith("tenants/tenant-b/") for k in recording.keys)
+
+    @pytest.mark.parametrize("defect", ["oversize", "non-canonical", "extra", "missing", "schema",
+                                       "tenant", "hex", "null-pairing"])
+    def test_corrupt_freeze(self, backend, monkeypatch, defect):
+        from leaf_cloud_client import canonical_bytes
+        publish(backend)
+        record = self._freeze(backend)
+        if defect == "extra":
+            record["extra"] = 1
+        elif defect == "missing":
+            del record["state"]
+        elif defect == "schema":
+            record["schema"] = "wrong"
+        elif defect == "tenant":
+            record["tenant_id"] = "other"
+        elif defect == "hex":
+            record["state"] = "A" * 64
+        elif defect == "null-pairing":
+            record["legacy_last_index"] = -1
+        raw = canonical_bytes(record)
+        if defect == "oversize":
+            raw += b" " * 1024
+        elif defect == "non-canonical":
+            raw += b"\n"
+        backend.put(self.legacy.freeze_key(TENANT, DRAWING), raw)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        refused("PHYSICAL_HEAD_CORRUPT", self._view, backend)
+        refused("PHYSICAL_LEGACY_CORRUPT", self.legacy.refuse_if_frozen, backend, TENANT, DRAWING)
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    def test_frozen_entry_mismatch_corrupt(self, backend, monkeypatch):
+        from leaf_cloud_client import canonical_bytes
+        publish(backend)
+        record = self._freeze(backend)
+        record["state"] = "0" * 64
+        backend.put(self.legacy.freeze_key(TENANT, DRAWING), canonical_bytes(record))
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        refused("PHYSICAL_HEAD_CORRUPT", self._view, backend)
+
+    def test_lineage_cycle_and_missing_row_corrupt(self, backend, graph, monkeypatch):
+        v, _ = self._source_at_two(backend, graph)
+        with held(backend) as fence:
+            child = _binding_bundle(backend, graph, fence, "child")
+        original = store.load_manifest(backend, TENANT, DRAWING)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        for parent in (child, 999):
+            manifest = copy.deepcopy(original)
+            next(row for row in manifest["versions"] if row["v"] == child)["parent"] = parent
+            store.save_manifest(backend, TENANT, DRAWING, manifest)
+            store._physical_memo_clear()
+            refused("PHYSICAL_HEAD_CORRUPT", self._view, backend, child)
+        assert v != child
+
+    def test_store_unavailable(self, backend, monkeypatch):
+        tip = publish(backend)["head"]
+        key = self.legacy.freeze_key(TENANT, DRAWING)
+        class Unavailable(self.Recording):
+            def get(self, requested):
+                if requested == key:
+                    raise OSError("unavailable")
+                return super().get(requested)
+        recording = Unavailable(backend)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        refused("PHYSICAL_HEAD_STORE_UNAVAILABLE", self._view, recording)
+        monkeypatch.delenv(self.legacy.SWITCH_ENV)
+        refused("PHYSICAL_LEGACY_STORE_UNAVAILABLE", publish, recording,
+                tip["state"]["artifact_id"], 3)
+
+    def test_read_cost_bounded(self, backend, graph, monkeypatch):
+        v, first = self._source_at_two(backend, graph)
+        tip = publish(backend, first["state"]["artifact_id"], 3)["head"]
+        baseline = self.Recording(backend, readonly=True)
+        ph._head(baseline, TENANT, DRAWING, PROJECT)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        recording = self.Recording(backend, readonly=True)
+        assert self.legacy.legacy_view(recording, TENANT, DRAWING, v, project_id=PROJECT)[0] == tip
+        assert recording.log_reads == baseline.log_reads
+        assert len(recording.log_reads) <= 13
+        assert len(set(recording.log_reads)) == len(recording.log_reads)
+        assert recording.keys.count(self.legacy.freeze_key(TENANT, DRAWING)) == 1
+        assert recording.keys.count(store.manifest_key(TENANT, DRAWING)) == 1
+        assert sum("/artifacts/" in k for k in recording.keys) == 2
+        assert len(recording.keys) == len(baseline.keys) + 2
+        self._freeze(backend)
+        for version, descendant in ((1, False), (v, True)):
+            recording = self.Recording(backend, readonly=True)
+            view, _ = self.legacy.legacy_view(recording, TENANT, DRAWING, version, project_id=PROJECT)
+            assert view == (tip if descendant else None)
+            assert recording.keys.count(self.legacy.freeze_key(TENANT, DRAWING)) == 1
+            assert recording.keys.count(store.manifest_key(TENANT, DRAWING)) == 1
+            assert recording.log_reads == ([1, 0] if descendant else [])
+            assert sum("/artifacts/" in k for k in recording.keys) == (2 if descendant else 0)
+            assert len(recording.keys) == (6 if descendant else 2)
+        # The first frozen entry has no predecessor to fetch.
+        from leaf_cloud_client import canonical_bytes
+        record = self.legacy._read_freeze(backend, TENANT, DRAWING)
+        record.update(legacy_last_index=0, state=first["state"]["artifact_id"],
+                      content_sha256=first["state"]["content_sha256"])
+        backend.put(self.legacy.freeze_key(TENANT, DRAWING), canonical_bytes(record))
+        recording = self.Recording(backend, readonly=True)
+        assert self.legacy.legacy_view(recording, TENANT, DRAWING, v, project_id=PROJECT)[0] == first
+        assert recording.log_reads == [0] and len(recording.keys) == 5
+
+    def test_legacy_status_reports_stranded(self, backend, monkeypatch):
+        tip = publish(backend)["head"]
+        self._freeze(backend)
+        ref = self._append_bound_entry(backend, tip)
+        status = self.legacy.legacy_status(backend, TENANT, DRAWING)
+        assert status["freeze"]["legacy_last_index"] == 0
+        assert status["log_last_index"] == 1 and status["stranded_after_freeze"]
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        with held(backend) as fence:
+            _binding_commit(backend, fence, ref)
+        assert not self.legacy.legacy_status(backend, TENANT, DRAWING)["stranded_after_freeze"]
+
+    def test_terrain_get_end_to_end(self, backend, graph, monkeypatch):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from envelopes import install_error_handlers
+        from routers import solar_terrain as route
+        _, tip = self._source_at_two(backend, graph)
+        with held(backend) as fence:
+            _binding_bundle(backend, graph, fence, "descendant")
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        monkeypatch.delenv("LEAF_AUTH_LIVE", raising=False)
+        monkeypatch.delenv("APS_LIVE", raising=False)
+        app = FastAPI()
+        install_error_handlers(app)
+        app.include_router(route.router)
+        with TestClient(app) as client, held(backend) as fence:
+            def get():
+                response = client.get(f"/api/drawings/{DRAWING}/terrain?project_id={PROJECT}",
+                                      headers={"X-Tenant-Id": TENANT})
+                assert response.status_code == 200, response.text
+                return response.json()
+            assert get()["stored"] and get()["head"] == tip
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            store.undo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            assert get()["stored"] is False
+            store.redo(backend, TENANT, DRAWING, holder="fixture-owner", fence=fence)
+            assert get()["stored"] and get()["head"]["state"]["artifact_id"] == tip["state"]["artifact_id"]
+
+    def test_postgres_lineage_and_restore(self, backend, graph, tmp_path, monkeypatch, request):
+        from routers import drawings
+        def exercise(target, tenant, drawing):
+            fence = store.acquire_checkout_fence(target, tenant, drawing, "fixture-owner", 300)
+            try:
+                from leaf_cloud_client import canonical_bytes
+                payload = json.loads(target.get(store.drawing_version_key(tenant, drawing, 1)))
+                anchor = write_loop._put_bytes_version(
+                    target, tenant, drawing, canonical_bytes(payload), 1, {"tool": "legacy-anchor"},
+                    holder="fixture-owner", fence=fence)
+                monkeypatch.delenv(self.legacy.SWITCH_ENV, raising=False)
+                first = ph.publish_physical_state(target, tenant, drawing, doc(), project_id=PROJECT)["head"]
+                monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+                child = write_loop._put_bytes_version(
+                    target, tenant, drawing, canonical_bytes(payload), anchor, {"tool": "legacy-test"},
+                    holder="fixture-owner", fence=fence)
+                for version in (anchor, child):
+                    assert ph.physical_head(target, tenant, drawing, version=version, project_id=PROJECT) == first
+                store.undo(target, tenant, drawing, holder="fixture-owner", fence=fence)
+                assert ph.physical_head(target, tenant, drawing, project_id=PROJECT) == first
+                store.undo(target, tenant, drawing, holder="fixture-owner", fence=fence)
+                assert ph.physical_head(target, tenant, drawing, project_id=PROJECT) is None
+                store.redo(target, tenant, drawing, holder="fixture-owner", fence=fence)
+                assert ph.physical_head(target, tenant, drawing, project_id=PROJECT) == first
+                restored = drawings.restore_drawing_version(
+                    tenant, drawing, anchor, actor="restore", holder="fixture-owner", fence=fence, backend=target)
+                assert store.read_version_physical(target, tenant, drawing, restored.version)[1] is None
+                assert ph.physical_head(target, tenant, drawing, project_id=PROJECT) == first
+            finally:
+                store.release_checkout(target, tenant, drawing, "fixture-owner")
+        exercise(backend, TENANT, DRAWING)
+        if os.environ.get("DATABASE_URL"):
+            request.getfixturevalue("postgres_authority")
+            import uuid
+            tenant, drawing = "legacy-" + uuid.uuid4().hex[:12], "physical"
+            memory = store.InMemoryBackend()
+            source = tmp_path / "pg-legacy.json"
+            from solar_sizing_client import digest
+            source.write_text(json.dumps({"solar_design_graph": graph,
+                                          "solar_design_graph_sha256": digest(graph)}))
+            store.ingest_drawing(memory, tenant, str(source), drawing_id=drawing)
+            exercise(memory, tenant, drawing)
+
+    @pytest.mark.parametrize("frozen", [False, True])
+    def test_freeze_project_mismatch(self, backend, monkeypatch, frozen):
+        publish(backend, project_id=PROJECT)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        if frozen:
+            self._freeze(backend)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        recording = self.Recording(backend)
+        refused("PHYSICAL_LEGACY_PROJECT_MISMATCH", self._freeze, recording, "foreign")
+        assert not any("/artifacts/" in key for key in recording.keys)
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+
+    @pytest.mark.parametrize("project_id", [None, "", "x" * 101, 7])
+    def test_freeze_project_id_invalid(self, backend, project_id):
+        recording = self.Recording(backend)
+        refused("PHYSICAL_LEGACY_ID_INVALID", self._freeze, recording, project_id)
+        assert recording.keys == []
+
+    def test_restore_unbound_legacy_descendant_records_no_reference(self, backend, graph, monkeypatch):
+        from routers import drawings
+        tip = publish(backend)["head"]
+        with held(backend) as fence:
+            source = _binding_bundle(backend, graph, fence)
+            _binding_bundle(backend, graph, fence, "later", physical=_binding_ref(tip))
+            monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+            assert self._view(backend, source) == tip
+            restored = drawings.restore_drawing_version(
+                TENANT, DRAWING, source, actor="restore", holder="fixture-owner", fence=fence, backend=backend)
+        bundle = store.read_graph_bundle(backend, TENANT, DRAWING, restored.version)
+        assert "physical" not in bundle
+        assert store.read_version_physical(backend, TENANT, DRAWING, restored.version)[1] is None
