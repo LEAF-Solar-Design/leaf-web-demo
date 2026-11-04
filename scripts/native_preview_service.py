@@ -96,6 +96,7 @@ def _accepted(result):
 def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
     entered = False
     armed = False
+    initialization_failed = False
     accepted = None
     output = None
     try:
@@ -104,7 +105,18 @@ def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
             if stop_event.is_set():
                 return 'stopped'
             output = Path(tempfile.mkdtemp(prefix='cycle-', dir=directory))
-            journal = recovery.Journal(output, digest, directory)
+            try:
+                journal = recovery.Journal(output, digest, directory)
+            except BaseException as error:
+                # This new invocation has not reached run_once or its claim POST.
+                # Preserve partial journal bytes and the prior checkpoint; this
+                # evidence grants no recovery authority for historical cycles.
+                initialization_failed = True
+                recovery.immutable(output / 'initialization-failure.json', worker.encode({
+                    'schema': 'leaf.native-preview-initialization-failure.v1',
+                    'scope_sha256': digest, 'cycle': output.name,
+                    'stage': 'journal-initialization', 'worker_invoked': False}))
+                return 'retry' if isinstance(error, Exception) else 'stopped'
             dirty = {'schema': recovery.CHECKPOINT_SCHEMA, 'scope_sha256': digest,
                      'phase': 'reconciliation-required', 'cycle': output.name}
             _checkpoint(checkpoint, digest, dirty)
@@ -129,6 +141,10 @@ def _cycle(scope, session_factory, directory, checkpoint, digest, stop_event):
         return 'retry'
     except BaseException as error:
         if entered:
+            if initialization_failed:
+                # Evidence-write or session-close failure is still uncertain,
+                # but cannot replace a valid predecessor with a missing journal.
+                return 'reconciliation-required'
             # Includes context cleanup failures even before a claim could start.
             try:
                 if not armed:

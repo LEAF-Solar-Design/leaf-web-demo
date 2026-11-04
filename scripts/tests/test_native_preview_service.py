@@ -163,6 +163,52 @@ def test_auth_acquisition_retries_with_bounded_interruptible_wait(tmp_path, monk
     assert SECRET not in json.dumps(result)
 
 
+@pytest.mark.parametrize('prior_checkpoint', [False, True])
+@pytest.mark.parametrize('failure', ['empty', 'partial-journal', 'session-close'])
+def test_journal_initialization_failure_preserves_prior_checkpoint_and_evidence(
+        tmp_path, monkeypatch, prior_checkpoint, failure):
+    base = directory(tmp_path)
+    base.mkdir()
+    old = service.worker.encode(dict(scope_sha256=base.name, phase='clean')) + b'\n'
+    if prior_checkpoint:
+        marker(tmp_path).write_bytes(old)
+    monkeypatch.setattr(service.worker, 'run_once', forbidden)
+    partial = b'partial journal fixture, never a claim witness'
+    def broken_journal(cycle, digest, directory):
+        if failure == 'partial-journal':
+            (cycle / 'journal.json').write_bytes(partial)
+        raise RuntimeError(SECRET)
+    monkeypatch.setattr(service.recovery, 'Journal', broken_journal)
+    exits = []
+    @contextmanager
+    def factory(scope):
+        try:
+            yield object(), forbidden
+        finally:
+            exits.append(True)
+            if failure == 'session-close':
+                raise RuntimeError(SECRET)
+    stop = Stop()
+    result = service.serve(SCOPE, factory, tmp_path, stop)
+    assert result == dict(state='reconciliation-required' if failure == 'session-close' else 'stopped', completed=0)
+    assert exits == [True]
+    assert stop.waits == ([] if failure == 'session-close' else [30.0])
+    if prior_checkpoint:
+        assert marker(tmp_path).read_bytes() == old
+    else:
+        assert not marker(tmp_path).exists()
+    cycles = list(base.glob('cycle-*'))
+    assert len(cycles) == 1
+    evidence = cycles[0] / 'initialization-failure.json'
+    assert json.loads(evidence.read_bytes()) == dict(
+        schema='leaf.native-preview-initialization-failure.v1', scope_sha256=base.name,
+        cycle=cycles[0].name, stage='journal-initialization', worker_invoked=False)
+    if failure == 'partial-journal':
+        assert (cycles[0] / 'journal.json').read_bytes() == partial
+    for path in cycles[0].iterdir():
+        assert SECRET.encode() not in path.read_bytes()
+
+
 @pytest.mark.parametrize('reply', [
     {'stage': 'completion', 'result': 'unknown'},
     {'stage': 'execution', 'result': 'failed'},

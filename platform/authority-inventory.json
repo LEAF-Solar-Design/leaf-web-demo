@@ -96,7 +96,8 @@
       "0092",
       "0093",
       "0094",
-      "0095"
+      "0095",
+      "0096"
     ],
     "completeness": "partial",
     "reason": "Historical backfill commands are not present in this repository, and most live staging and production selector values are still unrecorded. A recorded value names the task-definition revision, and where the value is the shipped image default, the image digest it was read from. Status measured_no_override means no deployment-layer override was set and the value is the repository default the image bakes; it is not an operator selection for that environment. Every named revision and digest ages."
@@ -1154,6 +1155,25 @@
       "current_selection": {
         "staging": {"value": null, "status": "unknown", "evidence": "SEL-202 adds migration 0084 only; no schema or runtime selection applied."},
         "production": {"value": null, "status": "unknown", "evidence": "SEL-202 adds migration 0084 only; no schema or runtime selection applied."}
+      }
+    },
+    {
+      "id": "device_bridge",
+      "coverage": ["device_bridge"],
+      "selectors": [{
+        "name": "LEAF_DEVICE_STORE",
+        "allowed_modes": ["sqlite", "postgres", "postgres_required"],
+        "repository_default": "sqlite"
+      }],
+      "postgres_tables": ["device_enrollments", "devices", "device_commands", "device_nonces", "device_relay_tokens", "device_audit"],
+      "legacy_source": ["LEAF_DEVICE_DB local SQLite; forbidden in deployed runtimes and under /data/state."],
+      "backfill": {"command": null, "status": "not_applicable", "note": "New device bridge authority; local SQLite is not a deployed migration source."},
+      "parity": {"command": null, "status": "not_run", "note": "Shared SQLite/PostgreSQL enrollment, tenant boundary, replay, lease, revocation and retention proofs are in server/tests/test_device_store.py; execution is required before enablement."},
+      "cutover_modes": ["postgres", "postgres_required"],
+      "rollback_mode": "Disable device bridge entry points and retain PostgreSQL credentials, revocations, nonces, commands and audit. Never fall back to SQLite in deployment.",
+      "current_selection": {
+        "staging": {"value": null, "status": "unknown", "evidence": "P1 adds migration 0096 only; no schema or runtime selection applied."},
+        "production": {"value": null, "status": "unknown", "evidence": "P1 adds migration 0096 only; no schema or runtime selection applied."}
       }
     },
     {

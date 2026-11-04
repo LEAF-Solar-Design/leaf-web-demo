@@ -1297,6 +1297,23 @@ async def stream_job(job_id: str, tenant=Depends(deps.require_tenant)):
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
+_LIST_TRIMMED_RESULT_KEYS = ("solver_result", "solver_input")
+
+
+def _trim_list_body(body):
+    """List-only projection: drop solver bodies; GET /api/jobs/{id} keeps them. Never mutates its input."""
+    if not isinstance(body, dict):
+        return body
+    result = body.get("result")
+    if not isinstance(result, dict) or not any(key in result for key in _LIST_TRIMMED_RESULT_KEYS):
+        return body
+    return {
+        **body,
+        "result": {key: value for key, value in result.items() if key not in _LIST_TRIMMED_RESULT_KEYS},
+        "result_trimmed": True,
+    }
+
+
 @router.get("/api/jobs")
 def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
     # Scope strictly to the RESOLVED caller tenant; a client-supplied tenant_id is
@@ -1338,7 +1355,7 @@ def list_jobs(limit: int = 20, tenant=Depends(deps.require_tenant)):
             visible.append(rec)
             seen.add(rec["job_id"])
         return with_envelope_fields(
-            {"jobs": [_record_body(r) for r in visible[:limit]]}
+            {"jobs": [_trim_list_body(_record_body(r)) for r in visible[:limit]]}
         )
     except Exception:
         if actor is None:

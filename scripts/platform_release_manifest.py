@@ -70,6 +70,7 @@ SURFACE_INPUTS: dict[str, tuple[str, ...]] = {
         "platform",
         "contract",
         "data",
+        "device-agent",
         "scripts/reconcile_customization_authority.py",
         "scripts/reconcile_drawing_authority.py",
         "scripts/reconcile_sessions_authority.py",
