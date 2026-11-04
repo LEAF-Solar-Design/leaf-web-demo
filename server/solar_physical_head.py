@@ -186,7 +186,7 @@ def _version_head(backend, tenant_id, drawing_id, project_id, version):
     if not store.physical_versioned_enabled():
         return _head(backend, tenant_id, drawing_id, project_id)
     try:
-        _, ref = store.read_version_physical(
+        v, ref = store.read_version_physical(
             backend, tenant_id, drawing_id, version, project_id=project_id)
     except store.PhysicalReferenceScopeMismatch:
         raise PhysicalHeadError("PHYSICAL_HEAD_PROJECT_MISMATCH") from None
@@ -197,7 +197,11 @@ def _version_head(backend, tenant_id, drawing_id, project_id, version):
     except (OSError, RuntimeError):
         raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
     if ref is None:
-        return _head(backend, tenant_id, drawing_id, project_id)
+        if v is None:
+            return _head(backend, tenant_id, drawing_id, project_id)
+        import solar_physical_legacy
+        return solar_physical_legacy.legacy_view(
+            backend, tenant_id, drawing_id, v, project_id=project_id)
     view, content = _view_at(_Log(backend, tenant_id, drawing_id), ref["head_index"], project_id)
     if (view["state"]["artifact_id"] != ref["state_artifact_id"]
             or view["state"]["content_sha256"] != ref["state_content_sha256"]):
@@ -258,6 +262,8 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
     if not _atomic_backend(backend):
         raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNSAFE")
     data = ps.encode_document(document)
+    import solar_physical_legacy
+    solar_physical_legacy.refuse_if_frozen(backend, tenant_id, drawing_id)
     content_sha256 = hashlib.sha256(data).hexdigest()
     parent = document["parent"]
     head, _ = _head(backend, tenant_id, drawing_id, project_id)
