@@ -131,8 +131,14 @@ def freeze_legacy(backend, tenant_id, drawing_id, *, project_id):
     return record
 
 
+def frozen_last_index(backend, tenant_id, drawing_id) -> int | None:
+    """Read the freeze once, returning its last legacy index or None when absent."""
+    record = _read_freeze(backend, tenant_id, drawing_id)
+    return None if record is None else record["legacy_last_index"]
+
+
 def refuse_if_frozen(backend, tenant_id, drawing_id):
-    if _read_freeze(backend, tenant_id, drawing_id) is not None:
+    if frozen_last_index(backend, tenant_id, drawing_id) is not None:
         raise PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN")
 
 

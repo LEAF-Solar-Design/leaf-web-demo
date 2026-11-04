@@ -254,7 +254,9 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
     that head with created False; any other stale parent, or a writer that loses the race for
     the next entry, is refused PHYSICAL_HEAD_CONFLICT. A crash after the state is stored and
     before its entry is created leaves an unreferenced artifact and an unchanged head; the
-    retry reuses the artifact at the same drawing revision."""
+    retry reuses the artifact at the same drawing revision. New publications read the freeze
+    before and after appending; a racing freeze that excludes the entry leaves it stranded
+    in the immutable log and refuses publication, while idempotent retries read no freeze."""
     if write_loop.drawing_mutations_refusal() is not None:
         raise PhysicalHeadError("PHYSICAL_HEAD_WRITES_DRAINED")
     if project_id is not None:
@@ -263,12 +265,12 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
         raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNSAFE")
     data = ps.encode_document(document)
     import solar_physical_legacy
-    solar_physical_legacy.refuse_if_frozen(backend, tenant_id, drawing_id)
     content_sha256 = hashlib.sha256(data).hexdigest()
     parent = document["parent"]
     head, _ = _head(backend, tenant_id, drawing_id, project_id)
     if head is not None and head["parent"] == parent and head["state"]["content_sha256"] == content_sha256:
         return {"schema": PUBLISH_SCHEMA, "created": False, "head": head}
+    solar_physical_legacy.refuse_if_frozen(backend, tenant_id, drawing_id)
     if parent != (None if head is None else head["state"]["artifact_id"]):
         raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT")
     index = 0 if head is None else head["index"] + 1
@@ -283,6 +285,9 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
         raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT") from None
     except (OSError, RuntimeError, ValueError):
         raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
+    frozen_index = solar_physical_legacy.frozen_last_index(backend, tenant_id, drawing_id)
+    if frozen_index is not None and frozen_index < index:
+        raise solar_physical_legacy.PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN")
     head = {"schema": HEAD_SCHEMA, "drawing_id": drawing_id, "project_id": stored["project_id"],
             "index": index, "parent": parent, "state": ref}
     return {"schema": PUBLISH_SCHEMA, "created": True, "head": head}

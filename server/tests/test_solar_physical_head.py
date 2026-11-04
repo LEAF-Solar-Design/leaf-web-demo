@@ -1531,9 +1531,75 @@ class TestLegacyAdoption:
             assert recording.keys == [key]
         else:
             assert publish(recording)["created"]
-            assert recording.keys.count(key) == 1
+            assert recording.keys.count(key) == 2
             assert not any("physical-legacy" in k and k != key for k in recording.keys)
             assert self._view(backend) == ph._head(backend, TENANT, DRAWING, PROJECT)[0]
+
+    def test_retry_of_head_after_freeze_returns_existing(self, backend, monkeypatch):
+        first = publish(backend)
+        monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
+        self._freeze(backend)
+        monkeypatch.delenv(self.legacy.SWITCH_ENV)
+        before = backend.drawing_object_keys(TENANT, DRAWING)
+        recording = self.Recording(backend)
+        retry = publish(recording)
+        assert retry["created"] is False
+        assert retry["head"] == first["head"]
+        assert backend.drawing_object_keys(TENANT, DRAWING) == before
+        assert recording.keys.count(self.legacy.freeze_key(TENANT, DRAWING)) == 0
+
+    def test_freeze_racing_publish_is_refused(self, backend, monkeypatch):
+        tip = publish(backend)["head"]
+        index = tip["index"] + 1
+        entry_key = ph.entry_key(TENANT, DRAWING, index)
+        records = []
+        legacy = self.legacy
+
+        class FreezeBeforeAppend(self.Recording):
+            def put_if_absent_or_verify(self, key, raw):
+                if key == entry_key and not records:
+                    with monkeypatch.context() as patch:
+                        patch.setenv(legacy.SWITCH_ENV, "1")
+                        records.append(legacy.freeze_legacy(
+                            self.inner, TENANT, DRAWING, project_id=PROJECT))
+                return super().put_if_absent_or_verify(key, raw)
+
+        refused("PHYSICAL_LEGACY_FROZEN", publish, FreezeBeforeAppend(backend),
+                tip["state"]["artifact_id"], 3)
+        assert len(records) == 1
+        status = legacy.legacy_status(backend, TENANT, DRAWING)
+        assert status["stranded_after_freeze"] is True
+        assert status["log_last_index"] == index
+        assert status["freeze"] == records[0]
+        view, _ = legacy.legacy_view(backend, TENANT, DRAWING, 1, project_id=PROJECT)
+        assert view == tip
+        assert view["index"] == records[0]["legacy_last_index"] < index
+
+    def test_freeze_after_append_keeps_success(self, backend, monkeypatch):
+        tip = publish(backend)["head"]
+        index = tip["index"] + 1
+        entry_key = ph.entry_key(TENANT, DRAWING, index)
+        records = []
+        legacy = self.legacy
+
+        class FreezeAfterAppend(self.Recording):
+            def put_if_absent_or_verify(self, key, raw):
+                result = super().put_if_absent_or_verify(key, raw)
+                if key == entry_key and not records:
+                    with monkeypatch.context() as patch:
+                        patch.setenv(legacy.SWITCH_ENV, "1")
+                        records.append(legacy.freeze_legacy(
+                            self.inner, TENANT, DRAWING, project_id=PROJECT))
+                return result
+
+        result = publish(FreezeAfterAppend(backend), tip["state"]["artifact_id"], 3)
+        assert result["created"] is True
+        assert result["head"]["index"] == index
+        assert len(records) == 1
+        assert records[0]["legacy_last_index"] == index
+        status = legacy.legacy_status(backend, TENANT, DRAWING)
+        assert status["freeze"] == records[0]
+        assert status["stranded_after_freeze"] is False
 
     def test_freeze_drained_refused(self, backend, monkeypatch):
         monkeypatch.setenv("LEAF_DRAWING_MUTATIONS_ENABLED", "0")
@@ -1678,7 +1744,7 @@ class TestLegacyAdoption:
         assert v != child
 
     def test_store_unavailable(self, backend, monkeypatch):
-        publish(backend)
+        tip = publish(backend)["head"]
         key = self.legacy.freeze_key(TENANT, DRAWING)
         class Unavailable(self.Recording):
             def get(self, requested):
@@ -1689,7 +1755,8 @@ class TestLegacyAdoption:
         monkeypatch.setenv(self.legacy.SWITCH_ENV, "1")
         refused("PHYSICAL_HEAD_STORE_UNAVAILABLE", self._view, recording)
         monkeypatch.delenv(self.legacy.SWITCH_ENV)
-        refused("PHYSICAL_LEGACY_STORE_UNAVAILABLE", publish, recording)
+        refused("PHYSICAL_LEGACY_STORE_UNAVAILABLE", publish, recording,
+                tip["state"]["artifact_id"], 3)
 
     def test_read_cost_bounded(self, backend, graph, monkeypatch):
         v, first = self._source_at_two(backend, graph)
