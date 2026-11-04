@@ -2,21 +2,23 @@
 optimistic publication of a child that names its parent.
 
 A drawing's physical states form one append-only head log under its prefix:
-`physical/head-NNNN.json`, entry n naming the state artifact that became current at step n
-and the state it replaced (its parent). An entry is created with the store's one atomic
+`physical/head-NNNN.json`, entry n naming a state artifact and the preceding log entry's
+state (its chain parent). An entry is created with the store's one atomic
 primitive, `put_if_absent_or_verify` (os.link on the filesystem backend, dict.setdefault in
 memory), so of two writers that build on the same head exactly one creates entry n and the
 other is refused PHYSICAL_HEAD_CONFLICT. A backend that inherits the base class's
 exists-then-put (the APS OSS backend) cannot make that promise and publication refuses it.
 
 The log is per drawing. With version binding enabled a read follows the reference on the
-selected drawing version; an unbound version reads the log tip. Resolution adds one manifest
+selected drawing version; an unbound version follows the legacy adoption policy. Resolution adds one manifest
 read and at most one object read (64 MiB for intake, 16 MiB for bundles), none on a memo hit.
 Entries are contiguous from 0 (entry n is written only after entry n-1 was read), so
 the head is found by binary search in at most 13 log reads, its predecessor included. The log
 holds at most 4,096 entries. Every read and write fails closed with a named, payload-free code.
-No clock, network, graph write or re-encoding of the state lives here: the state bytes are the
-physical-state module's own.
+Entry parents link the immutable log; view parents name the state the document replaced.
+Version-bound publication may leave an orphan after a refused version commit; readers
+follow only the selected version's reference, and an identical retry reuses the orphan.
+The state bytes are the physical-state module's own.
 """
 import hashlib
 import json
@@ -28,11 +30,13 @@ import solar_physical_state as ps
 import write_loop
 from leaf_cloud_client import canonical_bytes
 from solar_design_graph import GraphValidationError
+from solar_graph_context import resolve_graph_context
 
 ENTRY_SCHEMA = "leaf.solar-physical-head-entry.v1"
 HEAD_SCHEMA = "leaf.solar-physical-head.v1"
 PUBLISH_SCHEMA = "leaf.solar-physical-head-publish.v1"
 MAX_LOG_ENTRIES = 4096
+MAX_PHYSICAL_VERSIONS = MAX_LOG_ENTRIES
 MAX_ENTRY_BYTES = 1024
 MAX_PROJECT_ID_CHARS = 100
 ENTRY_KEYS = frozenset({"schema", "index", "project_id", "parent", "state", "content_sha256"})
@@ -40,6 +44,7 @@ CODES = frozenset({
     "PHYSICAL_HEAD_CONFLICT", "PHYSICAL_HEAD_LOG_FULL", "PHYSICAL_HEAD_CORRUPT",
     "PHYSICAL_HEAD_PROJECT_MISMATCH", "PHYSICAL_HEAD_PROJECT_ID_INVALID", "PHYSICAL_HEAD_ID_INVALID",
     "PHYSICAL_HEAD_WRITES_DRAINED", "PHYSICAL_HEAD_STORE_UNAVAILABLE", "PHYSICAL_HEAD_STORE_UNSAFE",
+    "PHYSICAL_HEAD_CHECKOUT_REQUIRED",
 })
 _HEX64 = re.compile(r"[0-9a-f]{64}")
 
@@ -214,7 +219,10 @@ def physical_head(backend, tenant_id, drawing_id, *, project_id, version="head")
     artifact gets; resolution uses one manifest and at most one bounded object (memoized).
     Unbound reads retain the at-most-13-read tip search."""
     _project_id(project_id)
-    return _version_head(backend, tenant_id, drawing_id, project_id, version)[0]
+    if not store.physical_versioned_enabled():
+        # Preserve the legacy metadata-only view, including its decode boundary.
+        return _version_head(backend, tenant_id, drawing_id, project_id, version)[0]
+    return load_physical_head(backend, tenant_id, drawing_id, project_id=project_id, version=version)[0]
 
 
 def load_physical_head(backend, tenant_id, drawing_id, *, project_id, version="head"):
@@ -238,7 +246,11 @@ def _document(view, content):
         document = ps.decode_document(content)
     except ps.PhysicalStateError:
         raise PhysicalHeadError("PHYSICAL_HEAD_CORRUPT") from None
-    return view, document
+    return _document_view(view, document), document
+
+
+def _document_view(view, document):
+    return dict(view, parent=document["parent"])
 
 
 def _atomic_backend(backend):
@@ -248,7 +260,8 @@ def _atomic_backend(backend):
     return getattr(type(backend), "put_if_absent_or_verify", None) is not inherited
 
 
-def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_id=None):
+def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_id=None,
+                           holder=None, fence=None):
     """Store `document` and make it the drawing's physical head, provided its parent is the
     current head's state (None for the first state). Retrying the head's own document returns
     that head with created False; any other stale parent, or a writer that loses the race for
@@ -264,20 +277,48 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
         _project_id(project_id)
     if not _atomic_backend(backend):
         raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNSAFE")
-    data = ps.encode_document(document)
     import solar_physical_legacy
+    versioned = solar_physical_legacy.versioned_mode()
+    if versioned:
+        _project_id(project_id)
+    paired = holder is not None or fence is not None
+    if ((versioned or paired) and (type(holder) is not str or not 1 <= len(holder) <= 200
+            or holder == store.ANONYMOUS_HOLDER or type(fence) is not int or fence < 1)):
+        raise PhysicalHeadError("PHYSICAL_HEAD_CHECKOUT_REQUIRED")
+    try:
+        if versioned and not store.checkout_active(
+                store.load_manifest(backend, tenant_id, drawing_id)["checkout"]):
+            raise PhysicalHeadError("PHYSICAL_HEAD_CHECKOUT_REQUIRED")
+        if versioned or paired:
+            store.authorize_checkout(backend, tenant_id, drawing_id, holder, fence)
+    except store.CheckoutDenied:
+        raise PhysicalHeadError("PHYSICAL_HEAD_CHECKOUT_REQUIRED") from None
+    except KeyError:
+        raise PhysicalHeadError("PHYSICAL_HEAD_ID_INVALID") from None
+    except PhysicalHeadError:
+        raise
+    except ValueError as exc:
+        if str(exc).startswith("an active checkout is required"):
+            raise PhysicalHeadError("PHYSICAL_HEAD_CHECKOUT_REQUIRED") from None
+        raise PhysicalHeadError("PHYSICAL_HEAD_ID_INVALID") from None
+    except (OSError, RuntimeError):
+        raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
+    if versioned:
+        return _publish_version(backend, tenant_id, drawing_id, document,
+                                project_id=project_id, holder=holder, fence=fence)
+    data = ps.encode_document(document)
     content_sha256 = hashlib.sha256(data).hexdigest()
     parent = document["parent"]
     head, _ = _head(backend, tenant_id, drawing_id, project_id)
     frozen_index = solar_physical_legacy.resolved_last_index(backend, tenant_id, drawing_id)
     if head is not None and head["parent"] == parent and head["state"]["content_sha256"] == content_sha256:
         if frozen_index is None or head["index"] <= frozen_index:
-            return {"schema": PUBLISH_SCHEMA, "created": False, "head": head}
+            return {"schema": PUBLISH_SCHEMA, "created": False, "head": _document_view(head, document)}
     # A stranded tip may hide an included retry; compare with the frozen entry too.
     if frozen_index is not None and frozen_index >= 0:
         included, _ = _view_at(_Log(backend, tenant_id, drawing_id), frozen_index, project_id)
         if included["parent"] == parent and included["state"]["content_sha256"] == content_sha256:
-            return {"schema": PUBLISH_SCHEMA, "created": False, "head": included}
+            return {"schema": PUBLISH_SCHEMA, "created": False, "head": _document_view(included, document)}
     if frozen_index is not None:
         raise solar_physical_legacy.PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN")
     if parent != (None if head is None else head["state"]["artifact_id"]):
@@ -299,4 +340,114 @@ def publish_physical_state(backend, tenant_id, drawing_id, document, *, project_
         raise solar_physical_legacy.PhysicalLegacyError("PHYSICAL_LEGACY_FROZEN")
     head = {"schema": HEAD_SCHEMA, "drawing_id": drawing_id, "project_id": stored["project_id"],
             "index": index, "parent": parent, "state": ref}
-    return {"schema": PUBLISH_SCHEMA, "created": True, "head": head}
+    return {"schema": PUBLISH_SCHEMA, "created": True, "head": _document_view(head, document)}
+
+
+def _publish_version(backend, tenant_id, drawing_id, document, *, project_id, holder, fence):
+    import solar_physical_legacy as legacy
+    data = ps.encode_document(document)
+    digest = hashlib.sha256(data).hexdigest()
+    # Validate scope before creating even a freeze intent on an unbound drawing.
+    try:
+        resolve_graph_context(backend, tenant_id, drawing_id, "head", project_id=project_id)
+    except GraphValidationError as exc:
+        code = ("PHYSICAL_HEAD_PROJECT_MISMATCH" if exc.code == "PROJECT_MISMATCH"
+                else "PHYSICAL_HEAD_CORRUPT")
+        raise PhysicalHeadError(code) from None
+    except (OSError, RuntimeError):
+        raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
+    try:
+        legacy.freeze_legacy(backend, tenant_id, drawing_id, project_id=project_id)
+    except legacy.PhysicalLegacyError as exc:
+        code = {"PHYSICAL_LEGACY_WRITES_DRAINED": "PHYSICAL_HEAD_WRITES_DRAINED",
+                "PHYSICAL_LEGACY_STORE_UNAVAILABLE": "PHYSICAL_HEAD_STORE_UNAVAILABLE",
+                "PHYSICAL_LEGACY_STORE_UNSAFE": "PHYSICAL_HEAD_STORE_UNSAFE",
+                "PHYSICAL_LEGACY_ID_INVALID": "PHYSICAL_HEAD_ID_INVALID",
+                "PHYSICAL_LEGACY_PROJECT_MISMATCH": "PHYSICAL_HEAD_PROJECT_MISMATCH"}.get(
+                    exc.code, "PHYSICAL_HEAD_CORRUPT")
+        raise PhysicalHeadError(code) from None
+
+    def current():
+        version, _ = store.read_version_physical(
+            backend, tenant_id, drawing_id, project_id=project_id)
+        view, doc = load_physical_head(backend, tenant_id, drawing_id,
+                                      project_id=project_id, version=version)
+        return version, view, doc
+
+    def retry(view, doc):
+        return (doc is not None and doc["parent"] == document["parent"]
+                and view["state"]["content_sha256"] == digest)
+
+    def result(view, version, parent_version, created):
+        return {"schema": PUBLISH_SCHEMA, "created": created, "head": view,
+                "drawing_version": {"version": version, "parent_version": parent_version,
+                                    "created": created}}
+
+    def reread():
+        version, view, doc = current()
+        if retry(view, doc):
+            return result(view, version, version, False)
+        raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT")
+
+    try:
+        version, view, doc = current()
+        if retry(view, doc):
+            return result(view, version, version, False)
+        if document["parent"] != (None if view is None else view["state"]["artifact_id"]):
+            raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT")
+        stored = ps.store_physical_state(backend, tenant_id, drawing_id, document, project_id=project_id)
+        ref = stored["state"]
+        log = _Log(backend, tenant_id, drawing_id)
+        last = log.last()
+        tip = None if last < 0 else log.entry(last)
+        if tip is not None and tip["state"] == ref["artifact_id"] and tip["content_sha256"] == digest:
+            index = last
+        else:
+            index = last + 1
+            if index >= MAX_LOG_ENTRIES:
+                raise PhysicalHeadError("PHYSICAL_HEAD_LOG_FULL")
+            raw = entry_bytes(index, project_id, None if tip is None else tip["state"],
+                              ref["artifact_id"], digest)
+            try:
+                backend.put_if_absent_or_verify(entry_key(tenant_id, drawing_id, index), raw)
+            except store.ImmutableConflict:
+                raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT") from None
+            except (OSError, RuntimeError, ValueError):
+                raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None
+        manifest = store.load_manifest(backend, tenant_id, drawing_id)
+        latest = manifest["latest"]
+        if sum(row.get("tool") == "solar-physical" for row in manifest["versions"]) >= MAX_PHYSICAL_VERSIONS:
+            raise PhysicalHeadError("PHYSICAL_HEAD_LOG_FULL")
+        apply_id = "phys_" + hashlib.sha256(
+            f"{tenant_id}/{drawing_id}/{version}/{latest}/{digest}".encode()).hexdigest()
+        try:
+            v, fresh = write_loop.commit_physical_version(
+                backend, tenant_id, drawing_id, project_id=project_id, parent_version=version,
+                physical={"head_index": index, "state_artifact_id": ref["artifact_id"],
+                          "state_content_sha256": digest}, holder=holder, fence=fence, apply_id=apply_id)
+        except (store.PhysicalReferenceScopeMismatch, store.PhysicalReferenceInvalid, PhysicalHeadError):
+            raise
+        except ValueError as exc:
+            message = str(exc)
+            if message.startswith(("stale parent ", "stale drawing head:")):
+                return reread()
+            if message.startswith("drawing mutations are disabled"):
+                raise PhysicalHeadError("PHYSICAL_HEAD_WRITES_DRAINED") from None
+            if message.startswith("an active checkout is required"):
+                raise PhysicalHeadError("PHYSICAL_HEAD_CHECKOUT_REQUIRED") from None
+            if message.startswith("apply id was reused"):
+                raise PhysicalHeadError("PHYSICAL_HEAD_CONFLICT") from None
+            raise PhysicalHeadError("PHYSICAL_HEAD_CORRUPT") from None
+        if not fresh:
+            return reread()
+        view = {"schema": HEAD_SCHEMA, "drawing_id": drawing_id, "project_id": project_id,
+                "index": index, "parent": document["parent"], "state": ref}
+        return result(_document_view(view, document), v, version, True)
+    except store.CheckoutDenied:
+        raise PhysicalHeadError("PHYSICAL_HEAD_CHECKOUT_REQUIRED") from None
+    except store.PhysicalReferenceScopeMismatch:
+        raise PhysicalHeadError("PHYSICAL_HEAD_PROJECT_MISMATCH") from None
+    except store.PhysicalReferenceInvalid:
+        raise PhysicalHeadError("PHYSICAL_HEAD_CORRUPT") from None
+    except (OSError, RuntimeError):
+        raise PhysicalHeadError("PHYSICAL_HEAD_STORE_UNAVAILABLE") from None

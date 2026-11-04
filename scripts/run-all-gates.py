@@ -943,6 +943,13 @@ def build_suites() -> List[Suite]:
         # nothing skips: the floor is the exact count, 57.
         Suite("server-solar-physical-head", "server tests/test_solar_physical_head.py",
               "pytest", SERVER, _py_pytest("tests/test_solar_physical_head.py"), 57),
+        # V2: canonical physical versions, checkout fencing, undo branches and orphan reuse
+        # on both drawing authorities. The 86 non-database cases set the floor;
+        # full database mode also runs the 64 PostgreSQL cases.
+        Suite("server-solar-physical-version-commit", "server tests/test_solar_physical_version_commit.py",
+              "pytest", SERVER, _py_pytest("tests/test_solar_physical_version_commit.py"), 86,
+              uses_database=True,
+              database_skip_reasons=(r"PostgreSQL physical commit test requires explicit DATABASE_URL",)),
         # sf-w4-landxml-import: the typed LandXML terrain intake (server/solar_landxml_import.py): bounded
         # upload, units and CRS read from the file and declared by the caller, the plugin's N E Z reader and
         # IDW grid, the source stored and the grid published on the physical head. Hermetic and nothing
@@ -3258,7 +3265,8 @@ def build_suites() -> List[Suite]:
               # SEL-303b adds the mirror/stage-policy registration contract.
               # PP-3A2 F: 25 dispatch rows; measured 266 + 6 = 272.
               # S1a adds one project physical registration test (272 -> 273).
-              ["test_studio_walk_regression_gate.py"], 273),
+              # V2 adds the physical version commit registration contract (273 -> 274).
+              ["test_studio_walk_regression_gate.py"], 274),
         # Dormant process-capture core: pure Python fixtures, no strace or network.
         Suite("ci-process-capture-core", "scripts ci process capture core", "pytest",
               SCRIPTS_DIR, _py_pytest("ci/tests/test_process_capture_core.py"), 14),

@@ -165,14 +165,24 @@ function standingCopy(value) {
   return out
 }
 
+function validDrawingVersion(v) {
+  return exact(v, ['version', 'parent_version', 'created'])
+    && Number.isSafeInteger(v.version) && v.version >= 1
+    && Number.isSafeInteger(v.parent_version) && v.parent_version >= 1
+    && typeof v.created === 'boolean'
+    && (v.created ? v.version > v.parent_version : v.version === v.parent_version)
+}
+
 export function validateTrackerRowsResult(body, context) {
   try {
     if (!exact(context, ['drawingId', 'projectId', 'drawingUnits', 'request', 'status'])) return null
     const { drawingId, projectId, drawingUnits, status } = context
     if (typeof drawingId !== 'string' || !DRAWING.test(drawingId) || (projectId !== null && !project(projectId))) return null
     const sent = validateTrackerRowsRequest(context.request, { drawingUnits })
-    if (!sent.ok || !exact(body, [...RESULT_KEYS, 'error', 'degraded_mode'])) return null
-    body = copy(body, [...RESULT_KEYS, 'error', 'degraded_mode'])
+    const optional = Object.hasOwn(body ?? {}, 'drawing_version') ? ['drawing_version'] : []
+    if (!sent.ok || !exact(body, [...RESULT_KEYS, 'error', 'degraded_mode', ...optional])) return null
+    body = copy(body, [...RESULT_KEYS, 'error', 'degraded_mode', ...optional])
+    if (optional.length && !validDrawingVersion(body.drawing_version)) return null
     if (body.error !== null || body.degraded_mode !== false || body.schema !== TRACKER_ROWS_RESULT_SCHEMA
       || body.operation !== TRACKER_ROWS_OPERATION) return null
     if (status === 201 ? body.created !== true || body.outcome !== 'published'
@@ -183,7 +193,7 @@ export function validateTrackerRowsResult(body, context) {
     const h = copy(body.head, HEAD_KEYS)
     if (h.schema !== 'leaf.solar-physical-head.v1' || h.drawing_id !== drawingId
       || h.project_id !== body.project_id || !integer(h.index, 0, 4095) || h.parent !== sent.body.expected_head
-      || (h.index === 0 ? h.parent !== null : !hex(h.parent))) return null
+      || (h.index === 0 ? h.parent !== null : h.parent !== null && !hex(h.parent))) return null
     if (!exact(h.state, REF_KEYS)) return null
     const ref = copy(h.state, REF_KEYS)
     if (ref.schema !== 'leaf.solar-artifact-ref.v1' || !hex(ref.artifact_id)
@@ -205,6 +215,7 @@ export function validateTrackerRowsResult(body, context) {
     const standing = standingCopy(body.terrain_standing)
     if (standing === null) return null
     return { ...copy(body, RESULT_KEYS), head: { ...copy(h, HEAD_KEYS), state: copy(ref, REF_KEYS) },
+      ...(optional.length ? { drawing_version: { ...body.drawing_version } } : {}),
       frame: copy(frame, FRAME_KEYS), summary: copy(summary, ['rows', 'slots', 'module_power_watts']), terrain_standing: standing }
   } catch {
     return null

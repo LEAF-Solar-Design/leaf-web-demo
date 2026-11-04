@@ -339,9 +339,12 @@ def _range(state, mpu, inputs):
 _RUN = {GENERATE: _generate, COLLISION: _collision, PILING: _piling, RANGE: _range}
 
 
-def _operate(backend, tenant_id, drawing_id, operation, base, project_id, request, inputs, drawing_units=None, *, source=None):
+def _operate(backend, tenant_id, drawing_id, operation, base, project_id, request, inputs, drawing_units=None, *, source=None, holder=None, fence=None):
     """The shared transaction: context, head, retry, stale base, units, run, publish."""
-    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
+    source = source if source is not None else LegacySource(
+        backend, tenant_id, drawing_id, project_id, holder=holder, fence=fence)
     context = _context(backend, tenant_id, drawing_id, project_id, source=source)
     project = context["project_id"]
     head, head_document = source.parent()
@@ -388,8 +391,11 @@ def _operate(backend, tenant_id, drawing_id, operation, base, project_id, reques
     document = ps.physical_document(state, drawing_units=units, source_sha256=request_sha256,
                                     capability=operation, parent=base, frame=frame)
     published = source.publish(document)
-    return _result(operation, "published" if published["created"] else "retry", published["created"],
+    result = _result(operation, "published" if published["created"] else "retry", published["created"],
                    drawing_id, project, base, document, published["head"], terrain_view, summary, standing)
+    if published.get("drawing_version") is not None:
+        result["drawing_version"] = published["drawing_version"]
+    return result
 
 
 def _terrain_view(state):
@@ -488,8 +494,10 @@ def _common(project_id, base):
     return _base(base)
 
 
-def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, drawing_units, project_id=None, source=None):
+def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, drawing_units, project_id=None, source=None, holder=None, fence=None):
     """frame-generate: pack frames into `boundary` (drawing units) with the plugin preset object."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     base = _common(project_id, base)
     if type(drawing_units) is not str or drawing_units not in ps.UNITS:
         raise FramesPilesError("FRAMES_PILES_DRAWING_UNITS_INVALID")
@@ -498,32 +506,38 @@ def generate_frames(backend, tenant_id, drawing_id, *, base, boundary, preset, d
     request = {"operation": GENERATE, "base": base, "drawing_units": drawing_units, "boundary": boundary,
                "preset": preset}
     return _operate(backend, tenant_id, drawing_id, GENERATE, base, project_id, request,
-                    {"boundary": boundary, "preset": loaded}, drawing_units, source=source)
+                    {"boundary": boundary, "preset": loaded}, drawing_units, source=source, holder=holder, fence=fence)
 
 
-def detect_collisions(backend, tenant_id, drawing_id, *, base, project_id=None, source=None):
+def detect_collisions(backend, tenant_id, drawing_id, *, base, project_id=None, source=None, holder=None, fence=None):
     """frame-collision-detect: overlap markers for the head's native frames."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     base = _common(project_id, base)
     request = {"operation": COLLISION, "base": base}
-    return _operate(backend, tenant_id, drawing_id, COLLISION, base, project_id, request, {}, source=source)
+    return _operate(backend, tenant_id, drawing_id, COLLISION, base, project_id, request, {}, source=source, holder=holder, fence=fence)
 
 
-def generate_piles(backend, tenant_id, drawing_id, *, base, preset, pile_template, project_id=None, source=None):
+def generate_piles(backend, tenant_id, drawing_id, *, base, preset, pile_template, project_id=None, source=None, holder=None, fence=None):
     """piling-generate: piles for the head's native frames, on the head's terrain."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     base = _common(project_id, base)
     loaded, preset_store = load_preset(preset)
     pile_store = load_pile_store(pile_template, loaded, preset_store)
     request = {"operation": PILING, "base": base, "preset": preset, "pile_template": pile_template}
     return _operate(backend, tenant_id, drawing_id, PILING, base, project_id, request,
-                    {"preset": loaded, "pile_store": pile_store}, source=source)
+                    {"preset": loaded, "pile_store": pile_store}, source=source, holder=holder, fence=fence)
 
 
-def check_pile_lengths(backend, tenant_id, drawing_id, *, base, preset, project_id=None, source=None):
+def check_pile_lengths(backend, tenant_id, drawing_id, *, base, preset, project_id=None, source=None, holder=None, fence=None):
     """pile-length-range-check: markers for piles outside the preset's length window."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     base = _common(project_id, base)
     loaded, _ = load_preset(preset)
     request = {"operation": RANGE, "base": base, "preset": preset}
-    return _operate(backend, tenant_id, drawing_id, RANGE, base, project_id, request, {"preset": loaded}, source=source)
+    return _operate(backend, tenant_id, drawing_id, RANGE, base, project_id, request, {"preset": loaded}, source=source, holder=holder, fence=fence)
 
 
 # ------------------------------------------------------------------- preview --

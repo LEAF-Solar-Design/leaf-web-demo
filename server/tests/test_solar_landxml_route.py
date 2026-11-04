@@ -35,7 +35,7 @@ PASSTHROUGH = {
     "PHYSICAL_HEAD_CONFLICT", "PHYSICAL_HEAD_LOG_FULL", "PHYSICAL_HEAD_PROJECT_MISMATCH",
     "PHYSICAL_STATE_PROJECT_MISMATCH", "PHYSICAL_HEAD_WRITES_DRAINED", "PHYSICAL_STATE_WRITES_DRAINED",
     "PHYSICAL_HEAD_STORE_UNAVAILABLE", "PHYSICAL_STATE_STORE_UNAVAILABLE", "PHYSICAL_HEAD_CORRUPT",
-    "PHYSICAL_HEAD_STORE_UNSAFE", "PHYSICAL_STATE_CORRUPT",
+    "PHYSICAL_HEAD_STORE_UNSAFE", "PHYSICAL_STATE_CORRUPT", "PHYSICAL_HEAD_CHECKOUT_REQUIRED",
 }
 RETRYABLE = {"LANDXML_WRITES_DRAINED", "LANDXML_STORE_UNAVAILABLE", "PHYSICAL_HEAD_CONFLICT",
              "LANDXML_CHECKOUT_UNAVAILABLE",
@@ -120,7 +120,8 @@ def test_landxml_route_refusal_map_is_closed():
     from routers import drawings
     refusals = drawings.LANDXML_IMPORT_REFUSALS
     assert set(refusals) == set(lx.CODES) | ROUTE_CODES | PASSTHROUGH
-    assert len(refusals) == 44
+    # V2 adds the checkout refusal for switch-on bound publication.
+    assert len(refusals) == 45
     assert PASSTHROUGH <= ps.CODES | ph.CODES
     assert drawings.LANDXML_MEDIA_TYPES == frozenset({"application/xml", "text/xml"})
     for code, (status, envelope_code, retryable) in refusals.items():
@@ -168,6 +169,7 @@ def test_landxml_route_refusal_statuses_pinned():
         "LANDXML_STORE_UNAVAILABLE": 503,
         "LANDXML_SOURCE_CORRUPT": 500,
         "PHYSICAL_HEAD_CONFLICT": 409,
+        "PHYSICAL_HEAD_CHECKOUT_REQUIRED": 403,
         "PHYSICAL_HEAD_LOG_FULL": 409,
         "PHYSICAL_HEAD_PROJECT_MISMATCH": 409,
         "PHYSICAL_STATE_PROJECT_MISMATCH": 409,

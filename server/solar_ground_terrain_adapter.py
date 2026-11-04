@@ -290,7 +290,7 @@ def _publish(backend, tenant_id, drawing_id, context, head, document, state, cap
     """Publish `state` as a child of the head (created False and nothing written when it
     equals the head's state)."""
     if state == document["state"]:
-        return False, head
+        return False, head, {}
     child = ps.physical_document(state, drawing_units=document["units"]["drawing_units"],
                                  source_sha256=document["source"]["sha256"], capability=capability,
                                  parent=head["state"]["artifact_id"], frame=document["frame"])
@@ -298,7 +298,9 @@ def _publish(backend, tenant_id, drawing_id, context, head, document, state, cap
         source = LegacySource(backend, tenant_id, drawing_id, context["project_id"])
         source.context = context
     published = source.publish(child)
-    return published["created"], published["head"]
+    extra = ({"drawing_version": published["drawing_version"]}
+             if published.get("drawing_version") is not None else {})
+    return published["created"], published["head"], extra
 
 
 def _result(operation, created, drawing_id, project_id, frame, grid, record, replaced, head, **extra):
@@ -308,12 +310,15 @@ def _result(operation, created, drawing_id, project_id, frame, grid, record, rep
             "replaced": replaced, **extra, "head": head}
 
 
-def render_mesh(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None, source=None):
+def render_mesh(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None, source=None, holder=None, fence=None):
     """LEAFTERRAINMESH over the current head: render the mesh from the head's grid in the
     head's units and publish a child whose mesh_faces is the face count drawn, with the
     mesh's preview record. `replaced` is the head's mesh_faces (the faces the plugin erases)."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     _preflight(project_id, expected_head)
-    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    source = source if source is not None else LegacySource(
+        backend, tenant_id, drawing_id, project_id, holder=holder, fence=fence)
     context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head, source=source)
     frame = document_frame(document)
     grid = document_grid(document)
@@ -324,22 +329,25 @@ def render_mesh(backend, tenant_id, drawing_id, *, project_id=None, expected_hea
     state = dict(document["state"])
     state["mesh_faces"] = len(mesh)
     state["status_records"] = _with_record(state, MESH_CAPABILITY, record)
-    created, head_view = _publish(backend, tenant_id, drawing_id, context, head, document, state,
+    created, head_view, extra = _publish(backend, tenant_id, drawing_id, context, head, document, state,
                                   MESH_CAPABILITY, source=source)
     return _result("mesh", created, drawing_id, context["project_id"], frame, grid_summary(grid, mpu),
-                   record, replaced, head_view)
+                   record, replaced, head_view, **extra)
 
 
 def check_tracker_slope(backend, tenant_id, drawing_id, *, limits=None, project_id=None,
-                        expected_head=None, source=None):
+                        expected_head=None, source=None, holder=None, fence=None):
     """LEAFTRACKERSLOPEVIOLATIONS over the current head: read the state's tracker frames,
     validate them on the head's grid against the limits, and publish a child whose
     slope_markers are the violation overlays (each {"role": "slope", "bbox": [x_min, y_min,
     x_max, y_max]} of the row axis drawn), with the check's preview record. `replaced` is the
     head's marker count (the overlays the plugin erases first)."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     _preflight(project_id, expected_head)
     resolved = resolve_limits(limits)
-    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    source = source if source is not None else LegacySource(
+        backend, tenant_id, drawing_id, project_id, holder=holder, fence=fence)
     context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head, source=source)
     frame = document_frame(document)
     grid = document_grid(document)
@@ -370,32 +378,35 @@ def check_tracker_slope(backend, tenant_id, drawing_id, *, limits=None, project_
     state = dict(document["state"])
     state["slope_markers"] = markers
     state["status_records"] = _with_record(state, SLOPE_CAPABILITY, record)
-    created, head_view = _publish(backend, tenant_id, drawing_id, context, head, document, state,
+    created, head_view, extra = _publish(backend, tenant_id, drawing_id, context, head, document, state,
                                   SLOPE_CAPABILITY, source=source)
     return _result("slope", created, drawing_id, context["project_id"], frame, grid_summary(grid, mpu),
-                   record, replaced, head_view, report=summary)
+                   record, replaced, head_view, report=summary, **extra)
 
 
-def clear_tracker_slope(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None, source=None):
+def clear_tracker_slope(backend, tenant_id, drawing_id, *, project_id=None, expected_head=None, source=None, holder=None, fence=None):
     """LEAFCLEARTRACKERSLOPEVIOLATIONS over the current head: publish a child with no slope
     markers and no slope record. Needs no grid. Nothing is published when the head has no
     markers and no slope record."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     _preflight(project_id, expected_head)
-    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    source = source if source is not None else LegacySource(
+        backend, tenant_id, drawing_id, project_id, holder=holder, fence=fence)
     context, head, document = _current(backend, tenant_id, drawing_id, project_id, expected_head, source=source)
     frame = document_frame(document)
     current = document["state"]
     replaced = len(current.get("slope_markers", []))
     if replaced == 0 and SLOPE_CAPABILITY not in (current.get("status_records") or {}):
-        created, head_view = False, head
+        created, head_view, extra = False, head, {}
     else:
         state = dict(current)
         state["slope_markers"] = []
         state["status_records"] = _with_record(state, SLOPE_CAPABILITY, None)
-        created, head_view = _publish(backend, tenant_id, drawing_id, context, head, document, state,
+        created, head_view, extra = _publish(backend, tenant_id, drawing_id, context, head, document, state,
                                       SLOPE_CAPABILITY, source=source)
     return _result("slope-clear", created, drawing_id, context["project_id"], frame, None, None,
-                   replaced, head_view)
+                   replaced, head_view, **extra)
 
 
 def _preview_state(record, grid_sha256, mpu, count):

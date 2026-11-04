@@ -561,6 +561,7 @@
     "server-solar-local-read",
     "server-solar-nec",
     "server-solar-physical-head",
+    "server-solar-physical-version-commit",
     "server-solar-physical-state",
     "server-solar-pile-block-mapping",
     "server-solar-probe-calcs",

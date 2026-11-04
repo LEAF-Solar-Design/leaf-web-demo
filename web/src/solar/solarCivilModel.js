@@ -183,7 +183,7 @@ function refCopy(v, drawingId) {
 function headCopy(v, drawingId, projectId) {
   if (!exact(v, HEAD_KEYS) || v.schema !== 'leaf.solar-physical-head.v1' || v.drawing_id !== drawingId || !project(v.project_id)
     || (projectId !== null && v.project_id !== projectId) || !Number.isInteger(v.index) || v.index < 0 || v.index > 4095
-    || (v.index === 0 ? v.parent !== null : !hash(v.parent)) || refCopy(v.state, drawingId) === null) return null
+    || (v.index === 0 ? v.parent !== null : v.parent !== null && !hash(v.parent)) || refCopy(v.state, drawingId) === null) return null
   return copy(v)
 }
 const envelope = (v) => (!Object.hasOwn(v, 'error') || v.error === null)
@@ -240,6 +240,14 @@ function summaryValid(v, op) {
   return true
 }
 
+function validDrawingVersion(v) {
+  return exact(v, ['version', 'parent_version', 'created'])
+    && Number.isSafeInteger(v.version) && v.version >= 1
+    && Number.isSafeInteger(v.parent_version) && v.parent_version >= 1
+    && typeof v.created === 'boolean'
+    && (v.created ? v.version > v.parent_version : v.version === v.parent_version)
+}
+
 export function validateCivilOperation(body, request) {
   try {
     if (!plain(request)) return null
@@ -248,11 +256,12 @@ export function validateCivilOperation(body, request) {
     const { operation, expected_head: base } = sent
     if (!scopeValid(drawingId, projectId) || !CIVIL_OPERATIONS.includes(operation) || (base !== null && !hash(base))) return null
     const keys = ['schema', 'operation', 'maturity', 'outcome', 'created', 'drawing_id', 'project_id', 'base', 'units', 'terrain', 'summary', 'preview', 'standing', 'head']
-    if (!exact(body, keys, ['error', 'degraded_mode']) || !envelope(body)
+    if (!exact(body, keys, ['error', 'degraded_mode', 'drawing_version']) || !envelope(body)
       || body.schema !== (operation === 'grade-pad' ? 'leaf.solar-civil-operation.v1' : 'leaf.solar-frames-piles.v1')
       || body.operation !== operation || body.maturity !== 'preview' || !['published', 'retry', 'unchanged'].includes(body.outcome)
       || body.created !== (body.outcome === 'published') || body.drawing_id !== drawingId || !project(body.project_id)
       || (projectId !== null && body.project_id !== projectId) || body.base !== base) return null
+    if (Object.hasOwn(body, 'drawing_version') && !validDrawingVersion(body.drawing_version)) return null
     const head = headCopy(body.head, drawingId, body.project_id)
     if (head === null || (body.outcome === 'unchanged' ? head.state.artifact_id !== base : head.parent !== base)) return null
     if (!exact(body.units, ['drawing_units', 'meters_per_unit'])

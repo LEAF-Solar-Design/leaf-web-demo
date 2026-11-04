@@ -259,12 +259,15 @@ def _context(backend, tenant_id, drawing_id, project_id, *, source=None):
 
 
 def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_units, crs,
-                           target_cells=DEFAULT_TARGET_CELLS, project_id=None, source=None):
+                           target_cells=DEFAULT_TARGET_CELLS, project_id=None, source=None,
+                           holder=None, fence=None):
     """Store the LandXML source and publish its terrain grid as the drawing's physical head.
 
     drawing_units is "m" or "ft"; crs is "none" or "EPSG:n"; target_cells is 2 to 200.
     Returns the RESULT_SCHEMA dict; created is False when the current head is already this
     file's terrain with the same units, CRS and grid (nothing is published)."""
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     if write_loop.drawing_mutations_refusal() is not None:
         raise LandXmlImportError("LANDXML_WRITES_DRAINED")
     if project_id is not None:
@@ -276,7 +279,8 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
     if (type(target_cells) is not int
             or not MIN_TARGET_CELLS <= target_cells <= MAX_TARGET_CELLS):
         raise LandXmlImportError("LANDXML_TARGET_CELLS_INVALID")
-    physical_source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    physical_source = source if source is not None else LegacySource(
+        backend, tenant_id, drawing_id, project_id, holder=holder, fence=fence)
     source = inspect_landxml(data)
     if source["file_crs"] is not None and source["file_crs"] != crs:
         raise LandXmlImportError("LANDXML_CRS_MISMATCH")
@@ -313,6 +317,7 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
     except GraphValidationError as exc:
         raise LandXmlImportError(_artifact_refusal(exc.code)) from None
 
+    published = None
     if (head is not None and head_document["capability"] == CAPABILITY
             and head_document["source"]["sha256"] == source["sha256"]
             and head_document["state"].get("grid") == grid):
@@ -337,6 +342,8 @@ def import_landxml_terrain(backend, tenant_id, drawing_id, data, *, drawing_unit
         "grid": {"rows": grid["rows"], "cols": grid["cols"], "target_cells": target_cells,
                  **{key: grid[key] for key in terrain.GRID_BOUNDS}},
         "head": head_view,
+        **({"drawing_version": published["drawing_version"]}
+           if published is not None and published.get("drawing_version") is not None else {}),
     }
 
 

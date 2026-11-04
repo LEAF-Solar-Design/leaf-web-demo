@@ -82,7 +82,7 @@ def _publish(tenant, drawing_id, project_id, body, capability, request_bytes):
     except (RuntimeError, OSError):
         raise domain.TrackerRowsError("TRACKER_ROWS_STORE_UNAVAILABLE") from None
     try:
-        _lock_authorization(drawing_id, tenant, backend, capability)
+        holder, fence = _lock_authorization(drawing_id, tenant, backend, capability) or (None, None)
     except checkout_capability.CapabilityRejected:
         raise domain.TrackerRowsError("TRACKER_ROWS_CHECKOUT_REQUIRED") from None
     except checkout_capability.CapabilityUnavailable:
@@ -94,7 +94,7 @@ def _publish(tenant, drawing_id, project_id, body, capability, request_bytes):
     return domain.publish_manual_create(
         backend, str(tenant), drawing_id, rows=body["rows"],
         module_power_watts=body["module_power_watts"], expected_head=body["expected_head"],
-        project_id=project_id, request_bytes=request_bytes)
+        project_id=project_id, request_bytes=request_bytes, holder=holder, fence=fence)
 
 
 def _reject_constant(value):

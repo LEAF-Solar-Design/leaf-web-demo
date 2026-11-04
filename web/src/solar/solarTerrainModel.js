@@ -298,7 +298,7 @@ function headCopy(value, drawingId, projectId) {
   if (value.schema !== HEAD_SCHEMA || value.drawing_id !== drawingId || !isProjectId(value.project_id)) return null
   if (projectId !== null && value.project_id !== projectId) return null
   if (!isIntegerIn(value.index, 0, MAX_HEAD_INDEX)) return null
-  if (value.index === 0 ? value.parent !== null : !isHex64(value.parent)) return null
+  if (value.index === 0 ? value.parent !== null : value.parent !== null && !isHex64(value.parent)) return null
   const state = refCopy(value.state, drawingId)
   if (state === null) return null
   return { ...copyOf(value, HEAD_KEYS), state }
@@ -523,6 +523,14 @@ function reportCopy(value) {
 // is what a slope request sent, and the record must carry exactly that. A result that
 // published nothing (created false) is a success; its head is the head the request named or
 // the identical child another writer published first.
+function validDrawingVersion(v) {
+  return isPlainObject(v) && hasExactKeys(v, ['version', 'parent_version', 'created'])
+    && Number.isSafeInteger(v.version) && v.version >= 1
+    && Number.isSafeInteger(v.parent_version) && v.parent_version >= 1
+    && typeof v.created === 'boolean'
+    && (v.created ? v.version > v.parent_version : v.version === v.parent_version)
+}
+
 export function validateTerrainOperation(body, request) {
   try {
     if (!isPlainObject(request)) return null
@@ -537,7 +545,8 @@ export function validateTerrainOperation(body, request) {
     }
     // Only a slope result carries a report, and it always does.
     const required = operation === 'slope' ? [...RESULT_KEYS, 'report'] : RESULT_KEYS
-    if (!isPlainObject(body) || !hasExactKeys(body, required, ENVELOPE_KEYS) || !validEnvelope(body)) return null
+    if (!isPlainObject(body) || !hasExactKeys(body, required, [...ENVELOPE_KEYS, 'drawing_version']) || !validEnvelope(body)) return null
+    if (Object.hasOwn(body, 'drawing_version') && !validDrawingVersion(body.drawing_version)) return null
     if (body.schema !== OPERATION_SCHEMA || body.maturity !== MATURITY || body.operation !== operation) return null
     if (body.capability !== TERRAIN_OPERATION_CAPABILITIES[operation] || typeof body.created !== 'boolean') return null
     if (body.drawing_id !== drawingId || !isProjectId(body.project_id)) return null
@@ -560,6 +569,7 @@ export function validateTerrainOperation(body, request) {
       grid: null,
       record: null,
       replaced: body.replaced,
+      ...(Object.hasOwn(body, 'drawing_version') ? { drawing_version: { ...body.drawing_version } } : {}),
     }
     if (operation === 'slope-clear') {
       if (body.grid !== null || body.record !== null || !isIntegerIn(body.replaced, 0, MAX_MARKERS)) return null

@@ -70,10 +70,13 @@ def _grade_result(outcome, created, drawing_id, project, base, document, head, s
 
 
 def grade_pad(backend, tenant_id, drawing_id, *, base, boundary, mode="Auto", value_du=None,
-              project_id=None, source=None):
+              project_id=None, source=None, holder=None, fence=None):
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     base = fp._common(project_id, base)
     boundary = _grade_inputs(boundary, mode, value_du)
-    source = source if source is not None else LegacySource(backend, tenant_id, drawing_id, project_id)
+    source = source if source is not None else LegacySource(
+        backend, tenant_id, drawing_id, project_id, holder=holder, fence=fence)
     project = fp._context(backend, tenant_id, drawing_id, project_id, source=source)["project_id"]
     head, document = source.parent()
     digest = fp.canonical_sha256({"operation": GRADE, "base": base,
@@ -121,17 +124,23 @@ def grade_pad(backend, tenant_id, drawing_id, *, base, boundary, mode="Auto", va
                                  frame=document["frame"])
     published = source.publish(child)
     created = published["created"]
-    return _grade_result("published" if created else "retry", created, drawing_id, project,
+    result = _grade_result("published" if created else "retry", created, drawing_id, project,
                          base, child, published["head"], summary if created else None)
+    if published.get("drawing_version") is not None:
+        result["drawing_version"] = published["drawing_version"]
+    return result
 
 
-def operate(backend, tenant_id, drawing_id, body, *, project_id=None, source=None):
+def operate(backend, tenant_id, drawing_id, body, *, project_id=None, source=None, holder=None, fence=None):
+    if source is not None and (holder is not None or fence is not None):
+        raise ValueError("source excludes holder and fence")
     b = validate_body(body)
     operation = b["operation"]
     kwargs = {key: value for key, value in b.items() if key not in ("operation", "expected_head")}
     call = {fp.GENERATE: fp.generate_frames, fp.COLLISION: fp.detect_collisions,
             fp.PILING: fp.generate_piles, fp.RANGE: fp.check_pile_lengths, GRADE: grade_pad}[operation]
-    return call(backend, tenant_id, drawing_id, base=b["expected_head"], project_id=project_id, source=source, **kwargs)
+    return call(backend, tenant_id, drawing_id, base=b["expected_head"], project_id=project_id,
+                source=source, holder=holder, fence=fence, **kwargs)
 
 
 def load_civil(backend, tenant_id, drawing_id, *, project_id=None):

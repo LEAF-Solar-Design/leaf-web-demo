@@ -432,6 +432,7 @@ async def import_combiner_intake(drawing_id: str, request: Request, project_id: 
 LANDXML_MEDIA_TYPES = frozenset({"application/xml", "text/xml"})
 LANDXML_IMPORT_REFUSALS = {
     "LANDXML_CHECKOUT_DENIED": (403, ErrorCode.BAD_PARAMS, False),
+    "PHYSICAL_HEAD_CHECKOUT_REQUIRED": (403, ErrorCode.BAD_PARAMS, False),
     "LANDXML_CHECKOUT_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
     "LANDXML_DRAWING_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
     "LANDXML_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
@@ -490,12 +491,13 @@ def _landxml_refused(reason):
 
 
 def _import_landxml(tenant_id, drawing_id, data, drawing_units, crs, cells, project_id, capability):
+    holder, fence = None, None
     try:
         backend = _backend(str(tenant_id))
     except (RuntimeError, OSError):
         raise solar_landxml_import.LandXmlImportError("LANDXML_STORE_UNAVAILABLE") from None
     try:
-        _lock_authorization(drawing_id, tenant_id, backend, capability)
+        holder, fence = _lock_authorization(drawing_id, tenant_id, backend, capability) or (None, None)
     except checkout_capability.CapabilityRejected:
         raise solar_landxml_import.LandXmlImportError("LANDXML_CHECKOUT_DENIED") from None
     except checkout_capability.CapabilityUnavailable:
@@ -506,7 +508,7 @@ def _import_landxml(tenant_id, drawing_id, data, drawing_units, crs, cells, proj
         raise solar_landxml_import.LandXmlImportError("LANDXML_STORE_UNAVAILABLE") from None
     return solar_landxml_import.import_landxml_terrain(
         backend, str(tenant_id), drawing_id, data, drawing_units=drawing_units, crs=crs,
-        target_cells=cells, project_id=project_id)
+        target_cells=cells, project_id=project_id, holder=holder, fence=fence)
 
 
 @router.post("/api/drawings/{drawing_id}/imports/landxml")

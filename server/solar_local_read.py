@@ -119,7 +119,7 @@ def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output, 
     """The physical head a finished read recorded under output["head"], re-read for its
     terminal proof. The head log is append-only and a later import or operation moves the
     current head, so the proof re-reads the entry the output names: the log entry at the
-    recorded index must be byte-equal to the entry the recorded head implies, the state it
+    recorded index must name the recorded state and digest in this project, the state it
     names is loaded by id, and the head view is rebuilt from the stored state's own metadata,
     never copied from the output. The entry must also be chained the way the head reader
     requires: entry 0 names no parent, and any later entry's parent is the state of its
@@ -127,7 +127,8 @@ def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output, 
     head reader calls corrupt at that index therefore never proves. A recorded None is provable only
     while the head reader finds no head: its search reads the log's contiguous prefix from entry 0,
     so a log whose first entries were removed reads as empty to this proof exactly as it does to
-    every reader (an inherited solar_physical_head limitation). At most two entry reads and one
+    every reader (an inherited solar_physical_head limitation). The recorded view parent must
+    match the document parent; the entry parent independently links the log. At most two entry reads and one
     artifact read (or one head search for None); never writes.
     A malformed or mismatched record raises a ValueError, LookupError, TypeError or
     AttributeError, each of which graph_read_provenance turns into its one rejection."""
@@ -148,17 +149,20 @@ def _recorded_physical_head(backend, tenant_id, drawing_id, project_id, output, 
     index, parent = recorded["index"], recorded["parent"]
     artifact_id = recorded["state"]["artifact_id"]
     log = solar_physical_head._Log(backend, tenant_id, drawing_id)
-    if log.get(index) != solar_physical_head.entry_bytes(index, project_id, parent, artifact_id,
-                                                         recorded["state"]["content_sha256"]):
+    entry = log.entry(index)
+    if (entry["project_id"] != project_id or entry["state"] != artifact_id
+            or entry["content_sha256"] != recorded["state"]["content_sha256"]):
         raise ValueError()
-    # Byte equality pins the recorded entry; its chain is the head reader's rule.
+    # The immutable entry parent links the log, independently of the document parent.
     if index == 0:
-        if parent is not None:
+        if entry["parent"] is not None:
             raise ValueError()
-    elif log.entry(index - 1)["state"] != parent:
+    elif log.entry(index - 1)["state"] != entry["parent"]:
         raise ValueError()
     meta, document = solar_physical_state.load_physical_state(
         backend, tenant_id, drawing_id, artifact_id, project_id=project_id)
+    if parent != document["parent"]:
+        raise ValueError()
     state = {key: meta[key] for key in ("artifact_id", "media_type", "filename", "byte_length",
                                         "content_sha256", "source_version")}
     state.update(schema=solar_artifacts.REF_SCHEMA,

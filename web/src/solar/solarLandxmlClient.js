@@ -29,6 +29,7 @@ export const LANDXML_IMPORT_FALLBACK = 'The LandXML import stopped'
 
 export const LANDXML_IMPORT_REASONS = Object.freeze({
   LANDXML_CHECKOUT_DENIED: 'The drawing checkout is held elsewhere or has ended, so take the checkout and import again',
+  PHYSICAL_HEAD_CHECKOUT_REQUIRED: 'The drawing checkout is held elsewhere or has ended, so take the checkout and import again',
   LANDXML_CHECKOUT_UNAVAILABLE: 'The drawing checkout could not be confirmed, so import the LandXML file again',
   LANDXML_DRAWING_ID_INVALID: 'This drawing cannot take a LandXML file because its id is not valid',
   LANDXML_PROJECT_ID_INVALID: 'The project named for this import is not valid',
@@ -213,8 +214,16 @@ function validHead(value, drawingId, projectId) {
   if (value.drawing_id !== drawingId || value.project_id !== projectId) return false
   if (!isIntegerIn(value.index, 0, MAX_HEAD_INDEX)) return false
   if (value.index === 0 ? value.parent !== null
-    : (typeof value.parent !== 'string' || !HEX64_PATTERN.test(value.parent))) return false
+    : (value.parent !== null && (typeof value.parent !== 'string' || !HEX64_PATTERN.test(value.parent)))) return false
   return validRef(value.state, drawingId, 'application/json', 'physical-state.json')
+}
+
+function validDrawingVersion(v) {
+  return isPlainObject(v) && hasExactKeys(v, ['version', 'parent_version', 'created'])
+    && Number.isSafeInteger(v.version) && v.version >= 1
+    && Number.isSafeInteger(v.parent_version) && v.parent_version >= 1
+    && typeof v.created === 'boolean'
+    && (v.created ? v.version > v.parent_version : v.version === v.parent_version)
 }
 
 // The normalized import result (9 keys, envelope fields dropped) or null. `request` is the
@@ -226,7 +235,8 @@ export function validateLandxmlImport(body, request) {
   if (!isIntegerIn(targetCells, LANDXML_MIN_TARGET_CELLS, LANDXML_MAX_TARGET_CELLS)) return null
   if (projectId !== null && !isProjectId(projectId)) return null
   if (!isIntegerIn(byteLength, 1, LANDXML_MAX_BYTES)) return null
-  if (!isPlainObject(body) || !hasExactKeys(body, RESULT_KEYS, ENVELOPE_KEYS)) return null
+  if (!isPlainObject(body) || !hasExactKeys(body, RESULT_KEYS, [...ENVELOPE_KEYS, 'drawing_version'])) return null
+  if (Object.hasOwn(body, 'drawing_version') && !validDrawingVersion(body.drawing_version)) return null
   if (Object.hasOwn(body, 'error') && body.error !== null) return null
   if (Object.hasOwn(body, 'degraded_mode') && typeof body.degraded_mode !== 'boolean') return null
   if (body.schema !== 'leaf.solar-landxml-import.v1' || typeof body.created !== 'boolean') return null
@@ -248,6 +258,7 @@ export function validateLandxmlImport(body, request) {
     points: copyOf(body.points, POINT_KEYS),
     grid: copyOf(body.grid, GRID_KEYS),
     head: { ...copyOf(body.head, HEAD_KEYS), state: copyOf(body.head.state, REF_KEYS) },
+    ...(Object.hasOwn(body, 'drawing_version') ? { drawing_version: { ...body.drawing_version } } : {}),
   }
 }
 

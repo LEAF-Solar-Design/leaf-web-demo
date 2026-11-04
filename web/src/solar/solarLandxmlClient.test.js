@@ -53,7 +53,7 @@ const STATUS = Object.freeze({
 const FIRST = JSON.parse(FIRST_TEXT)
 const PROJECT = 'leaf:project:00000000-0000-4000-8000-000000000001'
 const CAPTURE_BYTES = 45_305
-// The 44 keys of LANDXML_IMPORT_REFUSALS in server/routers/drawings.py, sorted.
+// V2 adds the required checkout refusal to the route's closed table (44 -> 45).
 const SERVER_CODES = [
   'LANDXML_CHECKOUT_DENIED', 'LANDXML_CHECKOUT_UNAVAILABLE',
   'LANDXML_COORDINATE_OUT_OF_RANGE', 'LANDXML_CRS_INVALID', 'LANDXML_CRS_MISMATCH', 'LANDXML_CRS_UNSUPPORTED',
@@ -64,7 +64,7 @@ const SERVER_CODES = [
   'LANDXML_SOURCE_NOT_FOUND', 'LANDXML_STORE_UNAVAILABLE', 'LANDXML_TARGET_CELLS_INVALID', 'LANDXML_TOO_FEW_POINTS',
   'LANDXML_TOO_LARGE', 'LANDXML_TOO_MANY_POINTS', 'LANDXML_UNITS_MISMATCH', 'LANDXML_UNITS_MISSING',
   'LANDXML_UNITS_UNSUPPORTED', 'LANDXML_UNSAFE', 'LANDXML_WRITES_DRAINED',
-  'PHYSICAL_HEAD_CONFLICT', 'PHYSICAL_HEAD_CORRUPT', 'PHYSICAL_HEAD_LOG_FULL', 'PHYSICAL_HEAD_PROJECT_MISMATCH',
+  'PHYSICAL_HEAD_CHECKOUT_REQUIRED', 'PHYSICAL_HEAD_CONFLICT', 'PHYSICAL_HEAD_CORRUPT', 'PHYSICAL_HEAD_LOG_FULL', 'PHYSICAL_HEAD_PROJECT_MISMATCH',
   'PHYSICAL_HEAD_STORE_UNAVAILABLE', 'PHYSICAL_HEAD_STORE_UNSAFE', 'PHYSICAL_HEAD_WRITES_DRAINED',
   'PHYSICAL_STATE_CORRUPT', 'PHYSICAL_STATE_PROJECT_MISMATCH', 'PHYSICAL_STATE_STORE_UNAVAILABLE',
   'PHYSICAL_STATE_WRITES_DRAINED',
@@ -180,9 +180,9 @@ describe('solar LandXML client', () => {
     expect(Object.isFrozen(LANDXML_DRAWING_UNITS)).toBe(true)
     expect(Object.isFrozen(LANDXML_IMPORT_REASONS)).toBe(true)
     for (const list of [SERVER_CODES, CLIENT_AND_SESSION_CODES]) expect(list).toEqual([...list].sort())
-    expect(SERVER_CODES).toHaveLength(44)
+    expect(SERVER_CODES).toHaveLength(45) // V2's checkout-required refusal.
     const allCodes = [...SERVER_CODES, ...CLIENT_AND_SESSION_CODES].sort()
-    expect(allCodes).toHaveLength(53)
+    expect(allCodes).toHaveLength(54) // The optional version rail adds one checkout code.
     expect(Object.keys(LANDXML_IMPORT_REASONS).sort()).toEqual(allCodes)
     for (const sentence of Object.values(LANDXML_IMPORT_REASONS)) {
       expect(typeof sentence).toBe('string')

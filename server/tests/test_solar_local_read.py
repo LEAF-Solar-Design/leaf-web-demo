@@ -530,12 +530,26 @@ def _physical_builtin(monkeypatch, run_builtin, **flags):
 
 def _publish_head(backend, state=None, parent=None):
     """Publish a tiny physical state as the head of drawing "solar"; its head view."""
+    from contextlib import nullcontext
+    import solar_physical_legacy
     import solar_physical_head
     import solar_physical_state
 
     document = solar_physical_state.physical_document(
         {"mesh_faces": 3} if state is None else state, drawing_units="m", source_sha256="a" * 64,
         capability="frame-generate", parent=parent)
+    if solar_physical_legacy.versioned_mode():
+        # V2 bound publication needs the graph's project and a live checkout.
+        project = local.resolve_graph_context(backend, TENANT, "solar")["project_id"]
+        checkout = store.load_manifest(backend, TENANT, "solar")["checkout"]
+        active = store.checkout_active(checkout)
+        holder = checkout["holder"] if active else "fixture-owner"
+        lease = nullcontext(checkout["fence"]) if active else held(backend)
+        with lease as fence:
+            return solar_physical_head.publish_physical_state(
+                backend, TENANT, "solar", document, project_id=project,
+                holder=holder, fence=fence)["head"]
+    # Preserve the switch-off log-only fixture and its publication shape.
     return solar_physical_head.publish_physical_state(backend, TENANT, "solar", document)["head"]
 
 

@@ -49,7 +49,10 @@ def doc(parent=None, next_handle=2, capability="frame-generate"):
 
 
 def publish(backend, parent=None, next_handle=2, **kw):
-    return ph.publish_physical_state(backend, TENANT, DRAWING, doc(parent, next_handle), **kw)
+    # These V1/V3 fixtures seed legacy log entries; V2 publications have their own suite.
+    with pytest.MonkeyPatch.context() as patch:
+        patch.delenv("LEAF_SOLAR_PHYSICAL_VERSIONED", raising=False)
+        return ph.publish_physical_state(backend, TENANT, DRAWING, doc(parent, next_handle), **kw)
 
 
 def head(backend, project_id=PROJECT):
@@ -90,7 +93,7 @@ def test_physical_head_constants():
         "leaf.solar-physical-head-entry.v1", "leaf.solar-physical-head.v1", "leaf.solar-physical-head-publish.v1")
     assert (ph.MAX_LOG_ENTRIES, ph.MAX_ENTRY_BYTES, ph.MAX_PROJECT_ID_CHARS) == (4096, 1024, 100)
     assert ph.ENTRY_KEYS == {"schema", "index", "project_id", "parent", "state", "content_sha256"}
-    assert len(ph.CODES) == 9 and not ph.CODES & ps.CODES
+    assert len(ph.CODES) == 10 and not ph.CODES & ps.CODES  # Versioned writes require checkout credentials.
     error = ph.PhysicalHeadError("PHYSICAL_HEAD_CONFLICT")
     assert isinstance(error, ps.PhysicalStateError) and isinstance(error, ValueError)
     assert error.code == str(error) == "PHYSICAL_HEAD_CONFLICT"
@@ -481,13 +484,16 @@ def test_physical_head_corrupt(backend, case):
     assert backend.drawing_object_keys(TENANT, DRAWING) == before
 
 
-def test_physical_head_undecodable_state_is_corrupt(backend):
+def test_physical_head_undecodable_state_is_corrupt(backend, monkeypatch):
     data = json.dumps(document({}, GENERATE_SHA, "frame-generate")).encode("utf-8")
     artifact_id = _foreign_artifact(backend, ps.TOOL, ps.MEDIA_TYPE, ps.FILENAME, data)
     backend.put(ph.entry_key(TENANT, DRAWING, 0), ph.entry_bytes(0, PROJECT, None, artifact_id,
                                                                  hashlib.sha256(data).hexdigest()))
     assert head(backend)["state"]["artifact_id"] == artifact_id
     refused("PHYSICAL_HEAD_CORRUPT", ph.load_physical_head, backend, TENANT, DRAWING, project_id=PROJECT)
+    # Versioned views require the document parent; legacy metadata-only reads above stay unchanged.
+    monkeypatch.setenv("LEAF_SOLAR_PHYSICAL_VERSIONED", "1")
+    refused("PHYSICAL_HEAD_CORRUPT", head, backend)
 
 
 def test_physical_head_project(backend):
@@ -1215,16 +1221,20 @@ class TestVersionBinding:
                                           "solar_design_graph_sha256": digest(graph)}))
             store.ingest_drawing(memory, tenant, str(source), drawing_id=drawing)
             fence = store.acquire_checkout_fence(memory, tenant, drawing, "owner", 300)
-            entry = ph.publish_physical_state(memory, tenant, drawing, doc(), project_id=PROJECT)["head"]
+            with monkeypatch.context() as patch:
+                patch.delenv("LEAF_SOLAR_PHYSICAL_VERSIONED", raising=False)
+                entry = ph.publish_physical_state(memory, tenant, drawing, doc(), project_id=PROJECT)["head"]
             args = dict(project_id=PROJECT, parent_version=1, physical=_binding_ref(entry),
                         holder="owner", fence=fence, apply_id="pg-binding")
             v, created = write_loop.commit_physical_version(memory, tenant, drawing, **args)
             assert created
             assert write_loop.commit_physical_version(memory, tenant, drawing, **args) == (v, False)
             assert store.undo(memory, tenant, drawing, holder="owner", fence=fence) == 1
-            next_entry = ph.publish_physical_state(memory, tenant, drawing,
-                                                   doc(entry["state"]["artifact_id"], 3),
-                                                   project_id=PROJECT)["head"]
+            with monkeypatch.context() as patch:
+                patch.delenv("LEAF_SOLAR_PHYSICAL_VERSIONED", raising=False)
+                next_entry = ph.publish_physical_state(memory, tenant, drawing,
+                                                       doc(entry["state"]["artifact_id"], 3),
+                                                       project_id=PROJECT)["head"]
             args.update(physical=_binding_ref(next_entry), apply_id="pg-race")
             raced.clear()
             with monkeypatch.context() as patch:

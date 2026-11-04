@@ -129,7 +129,7 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
       if (!value) error = civilReadReason(result?.code, S.read_failed)
       if (value) {
         if (value.stored) {
-          next = { head: value.head, units: value.terrain.frame.drawing_units }
+          next = { head: value.head, units: value.terrain.frame.drawing_units, version: drawingVersion }
         } else {
           setReading('units-loading')
           error = 'units_unreadable'
@@ -152,7 +152,7 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
             const units = graph.project.units
             if (!['m', 'ft'].includes(units?.drawing_units)) error = 'TRACKER_ROWS_UNITS_UNSUPPORTED'
             else if (units.meters_per_unit !== (units.drawing_units === 'm' ? 1 : 0.3048)) error = 'units_unreadable'
-            else next = { head: null, units: units.drawing_units }
+            else next = { head: null, units: units.drawing_units, version: drawingVersion }
           }
         }
       }
@@ -167,7 +167,7 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
       setReadError(error)
       return
     }
-    setContext((previous) => previous?.head?.index > next.head?.index ? previous : next)
+    setContext((previous) => previous?.version === next.version && previous?.head?.index > next.head?.index ? previous : next)
     setConfirmed(true)
     const original = retained.current
     if (original) {
@@ -236,7 +236,9 @@ function PanelForScope({ drawingId, projectId = null, drawingVersion = null, cli
       setUncertain(null)
       setRecovery(null)
       setReceipt(value)
-      setContext((previous) => previous?.head?.index > value.head.index ? previous : { head: value.head, units: value.frame.drawing_units })
+      const next = { head: value.head, units: value.frame.drawing_units,
+        version: value.drawing_version?.created ? value.drawing_version.version : drawingVersion }
+      setContext((previous) => previous?.version === next.version && previous?.head?.index > next.head.index ? previous : next)
       try {
         const notified = changed.current?.(value)
         if (notified?.then) notified.then(undefined, () => {})

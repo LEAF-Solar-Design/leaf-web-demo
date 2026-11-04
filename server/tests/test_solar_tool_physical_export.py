@@ -822,22 +822,29 @@ def test_takeoff_version_follow_and_unbound_guard(backend, monkeypatch):
     monkeypatch.setenv("LEAF_SOLAR_PHYSICAL_VERSIONED", "1")
     store._physical_memo_clear()
     try:
-        a = _publish_head(backend, takeoff_state())
-        assert a["state"]["source_version"] == 1
         with held(backend) as fence:
-            assert write_loop.commit_physical_version(backend, TENANT, "solar", project_id=PROJECT,
-                parent_version=1, physical={"head_index": 0, "state_artifact_id": a["state"]["artifact_id"],
-                "state_content_sha256": a["state"]["content_sha256"]}, holder="fixture-owner", fence=fence,
-                apply_id="e1-a") == (2, True)
+            def publish(state, parent=None):
+                document = ps.physical_document(state, drawing_units="m", source_sha256="a" * 64,
+                    capability="frame-generate", parent=parent)
+                return ph.publish_physical_state(backend, TENANT, "solar", document,
+                    project_id=PROJECT, holder="fixture-owner", fence=fence)
+
+            # V2 freezes the legacy log and commits each physical version itself.
+            first = publish(takeoff_state())
+            a = first["head"]
+            unbound_version = first["drawing_version"]["parent_version"]
+            version_a = first["drawing_version"]["version"]
+            assert first["drawing_version"]["created"] is True
+            assert a["state"]["source_version"] == unbound_version
             state_b = takeoff_state()
             state_b["tracker_rows"][0]["slots"] = 20
-            b = _publish_head(backend, state_b, parent=a["state"]["artifact_id"])
-            assert b["state"]["source_version"] == 2
-            assert write_loop.commit_physical_version(backend, TENANT, "solar", project_id=PROJECT,
-                parent_version=2, physical={"head_index": 1, "state_artifact_id": b["state"]["artifact_id"],
-                "state_content_sha256": b["state"]["content_sha256"]}, holder="fixture-owner", fence=fence,
-                apply_id="e1-b") == (3, True)
-            for version, expected in ((2, a), (3, b)):
+            second = publish(state_b, parent=a["state"]["artifact_id"])
+            b = second["head"]
+            version_b = second["drawing_version"]["version"]
+            assert second["drawing_version"]["created"] is True
+            assert second["drawing_version"]["parent_version"] == version_a
+            assert b["state"]["source_version"] == version_a
+            for version, expected in ((version_a, a), (version_b, b)):
                 result = takeoff_read(backend, version)
                 assert result["output"]["summary"]["head"] == expected
                 assert takeoff_proof(backend, result)
@@ -847,9 +854,41 @@ def test_takeoff_version_follow_and_unbound_guard(backend, monkeypatch):
                         "content_sha256": expected["state"]["content_sha256"],
                         "state_source_version": expected["state"]["source_version"]}
                     assert line["source"]["drawing_version"] == version
-            assert store.undo(backend, TENANT, "solar", holder="fixture-owner", fence=fence) == 2
-            assert takeoff_read(backend, 2)["output"]["summary"]["head"] == a
-            older = takeoff_read(backend, 1)
+            assert store.undo(backend, TENANT, "solar", holder="fixture-owner", fence=fence) == version_a
+            assert takeoff_read(backend, version_a)["output"]["summary"]["head"] == a
+            # Switch-on resolution preserves the empty pre-edit legacy freeze.
+            older = takeoff_read(backend, unbound_version)
+            assert older["output"]["summary"]["head"] is None
+            assert all(line["reason"] == "PHYSICAL_STATE_ABSENT" and line["quantity"] is None
+                       for line in takeoff_physical_lines(older))
+            assert takeoff_proof(backend, older)
+    finally:
+        store._physical_memo_clear()
+
+
+def test_takeoff_unbound_ahead_guard_switch_off(backend, monkeypatch):
+    monkeypatch.setenv("LEAF_SOLAR_PHYSICAL_VERSIONED", "1")
+    store._physical_memo_clear()
+    try:
+        with held(backend) as fence:
+            def publish(state, parent=None):
+                document = ps.physical_document(state, drawing_units="m", source_sha256="a" * 64,
+                    capability="frame-generate", parent=parent)
+                return ph.publish_physical_state(backend, TENANT, "solar", document,
+                    project_id=PROJECT, holder="fixture-owner", fence=fence)
+
+            # Use a fresh backend so switch-dependent reads cannot share an artifact identity.
+            first = publish(takeoff_state())
+            a = first["head"]
+            unbound_version = first["drawing_version"]["parent_version"]
+            state_b = takeoff_state()
+            state_b["tracker_rows"][0]["slots"] = 20
+            second = publish(state_b, parent=a["state"]["artifact_id"])
+            b = second["head"]
+            # Switch-off reads retain the original unbound log-tip ahead guard.
+            monkeypatch.setenv("LEAF_SOLAR_PHYSICAL_VERSIONED", "0")
+            store._physical_memo_clear()
+            older = takeoff_read(backend, unbound_version)
             assert older["output"]["summary"]["head"] == b
             assert all(line["reason"] == "PHYSICAL_STATE_AHEAD_OF_VERSION" and line["quantity"] is None
                        for line in takeoff_physical_lines(older))

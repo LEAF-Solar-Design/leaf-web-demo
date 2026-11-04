@@ -174,6 +174,22 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   const [trackerHeadSignal, setTrackerHeadSignal] = useState(null)
   const [civilHeadSignal, setCivilHeadSignal] = useState(null)
   const [readHeadSignal, setReadHeadSignal] = useState(null)
+  const drawingVersionRef = useRef(drawingVersion)
+  drawingVersionRef.current = drawingVersion
+  const previousPhysicalVersion = useRef(drawingVersion)
+  // Deliver the version signal in the same render as drawingVersion/client changes,
+  // so panel effects do not start one read before the layout reset and a second after it.
+  const versionHeadSignal = previousPhysicalVersion.current !== drawingVersion ? `version:${drawingVersion}` : null
+  useLayoutEffect(() => {
+    if (previousPhysicalVersion.current === drawingVersion) return
+    previousPhysicalVersion.current = drawingVersion
+    setPhysicalHead(null)
+    const signal = `version:${drawingVersion}`
+    setCivilHeadSignal(signal)
+    setTerrainHeadSignal(signal)
+    setTrackerHeadSignal(signal)
+    setReadHeadSignal(signal)
+  }, [drawingVersion])
   const civilTrigger = useRef(null)
   const civilHeading = useRef(null)
   const readTrigger = useRef(null)
@@ -510,19 +526,23 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
   }), [combinerClient])
 
   const scopeTerrainClient = useMemo(() => ({
-    getTerrain: (options) => terrainClient.getTerrain(options).then((result) => {
-      try {
-        const head = result?.value?.head
-        if (activeScope.current && options?.signal?.aborted !== true && result?.ok === true && head?.drawing_id === drawingId
-          && result.value.terrain?.drawing_id === drawingId && Number.isInteger(head.index) && head.index >= 0) {
-          setPhysicalHead((current) => activeScope.current
-            && (!Number.isInteger(current?.index) || head.index >= current.index) ? head : current)
+    getTerrain: (options) => {
+      const version = drawingVersionRef.current
+      return terrainClient.getTerrain(options).then((result) => {
+        if (version !== drawingVersionRef.current) return { ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID', retryable: false, status: null }
+        try {
+          const head = result?.value?.head
+          if (activeScope.current && options?.signal?.aborted !== true && result?.ok === true && head?.drawing_id === drawingId
+            && result.value.terrain?.drawing_id === drawingId && Number.isInteger(head.index) && head.index >= 0) {
+            setPhysicalHead((current) => activeScope.current
+              && (!Number.isInteger(current?.index) || head.index >= current.index) ? head : current)
+          }
+        } catch {
+          // Observing a read must never change the client's answer.
         }
-      } catch {
-        // Observing a read must never change the client's answer.
-      }
-      return result
-    }),
+        return result
+      })
+    },
     runTerrainOperation: (request) => guardedWrite('terrain', request, terrainClient.runTerrainOperation, 'TERRAIN_CLIENT_REQUEST_INVALID'),
   }), [terrainClient, drawingId])
   const scopeTrackerRowsClient = useMemo(() => ({
@@ -536,10 +556,14 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       && request.drawingId === drawingId && request.projectId === projectId && !request.signal?.aborted
     const refused = () => Promise.resolve({ ok: false, code: 'TERRAIN_CLIENT_REQUEST_INVALID', retryable: false, status: null })
     return {
-      getCivil: (request) => !isCurrent(request) ? refused() : civilClient.getCivil(request).then((answer) => {
-        if (isCurrent(request) && answer?.ok && answer.value?.head) observeHead(answer.value.head)
-        return answer
-      }),
+      getCivil: (request) => {
+        const version = drawingVersionRef.current
+        return !isCurrent(request) ? refused() : civilClient.getCivil(request).then((answer) => {
+          if (version !== drawingVersionRef.current) return refused()
+          if (isCurrent(request) && answer?.ok && answer.value?.head) observeHead(answer.value.head)
+          return answer
+        })
+      },
       runCivilOperation: (request) => !isCurrent(request) ? refused()
         : guardedWrite('civil', request, civilClient.runCivilOperation, 'TERRAIN_CLIENT_REQUEST_INVALID'),
     }
@@ -557,6 +581,18 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     setReadHeadSignal(signal)
   }
 
+  function seatPhysicalVersion(result) {
+    const next = result?.drawing_version
+    if (next?.created !== true || next.version === drawingVersion) return
+    const lifetime = solarLifetime.current
+    try {
+      Promise.resolve(onDrawingVersionChanged?.({ drawing_id: drawingId, version: next.version,
+        parent: next.parent_version }, undefined, {
+        isCurrent: () => activeScope.current && solarLifetime.current === lifetime, announce: true,
+      })).catch(() => {})
+    } catch { /* Physical publication remains successful if seating fails. */ }
+  }
+
   function onCivilChanged(value) {
     if (!activeScope.current || solarLifetime.current !== renderSolarLifetime || value?.drawing_id !== drawingId || !value.created) return
     observeHead(value.head)
@@ -564,6 +600,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     setTrackerHeadSignal(value.head.state.artifact_id)
     signalPhysicalPeers(value.head, 'civil')
     onPhysicalHeadChanged?.(value)
+    seatPhysicalVersion(value)
   }
 
   const readDisabledReason = phase === 'failed' ? 'The drawing could not be refreshed. Refresh the drawing before continuing.'
@@ -588,6 +625,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       ? 'Terrain imported for this drawing.'
       : 'This terrain was already imported, so nothing changed.')
     onPhysicalHeadChanged?.(value)
+    seatPhysicalVersion(value)
   }
 
   function onTerrainChanged(result) {
@@ -596,6 +634,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     signalPhysicalPeers(result.head)
     if (typeof result.head?.state?.artifact_id === 'string') setTrackerHeadSignal(result.head.state.artifact_id)
     onPhysicalHeadChanged?.(result)
+    seatPhysicalVersion(result)
   }
 
   function onTrackerRowsChanged(result) {
@@ -604,6 +643,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     setTerrainHeadSignal(result.head.state.artifact_id)
     signalPhysicalPeers(result.head)
     onPhysicalHeadChanged?.(result)
+    seatPhysicalVersion(result)
   }
 
   if (!hasLandxml && !hasCombiner && !hasTerrain && !hasSolarEdge && !trackerMounted) return null
@@ -619,13 +659,13 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
       {hasCivil && openPanel === 'civil' && <div className="solar-workspace-panel">
         <h3 tabIndex={-1} ref={civilHeading}>Civil operations</h3>
         <SolarCivilPanel drawingId={drawingId} projectId={projectId} client={scopeCivilClient}
-          headSignal={civilHeadSignal} disabled={civilDisabled} disabledReason={civilDisabledReason} onPhysicalHeadChanged={onCivilChanged} />
+          headSignal={versionHeadSignal ?? civilHeadSignal} disabled={civilDisabled} disabledReason={civilDisabledReason} onPhysicalHeadChanged={onCivilChanged} />
         <button type="button" onClick={() => { physicalCloseFocus.current = civilTrigger.current; setOpenPanel(null) }}>Close</button>
       </div>}
       {hasPhysicalRead && openPanel === 'physical-read' && <div className="solar-workspace-panel">
         <h3 tabIndex={-1} ref={readHeading}>Physical reads</h3>
         <SolarPhysicalReadPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
-          terrainClient={scopeTerrainClient} runRead={runRead} headSignal={readHeadSignal} catalogDigestOf={catalogDigestOf}
+          terrainClient={scopeTerrainClient} runRead={runRead} headSignal={versionHeadSignal ?? readHeadSignal} catalogDigestOf={catalogDigestOf}
           disabled={!!readDisabledReason} disabledReason={readDisabledReason}
           download={importClient.downloadArtifact} save={save} />
         <button type="button" onClick={() => { physicalCloseFocus.current = readTrigger.current; setOpenPanel(null) }}>Close</button>
@@ -679,7 +719,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
         <div className="solar-workspace-panel" ref={terrainPanel}>
           <h3 tabIndex={-1} ref={terrainHeading}>Terrain preview</h3>
           <SolarTerrainPanel drawingId={drawingId} projectId={projectId} client={scopeTerrainClient}
-            headSignal={terrainHeadSignal} disabled={terrainGate !== null}
+            headSignal={versionHeadSignal ?? terrainHeadSignal} disabled={terrainGate !== null}
             disabledReason={terrainGate === null ? undefined : terrainGate === 'tracker_pending' ? TRACKER_ROWS_PANEL_REASONS.tracker_pending : TERRAIN_WORKSPACE_REASONS[terrainGate]}
             onPhysicalHeadChanged={onTerrainChanged} />
           <button type="button" onClick={() => {
@@ -713,7 +753,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
         hidden={openPanel !== 'tracker-rows' || !hasTrackerRows || !!writers.solaredge}>
         <SolarTrackerRowsPanel drawingId={drawingId} projectId={projectId} drawingVersion={drawingVersion}
           client={scopeTrackerRowsClient} terrainClient={scopeTerrainClient} readIntake={readIntake}
-          headSignal={trackerHeadSignal} active={openPanel === 'tracker-rows' && hasTrackerRows && !writers.solaredge}
+          headSignal={versionHeadSignal ?? trackerHeadSignal} active={openPanel === 'tracker-rows' && hasTrackerRows && !writers.solaredge}
           checkoutHeld={checkoutHeld} busy={busy} blockedReason={trackerBlockedReason === 'solaredge_pending' ? null : trackerBlockedReason}
           onPhysicalHeadChanged={onTrackerRowsChanged}
           onClose={() => { setOpenPanel(null); trackerTrigger.current?.focus() }} />

@@ -124,6 +124,8 @@ def validate_manual_create(*, rows, module_power_watts, expected_head, drawing_u
 
 
 def _translated(code):
+    if code == "PHYSICAL_HEAD_CHECKOUT_REQUIRED":
+        return "TRACKER_ROWS_CHECKOUT_REQUIRED"
     if code in CODES:
         return code
     if code == "TERRAIN_FRAME_UNSUPPORTED" or code == "PHYSICAL_STATE_FRAME_INVALID":
@@ -158,7 +160,8 @@ def _result(drawing_id, project_id, validated, document, head, created):
 
 
 def publish_manual_create(backend, tenant_id, drawing_id, *, rows, module_power_watts,
-                          expected_head, project_id=None, request_bytes=None) -> dict:
+                          expected_head, project_id=None, request_bytes=None,
+                          holder=None, fence=None) -> dict:
     """Preflight a first creation or return the current head's exact normalized retry."""
     try:
         if project_id is not None and (type(project_id) is not str or not 1 <= len(project_id) <= 100):
@@ -215,7 +218,10 @@ def publish_manual_create(backend, tenant_id, drawing_id, *, rows, module_power_
                                         capability=OPERATION, parent=expected_head)
         # Result helpers validate the preserved state before any publication.
         result = _result(drawing_id, project, validated, document, None, True)
-        published = ph.publish_physical_state(backend, tenant_id, drawing_id, document, project_id=project)
+        published = ph.publish_physical_state(backend, tenant_id, drawing_id, document, project_id=project,
+                                               holder=holder, fence=fence)
+        if published.get("drawing_version") is not None:
+            result["drawing_version"] = published["drawing_version"]
         result.update(head=published["head"], created=published["created"],
                       outcome="published" if published["created"] else "retry")
         return result

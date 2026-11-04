@@ -435,11 +435,12 @@ def test_contract_constants_signatures_and_vocabulary():
         "vegetation_outlines", "grading_settings", "export_settings", "pile_store_text", "next_handle",
         "mesh_faces", "terrain_face_colors", "collision_layer",
     })
+    # V2 adds keyword-only checkout credentials to the publication seam.
     for fn, names in [(rows_domain.validate_manual_create,
                        ["rows", "module_power_watts", "expected_head", "drawing_units", "request_bytes"]),
                       (rows_domain.publish_manual_create,
                        ["backend", "tenant_id", "drawing_id", "rows", "module_power_watts", "expected_head",
-                        "project_id", "request_bytes"])]:
+                        "project_id", "request_bytes", "holder", "fence"])]:
         params = inspect.signature(fn).parameters
         assert list(params) == names
         for name in names[3:] if fn is rows_domain.publish_manual_create else names:

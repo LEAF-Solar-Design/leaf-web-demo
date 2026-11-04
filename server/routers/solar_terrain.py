@@ -24,6 +24,7 @@ MAX_TERRAIN_BODY_BYTES = 8192
 VIEW_RESPONSE_SCHEMA = "leaf.solar-terrain-view-response.v1"
 TERRAIN_ROUTE_REFUSALS = {
     "TERRAIN_CHECKOUT_DENIED": (403, ErrorCode.BAD_PARAMS, False),
+    "PHYSICAL_HEAD_CHECKOUT_REQUIRED": (403, ErrorCode.BAD_PARAMS, False),
     "TERRAIN_CHECKOUT_UNAVAILABLE": (503, ErrorCode.INTERNAL, True),
     "TERRAIN_PROJECT_ID_INVALID": (400, ErrorCode.BAD_PARAMS, False),
     "TERRAIN_EXPECTED_HEAD_INVALID": (400, ErrorCode.BAD_PARAMS, False),
@@ -145,8 +146,9 @@ def _get_civil(tenant, drawing_id, project_id):
 
 def _operate(tenant, drawing_id, project_id, body, capability):
     backend = _terrain_backend(str(tenant))
+    holder, fence = None, None
     try:
-        _lock_authorization(drawing_id, tenant, backend, capability)
+        holder, fence = _lock_authorization(drawing_id, tenant, backend, capability) or (None, None)
     except checkout_capability.CapabilityRejected:
         raise adapter.TerrainAdapterError("TERRAIN_CHECKOUT_DENIED") from None
     except checkout_capability.CapabilityUnavailable:
@@ -156,10 +158,12 @@ def _operate(tenant, drawing_id, project_id, body, capability):
     except (ValueError, OSError):
         raise adapter.TerrainAdapterError("TERRAIN_STORE_UNAVAILABLE") from None
     if body["operation"] in civil.OPERATIONS:
-        return civil.operate(backend, str(tenant), drawing_id, body, project_id=project_id)
+        return civil.operate(backend, str(tenant), drawing_id, body, project_id=project_id,
+                             holder=holder, fence=fence)
     call = {"mesh": adapter.render_mesh, "slope": adapter.check_tracker_slope,
             "slope-clear": adapter.clear_tracker_slope}[body["operation"]]
-    kwargs = {"project_id": project_id, "expected_head": body["expected_head"]}
+    kwargs = {"project_id": project_id, "expected_head": body["expected_head"],
+              "holder": holder, "fence": fence}
     if "limits" in body:
         kwargs["limits"] = body["limits"]
     return call(backend, str(tenant), drawing_id, **kwargs)
