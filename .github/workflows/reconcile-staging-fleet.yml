@@ -82,6 +82,9 @@ permissions:
   actions: read
   contents: read
 
+# Coalesce reconciler ticks separately from dispatch-staging-fleet so a tick
+# cannot replace a pending relay job. Planner and per-leg busy checks still
+# yield to the relay; downstream ECS mutation serialization is unchanged.
 concurrency:
   group: reconcile-staging-fleet
   cancel-in-progress: false
