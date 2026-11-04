@@ -808,7 +808,7 @@ export class HttpAppRunClient implements AppRunClient {
    * up to the full job timeout) keeps the job_id in hand even when the budget runs
    * out — the caller gets {job_id, status} and the model can job_status later.
    */
-  async submitRun(req: SubmitRunRequest): Promise<SubmitRunResponse> {
+  async submitRun(req: SubmitRunRequest & { idempotencyKey?: string }): Promise<SubmitRunResponse> {
     const response = await this.requestWithStatus(
       req.tenantId,
       "POST",
@@ -837,6 +837,9 @@ export class HttpAppRunClient implements AppRunClient {
           : {}),
         ...(req.authorityTurnId
           ? { "x-authority-turn-id": req.authorityTurnId }
+          : {}),
+        ...(typeof req.idempotencyKey === "string" && req.idempotencyKey.length > 0
+          ? { "idempotency-key": req.idempotencyKey }
           : {}),
       },
     );

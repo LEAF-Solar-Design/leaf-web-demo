@@ -341,6 +341,163 @@ function ofType(events: StoredEvent[], type: string): StoredEvent[] {
   return events.filter((e) => e.type === type);
 }
 
+describe("ConverseLoop read run idempotency", () => {
+  type Outcome = "timeout" | "pre_ack" | "complete" | "failed" | "unavailable" | "invalid";
+  type Route = "ordinary" | "batch_fallback";
+
+  async function setup(options: {
+    route?: Route;
+    outcome?: Outcome;
+    authority?: "both" | "none" | "session" | "turn";
+    params?: Record<string, unknown>[];
+    tool?: string;
+  } = {}) {
+    const outcome = options.outcome ?? "timeout";
+    class RetryAppRunClient extends FakeAppRunClient {
+      override async submitRun(
+        req: Parameters<FakeAppRunClient["submitRun"]>[0],
+      ): ReturnType<FakeAppRunClient["submitRun"]> {
+        if (outcome === "pre_ack" && this.submitCalls.length === 0) {
+          this.submitCalls.push(req);
+          throw new Error("submission response lost");
+        }
+        return super.submitRun(req);
+      }
+
+      override async getJob(tenantId: string, jobId: string): Promise<Record<string, unknown>> {
+        if (outcome === "unavailable") throw new Error("poll unavailable");
+        if (outcome === "failed" || outcome === "invalid") {
+          return { status: outcome === "failed" ? "failed" : "unexpected" };
+        }
+        return super.getJob(tenantId, jobId);
+      }
+    }
+    const appRun = new RetryAppRunClient();
+    if (options.route === "batch_fallback") {
+      appRun.catalog = appRun.catalog.map(entry => entry.name === "count-by-layer"
+        ? { ...entry, execution_class: "instant", batch_fallback: true } : entry);
+    }
+    if (options.tool === "solar-solve-proposal") {
+      const write = appRun.catalog.find(entry => entry.name === "add-panel")!;
+      appRun.catalog.push({ ...write, name: options.tool,
+        capabilities: ["solve"] as unknown as typeof write.capabilities });
+    }
+    const results: SpineToolResult[] = [];
+    const runner: SpineConverseRunner = {
+      async *run(input) {
+        for (const params of options.params ?? [{}, {}]) {
+          results.push(await input.tools.execute("run_capability", {
+            tool: options.tool ?? "count-by-layer", params,
+            ...(options.tool === "solar-solve-proposal" ? {
+              solve_context: { frame_ref: "frame-1", expected_rev: 0, phase: "initial" },
+            } : {}),
+          }));
+        }
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+      },
+    };
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const loop = new ConverseLoop({ runner, appRun, gate, store }, {
+      readWaitS: outcome === "timeout" ? 0 : 15,
+    });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const authority = options.authority ?? "both";
+    const send = async (authorityTurnId = "app-turn-1") => {
+      const turn = await loop.handleMessage({
+        sessionId: session.session_id, tenantId: session.tenant_id,
+        text: "Run the capability", contextPacket: PACKET,
+        ...(authority === "both" || authority === "session" ? { authoritySessionId: "app-session" } : {}),
+        ...(authority === "both" || authority === "turn" ? { authorityTurnId } : {}),
+      });
+      await turn.done;
+    };
+    const keys = () => appRun.submitCalls.map(call => (call as { idempotencyKey?: string }).idempotencyKey);
+    return { appRun, gate, results, send, keys };
+  }
+
+  it.each(["ordinary", "batch_fallback"] as const)("%s read carries an authority-bound key", async route => {
+    const fixture = await setup({ route, params: [{}] });
+    await fixture.send();
+    expect(fixture.appRun.submitCalls).toHaveLength(1);
+    expect(fixture.keys()[0]).toMatch(/^run:[0-9a-f]{64}$/);
+    expect(fixture.results[0]!.isError).not.toBe(true);
+  });
+
+  it.each(["none", "session", "turn"] as const)("omits the key with %s authority", async authority => {
+    const fixture = await setup({ authority, params: [{}] });
+    await fixture.send();
+    expect(fixture.appRun.submitCalls).toHaveLength(1);
+    expect(fixture.keys()[0]).toBeUndefined();
+  });
+
+  it.each(["add-panel", "solar-solve-proposal"])("omits the key for %s with authority", async tool => {
+    const fixture = await setup({ tool, params: [{}] });
+    vi.spyOn(fixture.gate, "check").mockResolvedValue({ decision: "allow", policy: "test-approved", rung: "R4" });
+    await fixture.send();
+    expect(fixture.appRun.submitCalls).toHaveLength(1);
+    expect(fixture.appRun.submitCalls[0]!.tool).toBe(tool);
+    expect(fixture.keys()[0]).toBeUndefined();
+    expect(fixture.results[0]!.isError).not.toBe(true);
+  });
+
+  describe.each(["ordinary", "batch_fallback"] as const)("%s retries", route => {
+    it.each(["timeout", "pre_ack", "unavailable", "invalid"] as const)(
+      "keeps the same key after %s",
+      async outcome => {
+        const fixture = await setup({ route, outcome });
+        await fixture.send();
+        const keys = fixture.keys();
+        expect(keys).toHaveLength(2);
+        expect(keys[0]).toMatch(/^run:[0-9a-f]{64}$/);
+        expect(keys[1]).toBe(keys[0]);
+        if (outcome === "pre_ack" || outcome === "invalid") {
+          expect(fixture.results[0]!.isError).toBe(true);
+        } else {
+          expect(JSON.parse(fixture.results[0]!.content)).toMatchObject({ pending: true, observation: outcome });
+        }
+      },
+    );
+
+    it.each(["complete", "failed"] as const)("uses a new key after terminal %s", async outcome => {
+      const fixture = await setup({ route, outcome });
+      await fixture.send();
+      const keys = fixture.keys();
+      expect(keys).toHaveLength(2);
+      expect(keys[0]).toMatch(/^run:[0-9a-f]{64}$/);
+      expect(keys[1]).toMatch(/^run:[0-9a-f]{64}$/);
+      expect(keys[1]).not.toBe(keys[0]);
+      expect(JSON.parse(fixture.results[0]!.content)).toMatchObject({ status: outcome });
+    });
+  });
+
+  it("distinguishes different params and canonicalizes nested object keys", async () => {
+    const fixture = await setup({ params: [
+      { layer: "Panels", filter: { a: 1, b: [{ x: 2, y: 3 }] } },
+      { layer: "Other", filter: { a: 1, b: [{ x: 2, y: 3 }] } },
+      { filter: { b: [{ y: 3, x: 2 }], a: 1 }, layer: "Panels" },
+    ] });
+    await fixture.send();
+    const keys = fixture.keys();
+    expect(keys).toHaveLength(3);
+    expect(keys[0]).toMatch(/^run:[0-9a-f]{64}$/);
+    expect(keys[1]).toMatch(/^run:[0-9a-f]{64}$/);
+    expect(keys[1]).not.toBe(keys[0]);
+    expect(keys[2]).toBe(keys[0]);
+  });
+
+  it("uses a different key for identical input on a later authority turn", async () => {
+    const fixture = await setup({ params: [{}] });
+    await fixture.send();
+    await fixture.send("app-turn-2");
+    const keys = fixture.keys();
+    expect(keys).toHaveLength(2);
+    expect(keys[0]).toMatch(/^run:[0-9a-f]{64}$/);
+    expect(keys[1]).toMatch(/^run:[0-9a-f]{64}$/);
+    expect(keys[1]).not.toBe(keys[0]);
+  });
+});
+
 /**
  * Model the app gate's request_confirmation policy (always-confirm, rung 0,
  * NOT tenant-tightenable): the verdict is awaiting_approval and the APP mints

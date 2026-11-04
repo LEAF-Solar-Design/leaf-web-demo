@@ -195,6 +195,42 @@ export class ConverseLoop {
     this.ttlS = opts.confirmationTtlS ?? 300;
   }
 
+  private readInvocation(
+    ctx: {
+      authoritySessionId?: string;
+      authorityTurnId?: string;
+      runInvocations?: Map<string, { ordinal: number; open: boolean }>;
+    },
+    tool: string,
+    params: Record<string, unknown>,
+    dwg: string,
+    drawingVersion: number | undefined,
+    catalogDigest: string,
+  ): { key: string; settle: () => void } | undefined {
+    if (!ctx.authoritySessionId || !ctx.authorityTurnId || !ctx.runInvocations) return undefined;
+    const canonical = JSON.stringify(
+      [ctx.authoritySessionId, ctx.authorityTurnId, tool, params, dwg, drawingVersion ?? null, catalogDigest],
+      (_key, value: unknown) => value && typeof value === "object" && !Array.isArray(value)
+        ? Object.fromEntries(Object.entries(value).sort(([a], [b]) => a < b ? -1 : a > b ? 1 : 0))
+        : value,
+    );
+    const fingerprint = createHash("sha256").update(canonical).digest("hex");
+    let entry = ctx.runInvocations.get(fingerprint);
+    if (!entry) {
+      entry = { ordinal: 0, open: true };
+      ctx.runInvocations.set(fingerprint, entry);
+    } else if (!entry.open) {
+      entry.ordinal += 1;
+      entry.open = true;
+    }
+    // Read runs only: same key while unresolved, a new key after a terminal result.
+    const attempt = entry;
+    return {
+      key: `run:${createHash("sha256").update(`${fingerprint}:${entry.ordinal}`).digest("hex")}`,
+      settle: () => { attempt.open = false; },
+    };
+  }
+
   private async pollReadJob(
     appRun: AppRunClient,
     tenantId: string,
@@ -706,6 +742,7 @@ export class ConverseLoop {
     const { appRun, gate, store } = this.ports;
     const tenantId = session.tenant_id;
     const sessionId = session.session_id;
+    const runInvocations = new Map<string, { ordinal: number; open: boolean }>();
 
     const catalogFor = async (): Promise<CapabilityEntry[]> => {
       if (!state.catalogFetched) {
@@ -1187,6 +1224,7 @@ export class ConverseLoop {
                 state.catalog = null;
               },
               turnState: state,
+              runInvocations,
               ...instant,
               capturePageProposal: value => { pageProposalResult = value; },
               captureAuthoredView: value => { authoredViewResult = value; },
@@ -1240,6 +1278,7 @@ export class ConverseLoop {
       pageProposalSource?: PageProposalSource;
       capturePageProposal?: (value: Record<string, unknown>) => void;
       captureAuthoredView?: (value: Record<string, unknown>) => void;
+      runInvocations?: Map<string, { ordinal: number; open: boolean }>;
     },
   ): Promise<SpineToolResult> {
     const { appRun, instantExecutor } = this.ports;
@@ -1366,6 +1405,9 @@ export class ConverseLoop {
             : undefined;
         if (catalogEntry?.execution_class === "instant") {
           const batchFallback = async (reason: string): Promise<SpineToolResult> => {
+            const invocation = await ctx.capabilityOf(target) === "drawing.read"
+              ? this.readInvocation(ctx, target, params, dwg, drawingVersion, catalogDigest)
+              : undefined;
             let fallback;
             try {
               fallback = await appRun.submitRun({
@@ -1373,6 +1415,7 @@ export class ConverseLoop {
                 ...(drawingVersion !== undefined ? { drawingVersion } : {}),
                 authoritySessionId: ctx.authoritySessionId,
                 authorityTurnId: ctx.authorityTurnId,
+                ...(invocation ? { idempotencyKey: invocation.key } : {}),
                 wait: false,
               });
             } catch {
@@ -1382,6 +1425,7 @@ export class ConverseLoop {
               job_id: fallback.job_id, tool: target, route: "batch_fallback", reason,
             });
             const terminal = await this.pollReadJob(appRun, tenantId, fallback.job_id);
+            if (terminal.status === "complete" || (!terminal.ok && terminal.status === "failed")) invocation?.settle();
             const { ok: observed, ...observation } = terminal;
             if (!observed) return err(JSON.stringify({ job_id: fallback.job_id, ...observation }));
             return ok(JSON.stringify({
@@ -1430,12 +1474,16 @@ export class ConverseLoop {
         const effectiveCatalogDigest = args.effective_catalog_digest;
         const toolManifestSha256 = args.tool_manifest_sha256;
         // Read tools may wait inline (fast path); writes are long jobs — async row.
+        const invocation = capability === "drawing.read"
+          ? this.readInvocation(ctx, target, params, dwg, drawingVersion, catalogDigest)
+          : undefined;
         let res;
         try {
           res = await appRun.submitRun({
             tenantId,
             authoritySessionId: ctx.authoritySessionId,
             authorityTurnId: ctx.authorityTurnId,
+            ...(invocation ? { idempotencyKey: invocation.key } : {}),
             tool: target,
             params,
             dwg,
@@ -1464,6 +1512,7 @@ export class ConverseLoop {
         await ctx.emit("job_linked", { job_id: res.job_id, tool: target });
         if (capability === "drawing.read") {
           const terminal = await this.pollReadJob(appRun, tenantId, res.job_id);
+          if (terminal.status === "complete" || (!terminal.ok && terminal.status === "failed")) invocation?.settle();
           const { ok: observed, ...observation } = terminal;
           if (!observed) return err(JSON.stringify({ job_id: res.job_id, ...observation }));
           return ok(JSON.stringify({

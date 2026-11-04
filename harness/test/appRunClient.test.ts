@@ -295,6 +295,37 @@ describe("HttpAppRunClient overlay identity", () => {
 });
 
 describe("HttpAppRunClient run identity", () => {
+  it.each(["run:stable-read-key", undefined, ""])(
+    "sends an optional idempotency key only as a header (%s)",
+    async (idempotencyKey) => {
+      let headers = new Headers();
+      let body: Record<string, unknown> = {};
+      const client = new HttpAppRunClient({
+        baseUrl: "https://app.invalid",
+        dispatchSecret: "test-secret",
+        fetchImpl: async (_input, init) => {
+          headers = new Headers(init?.headers ?? {});
+          body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+          return new Response(JSON.stringify({ job_id: "job-1", status: "submitted" }), {
+            status: 202,
+            headers: { "content-type": "application/json" },
+          });
+        },
+      });
+
+      await client.submitRun({
+        tenantId: "tenant-a", authoritySessionId: "app-session", authorityTurnId: "app-turn",
+        tool: "count-by-layer", params: {}, dwg: "drawing-a", catalogDigest: "digest-1",
+        ...(idempotencyKey !== undefined ? { idempotencyKey } : {}),
+        wait: false,
+      });
+
+      expect(headers.get("idempotency-key")).toBe(idempotencyKey || null);
+      expect(body).not.toHaveProperty("idempotencyKey");
+      expect(body).not.toHaveProperty("idempotency_key");
+    },
+  );
+
   it("sends only the app-owned authority tuple as run headers", async () => {
     let headers = new Headers();
     let body: Record<string, unknown> = {};
