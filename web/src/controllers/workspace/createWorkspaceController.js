@@ -1,4 +1,5 @@
 import { humanizeError } from '../../errorHumanize.js'
+import { createMaterialIntakeController } from '../../workspace/createMaterialIntakeController.js'
 
 export const WORKSPACE_ORG_KEY = 'leaf.org_id'
 
@@ -311,17 +312,28 @@ export function createWorkspaceController({
     }
   }
 
-  async function createProject(givenName) {
+  let pendingDrawingCreate = null
+  async function createProject(givenName, options = {}) {
     if (state.projectBusy || givenName == null || !String(givenName).trim()) return null
     const name = String(givenName).trim()
+    const source = options.drawingUpload
+      ? Object.freeze({ ...options.drawingUpload }) : null
+    if (source && (!state.orgId || typeof source.drawingId !== 'string' || !source.drawingId.trim() || !Number.isSafeInteger(source.version) || source.version <= 0
+      || !services.importUpload || typeof options.isSourceCurrent !== 'function' || !options.isSourceCurrent())) return null
     const request = nextGeneration('project')
     const orgId = state.orgId
+    const workspaceRequest = generations.workspace
+    const current = () => isCurrent('project', request) && state.orgId === orgId
+      && (!source || (isCurrent('workspace', workspaceRequest) && options.isSourceCurrent()))
+    const sourceKey = source ? JSON.stringify([orgId, name, source.drawingId, source.version]) : null
     publish({ projectBusy: true, projectsError: null, projectDraftError: null })
     try {
-      const project = await services.createProject(name, orgId)
+      const project = sourceKey && pendingDrawingCreate?.key === sourceKey
+        ? pendingDrawingCreate.project : await services.createProject(name, orgId)
       const projectId = projectIdOf(project)
       if (!projectId) throw new Error('The workspace service returned a project without an id.')
-      if (!isCurrent('project', request) || state.orgId !== orgId) return null
+      if (!current()) return null
+      if (source && pendingDrawingCreate?.key !== sourceKey) pendingDrawingCreate = { key: sourceKey, project, imported: null }
       // The create endpoint is idempotent, so reconcile a replay by identity.
       const nextProjects = state.projects.some((item) => projectIdOf(item) === projectId)
         ? state.projects.map((item) => projectIdOf(item) === projectId ? project : item)
@@ -329,17 +341,42 @@ export function createWorkspaceController({
       publish({ projects: nextProjects, projectsError: null, projectDraftError: null })
       invoke(callbacks.onProjectCreated, project)
 
+      let imported = null
+      if (source) {
+        if (!current()) return null
+        imported = pendingDrawingCreate.imported
+        if (!imported) {
+          const intake = createMaterialIntakeController({ services: { importUpload: (...args) => {
+            if (!current()) throw new Error('The drawing or workspace changed before import.')
+            return services.importUpload(...args)
+          } } })
+          intake.begin({ projectId, projectName: name, fileName: name })
+          try {
+            imported = await intake.onUploadReady({ receipt: { drawing_id: source.drawingId }, status: { extracted_version: source.version } })
+            if (typeof imported?.drawingVersion?.version_id !== 'string' || !imported.drawingVersion.version_id
+              || imported.drawingVersion.project_id !== projectId || imported.drawingVersion.org_id !== orgId) {
+              throw new Error(intake.getSnapshot().error || 'The drawing could not be added to the project. Retry the same action.')
+            }
+          } finally { intake.dispose() }
+          if (!current()) return null
+          pendingDrawingCreate.imported = imported
+        }
+        if (!current()) return null
+      }
+
       const openRequest = nextGeneration('workspace')
       publish({
         openProjectId: projectId,
         workspace: null,
-        canonicalVersionId: null,
+        canonicalVersionId: imported?.drawingVersion?.version_id || null,
         workspaceLoading: true,
         projectsError: null,
       })
       try {
         const workspace = await services.openProject(projectId, orgId)
         if (!isCurrent('workspace', openRequest) || state.openProjectId !== projectId || state.orgId !== orgId) return project
+        if (imported && !workspace?.drawing_versions?.some((version) => version.version_id === imported.drawingVersion.version_id
+          && version.project_id === projectId && version.org_id === orgId)) throw new Error('The imported drawing version is not readable yet.')
         publish({ workspace, workspaceLoading: false })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId, workspace })
       } catch {
@@ -355,6 +392,8 @@ export function createWorkspaceController({
       const message = explain(error)
       publish({ projectDraftError: message, projectsError: message, projectBusy: false })
       return null
+    } finally {
+      if (isCurrent('project', request) && state.projectBusy) publish({ projectBusy: false })
     }
   }
 

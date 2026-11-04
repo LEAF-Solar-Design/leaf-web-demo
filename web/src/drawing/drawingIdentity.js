@@ -181,7 +181,11 @@ export function identityFromUploadReceipt(receipt) {
   const drawingId = typeof receipt?.drawing_id === 'string' ? receipt.drawing_id : ''
   if (!drawingId) return null
   const tenantKind = receipt.tenant_kind === 'account' || receipt.tenant_kind === 'guest' ? receipt.tenant_kind : null
-  return Object.freeze({ drawingId, source: drawingId, origin: IDENTITY_ORIGIN.UPLOAD, tenantKind })
+  const version = receipt.extracted_version
+  const uploadSource = tenantKind === 'account' && Number.isInteger(version) && version > 0
+    ? Object.freeze({ drawingId, version }) : null
+  return Object.freeze({ drawingId, source: drawingId, origin: IDENTITY_ORIGIN.UPLOAD, tenantKind,
+    ...(uploadSource ? { uploadSource } : {}) })
 }
 
 /** The accepted app-console upload's address policy, without browser I/O. */

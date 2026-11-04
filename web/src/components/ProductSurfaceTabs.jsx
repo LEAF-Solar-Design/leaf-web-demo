@@ -284,7 +284,7 @@ export function WorkspaceProjectSlot({ state, onCreateProject, studioPresentatio
             data-testid="surface-project-action"
             disabled={disabled}
             aria-describedby={reasonId}
-            onClick={() => onCreateProject?.(action.projectName)}
+            onClick={() => onCreateProject?.(action.projectName, { fromDrawing: true })}
           >
             {action.label}
           </button>
