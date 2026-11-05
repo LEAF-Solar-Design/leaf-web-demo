@@ -1,11 +1,14 @@
 """Exercise the PR ordering hint in isolation from installs and the gate."""
 
+import ast
+import importlib.util
 import json
 import os
 from pathlib import Path
 import re
 import shutil
 import subprocess
+import sys
 
 import pytest
 
@@ -25,6 +28,15 @@ def priority_block():
 def suite(sid, path="unrelated.py", cwd="."):
     return {"id": sid, "cwd": cwd, "label": "server/tests/test_changed.py",
             "command": ["<PYTHON>", "-m", "pytest", path]}
+
+
+def hint_counts(result):
+    lines = [line.removeprefix("PRIORITY_HINT ") for line in result.stdout.splitlines()
+             if line.startswith("PRIORITY_HINT ")]
+    assert len(lines) == 1
+    counts = json.loads(lines[0])
+    assert lines[0] == json.dumps(counts, separators=(",", ":"))
+    return counts
 
 
 class Build:
@@ -82,6 +94,13 @@ class Build:
             cwd=self.repo, env=env, capture_output=True, text=True, timeout=30)
         assert result.returncode == 0, result.stdout + result.stderr
         hint = json.loads(self.output.read_text()) if self.output.is_file() else None
+        if hint is not None:
+            assert set(hint) == {"suite_ids"}
+            assert isinstance(hint["suite_ids"], list)
+            assert all(isinstance(sid, str) for sid in hint["suite_ids"])
+            hint_counts(result)
+        else:
+            assert "PRIORITY_HINT " not in result.stdout
         expected_export = str(self.output) if hint is not None else "UNSET"
         assert "PRIORITY_EXPORT=" + expected_export + "\n" in result.stdout
         return result, hint
@@ -114,8 +133,8 @@ def test_trusted_argv_then_trailer_then_map_order(build):
                  "candidate\n\nLeaf-Impact-Suites: trailer, direct, unknown, bad/id\n")
     result, hint = build.run()
     assert hint["suite_ids"] == ["direct", "web-direct", "parent-direct", "trailer", "mapped"]
-    assert hint["counts"] == dict(argv=3, trailer=1, read_paths=1, unknown=2,
-                                   malformed=1, duplicates=2, over_limit=0)
+    assert hint_counts(result) == dict(argv=3, trailer=1, read_paths=1, unknown=2,
+                                       malformed=1, duplicates=2, over_limit=0)
     assert "INFO:" not in result.stdout
 
 
@@ -137,11 +156,12 @@ def test_trailers_are_inert_physical_lines_with_bounded_valid_ids(build):
         " mapped\nLeaf-Impact-Suites:\nmapped\n"
         "Leaf-Impact-Suites: trailer\nLEAF_PRIORITY_SUITES\ntouch HEREDOC\n"
         "Leaf-Impact-Suites: mapped\u2028direct\n"))
-    _, hint = build.run()
+    result, hint = build.run()
     assert hint["suite_ids"] == ["trailer"]
-    assert hint["counts"]["unknown"] == 1
-    assert hint["counts"]["malformed"] == 8
-    assert hint["counts"]["duplicates"] == 1
+    counts = hint_counts(result)
+    assert counts["unknown"] == 1
+    assert counts["malformed"] == 8
+    assert counts["duplicates"] == 1
     assert not any((build.repo / name).exists()
                    for name in ("SUBSTITUTION", "BACKTICK", "HEREDOC"))
 
@@ -154,18 +174,45 @@ def test_deduplication_and_cap_preserve_source_precedence(build):
     build.commit({"server/tests/test_changed.py": "changed\n", "src/shared.py": "changed\n"},
                  "candidate\n\nLeaf-Impact-Suites: " + ",".join(
                      ids + [ids[0], ids[-1], "unknown", "invalid/id"]) + "\n")
-    _, hint = build.run()
+    result, hint = build.run()
     assert hint["suite_ids"] == [ids[-1], *ids[:199]]
     assert len(set(hint["suite_ids"])) == 200
-    assert hint["counts"] == dict(argv=1, trailer=199, read_paths=0, unknown=1,
-                                   malformed=1, duplicates=4, over_limit=5)
+    assert hint_counts(result) == dict(argv=1, trailer=199, read_paths=0, unknown=1,
+                                       malformed=1, duplicates=4, over_limit=5)
 
 
 def test_empty_diff_and_no_hints_write_empty_advisory_list(build):
     build.commit()
+    result, hint = build.run()
+    assert hint == {"suite_ids": []}
+    assert hint_counts(result) == dict(
+        argv=0, trailer=0, read_paths=0, unknown=0, malformed=0, duplicates=0, over_limit=0)
+
+
+def test_written_hint_is_accepted_by_runner(build, monkeypatch, capsys):
+    runner_path = ROOT / "scripts/run-all-gates.py"
+    definitions = ast.parse(runner_path.read_text(encoding="utf-8")).body
+    if not any(isinstance(node, ast.FunctionDef) and node.name == "load_priority_suites"
+               for node in definitions):
+        pytest.skip("runner slice not on this base")
+    spec = importlib.util.spec_from_file_location("leaf_priority_gate_runner", runner_path)
+    runner = importlib.util.module_from_spec(spec)
+    monkeypatch.setitem(sys.modules, spec.name, runner)
+    previous = list(sys.path)
+    try:
+        spec.loader.exec_module(runner)
+    finally:
+        sys.path[:] = previous
+    build.commit({"server/tests/test_changed.py": "after\n", "src/shared.py": "after\n"},
+                 "candidate\n\nLeaf-Impact-Suites: trailer\n")
     _, hint = build.run()
-    assert hint == {"suite_ids": [], "counts": dict(
-        argv=0, trailer=0, read_paths=0, unknown=0, malformed=0, duplicates=0, over_limit=0)}
+    expected = ["direct", "trailer", "mapped"]
+    assert hint == {"suite_ids": expected}
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES_FILE", str(build.output))
+    suites = [runner.Suite(sid, sid, "script", build.repo, ["unused"], None)
+              for sid in ("mapped", "direct", "trailer")]
+    assert runner.load_priority_suites(suites) == frozenset(expected)
+    assert "PRIORITY ignored" not in capsys.readouterr().out
 
 
 def test_diff_uses_merge_base_and_ignores_trusted_branch_only_changes(build):

@@ -360,8 +360,9 @@ try:
     with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent,
                                      prefix=".priority-suites-", delete=False) as stream:
         temporary = Path(stream.name)
-        stream.write(json.dumps({"suite_ids": selected, "counts": counts}, sort_keys=True) + "\n")
+        stream.write(json.dumps({"suite_ids": selected}, sort_keys=True) + "\n")
     temporary.replace(output)
+    print("PRIORITY_HINT " + json.dumps(counts, separators=(",", ":")))
 except Exception:
     for path in (temporary, output):
         if path is not None:
