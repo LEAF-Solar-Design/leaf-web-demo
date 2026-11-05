@@ -977,10 +977,16 @@ LEAF_DIAGNOSTIC_EXACT
 fi
 # LEAF_DIAGNOSTIC_END
 gate_status=0
+gate_fail_fast_args=(--fail-fast)
+if [[ "${process_capture_active:-0}" == 1 ]]; then
+  # Capture records every suite's reads; a failure still fails the job below.
+  gate_fail_fast_args=()
+fi
+echo "LEAF_EVENT gate fail_fast=${#gate_fail_fast_args[@]}" >&2
 unset PYTHONSAFEPATH
 # Ensure gate rows reach the log even when the job is killed at its deadline.
 export PYTHONUNBUFFERED=1
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 "${gate_fail_fast_args[@]}" --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
 python -I -B scripts/ci/retain_failed_gate_logs.py \
   --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs \
   || echo 'WARNING: failed gate log retention unavailable' >&2
