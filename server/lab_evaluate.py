@@ -9,6 +9,7 @@ from __future__ import annotations
 from collections import deque
 from dataclasses import dataclass, fields
 from functools import lru_cache
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -22,6 +23,7 @@ from lab_canonical import canonical_json
 from lab_doc_validators import validate_graph
 import lab_registry
 from lab_ops import MAX_ROWS, STREAM_ADAPTERS, has_operator, run_operator
+from lab_placement import placement, SETTINGS_DIGEST_ID
 
 
 class ValueRefused(ValueError):
@@ -448,6 +450,7 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
             if port not in inputs and pin["has_default"]:
                 inputs[port] = runtime_value(pin["default"], mode=pin["mode"])
         metadata = inherited(inputs.values())
+        target = placement(manifest)
         remote = block_id in tool_blocks
         if remote:
             remaining_s = budget.run_wall_s - (clock() - started)
@@ -457,11 +460,15 @@ def evaluate_graph(graph, registry, *, budget=None, clock=time.monotonic,
                                    deadline_s=remaining_s)
             if clock() - started >= budget.run_wall_s:
                 raise RunBudgetExceeded()
+        elif target == "here" and manifest["id"] == SETTINGS_DIGEST_ID:
+            result = runtime_value(hashlib.sha256(canonical_json(block["settings"]).encode("utf-8")).hexdigest(),
+                                   mode="scalar", **metadata)
         elif manifest["kind"] == "builtin" and has_operator(manifest["id"]):
             result = evaluate_operation(manifest["id"], inputs, block["settings"],
                                         output_mode=next(iter(manifest["outputs"].values()))["mode"])
         else:
-            result = runtime_value(None, **metadata, error="server-execution-refused")
+            result = runtime_value(None, **metadata,
+                                   error="runs_on_bot" if target == "bot" else "server-execution-refused")
         outputs = {}
         for port, pin in manifest["outputs"].items():
             if remote:

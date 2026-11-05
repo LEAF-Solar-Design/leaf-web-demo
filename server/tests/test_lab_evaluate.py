@@ -1,6 +1,7 @@
 """Shared pure graph parity and server-only admission / resource boundaries."""
 from copy import deepcopy
 from dataclasses import FrozenInstanceError
+import hashlib
 import json
 import math
 from pathlib import Path
@@ -14,10 +15,13 @@ from lab_evaluate import (Budget, GraphRefused, RunBudgetExceeded, RunCancelled,
                           ValueRefused, evaluate_graph, evaluate_operation,
                           export_value, inherited, runtime_value, trusted_registry)
 from lab_ops import MAX_ROWS, UNDEFINED
+from lab_canonical import canonical_json
 
 FIXTURE = json.loads((Path(__file__).parent / "fixtures/lab-graph-cases.v1.json").read_text(encoding="utf-8"))
 CASES = FIXTURE["cases"]
 FIELDS = ("data", "mode", "error", "truncated", "host_tainted", "simulated", "stale")
+PLACEMENT_CASES = json.loads((Path(__file__).parent / "fixtures/lab-placement-cases.v1.json").read_text(encoding="utf-8"))["cases"]
+CONFIG_MANIFEST = next(item["manifest"] for item in PLACEMENT_CASES if item["name"] == "settings-digest")
 
 
 def case(name="identity"):
@@ -27,6 +31,66 @@ def case(name="identity"):
 
 def ticks(*values):
     return iter(values).__next__
+
+
+def single_block(manifest, settings):
+    port = next(iter(manifest["outputs"]))
+    return ({"schema": "leaf.lab-graph.v1", "blocks": [{"id": "block", "registry": {
+        "id": manifest["id"], "version": manifest["version"]["semver"],
+        "code_sha256": manifest["version"]["code_sha256"]}, "settings": settings}],
+        "pipes": [], "outputs": {"result": {"node": "block", "port": port}}},
+        {f'{manifest["id"]}@{manifest["version"]["semver"]}': manifest})
+
+
+@pytest.mark.parametrize("k_min", [0, 4, -1, 100])
+def test_config_settings_digest(k_min):
+    settings = {"k_min": k_min}
+    graph, registry = single_block(CONFIG_MANIFEST, settings)
+    before = deepcopy(graph)
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data == hashlib.sha256(canonical_json(settings).encode("utf-8")).hexdigest()
+    assert value.mode == "scalar" and value.error is None
+    assert graph == before
+
+
+def test_config_digest_inherits_input_metadata(monkeypatch):
+    graph, registry = case("constant-number")
+    registry["constant@1.0.0"]["outputs"]["result"]["nullable"] = False
+    graph["blocks"].append(single_block(CONFIG_MANIFEST, {"k_min": 4})[0]["blocks"][0])
+    registry["kashbot2-config@1.0.0"] = CONFIG_MANIFEST
+    graph["pipes"] = [{"from": {"node": "block-0", "port": "result"}, "to": {"node": "block", "port": "value"}}]
+    graph["outputs"] = {"result": {"node": "block", "port": "config-hash"}}
+    monkeypatch.setattr(evaluator, "evaluate_operation", lambda *args, **kwargs:
+                        runtime_value(7, as_of=10, simulated=True, stale=True, truncated=True))
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data == hashlib.sha256(b'{"k_min":4}').hexdigest()
+    assert (value.mode, value.as_of, value.simulated, value.stale, value.truncated) == ("scalar", 10, True, True, True)
+
+
+def test_config_digest_keeps_output_validation():
+    manifest = deepcopy(CONFIG_MANIFEST)
+    manifest["outputs"]["config-hash"]["schema"] = {"type": "number"}
+    manifest["sample_output"]["config-hash"] = 0
+    graph, registry = single_block(manifest, {"k_min": 4})
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data is None and value.error == "output-refused"
+
+
+@pytest.mark.parametrize("manifest", list(trusted_registry().values()), ids=lambda manifest: manifest["id"])
+def test_placeholder_runs_only_on_bot(manifest):
+    settings = {name: manifest["settings_schema"]["properties"][name].get("minimum", 0)
+                for name in manifest["settings_schema"].get("required", [])}
+    graph, registry = single_block(manifest, settings)
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data is None and value.error == "runs_on_bot"
+
+
+@pytest.mark.parametrize("block_id,kind", [("host-intent", "settings"), ("kashbot2-config", "builtin")])
+def test_other_settings_and_config_builtin_do_not_hash(block_id, kind):
+    manifest = dict(deepcopy(CONFIG_MANIFEST), id=block_id, kind=kind)
+    graph, registry = single_block(manifest, {"k_min": 4})
+    value = evaluate_graph(graph, registry)["outputs"]["result"]
+    assert value.data is None and value.error == "server-execution-refused"
 
 
 @pytest.mark.parametrize("item", CASES, ids=lambda item: item["name"])

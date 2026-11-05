@@ -395,6 +395,7 @@
     "server-kit-stream-superset",
     "server-lab-contract",
     "server-lab-honesty",
+    "server-lab-placement",
     "server-capture-lab-wave3",
     "server-lab-ops",
     "server-lab-evaluate",
@@ -809,6 +810,17 @@
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",
   "always_select_suite_ids": [],
   "suites": {
+    "server-lab-placement": {
+      "mappable": false,
+      "read_paths": [
+        "server/lab_placement.py",
+        "server/lab_evaluate.py",
+        "server/lab_ops.py",
+        "server/tests/test_lab_placement.py",
+        "server/tests/fixtures/lab-placement-cases.v1.json",
+        "contract/fixtures/lab/blocks.json"
+      ]
+    },
     "server-lab-honesty": {
       "mappable": false,
       "read_paths": [
