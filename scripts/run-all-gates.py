@@ -3586,6 +3586,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_device_relay.py"), 56),
         Suite("server-devices-router", "server tests/test_devices_router.py", "pytest", SERVER,
               _py_pytest("tests/test_devices_router.py"), 60),
+        Suite("server-device-tools", "server tests/test_device_tools.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_tools.py"), 52),
         Suite("device-agent-tests", "device-agent tests", "pytest", REPO / "device-agent",
               _py_pytest("tests"), 71),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
