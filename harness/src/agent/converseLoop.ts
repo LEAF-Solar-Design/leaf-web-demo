@@ -197,15 +197,24 @@ export class ConverseLoop {
     jobId: string,
   ): Promise<
     | { ok: true; status: "complete"; result?: unknown }
-    | { ok: false; message: string }
+    | { ok: true; status: "submitted" | "running"; pending: true;
+        observation: "timeout" | "unavailable"; message: string;
+        next_action: { tool: "job_status"; args: { job_id: string } } }
+    | { ok: false; status: "failed" | "invalid"; message: string }
   > {
     const deadline = Date.now() + this.readWaitS * 1000;
+    let lastStatus: "submitted" | "running" = "submitted";
+    const pending = (observation: "timeout" | "unavailable") => ({
+      ok: true as const, status: lastStatus, pending: true as const, observation,
+      message: "The job was accepted. Use job_status with this job_id to follow it; do not dispatch it again.",
+      next_action: { tool: "job_status" as const, args: { job_id: jobId } },
+    });
     while (Date.now() < deadline) {
       let row: Record<string, unknown>;
       try {
         row = await appRun.getJob(tenantId, jobId);
       } catch {
-        return { ok: false, message: "job status was unavailable after dispatch" };
+        return pending("unavailable");
       }
       const status = String(row.status ?? "");
       if (status === "complete") {
@@ -216,14 +225,15 @@ export class ConverseLoop {
         };
       }
       if (status === "failed") {
-        return { ok: false, message: "job failed after dispatch" };
+        return { ok: false, status: "failed", message: "job failed after dispatch" };
       }
       if (!status || !["submitted", "running"].includes(status)) {
-        return { ok: false, message: "job status was invalid after dispatch" };
+        return { ok: false, status: "invalid", message: "job status was invalid after dispatch" };
       }
+      lastStatus = status as "submitted" | "running";
       await new Promise((resolve) => setTimeout(resolve, 250));
     }
-    return { ok: false, message: "job polling timed out after dispatch" };
+    return pending("timeout");
   }
 
   /** Idempotent per (tenant, drawing) — section-1 POST /converse/sessions. */
@@ -1248,11 +1258,11 @@ export class ConverseLoop {
               job_id: fallback.job_id, tool: target, route: "batch_fallback", reason,
             });
             const terminal = await this.pollReadJob(appRun, tenantId, fallback.job_id);
-            if (!terminal.ok) return err(terminal.message);
+            const { ok: observed, ...observation } = terminal;
+            if (!observed) return err(JSON.stringify({ job_id: fallback.job_id, ...observation }));
             return ok(JSON.stringify({
               route: "batch_fallback", reason,
-              job_id: fallback.job_id, status: terminal.status,
-              ...(terminal.result !== undefined ? { result: terminal.result } : {}),
+              job_id: fallback.job_id, ...observation,
             }));
           };
           const instant = validateInstantRoute({
@@ -1329,11 +1339,10 @@ export class ConverseLoop {
         await ctx.emit("job_linked", { job_id: res.job_id, tool: target });
         if (capability === "drawing.read") {
           const terminal = await this.pollReadJob(appRun, tenantId, res.job_id);
-          if (!terminal.ok) return err(terminal.message);
+          const { ok: observed, ...observation } = terminal;
+          if (!observed) return err(JSON.stringify({ job_id: res.job_id, ...observation }));
           return ok(JSON.stringify({
-            job_id: res.job_id,
-            status: terminal.status,
-            ...(terminal.result !== undefined ? { result: terminal.result } : {}),
+            job_id: res.job_id, ...observation,
           }));
         }
         return ok(

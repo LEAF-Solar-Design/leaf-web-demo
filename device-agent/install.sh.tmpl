@@ -1,0 +1,76 @@
+#!/bin/sh
+set -eu
+# Leaf device agent @VERSION@. Publish this installer through a trusted origin.
+umask 077
+origin=${LEAF_SERVER_ORIGIN:?Set LEAF_SERVER_ORIGIN to the HTTPS Studio origin}
+case "$origin" in
+  https://*) ;;
+  *) printf '%s\n' 'An HTTPS Studio origin is required.' >&2; exit 1 ;;
+esac
+origin=${origin%/}
+os=$(uname -s)
+case "$os" in
+  Darwin) agent_home=${LEAF_AGENT_HOME:-"$HOME/Library/Application Support/LeafAgent"} ;;
+  Linux) agent_home=${LEAF_AGENT_HOME:-"${XDG_DATA_HOME:-$HOME/.local/share}/leaf-agent"} ;;
+  *) printf '%s\n' 'Only macOS and Linux are supported.' >&2; exit 1 ;;
+esac
+export LEAF_AGENT_HOME="$agent_home"
+python_bin=
+find_python() {
+  for candidate in /opt/homebrew/bin/python3.13 /opt/homebrew/bin/python3 "$(command -v python3 || :)"; do
+    if [ -n "$candidate" ] && [ -x "$candidate" ] && "$candidate" -c 'import sys; sys.exit(sys.version_info < (3, 11))'; then
+      python_bin=$candidate
+      return 0
+    fi
+  done
+  return 1
+}
+if ! find_python; then
+  if [ "$os" = Darwin ] && command -v brew >/dev/null 2>&1; then
+    brew install python@3.13
+    find_python || { printf '%s\n' 'Python >= 3.11 required.' >&2; exit 1; }
+  else
+    printf '%s\n' 'Install Python >= 3.11, then re-run.' >&2
+    exit 1
+  fi
+fi
+# Validate before using the origin to construct a download URL.
+"$python_bin" - "$origin" <<'PY'
+import sys
+from urllib.parse import urlsplit
+p = urlsplit(sys.argv[1])
+if p.scheme != 'https' or not p.hostname or p.username or p.password or p.path or p.query or p.fragment:
+    raise SystemExit('Expected an HTTPS origin without path or credentials')
+PY
+temp_dir=$(mktemp -d)
+trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
+curl --fail --silent --show-error --proto '=https' --connect-timeout 15 --max-time 180 \
+  "$origin/api/devices/agent/package.tar.gz?sha256=@SHA256@" -o "$temp_dir/package.tar.gz"
+"$python_bin" - "$temp_dir/package.tar.gz" <<'PY'
+import hashlib
+import sys
+from pathlib import Path
+if hashlib.sha256(Path(sys.argv[1]).read_bytes()).hexdigest() != '@SHA256@':
+    raise SystemExit('Package checksum mismatch; installation stopped')
+PY
+mkdir -p "$agent_home"
+"$python_bin" -m venv "$agent_home/venv"
+tar -xzf "$temp_dir/package.tar.gz" -C "$temp_dir"
+"$agent_home/venv/bin/python" -m pip install --disable-pip-version-check --only-binary=:all: \
+  --require-hashes -r "$temp_dir/requirements.lock"
+# Install the verified pure-Python package without an unpinned build backend.
+"$agent_home/venv/bin/python" - "$temp_dir/leaf_agent" <<'PY'
+from pathlib import Path
+import shutil
+import sys
+import sysconfig
+target = Path(sysconfig.get_path('purelib')) / 'leaf_agent'
+if target.exists():
+    shutil.rmtree(target)
+shutil.copytree(sys.argv[1], target)
+PY
+# LEAF_ENROLL_TOKEN is inherited from the caller; never put it in argv or output.
+device_id=$("$agent_home/venv/bin/python" -m leaf_agent enroll --server "$origin")
+unset LEAF_ENROLL_TOKEN
+"$agent_home/venv/bin/python" -m leaf_agent install-service
+printf '%s\n' "$device_id"

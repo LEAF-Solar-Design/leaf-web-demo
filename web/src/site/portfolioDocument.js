@@ -1,4 +1,5 @@
 import { listProjectPhotos } from '../projects/api.js'
+import { DESIGN_FIELDS, validateNodeDesign } from './pageDesign.js'
 
 export const PORTFOLIO_SCHEMA = 'leaf.portfolio.v1'
 const HEX = /^[0-9a-f]{64}$/
@@ -22,7 +23,8 @@ function items(value, low, high) {
 }
 
 export function validatePortfolioDocument(document, importing = false) {
-  exact(document, 'schema name headline introduction about contact resume categories theme', ['galleryLayout'])
+  exact(document, 'schema name headline introduction about contact resume categories theme', ['galleryLayout', ...Object.keys(DESIGN_FIELDS.portfolio)])
+  validateNodeDesign(document, 'portfolio')
   if (Object.hasOwn(document, 'galleryLayout') && !['grid', 'single'].includes(document.galleryLayout)) throw new Error('Unsupported photo layout.')
   if (document.schema !== (importing ? 'leaf.portfolio.import.v1' : PORTFOLIO_SCHEMA) || document.theme !== 'light') throw new Error('Unsupported portfolio schema or theme.')
   for (const [field, low, high] of [['name', 1, 120], ['headline', 1, 240], ['introduction', 0, 2400], ['about', 0, 8000]]) text(document[field], low, high, field)
@@ -32,9 +34,11 @@ export function validatePortfolioDocument(document, importing = false) {
   text(document.contact.location, 0, 160, 'location')
   items(document.resume, 0, 8)
   for (const section of document.resume) {
-    exact(section, 'heading entries'); text(section.heading, 1, 120, 'section heading'); items(section.entries, 0, 20)
+    exact(section, 'heading entries', Object.keys(DESIGN_FIELDS.section)); text(section.heading, 1, 120, 'section heading'); items(section.entries, 0, 20)
+    validateNodeDesign(section, 'section')
     for (const entry of section.entries) {
-      exact(entry, 'title subtitle dates description')
+      exact(entry, 'title subtitle dates description', Object.keys(DESIGN_FIELDS.entry))
+      validateNodeDesign(entry, 'entry')
       for (const [field, high] of [['title', 200], ['subtitle', 240], ['dates', 120], ['description', 2400]]) text(entry[field], 0, high, field)
     }
   }
@@ -42,7 +46,8 @@ export function validatePortfolioDocument(document, importing = false) {
   const slugs = new Set(), references = new Map()
   let total = 0
   for (const category of document.categories) {
-    exact(category, 'slug title description hero images')
+    exact(category, 'slug title description hero images', Object.keys(DESIGN_FIELDS.category))
+    validateNodeDesign(category, 'category')
     if (!fullMatch(/^[a-z][a-z0-9-]{0,47}$/, category.slug) || ['home', 'about', 'resume'].includes(category.slug) || slugs.has(category.slug)) throw new Error('Choose unique category slugs; home, about and resume are reserved.')
     slugs.add(category.slug)
     text(category.title, 1, 120, 'category title'); text(category.description, 0, 1200, 'category description')
@@ -51,7 +56,8 @@ export function validatePortfolioDocument(document, importing = false) {
     if (total > 200 || !Number.isInteger(category.hero) || category.hero < 0 || category.hero >= category.images.length) throw new Error('Choose a hero image and use at most 200 images in total.')
     const seen = new Set()
     for (const image of category.images) {
-      exact(image, importing ? 'source_sha256 title alt' : 'material_id sha256 preview_sha256 title alt')
+      exact(image, importing ? 'source_sha256 title alt' : 'material_id sha256 preview_sha256 title alt', Object.keys(DESIGN_FIELDS.image))
+      validateNodeDesign(image, 'image')
       if (importing) {
         if (!fullMatch(HEX, image.source_sha256)) throw new Error('Invalid source photo digest.')
       } else {
@@ -99,7 +105,8 @@ export async function importPortfolio(file, projectId, options) {
   for (const category of document.categories) category.images = category.images.map(image => {
     const matches = photos.filter(photo => photo.sha256 === image.source_sha256)
     if (matches.length !== 1) { problems.add(`${matches.length ? 'Ambiguous' : 'Missing'} photo ${image.source_sha256}. ${matches.length ? 'Keep exactly one matching upload.' : 'Upload the original photo to this project, then retry.'}`); return image }
-    return { ...photoReference(matches[0]), title: image.title, alt: image.alt }
+    return { ...photoReference(matches[0]), title: image.title, alt: image.alt,
+      ...(image.display ? { display: image.display } : {}), ...(image.captionStyle ? { captionStyle: image.captionStyle } : {}) }
   })
   if (problems.size) throw new Error([...problems].join('\n'))
   document.schema = PORTFOLIO_SCHEMA

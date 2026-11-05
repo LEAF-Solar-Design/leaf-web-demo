@@ -1,9 +1,14 @@
 import React, { useState } from 'react'
-import { cleanup, fireEvent, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen, within } from '@testing-library/react'
+import { readFileSync } from 'node:fs'
+import { runInNewContext } from 'node:vm'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import PortfolioEditor, { PortfolioPreview } from './PortfolioEditor.jsx'
 import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
 import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
+import { cloneDocument, resetDesign, selectionIdentity, setOverride } from './portfolioEdits.js'
+import { appearanceStyle, containerStyle, navigationOrder, photoStyle, photoSpanStyle, textStyle } from './pageDesign.js'
+import ElementInspector, { designElements } from './ElementInspector.jsx'
 
 vi.mock('../auth.js', () => ({ subscribeBeforeLogout: () => () => {}, subscribeTokenStored: () => () => {} }))
 vi.mock('../auth/activeScope.js', () => ({ readActiveScope: () => null, subscribeActiveScope: () => () => {} }))
@@ -33,6 +38,159 @@ beforeEach(() => {
   listProjectPhotos.mockResolvedValue({ materials: photos })
 })
 afterEach(cleanup)
+
+describe('ENV1 contextual editing and projections', () => {
+  it.each([
+    [['layout'], { gap: -1 }], [['layout'], { maxWidth: 1801 }], [['layout'], { padding: false }], [['layout'], { imageFit: 'cover' }],
+    [['images', 0, 'display'], { focal: 'north' }], [['images', 0, 'display'], { span: 3 }], [['images', 0, 'display'], { hidden: false }],
+    [['images', 0, 'captionStyle'], { lineHeight: NaN }], [['images', 0, 'captionStyle'], { letterSpacing: -2 }], [['images', 0, 'captionStyle'], { size: 97 }],
+  ])('rejects malformed nested design at %j', (path, invalid) => {
+    const value = fixture()
+    let node = value.categories[0]
+    for (const key of path.slice(0, -1)) node = node[key]
+    node[path.at(-1)] = invalid
+    expect(() => validatePortfolioDocument(value)).toThrow()
+  })
+  it('evaluates exported web design functions with the same precedence and dimensions as the browser', () => {
+    const source = readFileSync(`${process.cwd()}/../platform/page_design.py`, 'utf8')
+    const code = source.match(/DESIGN_JS = """([\s\S]*?)"""/)[1].replaceAll('export ', '')
+    const portable = runInNewContext(code + ';({textStyle,containerStyle,photoStyle,photoSpanStyle,appearanceStyle,navigationOrder,galleryStyle})')
+    const text = { font: 'mono', size: 36, weight: 'bold', color: '#AbCdEf', align: 'right', lineHeight: 2.2, letterSpacing: 4, italic: true, underline: true, hidden: true }
+    const box = { align: 'center', columns: 4, mobileColumns: 2, gap: 0, padding: 10, maxWidth: 700, background: '#123456', radius: 12, borderWidth: 2, borderColor: '#ABCDEF', shadow: 'strong' }
+    const root = { font: 'classic', scale: 'large', headingWeight: 'bold', spacing: 'airy', width: 'wide', columns: 3, mobileColumns: 2, gap: 7, padding: 9, maxWidth: 900, palette: { background: '#123456', text: '#234567', muted: '#345678', accent: '#456789' }, imageFit: 'cover', aspect: 'square', focal: 'top-left' }
+    const photo = { fit: 'contain', aspect: 'portrait', focal: 'bottom-right', radius: 4, span: 2 }
+    for (const [name, args, browser] of [
+      ['textStyle', [text], textStyle], ['containerStyle', [box], containerStyle],
+      ['photoStyle', [photo, root], photoStyle], ['photoStyle', [{}, root], photoStyle],
+      ['appearanceStyle', [root], appearanceStyle], ['navigationOrder', [{ order: ['resume'] }], navigationOrder],
+      ['photoSpanStyle', [photo, { appearance: root }, { layout: box }], photoSpanStyle],
+    ]) expect(JSON.parse(JSON.stringify(portable[name](...args)))).toEqual(JSON.parse(JSON.stringify(browser(...args))))
+    expect(portable.galleryStyle({ galleryLayout: 'single' }, {} )['--design-columns']).toBe(1)
+    expect(portable.galleryStyle({ galleryLayout: 'single', appearance: root }, { layout: box })).toMatchObject({ '--design-columns': 4, '--design-mobile-columns': 2, gap: 0 })
+    expect(photoStyle({}, root)).toMatchObject({ objectFit: 'cover', aspectRatio: '1', objectPosition: 'top left' })
+    expect(photoSpanStyle(photo, { galleryLayout: 'single' }, {})).toEqual({ gridColumn: 'span 1', '--design-mobile-span': 1 })
+  })
+
+  it('reveals a hidden gallery from outline, edits its caption in place and leaves presentation flags intact', () => {
+    const original = fixture()
+    original.categories[0].hidden = true
+    original.categories[0].layout = { hidden: true }
+    original.categories[0].images[0].display = { hidden: true }
+    function Studio() {
+      const [value, change] = useState(original), [selected, select] = useState(null)
+      return <><ElementInspector document={value} selected={selected} onSelect={select} onChange={change} />
+        <PortfolioPreview document={value} projectId={PROJECT} selectedElement={selected} onSelectElement={select} onInlineChange={change} />
+        <output data-testid="draft">{JSON.stringify(value)}</output></>
+    }
+    const { container } = render(<Studio />)
+    const image = original.categories[0].images[0]
+    fireEvent.change(screen.getByLabelText('Elements / Outline'), { target: { value: `${selectionIdentity(image)}:captionStyle` } })
+    const caption = container.querySelector('.portfolio textarea[aria-label="Photo caption"]')
+    expect(caption).toBeTruthy()
+    expect(caption.closest('section').style.display).not.toBe('none')
+    fireEvent.focus(caption)
+    fireEvent.change(caption, { target: { value: 'Inline caption' } })
+    expect(JSON.parse(screen.getByTestId('draft').textContent).categories[0].images[0].title).toBe('Inline caption')
+    fireEvent.keyDown(caption, { key: 'Escape' })
+    const actual = JSON.parse(screen.getByTestId('draft').textContent)
+    expect(actual.categories[0].images[0].title).toBe('Cake')
+    expect(actual.categories[0].hidden).toBe(true)
+    expect(actual.categories[0].images[0].display.hidden).toBe(true)
+    expect(container.querySelector('button textarea, a textarea, button button')).toBeNull()
+  })
+
+  it('keeps the selected resume entry after reorder and refuses to retarget a deleted identity', () => {
+    const value = fixture(), entry = value.resume[0].entries[0]
+    value.resume[0].entries.push({ title: 'Other', subtitle: '', dates: '', description: '' })
+    const selected = `${selectionIdentity(entry)}:textStyles.title`, change = vi.fn()
+    const { rerender } = render(<ElementInspector document={value} selected={selected} onSelect={() => {}} onChange={change} />)
+    const reordered = cloneDocument(value)
+    reordered.resume[0].entries.reverse()
+    rerender(<ElementInspector document={reordered} selected={selected} onSelect={() => {}} onChange={change} />)
+    fireEvent.change(screen.getByLabelText('Text size'), { target: { value: '42' } })
+    expect(change.mock.lastCall[0].resume[0].entries[1].textStyles.title.size).toBe(42)
+    expect(change.mock.lastCall[0].resume[0].entries[0].textStyles).toBeUndefined()
+    reordered.resume[0].entries.pop()
+    rerender(<ElementInspector document={reordered} selected={selected} onSelect={() => {}} onChange={change} />)
+    expect(screen.queryByLabelText('Text size')).toBeNull()
+    expect(screen.getByText('Selected element was removed. Choose an element.')).toBeTruthy()
+  })
+
+  it('provides all node families in outline and keeps individual text alignment on a block target', () => {
+    const value = fixture()
+    const rows = designElements(value)
+    expect(rows.map(row => row.label)).toEqual(expect.arrayContaining(['Page appearance', 'Navigation', 'About Heading', 'Contact Heading', 'Resume Heading',
+      'Gallery: Cakes', 'Photo: Cake photograph', 'Alt text: Cake photograph', 'Resume section: Experience', 'Resume entry: Chef']))
+    value.textStyles = { headline: { align: 'right', size: 40, color: '#123456' } }
+    const { container } = render(<PortfolioPreview document={value} projectId={PROJECT} />)
+    const headline = within(container).getByText('Selected pastry')
+    expect(headline.style.display).toBe('block')
+    expect(headline.style.textAlign).toBe('right')
+    expect(headline.style.fontSize).toBe('40px')
+  })
+})
+
+
+describe('optional ENV1 design data', () => {
+  it('retains every optional node family, accepts all-hidden presentation and resets without changing content', () => {
+    const legacy = fixture(), value = fixture()
+    value.appearance = { font: 'mono', columns: 4, mobileColumns: 2, palette: { background: '#AbCdEF' }, maxWidth: 720 }
+    value.textStyles = { headline: { size: 96, weight: 'bold', lineHeight: 2.5, letterSpacing: -1, italic: true, underline: true } }
+    value.labels = { aboutHeading: 'About me', contactHeading: 'Say hello', resumeHeading: 'Experience', viewerClose: 'Back' }
+    value.nav = { order: ['resume', 'home'], hideHome: true, hidden: true, appearance: { color: '#ABCDEF' }, layout: 'column' }
+    value.categories[0].hidden = true
+    value.categories[0].layout = { columns: 1, gap: 0, radius: 64, borderWidth: 8, borderColor: '#000000', shadow: 'strong', hidden: true }
+    value.categories[0].navLabel = 'Bakes'
+    value.categories[0].textStyles = { navigation: { color: '#abcdef' } }
+    value.categories[0].images[0].display = { fit: 'cover', aspect: 'portrait', focal: 'bottom-right', span: 2, hidden: true }
+    value.categories[0].images[0].captionStyle = { align: 'right' }
+    value.resume[0].headingStyle = { font: 'serif' }
+    value.resume[0].layout = { hidden: true }
+    value.resume[0].entries[0].layout = { padding: 96 }
+    value.resume[0].entries[0].textStyles = { dates: { size: 12 } }
+    expect(validatePortfolioDocument(value)).toEqual(value)
+    expect(resetDesign(value)).toEqual(legacy)
+    expect(value.categories[0].hidden).toBe(true)
+    expect(photoStyle(value.categories[0].images[0].display)).toMatchObject({ objectFit: 'cover', objectPosition: 'bottom right', aspectRatio: '3 / 4', display: 'none' })
+    expect(textStyle(value.textStyles.headline)).toMatchObject({ fontSize: 96, fontWeight: 700, lineHeight: 2.5, letterSpacing: -1, fontStyle: 'italic' })
+  })
+
+  it.each([
+    ['appearance', {}], ['appearance', { columns: true }], ['appearance', { columns: 1.5 }],
+    ['appearance', { columns: 5 }], ['appearance', { mobileColumns: 3 }], ['appearance', { palette: {} }],
+    ['appearance', { palette: { text: '#fff' } }], ['appearance', { arbitraryCSS: 'display:none' }],
+    ['textStyles', { headline: {} }], ['textStyles', { headline: { size: null } }],
+    ['textStyles', { headline: { size: false } }], ['textStyles', { headline: { italic: false } }],
+    ['textStyles', { headline: { lineHeight: Infinity } }], ['textStyles', { missing: { size: 12 } }],
+    ['nav', { order: ['home', 'home'] }], ['nav', { order: ['external'] }], ['nav', { appearance: { hidden: true } }],
+    ['labels', { viewerClose: 'https://example.com' }], ['labels', { aboutHeading: null }],
+  ])('rejects malformed %s configuration %j', (field, value) => {
+    expect(() => validatePortfolioDocument({ ...fixture(), [field]: value })).toThrow()
+  })
+
+  it('keeps semantic identity through immutable reorder and prunes reset ancestors', () => {
+    const value = fixture(), entry = value.resume[0].entries[0], identity = selectionIdentity(entry)
+    const configured = setOverride(value, identity, ['textStyles', 'title', 'size'], 36)
+    expect(entry.textStyles).toBeUndefined()
+    const reordered = cloneDocument(configured)
+    reordered.resume[0].entries.unshift({ title: 'Other', subtitle: '', dates: '', description: '' })
+    expect(selectionIdentity(reordered.resume[0].entries[1])).toBe(identity)
+    const reset = setOverride(reordered, identity, ['textStyles', 'title', 'size'], undefined)
+    expect(reset.resume[0].entries[1].textStyles).toBeUndefined()
+    expect(reset.resume[0].entries[0].title).toBe('Other')
+    expect(setOverride(reset, 'stale-identity', ['title'], 'Wrong')).toBe(reset)
+  })
+
+  it('keeps imported display configuration while binding only authorized originals', async () => {
+    const value = importFixture()
+    value.categories[0].images[0].display = { fit: 'cover', focal: 'top-left' }
+    value.categories[0].images[0].captionStyle = { color: '#AbCdEf' }
+    const actual = await importPortfolio({ name: 'portfolio.json', size: 100, text: async () => JSON.stringify(value) }, PROJECT)
+    expect(actual.categories[0].images[0]).toMatchObject({ material_id: photos[0].material_id, sha256: photos[0].sha256,
+      preview_sha256: photos[0].preview_sha256, display: { fit: 'cover', focal: 'top-left' }, captionStyle: { color: '#AbCdEf' } })
+    expect(actual.categories[0].images[0].source_sha256).toBeUndefined()
+  })
+})
 
 describe('persisted portfolio photo layout', () => {
   it('keeps legacy validation bytes unchanged and renders Grid without an initial change', () => {

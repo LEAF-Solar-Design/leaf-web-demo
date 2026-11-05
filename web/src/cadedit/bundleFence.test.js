@@ -1,8 +1,11 @@
-import { execFileSync } from 'node:child_process'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { resolve } from 'node:path'
 import { beforeAll, describe, expect, it } from 'vitest'
 import { bundleGraph } from '../../scripts/bundle-assets.mjs'
 import { nextFenceDirectory, NEXT_FENCE_TIMEOUT } from '../../scripts/next-fence-fixtures.mjs'
+
+const execFileAsync = promisify(execFile)
 
 const SURFACE_MARKERS = ['cad-edit-workbench', 'cad-edit-entity-list']
 // Shared client error maps contain generic reason codes even with CAD off.
@@ -15,9 +18,13 @@ describe('cad_edit build fence', () => {
   beforeAll(async () => {
     const enabled = await nextFenceDirectory('enabled')
     on = bundleGraph(enabled)
-    execFileSync(process.execPath, [resolve('scripts/check_next_worker.mjs'), enabled], { encoding: 'utf8' })
-    console.log(execFileSync(process.execPath, [resolve('scripts/check_bundle_budget.mjs'), '--dist', enabled, '--measure-next'], { encoding: 'utf8' }).trim())
-    off = bundleGraph(await nextFenceDirectory('disabled'))
+    // The two checks are separate processes and the disabled graph is independent of them, so overlap all three.
+    const [, budget] = await Promise.all([
+      execFileAsync(process.execPath, [resolve('scripts/check_next_worker.mjs'), enabled], { encoding: 'utf8' }),
+      execFileAsync(process.execPath, [resolve('scripts/check_bundle_budget.mjs'), '--dist', enabled, '--measure-next'], { encoding: 'utf8' }),
+      (async () => { off = bundleGraph(await nextFenceDirectory('disabled')) })(),
+    ])
+    console.log(budget.stdout.trim())
   }, NEXT_FENCE_TIMEOUT)
   it('ships the editing surface only in the enabled export', () => {
     for (const marker of SURFACE_MARKERS) {

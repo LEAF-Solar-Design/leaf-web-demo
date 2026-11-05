@@ -9,6 +9,17 @@ import unicodedata
 import uuid
 import zipfile
 
+if __package__:
+    from .page_design import FIELDS as DESIGN_FIELDS, validate_node, DESIGN_JS, DESIGN_CSS
+else:
+    import importlib.util
+    from pathlib import Path
+    _design_spec = importlib.util.spec_from_file_location('page_design', Path(__file__).with_name('page_design.py'))
+    _design = importlib.util.module_from_spec(_design_spec)
+    _design_spec.loader.exec_module(_design)
+    DESIGN_FIELDS, validate_node = _design.FIELDS, _design.validate_node
+    DESIGN_JS, DESIGN_CSS = _design.DESIGN_JS, _design.DESIGN_CSS
+
 MAX_DOCUMENT_BYTES = 512 * 1024
 MAX_PREVIEW_BYTES = 64 * 1024 * 1024
 MAX_ARCHIVE_BYTES = 80 * 1024 * 1024
@@ -40,7 +51,8 @@ def items(value, minimum, maximum):
 
 
 def validate_document(document):
-    exact(document, 'schema name headline introduction about contact resume categories theme', ('galleryLayout',))
+    exact(document, 'schema name headline introduction about contact resume categories theme', ('galleryLayout', *DESIGN_FIELDS['portfolio']))
+    validate_node(document, 'portfolio')
     if 'galleryLayout' in document and (type(document['galleryLayout']) is not str or document['galleryLayout'] not in ('grid', 'single')):
         raise ValueError('Unsupported photo layout')
     if document['schema'] != 'leaf.portfolio.v1' or document['theme'] != 'light':
@@ -55,18 +67,21 @@ def validate_document(document):
     text(contact['location'], 0, 160)
     items(document['resume'], 0, 8)
     for section in document['resume']:
-        exact(section, 'heading entries')
+        exact(section, 'heading entries', DESIGN_FIELDS['section'])
+        validate_node(section, 'section')
         text(section['heading'], 1, 120)
         items(section['entries'], 0, 20)
         for entry in section['entries']:
-            exact(entry, 'title subtitle dates description')
+            exact(entry, 'title subtitle dates description', DESIGN_FIELDS['entry'])
+            validate_node(entry, 'entry')
             for key, high in [('title', 200), ('subtitle', 240), ('dates', 120), ('description', 2400)]:
                 text(entry[key], 0, high)
     items(document['categories'], 1, 12)
     slugs, total = set(), 0
     references = {}
     for category in document['categories']:
-        exact(category, 'slug title description hero images')
+        exact(category, 'slug title description hero images', DESIGN_FIELDS['category'])
+        validate_node(category, 'category')
         slug = category['slug']
         if (type(slug) is not str or not re.fullmatch(r'[a-z][a-z0-9-]{0,47}', slug)
                 or slug in slugs or slug in {'about', 'resume', 'home'}):
@@ -80,7 +95,8 @@ def validate_document(document):
             raise ValueError('Invalid hero or more than 200 images')
         seen = set()
         for image in category['images']:
-            exact(image, 'material_id sha256 preview_sha256 title alt')
+            exact(image, 'material_id sha256 preview_sha256 title alt', DESIGN_FIELDS['image'])
+            validate_node(image, 'image')
             mid = image['material_id']
             try:
                 valid = type(mid) is str and str(uuid.UUID(mid)) == mid
@@ -151,6 +167,8 @@ def source_archive(document, revision, previews, package_versions):
         'README.md': b'# Your photo portfolio\n\nRequires Node.js 20.9 or newer. Run `npm install`, `npm run build`, then `npm start`. Keep the generated package-lock.json and use npm ci for subsequent installs.\n\nEdit portfolio.json for literal text and galleries. Local optimized JPEG previews are included; originals remain independently downloadable from the project photo API. No Studio connection, secrets, or external image services are required at runtime. Saving or exporting does not publish. Deploy through your own hosting account when ready.\n\nsource-manifest.json binds the exact revision, canonical document, assets and every other file hash. It is not a build receipt.\n',
         'asset-manifest.json': canonical({mid: {'sha256': image['sha256'], 'preview_sha256': image['preview_sha256'], 'path': f'public/images/{mid}.jpg'} for mid, image in refs.items()}) + b'\n',
     }
+    files.update(_designed_files())
+    files['app/globals.css'] += DESIGN_CSS.encode()
     files.update({f'public/images/{mid}.jpg': data for mid, data in previews.items()})
     manifest = {'schema': 'leaf.portfolio-source.v1', 'revision': revision, 'document_sha256': hashlib.sha256(canonical(page)).hexdigest(), 'files': {path: {'sha256': hashlib.sha256(data).hexdigest(), 'size_bytes': len(data)} for path, data in sorted(files.items())}}
     files['source-manifest.json'] = canonical(manifest) + b'\n'
@@ -168,3 +186,44 @@ def source_archive(document, revision, previews, package_versions):
     if len(result) > MAX_ARCHIVE_BYTES:
         raise ValueError('Portfolio archive exceeds 80 MiB')
     return result
+
+
+def _designed_files():
+    return {
+        'app/design.js': DESIGN_JS.encode(),
+        'app/layout.jsx': b'''import './globals.css';
+import page from '../portfolio.json';
+import {appearanceStyle,containerStyle,textStyle,navigationOrder} from './design';
+export const metadata={title:page.name,description:page.headline};
+export default function Layout({children}){const n=page.nav||{};return <html lang="en"><body><main className="portfolio" style={appearanceStyle(page.appearance)}>{!n.hidden&&<nav aria-label="Portfolio" style={{...containerStyle(n),...textStyle(n.appearance),display:'flex',flexDirection:n.layout}}>{navigationOrder(n).map(group=>group==='home'?!n.hideHome&&<a key={group} href="/" style={textStyle(page.textStyles?.name)}>{n.homeLabel||page.name}</a>:group==='galleries'?page.categories.filter(c=>!c.hidden&&!c.layout?.hidden).map(c=><a key={c.slug} href={'/'+c.slug} style={textStyle(c.textStyles?.navigation)}>{c.navLabel||c.title}</a>):group==='about'?!n.hideAbout&&<a key={group} href="/about">{n.aboutLabel||'About / Contact'}</a>:!n.hideResume&&<a key={group} href="/resume">{n.resumeLabel||'Resume'}</a>)}</nav>}{children}</main></body></html>;}
+''',
+        'app/page.jsx': b'''import page from '../portfolio.json';
+import {textStyle,containerStyle,photoStyle,galleryStyle} from './design';
+export default function Home(){return <><h1 style={textStyle(page.textStyles?.headline)}>{page.headline}</h1><p style={textStyle(page.textStyles?.introduction)}>{page.introduction}</p><div className="portfolio-grid" style={galleryStyle(page)}>{page.categories.filter(c=>!c.hidden&&!c.layout?.hidden).map(c=><a key={c.slug} href={'/'+c.slug} style={containerStyle(c.layout)}>{!c.images[c.hero].display?.hidden&&<img src={'/images/'+c.images[c.hero].material_id+'.jpg'} alt={c.images[c.hero].alt} style={photoStyle(c.images[c.hero].display,page.appearance)}/>}<h2 style={textStyle(c.textStyles?.title)}>{c.title}</h2><p style={textStyle(c.textStyles?.description)}>{c.description}</p></a>)}</div></>;}
+''',
+        'app/[slug]/page.jsx': b'''import page from '../../portfolio.json';
+import Gallery from '../Gallery';
+import {containerStyle,textStyle} from '../design';
+export const dynamicParams=false;
+export function generateStaticParams(){return page.categories.map(c=>({slug:c.slug}));}
+export default async function Category({params}){const {slug}=await params;const c=page.categories.find(c=>c.slug===slug);return <section style={{...containerStyle(c.layout),display:c.hidden?'none':c.layout?.hidden?'none':undefined}}><h1 style={textStyle(c.textStyles?.title)}>{c.title}</h1><p style={textStyle(c.textStyles?.description)}>{c.description}</p><Gallery page={page} category={c}/></section>;}
+''',
+        'app/about/page.jsx': b'''import page from '../../portfolio.json';
+import {textStyle} from '../design';
+export default function About(){const s=page.textStyles||{};return <><h1 style={textStyle(s.aboutHeading)}>{page.labels?.aboutHeading??('About '+page.name)}</h1><p style={textStyle(s.about)}>{page.about}</p><h2 style={textStyle(s.contactHeading)}>{page.labels?.contactHeading??'Contact'}</h2><p style={textStyle(s.location)}>{page.contact.location}</p>{page.contact.email&&<a style={textStyle(s.email)} href={'mailto:'+page.contact.email}>{page.contact.email}</a>}</>;}
+''',
+        'app/resume/page.jsx': b'''import page from '../../portfolio.json';
+import {containerStyle,textStyle} from '../design';
+export default function Resume(){return <><h1 style={textStyle(page.textStyles?.resumeHeading)}>{page.labels?.resumeHeading??'Resume'}</h1>{page.resume.map((s,i)=><section key={i} className={s.layout && (s.layout.columns || s.layout.mobileColumns || s.layout.gap !== undefined) ? "design-container" : undefined} style={containerStyle(s.layout)}><h2 style={textStyle(s.headingStyle)}>{s.heading}</h2>{s.entries.map((e,j)=><article key={j} className={e.layout && (e.layout.columns || e.layout.mobileColumns || e.layout.gap !== undefined) ? "design-container" : undefined} style={containerStyle(e.layout)}><h3 style={textStyle(e.textStyles?.title)}>{e.title}</h3><p style={textStyle(e.textStyles?.subtitle)}>{e.subtitle}</p><p style={textStyle(e.textStyles?.dates)}>{e.dates}</p><p style={textStyle(e.textStyles?.description)}>{e.description}</p></article>)}</section>)}</>;}
+''',
+        'app/Gallery.jsx': b'''"use client";
+import {useEffect,useRef,useState} from 'react';
+import {photoStyle,photoSpanStyle,textStyle,galleryStyle} from './design';
+export default function Gallery({page,category}){
+ const [selected,setSelected]=useState(null),trigger=useRef(null),closeButton=useRef(null);
+ const close=()=>{setSelected(null);trigger.current?.focus();};
+ useEffect(()=>{if(!selected)return;closeButton.current?.focus();const key=e=>{if(e.key==='Escape')close();if(e.key==='Tab'){e.preventDefault();closeButton.current?.focus();}};window.addEventListener('keydown',key);return()=>window.removeEventListener('keydown',key);},[selected]);
+ return <><div className="portfolio-grid" data-gallery-layout={page.galleryLayout||'grid'} style={galleryStyle(page,category)}>{category.images.filter(i=>!i.display?.hidden).map(image=><figure key={image.material_id} style={photoSpanStyle(image.display,page,category)}><button aria-label={'View '+image.alt} onClick={e=>{trigger.current=e.currentTarget;setSelected(image);}}><img loading="lazy" src={'/images/'+image.material_id+'.jpg'} alt={image.alt} style={photoStyle(image.display,page.appearance)}/><span style={textStyle(image.captionStyle)}>{image.title}</span></button></figure>)}</div>{selected&&<div className="portfolio-viewer" role="dialog" aria-modal="true" aria-label={selected.alt}><button ref={closeButton} onClick={close}>{page.labels?.viewerClose||'Close image'}</button><img src={'/images/'+selected.material_id+'.jpg'} alt={selected.alt} style={photoStyle(selected.display,page.appearance)}/><p style={textStyle(selected.captionStyle)}>{selected.title}</p></div>}</>;
+}
+''',
+    }

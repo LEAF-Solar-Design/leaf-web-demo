@@ -42,8 +42,9 @@ def test_all_mode_lines_unchanged():
     original = subprocess.run(
         ["git", "show", f"{base}:.codebuild/ci.sh"], cwd=ROOT,
         check=True, capture_output=True, text=True,
-    ).stdout.splitlines()
-    remaining = iter(ci_script().splitlines())
+    ).stdout.replace('--retry 1 --fail-fast ', '--retry 1 ').splitlines()
+    # Allow the fail-fast gate flag while preserving the other baseline lines.
+    remaining = iter(ci_script().replace('--retry 1 --fail-fast ', '--retry 1 ').splitlines())
     for line in original:
         assert any(candidate == line for candidate in remaining), (
             "Original line missing or reordered: " + line

@@ -103,6 +103,7 @@ import ClaudeAccountPanel from './components/ClaudeAccountPanel.jsx'
 import AddonsPanel from './components/AddonsPanel.jsx'
 import CostTransparencyPanel from './components/CostTransparencyPanel.jsx'
 import useTenantMcpRegistry from './useTenantMcpRegistry.js'
+import useDeviceRegistry from './useDeviceRegistry.js'
 import DemoBanner from './components/DemoBanner.jsx'
 import { AccountSignOut } from './components/ProductSurfaceTabs.jsx'
 import { deriveWorkspaceProjectState } from './site/workspaceProjectState.js'
@@ -822,6 +823,18 @@ export default function App() {
   // review #428 round-1 blocker 3); step 0 is emitted as reached so per-step
   // dropout starts at the first step.
   const tourStepRef = useRef(0)
+  const tourVersionStartRef = useRef(null)
+  const onTourVersionSeated = useCallback(({ drawingState: seated }) => {
+    const start = tourVersionStartRef.current
+    if (mock && tourOn && TOUR_STEPS[tourStepRef.current]?.id === 'version'
+      && start && start.seq === cannedSeq.current
+      && start.drawingId != null && seated?.drawing_id === start.drawingId
+      && start.head != null && Number.isFinite(Number(start.head))
+      && Number.isFinite(Number(seated.head)) && Number(seated.head) > Number(start.head)
+      && Number(seated.version) === Number(seated.head)) {
+      setTourLanded(true)
+    }
+  }, [mock, tourOn])
   const tourStartedRef = useRef(false)
   useEffect(() => {
     if (tourOn && mock && !tourStartedRef.current) {
@@ -970,6 +983,7 @@ export default function App() {
     onApplyIntake: applySelectedDrawingIntake,
     onResetSelection: resetDrawingSelection,
     onError: reportDrawingError,
+    onVersionEvent: onTourVersionSeated,
   })
   const {
     intake,
@@ -1072,6 +1086,8 @@ export default function App() {
     closeProject: onCloseProject,
     selectCanonicalVersion,
   } = workspaceController
+  const deviceRegistry = useDeviceRegistry({ mock: mock || knownGuest, projectId: openProjectId })
+  const [linkDeviceOpen, setLinkDeviceOpen] = useState(false)
   useDrawingScopeReset(openProjectId)
   useLayoutEffect(() => {
     // A project or drawing change retires any queued product-tab switch.
@@ -3310,6 +3326,9 @@ export default function App() {
     // in-flight beat rather than interleave two typing loops.
     const seq = (cannedSeq.current += 1)
     setTourLanded(false)
+    tourVersionStartRef.current = step?.action === 'version'
+      ? { seq, drawingId: drawingState?.drawing_id, head: drawingState?.head }
+      : null
     // self-type into the real bar so the audience sees the sentence being written
     runIntentStateRef.current = dismissRunIntent(runIntentStateRef.current)
     // A leftover route at a tour beat's start was superseded, not user-dismissed.
@@ -3344,9 +3363,9 @@ export default function App() {
       if (cannedSeq.current === seq) setRunErr(humanizeError(e))
     } finally {
       // AuthorPanel reports staging only after its card or failure is rendered.
-      if (cannedSeq.current === seq && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
+      if (cannedSeq.current === seq && step?.action !== 'version' && !(step?.action === 'author' && r?.lane === 'build')) setTourLanded(true)
     }
-  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools])
+  }, [dismissRoute, onDispatch, onPromptChange, onRequestCatalogRun, onConfirmCatalogRun, setRunErr, tools, drawingState])
 
   const onTourStepChange = useCallback((index) => {
     tourStepRef.current = index
@@ -4889,6 +4908,27 @@ export default function App() {
         onRefresh: mcpRegistry.refresh,
         onHealth: mcpRegistry.health,
         onUnlink: mcpRegistry.unlink,
+      }}
+      devices={!mock && (knownGuest || !openProjectId) ? null : {
+        mock,
+        projectId: openProjectId,
+        devices: deviceRegistry.devices,
+        loading: deviceRegistry.loading,
+        busy: deviceRegistry.busy,
+        error: deviceRegistry.error,
+        catalog: deviceRegistry.catalog,
+        catalogLoading: deviceRegistry.catalogLoading,
+        catalogError: deviceRegistry.catalogError,
+        onLoadCatalog: deviceRegistry.loadCatalog,
+        open: linkDeviceOpen,
+        onToggle: setLinkDeviceOpen,
+        onEnroll: deviceRegistry.enroll,
+        onRefresh: deviceRegistry.refresh,
+        onCommand: deviceRegistry.command,
+        onGetCommand: deviceRegistry.getCommand,
+        onAudit: deviceRegistry.audit,
+        onRevoke: deviceRegistry.revoke,
+        onRelayToken: deviceRegistry.relayToken,
       }}
     >
     <div className="app" ref={projectLayout.appRef} data-project-workspace={!studioShell && projectLayout.active ? 'results' : undefined} data-project-tools={projectLayout.toolsOpen ? 'open' : 'closed'} data-project-activity={projectLayout.activityOpen ? 'open' : 'closed'} data-studio-transition={studioGround && phase !== 'idle' ? phase : undefined} data-drawer={studioShell && !browserAssetActive ? studioDrawer : undefined} data-studio-shell={studioShell ? 'cockpit' : undefined} data-surface={studioGround ? activeSurface : undefined} data-start-open={studioGround && startOpen ? 'true' : undefined} data-tour="shell"

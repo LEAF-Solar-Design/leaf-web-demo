@@ -1,4 +1,4 @@
-import React from 'react'
+import React, { useState } from 'react'
 import { Blob as NativeBlob } from 'node:buffer'
 import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -8,6 +8,8 @@ import { downloadProjectPageSource, loadProjectPage, saveProjectPage, submitProj
 import { listProjectPhotos, readProjectPhotoPreview } from '../projects/api.js'
 import { emptyPortfolio, importPortfolio, validatePortfolioDocument } from './portfolioDocument.js'
 import { registerEscapeOwner } from '../lib/useEscapeOwner.js'
+import ElementInspector from './ElementInspector.jsx'
+import CanvasToolbar from './CanvasToolbar.jsx'
 
 const auth = vi.hoisted(() => ({ logout: null, token: null, scope: 'account-a', unauthorized: vi.fn(), logouts: new Set(), tokens: new Set() }))
 vi.mock('../auth.js', () => ({
@@ -85,6 +87,120 @@ const ask = () => {
 
 const incoming = (result = proposalResult()) => ({ result, accountScope: 'account-a', activeScope: 'account-a',
   isCurrent: () => true, consumed: vi.fn() })
+
+
+describe('environment controls share the editor owner', () => {
+  function Studio() {
+    const [editor, setEditor] = useState(null), [style, setStyle] = useState('environment'), [selected, select] = useState(null)
+    return <>
+      <button onClick={() => setStyle(style === 'environment' ? 'sidebar' : 'environment')}>Switch editing style</button>
+      <div hidden={style !== 'sidebar'}><ProjectPageEditor projectId={PROJECT} accountScope="account-a" onSession={setEditor} selectedElement={selected} onSelectElement={select} /></div>
+      {editor && style === 'environment' && <section aria-label="Environment">
+        <button onClick={editor.session.open}>Open saved page</button>
+        <CanvasToolbar editor={editor} editing onEditing={() => {}} onOutline={() => {}} onSettings={() => {}} />
+        {editor.document && <><PagePreview document={editor.document} projectId={PROJECT} onInlineChange={editor.session.change} onSelectElement={select} selectedElement={selected} />
+          <ElementInspector document={editor.document} selected={selected} onSelect={select} onChange={editor.session.change} /></>}
+      </section>}
+    </>
+  }
+
+  it('edits theme/alignment and inline text, switches styles without loading, then saves and undoes the exact draft', async () => {
+    render(<Studio />)
+    fireEvent.click(screen.getByRole('button', { name: 'Open saved page' }))
+    let env = within(await screen.findByRole('region', { name: 'Environment' }))
+    await env.findByLabelText('Page theme')
+    fireEvent.change(env.getByLabelText('Page theme'), { target: { value: 'dark' } })
+    fireEvent.change(env.getByLabelText('Page alignment'), { target: { value: 'left' } })
+    fireEvent.change(env.getByLabelText('headline'), { target: { value: 'Changed in place' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Switch editing style' }))
+    expect(screen.getByLabelText('Headline', { selector: 'input' }).value).toBe('Changed in place')
+    expect(screen.getByLabelText('Theme').value).toBe('dark')
+    expect(screen.getByLabelText('Alignment').value).toBe('left')
+    fireEvent.click(screen.getByRole('button', { name: 'Switch editing style' }))
+    env = within(screen.getByRole('region', { name: 'Environment' }))
+    expect(env.getByLabelText('headline').value).toBe('Changed in place')
+    fireEvent.change(env.getByLabelText('headline'), { target: { value: 'Immediate save' } })
+    fireEvent.click(env.getByRole('button', { name: 'Save page' }))
+    await waitFor(() => expect(saveProjectPage).toHaveBeenCalledTimes(1))
+    expect(saveProjectPage.mock.lastCall[1]).toMatchObject({ headline: 'Immediate save', theme: 'dark', alignment: 'left' })
+    expect(saveProjectPage.mock.lastCall[2]).toBe(1)
+    await waitFor(() => expect(env.getByRole('button', { name: 'Undo' }).disabled).toBe(false))
+    fireEvent.click(env.getByRole('button', { name: 'Undo' }))
+    expect(env.getByLabelText('headline').value).toBe(document.headline)
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(submitProjectNativePreview).not.toHaveBeenCalled()
+  })
+
+  it('traps a narrow inspector, closes on Escape and restores its trigger', () => {
+    vi.stubGlobal('matchMedia', () => ({ matches: true }))
+    const rects = vi.spyOn(HTMLElement.prototype, 'getClientRects').mockReturnValue([{}])
+    function Sheet() {
+      const [open, setOpen] = useState(false)
+      return <><button onClick={() => setOpen(true)}>Properties trigger</button>{open && <ElementInspector document={document} onSelect={() => {}} onChange={() => {}} onClose={() => setOpen(false)} />}</>
+    }
+    try {
+      render(<Sheet />)
+      const trigger = screen.getByRole('button', { name: 'Properties trigger' })
+      trigger.focus(); fireEvent.click(trigger)
+      const first = screen.getByRole('button', { name: 'Close properties' })
+      expect(window.document.activeElement).toBe(first)
+      fireEvent.keyDown(first, { key: 'Tab', shiftKey: true })
+      expect(window.document.activeElement).toBe(screen.getByRole('button', { name: 'Reset all design' }))
+      fireEvent.keyDown(window.document.activeElement, { key: 'Tab' })
+      expect(window.document.activeElement).toBe(first)
+      fireEvent.keyDown(window, { key: 'Escape' })
+      expect(screen.queryByRole('button', { name: 'Close properties' })).toBeNull()
+      expect(window.document.activeElement).toBe(trigger)
+    } finally { rects.mockRestore(); vi.unstubAllGlobals() }
+  })
+})
+
+describe('shared editor session history', () => {
+  it('publishes before open, saves an immediate edit, and keeps history across save', async () => {
+    let current
+    setup({ onSession: value => { current = value } })
+    expect(current.document).toBeNull()
+    const session = current.session
+    await act(async () => { await session.open() })
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+    expect(current.session).toBe(session)
+    await act(async () => {
+      session.change({ ...current.document, headline: 'Immediate edit' }, { coalesceKey: 'headline' })
+      await session.save()
+    })
+    expect(saveProjectPage.mock.lastCall[1].headline).toBe('Immediate edit')
+    expect(saveProjectPage.mock.lastCall[2]).toBe(1)
+    expect(current.state.dirty).toBe(false)
+    act(() => session.undo())
+    expect(current.document.headline).toBe(document.headline)
+    expect(current.state.dirty).toBe(true)
+    act(() => session.redo())
+    expect(current.document.headline).toBe('Immediate edit')
+    expect(current.state.dirty).toBe(false)
+  })
+
+  it('coalesces one field, clears redo on a new edit, makes discard undoable and fences stale actions', async () => {
+    let current
+    setup({ onSession: value => { current = value } })
+    const session = current.session
+    await act(async () => { await session.open() })
+    act(() => session.change({ ...current.document, headline: 'One' }, { coalesceKey: 'headline' }))
+    act(() => session.change({ ...current.document, headline: 'Two' }, { coalesceKey: 'headline' }))
+    act(() => session.undo())
+    expect(current.document.headline).toBe(document.headline)
+    act(() => session.change({ ...current.document, description: 'Different field' }))
+    expect(current.state.canRedo).toBe(false)
+    act(() => session.discard())
+    expect(current.state.dirty).toBe(false)
+    act(() => session.undo())
+    expect(current.document.description).toBe('Different field')
+    act(() => auth.logout())
+    act(() => { session.change(document); session.undo(); session.redo(); session.save(); session.open() })
+    expect(current.document).toBeNull()
+    expect(saveProjectPage).not.toHaveBeenCalled()
+    expect(loadProjectPage).toHaveBeenCalledTimes(1)
+  })
+})
 
 describe('conversation proposal intake', () => {
   it('loads an unopened saved portfolio, then reviews and uses only a private draft', async () => {

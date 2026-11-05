@@ -17,10 +17,11 @@ export function productionBundleCacheKey(flags, engineUnavailableReason = null) 
 }
 
 // Reuse accepts a prior marker's builtAt; legacy markers have no known build time.
-export function productionBundleMarker({ sourceMtime, cacheKey, flags, engine_unavailable_reason, provenance, at, builtAt = null }) {
+export function productionBundleMarker({ sourceMtime, cacheKey, flags, engine_unavailable_reason, engine = null, provenance, buildProvenance = null, at, builtAt = null }) {
   return {
     sourceMtime, apiBase: '', mock: false, authLive: false, flags, engine_unavailable_reason, cacheKey,
-    provenance, builtAt: provenance === 'built' ? at : builtAt, lastUsedAt: at,
+    engine, provenance, buildProvenance: provenance === 'built' ? 'built' : buildProvenance,
+    builtAt: provenance === 'built' ? at : builtAt, lastUsedAt: at,
   }
 }
 

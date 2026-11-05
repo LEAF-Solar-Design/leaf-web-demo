@@ -264,6 +264,30 @@ export function phaseLabel(phase) {
 // back); see the first-run coach gate below.
 let sessionWasActiveThisPageLoad = false
 
+function AccountDetailsRefresh() {
+  const [busy, setBusy] = useState(false)
+  const [status, setStatus] = useState('')
+  const refresh = async () => {
+    if (busy) return
+    setBusy(true)
+    setStatus('')
+    try {
+      const response = await fetch(`${config.apiBase}/api/health`, { method: 'GET' })
+      if (!response.ok) throw new Error('Health unavailable')
+      await response.json()
+      setStatus('Up to date')
+    } catch {
+      setStatus('Refresh unavailable. Try again.')
+    } finally {
+      setBusy(false)
+    }
+  }
+  return <>
+    <button type="button" className="chip-act drawer-act" disabled={busy} onClick={refresh}>Refresh</button>
+    <span role="status">{busy ? 'Checking health…' : status}</span>
+  </>
+}
+
 export default function ToolCast({
   active,
   drawingId,
@@ -1551,6 +1575,7 @@ export default function ToolCast({
       `organization ${sessionOrg || workspace.orgId || 'unknown'}`,
       `tier ${sessionTier || platform.entitlements?.tier || 'unknown'}`,
       `authentication ${sessionAuthRequired ? 'sign in required' : 'active'}`,
+      <AccountDetailsRefresh key="health-refresh" />,
     ],
     action: isSignedIn() ? { label: 'Sign out', onClick: platformSession.actions.signOut } : null,
     foot: 'Platform identity and Claude account credit are separate.',
@@ -2488,13 +2513,6 @@ export default function ToolCast({
               onLink={platform.actions.linkClaude}
               onUnlink={platform.actions.unlinkClaude}
             />
-            <button
-              type="button"
-              className="chip-act tc-account-details"
-              onClick={openAccountDetails}
-            >
-              Account details
-            </button>
             {/* Standardization slice 8c: the Link-a-service drawer sits in
                 the rail column (aside.tc-rail-r), beside the account trigger
                 it is modeled on, never inside the drawing window's
@@ -2524,7 +2542,9 @@ export default function ToolCast({
           </div>
         )}
         </div>
-        <div className="tc-rail-foot"><span className="tc-link muted">{PROOF_MODE ? (phase === 'complete' || phase === 'undone' ? 'Cat oracle, sitting-v1' : 'Contract proof, no APS claim') : 'Tool results appear here'}</span></div>
+        <div className="tc-rail-foot"><span className="tc-link muted">{PROOF_MODE ? (phase === 'complete' || phase === 'undone' ? 'Cat oracle, sitting-v1' : 'Contract proof, no APS claim') : 'Tool results appear here'}</span>
+          <button type="button" className="chip-act tc-account-details" onClick={openAccountDetails}>Account details</button>
+        </div>
       </aside>
 
       {/* Slice 4a: the command well is the frame's `commandBar` render

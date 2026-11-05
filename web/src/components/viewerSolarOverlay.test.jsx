@@ -199,6 +199,13 @@ function reaches(group, target) {
 }
 const attached = () => gl.layers.filter(layer => reaches(layer.group, scene()))
 const vertices = layer => layer.group.children.map(mesh => mesh.geometry.attributes.position.count)
+function worldVertices(mesh) {
+  mesh.updateWorldMatrix(true, false)
+  const positions = mesh.geometry.attributes.position
+  return Array.from({ length: positions.count }, (_, index) =>
+    new THREE.Vector3().fromBufferAttribute(positions, index).applyMatrix4(mesh.matrixWorld).toArray()
+  ).flat()
+}
 function disposalSpies(layer) {
   return layer.group.children.flatMap(mesh => [
     vi.spyOn(mesh.geometry, 'dispose'), vi.spyOn(mesh.material, 'dispose'),
@@ -225,7 +232,7 @@ describe('stored Solar graph in real Viewer', () => {
     view.update({ solarOverlay: overlayOf(next) })
     expect(attached()).toHaveLength(1)
     expect(vertices(attached()[0])).toEqual([2])
-    expect(Array.from(attached()[0].group.children[0].geometry.attributes.position.array))
+    expect(worldVertices(attached()[0].group.children[0]))
       .toEqual([1, -1, 1.5, .5, -.5, 1.5])
   })
 

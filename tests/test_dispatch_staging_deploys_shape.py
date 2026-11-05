@@ -97,6 +97,9 @@ def check_relay_concurrency(text: str) -> None:
         f"{jobs['dispatch'].get('if')!r}")
     assert "(" + GATE + ")" in block["group"], (
         "the group predicate must be the job gate verbatim")
+    assert jobs["dispatch"]["concurrency"] == {
+        "group": "dispatch-staging-fleet", "cancel-in-progress": False,
+    }, "scheduled ticks must not share the dispatch job's pending slot"
 
     # The trigger is frozen too: the predicate reads workflow_run fields, so a
     # broader trigger would evaluate it against a payload that has none.
@@ -173,7 +176,11 @@ def test_relay_fleet_executor_is_gated_and_isolated():
     job = wf["jobs"]["dispatch"]
     assert wf["env"]["RELAY_FLEET_CONVERGENCE_ENABLED"] == "true"
     assert job["timeout-minutes"] == 95 + 80 + 15 == 190
-    assert job["concurrency"] == {"group": "reconcile-staging-fleet", "cancel-in-progress": False}
+    assert job["concurrency"] == {"group": "dispatch-staging-fleet", "cancel-in-progress": False}
+    reconciler = _load((RELAY.parent / "reconcile-staging-fleet.yml").read_text(encoding="utf-8"))
+    assert reconciler["concurrency"] == {"group": "reconcile-staging-fleet", "cancel-in-progress": False}
+    assert job["concurrency"]["group"] != reconciler["concurrency"]["group"]
+    assert job["concurrency"]["group"] != LANE
     steps = job["steps"]
     checkout = next(s for s in steps if s.get("uses") == "actions/checkout@v4")
     fleet = next(s for s in steps if s.get("id") == "fleet")
@@ -231,6 +238,10 @@ def _mutate(old: str, new: str) -> str:
 
 
 _NEGATIVES = {
+    "dispatch job shares the scheduled reconciler group": lambda: _mutate(
+        "      group: dispatch-staging-fleet\n", "      group: reconcile-staging-fleet\n"),
+    "dispatch job cancels a running dispatch": lambda: _mutate(
+        "      cancel-in-progress: false\n", "      cancel-in-progress: true\n"),
     "cancel-in-progress flipped back to true (the 2026-09-02 regression)": lambda: _mutate(
         "  cancel-in-progress: false\n", "  cancel-in-progress: true\n"),
     "cancel-in-progress as a string, which GitHub reads as truthy": lambda: _mutate(

@@ -300,8 +300,11 @@ jobs:
     # web, ~14 min for app, plus time queued behind the shared staging lock).
     # 95 minutes product + 80 minutes fleet + 15 minutes setup/publication.
     timeout-minutes: 190
+    # Keep scheduled reconcile ticks out of the relay's pending slot. Even
+    # with cancellation disabled, a shared group replaces its pending member.
+    # Downstream deploys still hold leaf-platform-staging-ecs-mutation.
     concurrency:
-      group: reconcile-staging-fleet
+      group: dispatch-staging-fleet
       cancel-in-progress: false
 
     env:

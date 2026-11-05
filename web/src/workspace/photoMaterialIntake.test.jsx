@@ -4,7 +4,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import PhotoMaterialIntake from './PhotoMaterialIntake.jsx'
 import { listProjectPhotos, readProjectPhotoPreview, uploadProjectPhoto } from '../projects/api.js'
 
-const authority = vi.hoisted(() => ({ scope: 'account-a', listeners: new Set() }))
+const authority = vi.hoisted(() => ({ scope: 'account-a', listeners: new Set(), logouts: new Set() }))
+vi.mock('../auth.js', () => ({ subscribeBeforeLogout: fn => { authority.logouts.add(fn); return () => authority.logouts.delete(fn) } }))
 vi.mock('../auth/activeScope.js', () => ({
   readActiveScope: () => authority.scope,
   subscribeActiveScope: fn => { authority.listeners.add(fn); return () => authority.listeners.delete(fn) },
@@ -17,6 +18,7 @@ const choose = (...names) => fireEvent.change(screen.getByLabelText('Photo files
 beforeEach(() => {
   vi.clearAllMocks()
   authority.scope = 'account-a'
+  authority.logouts.clear()
   listProjectPhotos.mockResolvedValue({ materials: [] })
   readProjectPhotoPreview.mockResolvedValue(new Blob(['preview'], { type: 'image/jpeg' }))
   URL.createObjectURL = vi.fn(() => 'blob:photo-preview')
@@ -25,6 +27,39 @@ beforeEach(() => {
 afterEach(cleanup)
 
 describe('project photo intake', () => {
+  it('fences a completed upload at logout before account props or active scope change', async () => {
+    const pending = deferred(), uploaded = vi.fn()
+    uploadProjectPhoto.mockReturnValueOnce(pending.promise)
+    render(<PhotoMaterialIntake projectId="project-a" onUploaded={uploaded} />)
+    choose('private.jpg')
+    act(() => { for (const clear of authority.logouts) clear() })
+    expect(uploadProjectPhoto.mock.lastCall[2].signal.aborted).toBe(true)
+    await act(async () => pending.resolve({ material: row('private.jpg') }))
+    expect(uploaded).not.toHaveBeenCalled()
+    expect(screen.queryByText('private.jpg')).toBeNull()
+  })
+  it('refreshes the authorized editor picker once after a completed upload batch', async () => {
+    const uploaded = vi.fn()
+    uploadProjectPhoto.mockResolvedValueOnce({ material: row('cake.jpg') }).mockResolvedValueOnce({ material: row('bread.jpg') })
+    render(<PhotoMaterialIntake projectId="project-a" onUploaded={uploaded} />)
+    await screen.findByText('0 photos in this project.')
+    choose('cake.jpg', 'bread.jpg')
+    await screen.findByText('2 photos ready.')
+    expect(uploaded).toHaveBeenCalledTimes(1)
+    for (const call of uploadProjectPhoto.mock.calls) expect(call[2].expectedScope).toBe('account-a')
+  })
+
+  it('never refreshes another project picker with a late upload result', async () => {
+    const pending = deferred(), uploaded = vi.fn()
+    uploadProjectPhoto.mockReturnValueOnce(pending.promise)
+    const view = render(<PhotoMaterialIntake projectId="project-a" onUploaded={uploaded} />)
+    choose('private.jpg')
+    view.rerender(<PhotoMaterialIntake projectId="project-b" onUploaded={uploaded} />)
+    await act(async () => pending.resolve({ material: row('private.jpg') }))
+    expect(uploaded).not.toHaveBeenCalled()
+    expect(screen.queryByText('private.jpg')).toBeNull()
+  })
+
   it('uploads sequentially, retains failures and retries only failed files', async () => {
     const first = deferred()
     uploadProjectPhoto.mockImplementationOnce(() => first.promise)

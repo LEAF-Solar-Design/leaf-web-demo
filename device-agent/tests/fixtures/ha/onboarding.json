@@ -1,0 +1,24 @@
+{
+  "source": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/onboarding/views.py",
+  "auth_source": "https://github.com/home-assistant/core/blob/2026.10.4/homeassistant/components/auth/__init__.py",
+  "checked": ["onboarding/__init__.py", "onboarding/views.py", "auth/__init__.py", "auth/login_flow.py", "auth/indieauth.py", "websocket_api/http.py", "websocket_api/auth.py", "websocket_api/const.py"],
+  "pending": [
+    {"step": "user", "done": false},
+    {"step": "core_config", "done": false},
+    {"step": "analytics", "done": false},
+    {"step": "integration", "done": false}
+  ],
+  "owner": {"auth_code": "fixture-owner-code"},
+  "tokens": {
+    "access_token": "fixture-temporary-access",
+    "token_type": "Bearer",
+    "refresh_token": "fixture-refresh-token",
+    "expires_in": 1800,
+    "ha_auth_provider": "homeassistant"
+  },
+  "auth_required": {"type": "auth_required", "ha_version": "2026.10.4"},
+  "auth_ok": {"type": "auth_ok", "ha_version": "2026.10.4"},
+  "long_lived": {"id": 1, "type": "result", "success": true, "result": "fixture-long-lived-access"},
+  "login_form": {"flow_id": "fixture-login", "handler": ["homeassistant", null], "step_id": "init", "type": "form", "errors": {}, "data_schema": [{"name": "username", "required": true, "type": "string"}, {"name": "password", "required": true, "type": "string"}]},
+  "login_result": {"flow_id": "fixture-login", "handler": ["homeassistant", null], "type": "create_entry", "title": "leaf-owner", "result": "fixture-owner-code", "version": 1}
+}

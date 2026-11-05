@@ -13,6 +13,16 @@ import re
 import unicodedata
 import zipfile
 
+if __package__:
+    from .page_design import FIELDS as DESIGN_FIELDS, validate_node
+else:
+    import importlib.util
+    from pathlib import Path
+    _design_spec = importlib.util.spec_from_file_location('page_design', Path(__file__).with_name('page_design.py'))
+    _design = importlib.util.module_from_spec(_design_spec)
+    _design_spec.loader.exec_module(_design)
+    DESIGN_FIELDS, validate_node = _design.FIELDS, _design.validate_node
+
 
 MAX_DOCUMENT_BYTES = 512 * 1024
 MAX_ASSET_BYTES = 64 * 1024 * 1024
@@ -52,7 +62,8 @@ def _items(value: object, minimum: int, maximum: int) -> None:
 
 def validate_document(document: dict) -> dict:
     """Return detached F14 data; reject unknown fields, unsafe refs and bounds."""
-    _keys(document, "schema name headline introduction about contact resume categories theme", ("galleryLayout",))
+    _keys(document, "schema name headline introduction about contact resume categories theme", ("galleryLayout", *DESIGN_FIELDS['portfolio']))
+    validate_node(document, 'portfolio')
     if "galleryLayout" in document and (type(document["galleryLayout"]) is not str or document["galleryLayout"] not in ("grid", "single")):
         raise ValueError("Unsupported photo layout")
     if document["schema"] != "leaf.portfolio.v1" or document["theme"] != "light":
@@ -68,17 +79,20 @@ def validate_document(document: dict) -> dict:
         raise ValueError("Invalid contact email")
     _items(document["resume"], 0, 8)
     for section in document["resume"]:
-        _keys(section, "heading entries")
+        _keys(section, "heading entries", DESIGN_FIELDS['section'])
+        validate_node(section, 'section')
         _text(section["heading"], 1, 120)
         _items(section["entries"], 0, 20)
         for entry in section["entries"]:
-            _keys(entry, "title subtitle dates description")
+            _keys(entry, "title subtitle dates description", DESIGN_FIELDS['entry'])
+            validate_node(entry, 'entry')
             for key, high in (("title", 200), ("subtitle", 240), ("dates", 120), ("description", 2400)):
                 _text(entry[key], 0, high)
     _items(document["categories"], 1, 12)
     slugs, references, total = set(), {}, 0
     for category in document["categories"]:
-        _keys(category, "slug title description hero images")
+        _keys(category, "slug title description hero images", DESIGN_FIELDS['category'])
+        validate_node(category, 'category')
         slug = category["slug"]
         if (type(slug) is not str or not _SLUG.fullmatch(slug)
                 or slug in {"home", "about", "resume"} or slug in slugs):
@@ -95,7 +109,8 @@ def validate_document(document: dict) -> dict:
             raise ValueError("Invalid category hero index")
         seen = set()
         for image in category["images"]:
-            _keys(image, "material_id sha256 preview_sha256 title alt")
+            _keys(image, "material_id sha256 preview_sha256 title alt", DESIGN_FIELDS['image'])
+            validate_node(image, 'image')
             material_id = image["material_id"]
             if type(material_id) is not str or not _UUID.fullmatch(material_id) or material_id in seen:
                 raise ValueError("Invalid or duplicate material ID")
@@ -197,23 +212,219 @@ struct PortfolioDocument: Decodable {
     let categories: [PortfolioCategory]
     let theme: String
     let galleryLayout: String?
+    let appearance: Design?
+    let textStyles: [String: Design]?
+    let labels: [String: String]?
+    let nav: NavigationDesign?
 }
 struct Contact: Decodable { let email: String; let location: String }
-struct ResumeSection: Decodable { let heading: String; let entries: [ResumeEntry] }
+struct ResumeSection: Decodable {
+    let heading: String; let entries: [ResumeEntry]
+    let layout: Design?; let headingStyle: Design?
+}
 struct ResumeEntry: Decodable {
     let title: String; let subtitle: String; let dates: String; let description: String
+    let layout: Design?; let textStyles: [String: Design]?
 }
 struct PortfolioCategory: Decodable, Identifiable {
     let slug: String; let title: String; let description: String
     let hero: Int; let images: [PortfolioPhoto]
+    let layout: Design?; let hidden: Bool?; let navLabel: String?
+    let textStyles: [String: Design]?
     var id: String { slug }
+    var visible: Bool { hidden != true && layout?.hidden != true }
 }
 struct PortfolioPhoto: Decodable, Identifiable {
     let materialId: String; let sha256: String; let previewSha256: String
     let title: String; let alt: String
+    let display: Design?; let captionStyle: Design?
     var id: String { materialId }
 }
 
+// All design fields remain optional: decoding a legacy archive supplies no overrides.
+struct Design: Decodable {
+    var font: String?; var size: Double?; var weight: String?; var color: String?
+    var align: String?; var lineHeight: Double?; var letterSpacing: Double?
+    var italic: Bool?; var underline: Bool?; var hidden: Bool?
+    var columns: Int?; var mobileColumns: Int?; var gap: Double?; var padding: Double?
+    var maxWidth: Double?; var background: String?; var radius: Double?
+    var borderWidth: Double?; var borderColor: String?; var shadow: String?
+    var fit: String?; var imageFit: String?; var aspect: String?; var focal: String?; var span: Int?
+    var scale: String?; var headingWeight: String?; var spacing: String?; var width: String?
+    var palette: [String: String]?
+    var resolvedGap: CGFloat { CGFloat(gap ?? (spacing == "tight" ? 16 : spacing == "airy" ? 48 : spacing == "regular" ? 32 : 24)) }
+    var resolvedWidth: CGFloat { CGFloat(maxWidth ?? (width == "narrow" ? 720 : width == "wide" ? 1600 : 1200)) }
+    var gridGap: CGFloat { gap != nil || spacing != nil ? resolvedGap : 32 }
+    var gridColumnGap: CGFloat { gap != nil || spacing != nil ? resolvedGap : 24 }
+    func inheritingText(_ parent: Design?) -> Design {
+        var result = self
+        result.font = font ?? parent?.font; result.size = size ?? parent?.size
+        result.weight = weight ?? parent?.weight; result.color = color ?? parent?.color
+        result.align = align ?? parent?.align; result.lineHeight = lineHeight ?? parent?.lineHeight
+        result.letterSpacing = letterSpacing ?? parent?.letterSpacing
+        result.italic = italic ?? parent?.italic; result.underline = underline ?? parent?.underline
+        return result
+    }
+}
+struct NavigationDesign: Decodable {
+    let homeLabel: String?; let aboutLabel: String?; let resumeLabel: String?
+    let order: [String]?; let hideHome: Bool?; let hideAbout: Bool?; let hideResume: Bool?
+    let hidden: Bool?; let layout: String?; let appearance: Design?
+    let gap: Double?; let padding: Double?; let background: String?; let radius: Double?
+    static var empty: NavigationDesign {
+        NavigationDesign(homeLabel: nil, aboutLabel: nil, resumeLabel: nil, order: nil,
+            hideHome: nil, hideAbout: nil, hideResume: nil, hidden: nil, layout: nil,
+            appearance: nil, gap: nil, padding: nil, background: nil, radius: nil)
+    }
+    var groups: [String] {
+        let first = order ?? []
+        return first + ["home", "galleries", "about", "resume"].filter { !first.contains($0) }
+    }
+}
+func designColor(_ hex: String?, fallback: Color = .primary) -> Color {
+    guard let hex, hex.range(of: #"^#[0-9a-fA-F]{6}$"#, options: .regularExpression) != nil,
+          let number = UInt32(hex.dropFirst(), radix: 16) else { return fallback }
+    return Color(red: Double((number >> 16) & 255) / 255,
+                 green: Double((number >> 8) & 255) / 255, blue: Double(number & 255) / 255)
+}
+func designAlignment(_ value: String?) -> Alignment {
+    switch value {
+    case "left": return .leading
+    case "right": return .trailing
+    case "top": return .top
+    case "bottom": return .bottom
+    case "top-left": return .topLeading
+    case "top-right": return .topTrailing
+    case "bottom-left": return .bottomLeading
+    case "bottom-right": return .bottomTrailing
+    default: return .center
+    }
+}
+func textAlignment(_ value: String?) -> TextAlignment {
+    value == "center" ? .center : value == "right" ? .trailing : .leading
+}
+struct ContainerAlignmentKey: EnvironmentKey { static let defaultValue: String? = nil }
+extension EnvironmentValues {
+    var containerAlignment: String? {
+        get { self[ContainerAlignmentKey.self] }
+        set { self[ContainerAlignmentKey.self] = newValue }
+    }
+}
+struct DesignedText: View {
+    let value: String
+    var style: Design? = nil
+    var root: Design? = nil
+    var size: CGFloat = 17
+    var heading = false
+    var muted = false
+    var defaultWeight: Font.Weight = .regular
+    @Environment(\.containerAlignment) private var containerAlignment
+    @ScaledMetric(relativeTo: .body) private var metric: CGFloat = 1
+    private var pointSize: CGFloat {
+        CGFloat(style?.size ?? Double(size) * (root?.scale == "compact" ? 0.85 : root?.scale == "large" ? 1.2 : 1)) * metric
+    }
+    private var fontDesign: Font.Design {
+        switch style?.font ?? root?.font {
+        case "serif": return .serif
+        case "mono": return .monospaced
+        case "sans": return .default
+        case "classic": return heading ? .serif : .default
+        default: return .default
+        }
+    }
+    private var weight: Font.Weight {
+        switch style?.weight ?? (heading ? root?.headingWeight : nil) {
+        case "bold": return .bold
+        case "medium": return .medium
+        case "regular": return .regular
+        default: return defaultWeight
+        }
+    }
+    var body: some View {
+        if style?.hidden != true {
+            Text(verbatim: value)
+                .font(.system(size: pointSize, weight: weight, design: fontDesign))
+                .italic(style?.italic == true).underline(style?.underline == true)
+                .tracking(CGFloat(style?.letterSpacing ?? 0))
+                .lineSpacing(max(0, pointSize * CGFloat((style?.lineHeight ?? 1) - 1)))
+                .multilineTextAlignment(textAlignment(style?.align ?? containerAlignment ?? root?.align))
+                .frame(maxWidth: .infinity, alignment: designAlignment(style?.align ?? containerAlignment ?? root?.align ?? "left"))
+                .foregroundStyle(designColor(style?.color ?? root?.palette?[muted ? "muted" : "text"], fallback: muted ? .secondary : .primary))
+                .accessibilityAddTraits(heading ? .isHeader : [])
+        }
+    }
+}
+struct BoxDesign: ViewModifier {
+    var value: Design?
+    @Environment(\.containerAlignment) private var containerAlignment
+    func body(content: Content) -> some View {
+        if value?.hidden != true {
+            content
+                .environment(\.containerAlignment, value?.align ?? containerAlignment)
+                .padding(CGFloat(value?.padding ?? 0))
+                .frame(maxWidth: value?.maxWidth.map { CGFloat($0) }, alignment: designAlignment(value?.align ?? "left"))
+                .background(designColor(value?.background, fallback: .clear))
+                .clipShape(RoundedRectangle(cornerRadius: CGFloat(value?.radius ?? 0)))
+                .overlay(RoundedRectangle(cornerRadius: CGFloat(value?.radius ?? 0))
+                    .stroke(designColor(value?.borderColor), lineWidth: CGFloat(value?.borderWidth ?? 0)))
+                .shadow(color: .black.opacity(value?.shadow == "strong" ? 0.3 : value?.shadow == "soft" ? 0.12 : 0),
+                        radius: value?.shadow == "strong" ? 14 : 6, y: value?.shadow == "strong" ? 8 : 2)
+        }
+    }
+}
+struct PhotoSpan: LayoutValueKey { static let defaultValue = 1 }
+// A bounded responsive grid with real spanning cells; child order is source order.
+struct DesignGrid: Layout {
+    var columns: Int?
+    var mobileColumns: Int?
+    var gap: CGFloat = 24
+    var columnGap: CGFloat? = nil
+    var adaptive = false
+    private func arrange(_ proposal: ProposedViewSize, _ subviews: Subviews) -> (CGSize, [CGRect]) {
+        let width = max(1, proposal.width ?? 760)
+        let horizontalGap = columnGap ?? gap
+        let legacyCount = adaptive ? max(1, Int((width + horizontalGap) / (240 + horizontalGap))) : 1
+        let count = max(1, width < 600 ? (mobileColumns ?? (columns == nil ? legacyCount : 1)) : (columns ?? legacyCount))
+        let cell = max(1, (width - CGFloat(count - 1) * horizontalGap) / CGFloat(count))
+        var frames: [CGRect] = [], column = 0
+        var y: CGFloat = 0, rowHeight: CGFloat = 0
+        for view in subviews {
+            let span = min(count, max(1, view[PhotoSpan.self]))
+            if column + span > count { y += rowHeight + gap; column = 0; rowHeight = 0 }
+            let itemWidth = cell * CGFloat(span) + horizontalGap * CGFloat(span - 1)
+            let size = view.sizeThatFits(ProposedViewSize(width: itemWidth, height: nil))
+            frames.append(CGRect(x: CGFloat(column) * (cell + horizontalGap), y: y, width: itemWidth, height: size.height))
+            rowHeight = max(rowHeight, size.height); column += span
+        }
+        return (CGSize(width: width, height: y + rowHeight), frames)
+    }
+    func sizeThatFits(proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) -> CGSize {
+        arrange(proposal, subviews).0
+    }
+    func placeSubviews(in bounds: CGRect, proposal: ProposedViewSize, subviews: Subviews, cache: inout ()) {
+        let frames = arrange(ProposedViewSize(width: bounds.width, height: nil), subviews).1
+        for (index, frame) in frames.enumerated() {
+            subviews[index].place(at: CGPoint(x: bounds.minX + frame.minX, y: bounds.minY + frame.minY),
+                anchor: .topLeading, proposal: ProposedViewSize(width: frame.width, height: frame.height))
+        }
+    }
+}
+struct PageSurface<Content: View>: View {
+    let root: Design?
+    var legacyWidth: CGFloat = 1200
+    var legacySpacing: CGFloat = 24
+    @ViewBuilder let content: () -> Content
+    var body: some View {
+        ScrollView {
+            VStack(alignment: .leading, spacing: root?.gap != nil || root?.spacing != nil ? root!.resolvedGap : legacySpacing, content: content)
+                .padding(CGFloat(root?.padding ?? 24))
+                .frame(maxWidth: root?.maxWidth != nil || root?.width != nil ? root!.resolvedWidth : legacyWidth,
+                       alignment: designAlignment(root?.align ?? "left"))
+                .frame(maxWidth: .infinity)
+        }.background(designColor(root?.palette?["background"], fallback: .white))
+            .tint(designColor(root?.palette?["accent"]))
+    }
+}
 struct LoadedPortfolio {
     let document: PortfolioDocument
     let images: [String: UIImage]
@@ -299,96 +510,167 @@ struct PortfolioLoader: View {
 
 struct PortfolioTabs: View {
     let portfolio: LoadedPortfolio
+    @State private var route = "home"
+    private var document: PortfolioDocument { portfolio.document }
+    private var visibleCategories: [PortfolioCategory] { document.categories.filter { $0.visible } }
+    @ViewBuilder private var destination: some View {
+        if route == "about" { AboutView(document: document) }
+        else if route == "resume" { ResumeView(document: document) }
+        else if let category = document.categories.first(where: { $0.slug == route }) {
+            GalleryView(category: category, images: portfolio.images, document: document)
+        } else { HomeView(portfolio: portfolio) }
+    }
+    @ViewBuilder private func navigationButton(_ value: String, _ title: String, _ style: Design? = nil) -> some View {
+        if style?.hidden != true {
+            Button { route = value } label: {
+                DesignedText(value: title, style: style?.inheritingText(document.nav?.appearance) ?? document.nav?.appearance, root: document.appearance)
+            }.buttonStyle(.plain).padding(8)
+        }
+    }
     var body: some View {
-        TabView {
-            NavigationStack { HomeView(portfolio: portfolio) }
-                .tabItem { Label("Portfolio", systemImage: "photo.on.rectangle") }
-            NavigationStack { AboutView(document: portfolio.document) }
-                .tabItem { Label("About", systemImage: "person.crop.circle") }
-            NavigationStack { ResumeView(document: portfolio.document) }
-                .tabItem { Label("Resume", systemImage: "doc.text") }
+        if document.nav != nil || document.categories.contains(where: { $0.navLabel != nil || $0.textStyles?["navigation"] != nil }) {
+            let nav = document.nav ?? NavigationDesign.empty
+            NavigationStack {
+                VStack(spacing: 0) {
+                    if nav.hidden != true {
+                        let layout = nav.layout == "column" ? AnyLayout(VStackLayout(alignment: .leading, spacing: CGFloat(nav.gap ?? 12))) : AnyLayout(HStackLayout(spacing: CGFloat(nav.gap ?? 12)))
+                        ScrollView(nav.layout == "column" ? .vertical : .horizontal) {
+                            layout {
+                                ForEach(nav.groups, id: \.self) { group in
+                                    if group == "home" && nav.hideHome != true {
+                                        navigationButton("home", nav.homeLabel ?? document.name, document.textStyles?["name"])
+                                    } else if group == "about" && nav.hideAbout != true {
+                                        navigationButton("about", nav.aboutLabel ?? "About / Contact")
+                                    } else if group == "resume" && nav.hideResume != true {
+                                        navigationButton("resume", nav.resumeLabel ?? "Resume")
+                                    } else if group == "galleries" {
+                                        ForEach(visibleCategories) { category in
+                                            navigationButton(category.slug, category.navLabel ?? category.title, category.textStyles?["navigation"])
+                                        }
+                                    }
+                                }
+                            }.padding(CGFloat(nav.padding ?? 12))
+                        }.frame(maxHeight: nav.layout == "column" ? 240 : nil)
+                            .fixedSize(horizontal: false, vertical: nav.layout != "column")
+                            .background(designColor(nav.background, fallback: .clear))
+                            .clipShape(RoundedRectangle(cornerRadius: CGFloat(nav.radius ?? 0)))
+                    }
+                    destination
+                }.background(designColor(document.appearance?.palette?["background"], fallback: .white))
+            }.tint(designColor(document.appearance?.palette?["accent"]))
+        } else {
+            TabView {
+                NavigationStack { HomeView(portfolio: portfolio) }
+                    .tabItem { Label("Portfolio", systemImage: "photo.on.rectangle") }
+                NavigationStack { AboutView(document: document) }
+                    .tabItem { Label("About", systemImage: "person.crop.circle") }
+                NavigationStack { ResumeView(document: document) }
+                    .tabItem { Label("Resume", systemImage: "doc.text") }
+            }.tint(designColor(document.appearance?.palette?["accent"]))
         }
     }
 }
-
 struct PortfolioImage: View {
     let photo: PortfolioPhoto
     let images: [String: UIImage]
+    var root: Design? = nil
+    private var ratio: CGFloat? {
+        switch photo.display?.aspect ?? root?.aspect {
+        case "square": return 1
+        case "landscape": return 4 / 3
+        case "portrait": return 3 / 4
+        default: return nil
+        }
+    }
     var body: some View {
-        if let image = images[photo.id] {
-            Image(uiImage: image).resizable().scaledToFit()
-                .accessibilityLabel(Text(verbatim: photo.alt))
-        } else {
-            Label("Photograph unavailable", systemImage: "photo.badge.exclamationmark")
-                .frame(maxWidth: .infinity, minHeight: 120)
+        if photo.display?.hidden != true {
+            if let image = images[photo.id] {
+                Group {
+                    if let ratio {
+                        GeometryReader { geometry in
+                            Image(uiImage: image).resizable()
+                                .aspectRatio(contentMode: (photo.display?.fit ?? root?.imageFit) == "cover" ? .fill : .fit)
+                                .frame(width: geometry.size.width, height: geometry.size.height,
+                                       alignment: designAlignment(photo.display?.focal ?? root?.focal))
+                                .clipped()
+                        }.aspectRatio(ratio, contentMode: .fit)
+                    } else {
+                        Image(uiImage: image).resizable().scaledToFit()
+                    }
+                }.clipShape(RoundedRectangle(cornerRadius: CGFloat(photo.display?.radius ?? 0)))
+                    .accessibilityLabel(Text(verbatim: photo.alt))
+            } else {
+                Label("Photograph unavailable", systemImage: "photo.badge.exclamationmark")
+                    .frame(maxWidth: .infinity, minHeight: 120)
+            }
         }
     }
 }
-
 struct HomeView: View {
     let portfolio: LoadedPortfolio
-    private let columns = [GridItem(.adaptive(minimum: 240), spacing: 24)]
+    private var document: PortfolioDocument { portfolio.document }
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text(verbatim: portfolio.document.name).font(.title3).accessibilityAddTraits(.isHeader)
-                Text(verbatim: portfolio.document.headline).font(.largeTitle).fontWeight(.regular)
-                    .accessibilityAddTraits(.isHeader)
-                if !portfolio.document.introduction.isEmpty {
-                    Text(verbatim: portfolio.document.introduction).foregroundStyle(.secondary)
+        PageSurface(root: document.appearance) {
+            DesignedText(value: document.name, style: document.textStyles?["name"], root: document.appearance, size: 20, heading: true)
+            DesignedText(value: document.headline, style: document.textStyles?["headline"], root: document.appearance, size: 34, heading: true)
+            if !document.introduction.isEmpty {
+                DesignedText(value: document.introduction, style: document.textStyles?["introduction"], root: document.appearance, muted: true)
+            }
+            DesignGrid(columns: document.appearance?.columns, mobileColumns: document.appearance?.mobileColumns,
+                       gap: document.appearance?.gridGap ?? 32, columnGap: document.appearance?.gridColumnGap ?? 24, adaptive: true) {
+                ForEach(document.categories.filter { $0.visible }) { category in
+                    NavigationLink {
+                        GalleryView(category: category, images: portfolio.images, document: document)
+                    } label: {
+                        DesignGrid(columns: category.layout?.columns, mobileColumns: category.layout?.mobileColumns, gap: CGFloat(category.layout?.gap ?? 12)) {
+                            PortfolioImage(photo: category.images[category.hero], images: portfolio.images, root: document.appearance)
+                            DesignedText(value: category.title, style: category.textStyles?["title"], root: document.appearance, size: 22, heading: true)
+                            DesignedText(value: category.description, style: category.textStyles?["description"], root: document.appearance, muted: true)
+                        }.modifier(BoxDesign(value: category.layout))
+                    }.buttonStyle(.plain).accessibilityHint("Open category gallery")
                 }
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 32) {
-                    ForEach(portfolio.document.categories) { category in
-                        NavigationLink {
-                            GalleryView(category: category, images: portfolio.images, galleryLayout: portfolio.document.galleryLayout)
-                        } label: {
-                            VStack(alignment: .leading, spacing: 12) {
-                                PortfolioImage(photo: category.images[category.hero], images: portfolio.images)
-                                Text(verbatim: category.title).font(.title2)
-                                Text(verbatim: category.description).foregroundStyle(.secondary)
-                            }.frame(maxWidth: .infinity, alignment: .leading)
-                        }.buttonStyle(.plain)
-                            .accessibilityHint("Open category gallery")
-                    }
-                }
-            }.padding(24).frame(maxWidth: 1200, alignment: .leading).frame(maxWidth: .infinity)
-        }.background(Color.white).navigationTitle("Portfolio").navigationBarTitleDisplayMode(.inline)
+            }
+        }.navigationTitle("Portfolio").navigationBarTitleDisplayMode(.inline)
     }
 }
-
 struct GalleryView: View {
     let category: PortfolioCategory
     let images: [String: UIImage]
-    let galleryLayout: String?
-    private var columns: [GridItem] {
-        galleryLayout == "single"
-            ? [GridItem(.flexible(), spacing: 24)]
-            : [GridItem(.adaptive(minimum: 240), spacing: 24)]
-    }
+    let document: PortfolioDocument
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text(verbatim: category.description).foregroundStyle(.secondary)
-                LazyVGrid(columns: columns, alignment: .leading, spacing: 32) {
-                    ForEach(category.images) { photo in
+        PageSurface(root: document.appearance) {
+            VStack(alignment: .leading, spacing: CGFloat(category.layout?.gap ?? 24)) {
+                if category.textStyles?["title"] != nil {
+                    DesignedText(value: category.title, style: category.textStyles?["title"], root: document.appearance, size: 34, heading: true)
+                }
+                DesignedText(value: category.description, style: category.textStyles?["description"], root: document.appearance, muted: true)
+                DesignGrid(columns: category.layout?.columns ?? document.appearance?.columns ?? (document.galleryLayout == "single" ? 1 : nil),
+                           mobileColumns: category.layout?.mobileColumns ?? document.appearance?.mobileColumns,
+                           gap: category.layout?.gap.map { CGFloat($0) } ?? document.appearance?.gridGap ?? 32,
+                           columnGap: category.layout?.gap.map { CGFloat($0) } ?? document.appearance?.gridColumnGap ?? 24, adaptive: true) {
+                    ForEach(category.images.filter { $0.display?.hidden != true }) { photo in
                         NavigationLink {
-                            PhotoDetail(photo: photo, images: images)
+                            PhotoDetail(photo: photo, images: images, document: document)
                         } label: {
                             VStack(alignment: .leading, spacing: 10) {
-                                PortfolioImage(photo: photo, images: images)
-                                if !photo.title.isEmpty { Text(verbatim: photo.title) }
-                            }.frame(maxWidth: .infinity, alignment: .leading)
+                                PortfolioImage(photo: photo, images: images, root: document.appearance)
+                                if !photo.title.isEmpty {
+                                    DesignedText(value: photo.title, style: photo.captionStyle, root: document.appearance)
+                                }
+                            }
                         }.buttonStyle(.plain).accessibilityHint("Open full photograph")
+                            .layoutValue(key: PhotoSpan.self, value: photo.display?.span ?? 1)
                     }
                 }
-            }.padding(24).frame(maxWidth: 1200, alignment: .leading).frame(maxWidth: .infinity)
-        }.background(Color.white).navigationTitle(Text(verbatim: category.title))
+            }.modifier(BoxDesign(value: category.layout))
+        }.navigationTitle(Text(verbatim: category.title))
     }
 }
-
 struct PhotoDetail: View {
     let photo: PortfolioPhoto
     let images: [String: UIImage]
+    let document: PortfolioDocument
+    @Environment(\.dismiss) private var dismiss
     @State private var scale: CGFloat = 1
     @State private var startingScale: CGFloat = 1
     private func setScale(_ value: CGFloat) { scale = min(5, max(1, value)); startingScale = scale }
@@ -396,7 +678,7 @@ struct PhotoDetail: View {
         VStack(spacing: 12) {
             GeometryReader { geometry in
                 ScrollView([.horizontal, .vertical]) {
-                    PortfolioImage(photo: photo, images: images)
+                    PortfolioImage(photo: photo, images: images, root: document.appearance)
                         .frame(width: max(1, geometry.size.width) * scale,
                                height: max(1, geometry.size.height) * scale)
                         .gesture(MagnificationGesture()
@@ -404,18 +686,19 @@ struct PhotoDetail: View {
                             .onEnded { _ in startingScale = scale })
                 }
             }
-            if !photo.title.isEmpty { Text(verbatim: photo.title).font(.headline).padding(.horizontal) }
+            if !photo.title.isEmpty {
+                DesignedText(value: photo.title, style: photo.captionStyle, root: document.appearance, defaultWeight: .semibold).padding(.horizontal)
+            }
             HStack(spacing: 24) {
-                Button { setScale(scale / 1.5) } label: { Label("Zoom out", systemImage: "minus.magnifyingglass") }
-                    .disabled(scale <= 1)
+                Button { setScale(scale / 1.5) } label: { Label("Zoom out", systemImage: "minus.magnifyingglass") }.disabled(scale <= 1)
                 Button("Reset zoom") { setScale(1) }
-                Button { setScale(scale * 1.5) } label: { Label("Zoom in", systemImage: "plus.magnifyingglass") }
-                    .disabled(scale >= 5)
+                Button { setScale(scale * 1.5) } label: { Label("Zoom in", systemImage: "plus.magnifyingglass") }.disabled(scale >= 5)
             }.labelStyle(.iconOnly).buttonStyle(.bordered).padding(.bottom)
-        }.background(Color.white).navigationTitle("Photograph").navigationBarTitleDisplayMode(.inline)
+        }.background(designColor(document.appearance?.palette?["background"], fallback: .white))
+            .navigationTitle("Photograph").navigationBarTitleDisplayMode(.inline)
+            .toolbar { Button { dismiss() } label: { Text(verbatim: document.labels?["viewerClose"] ?? "Close image") } }
     }
 }
-
 struct AboutView: View {
     let document: PortfolioDocument
     private var emailURL: URL? {
@@ -426,47 +709,51 @@ struct AboutView: View {
         return URL(string: "mailto:" + email)
     }
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 24) {
-                Text(verbatim: document.name).font(.largeTitle).accessibilityAddTraits(.isHeader)
-                Text(verbatim: document.about)
-                if !document.contact.location.isEmpty {
-                    Label { Text(verbatim: document.contact.location) } icon: { Image(systemName: "mappin") }
-                }
-                if let emailURL {
-                    Link(destination: emailURL) {
-                        Label { Text(verbatim: document.contact.email) } icon: { Image(systemName: "envelope") }
-                    }.accessibilityHint("Compose an email in your mail app")
-                }
-            }.frame(maxWidth: 760, alignment: .leading).padding(24).frame(maxWidth: .infinity)
-        }.background(Color.white).navigationTitle("About")
+        PageSurface(root: document.appearance, legacyWidth: 760) {
+            DesignedText(value: document.labels?["aboutHeading"] ?? document.name, style: document.textStyles?["aboutHeading"], root: document.appearance, size: 34, heading: true)
+            DesignedText(value: document.about, style: document.textStyles?["about"], root: document.appearance)
+            if document.labels?["contactHeading"] != nil || document.textStyles?["contactHeading"] != nil {
+                DesignedText(value: document.labels?["contactHeading"] ?? "Contact", style: document.textStyles?["contactHeading"], root: document.appearance, size: 22, heading: true)
+            }
+            if !document.contact.location.isEmpty && document.textStyles?["location"]?.hidden != true {
+                Label { DesignedText(value: document.contact.location, style: document.textStyles?["location"], root: document.appearance) } icon: { Image(systemName: "mappin") }
+            }
+            if let emailURL, document.textStyles?["email"]?.hidden != true {
+                Link(destination: emailURL) {
+                    Label { DesignedText(value: document.contact.email, style: document.textStyles?["email"], root: document.appearance) } icon: { Image(systemName: "envelope") }
+                }.accessibilityHint("Compose an email in your mail app")
+            }
+        }.navigationTitle("About")
     }
 }
-
 struct ResumeView: View {
     let document: PortfolioDocument
     var body: some View {
-        ScrollView {
-            VStack(alignment: .leading, spacing: 28) {
-                Text(verbatim: document.name).font(.title).accessibilityAddTraits(.isHeader)
-                if document.resume.isEmpty { Text("No resume sections have been added.") }
-                ForEach(document.resume.indices, id: \.self) { index in
-                    let section = document.resume[index]
-                    VStack(alignment: .leading, spacing: 20) {
-                        Text(verbatim: section.heading).font(.title2).accessibilityAddTraits(.isHeader)
-                        ForEach(section.entries.indices, id: \.self) { entryIndex in
-                            let entry = section.entries[entryIndex]
-                            VStack(alignment: .leading, spacing: 6) {
-                                Text(verbatim: entry.title).font(.headline)
-                                Text(verbatim: entry.subtitle)
-                                Text(verbatim: entry.dates).font(.subheadline).foregroundStyle(.secondary)
-                                Text(verbatim: entry.description)
+        PageSurface(root: document.appearance, legacyWidth: 760, legacySpacing: 28) {
+            DesignedText(value: document.labels?["resumeHeading"] ?? document.name, style: document.textStyles?["resumeHeading"], root: document.appearance, size: 28, heading: true)
+            if document.resume.isEmpty { Text("No resume sections have been added.") }
+            ForEach(document.resume.indices, id: \.self) { index in
+                let section = document.resume[index]
+                if section.layout?.hidden != true {
+                    VStack(alignment: .leading, spacing: CGFloat(section.layout?.gap ?? 20)) {
+                        DesignedText(value: section.heading, style: section.headingStyle, root: document.appearance, size: 22, heading: true)
+                        DesignGrid(columns: section.layout?.columns, mobileColumns: section.layout?.mobileColumns, gap: CGFloat(section.layout?.gap ?? 20)) {
+                            ForEach(section.entries.indices, id: \.self) { entryIndex in
+                                let entry = section.entries[entryIndex]
+                                if entry.layout?.hidden != true {
+                                    DesignGrid(columns: entry.layout?.columns, mobileColumns: entry.layout?.mobileColumns, gap: CGFloat(entry.layout?.gap ?? 6)) {
+                                        DesignedText(value: entry.title, style: entry.textStyles?["title"], root: document.appearance, heading: true, defaultWeight: .semibold)
+                                        DesignedText(value: entry.subtitle, style: entry.textStyles?["subtitle"], root: document.appearance)
+                                        DesignedText(value: entry.dates, style: entry.textStyles?["dates"], root: document.appearance, size: 15, muted: true)
+                                        DesignedText(value: entry.description, style: entry.textStyles?["description"], root: document.appearance)
+                                    }.modifier(BoxDesign(value: entry.layout))
+                                }
                             }
                         }
-                    }
+                    }.modifier(BoxDesign(value: section.layout))
                 }
-            }.frame(maxWidth: 760, alignment: .leading).padding(24).frame(maxWidth: .infinity)
-        }.background(Color.white).navigationTitle("Resume")
+            }
+        }.navigationTitle("Resume")
     }
 }
 '''
