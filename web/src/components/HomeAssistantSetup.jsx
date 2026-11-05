@@ -28,6 +28,7 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
   const [relayBusy, setRelayBusy] = useState(false)
   const [copyError, setCopyError] = useState(null)
   const epoch = useRef(0)
+  const hueInitFlows = useRef(new Set())
   const relayLock = useRef(false)
   const live = useRef(active)
   live.current = active
@@ -38,6 +39,7 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
     live.current = active
     setSteps({})
     setHue(null)
+    hueInitFlows.current.clear()
     setHueHost('')
     setHueHostError(null)
     setRelay(null)
@@ -52,7 +54,7 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
   }, [active, deviceId, mock])
 
   useEffect(() => {
-    if (!active || !hue || hue.stepId === 'manual') return undefined
+    if (!active || !hue || hue.stepId === 'manual' || hue.stepId === 'init') return undefined
     const tick = () => setSeconds(Math.max(0, Math.ceil((hue.deadline - Date.now()) / 1000)))
     tick()
     const timer = setInterval(tick, 1000)
@@ -67,8 +69,8 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
     try {
       const result = await run(deviceId, op, args)
       if (!result || gen !== epoch.current || !live.current) return null
-      const accepted = accept ? accept(result.data) : true
-      if (accepted) setStep(name, 'Done')
+      const accepted = accept ? await accept(result.data) : true
+      if (accepted && gen === epoch.current && live.current) setStep(name, 'Done')
       return result
     } catch (error) {
       if (gen === epoch.current && live.current) setStep(name, 'Needs attention', deviceError(error))
@@ -76,7 +78,7 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
     }
   }
 
-  const acceptHue = (data) => {
+  const acceptHue = async (data) => {
     const error = flowError(data)
     const id = string(data?.flow_id) || hue?.id
     if (data?.type === 'create_entry' && !error) { setHue(null); return true }
@@ -84,6 +86,18 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
       const stepId = string(data?.step_id)
       setHue({ id, stepId, deadline: Date.now() + 30000 })
       setHueHostError(null)
+      if (data.type === 'form' && stepId === 'init' && !error) {
+        if (hueInitFlows.current.has(id)) {
+          setStep('hue', 'Needs attention', 'The Hue setup did not provide a link step. Try linking again.')
+          return false
+        }
+        hueInitFlows.current.add(id)
+        setStep('hue', 'Working')
+        const gen = epoch.current
+        const result = await run(deviceId, 'ha.flow.step', { flow_id: id, data: { id: 'manual' } })
+        if (!result || gen !== epoch.current || !live.current) return false
+        return acceptHue(result.data)
+      }
       setStep('hue', error ? 'Needs attention' : stepId === 'manual' ? 'Enter bridge IP' : 'Waiting for button', error)
     } else {
       setHue(null)
@@ -153,7 +167,7 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
         <li>
           <button className="chip-act" disabled={busy} onClick={() => execute('hue', 'ha.flow.start', { handler: 'hue' }, acceptHue)}>Link Hue bridge</button>
           {status('hue')}
-          {hue && <div className="ca-setup">
+          {hue && hue.stepId !== 'init' && <div className="ca-setup">
             {hue.stepId === 'manual' ? <>
               <label className={`ca-field${hueHostError ? ' field-invalid' : ''}`}>
                 <span className="ca-field-k">Hue bridge IP address</span>
