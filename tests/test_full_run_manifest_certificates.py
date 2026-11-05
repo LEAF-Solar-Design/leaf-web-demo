@@ -1,8 +1,10 @@
 """Multiple supervisor certificates and archive reference closure."""
 
 import copy
+import errno
 import importlib.util
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -146,3 +148,67 @@ def test_cli_loads_every_certificate(tmp_path, monkeypatch):
     document = json.loads(destination.read_text())
     assert len(document["process_tree_sha256s"]) == 2
     assert document["process_tree_sha256s"] == json.loads(members["full-run.json"].read_text())["process_tree_sha256s"]
+
+
+def test_stage_keeps_readsets_root_and_moves_children(tmp_path):
+    *_, readsets, selection = capture_fixture(tmp_path)
+    (readsets / "extra.txt").write_text("diagnostic", encoding="utf-8")
+    original_shard = (readsets / "sample/1/tree-process.json").read_bytes()
+    inode = readsets.stat().st_ino
+
+    MANIFEST.stage_process_capture(tmp_path / "process-capture/out", readsets, selection)
+
+    diagnostics = readsets.parent / "diagnostics"
+    assert (diagnostics / "extra.txt").read_text(encoding="utf-8") == "diagnostic"
+    assert (diagnostics / "sample/1/tree-process.json").read_bytes() == original_shard
+    assert readsets.is_dir()
+    if inode:
+        assert readsets.stat().st_ino == inode
+    assert not (readsets / "extra.txt").exists()
+    assert sorted(path.relative_to(readsets).as_posix() for path in readsets.rglob("*.json")) == [
+        "sample/1/tree-process.json", "sample/2/tree-process.json"]
+
+
+def test_stage_never_renames_mount_root(tmp_path, monkeypatch):
+    readsets_root = (tmp_path / "gate-logs/readsets").resolve()
+    original_move = MANIFEST.shutil.move
+    original_rename = os.rename
+
+    def guarded_move(source, destination, *args, **kwargs):
+        if Path(source).resolve() == readsets_root:
+            raise OSError(errno.EBUSY, "Device or resource busy", str(source))
+        return original_move(source, destination, *args, **kwargs)
+
+    def guarded_rename(source, destination, *args, **kwargs):
+        if Path(source).resolve() == readsets_root:
+            raise OSError(errno.EBUSY, "Device or resource busy", str(source))
+        return original_rename(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(MANIFEST.shutil, "move", guarded_move)
+    monkeypatch.setattr(os, "rename", guarded_rename)
+    *_, readsets, _ = capture_fixture(tmp_path)
+
+    assert readsets.is_dir()
+    assert (readsets.parent / "diagnostics/startup.json").is_file()
+    assert sorted(path.relative_to(readsets).as_posix() for path in readsets.rglob("*.json")) == [
+        "sample/1/tree-process.json", "sample/2/tree-process.json"]
+
+
+def test_stage_refuses_diagnostics_collision(tmp_path):
+    *_, readsets, selection = capture_fixture(tmp_path)
+    (readsets / "a-first.txt").write_text("must stay", encoding="utf-8")
+    diagnostics = readsets.parent / "diagnostics"
+    (diagnostics / "sample").mkdir()
+    (diagnostics / "sample/keep.txt").write_text("existing", encoding="utf-8")
+    before = {path.relative_to(readsets): path.read_bytes()
+              for path in readsets.rglob("*") if path.is_file()}
+    children = sorted(path.name for path in readsets.iterdir())
+
+    with pytest.raises(ValueError, match="^diagnostics_collision$"):
+        MANIFEST.stage_process_capture(tmp_path / "process-capture/out", readsets, selection)
+
+    assert sorted(path.name for path in readsets.iterdir()) == children
+    assert {path.relative_to(readsets): path.read_bytes()
+            for path in readsets.rglob("*") if path.is_file()} == before
+    assert (diagnostics / "sample/keep.txt").read_text(encoding="utf-8") == "existing"
+    assert not (diagnostics / "a-first.txt").exists()

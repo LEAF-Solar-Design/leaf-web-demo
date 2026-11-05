@@ -281,7 +281,7 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
         self.assertNotIn("--early-feedback", block)
         self.assertNotIn("--emit-proof", block)
         self.assertNotIn("aws ", block)
-        self.assertTrue(after.startswith('gate_status=0\nunset PYTHONSAFEPATH\n'))
+        self.assertTrue(after.startswith('gate_status=0\ngate_fail_fast_args=(--fail-fast)\n'))
         self.assertIn('# LEAF_GATE_PROOF_BEGIN', after)
         self.assertIn('--key "mq/leaf-web-demo/selection/main/', after)
 
@@ -601,8 +601,55 @@ printf 'PUBLISHED %s\\n' "$readsets_status"
         script = CI_PATH.read_text(encoding="utf-8")
         call = next(line for line in script.splitlines()
                     if line.startswith("python scripts/run-all-gates.py "))
-        self.assertIn("--fail-fast", shlex.split(call))
+        self.assertIn('"${gate_fail_fast_args[@]}"', call)
+        self.assertNotIn("--fail-fast", call)
         self.assertIn('export PYTHONUNBUFFERED=1\n' + call, script)
+        self.assertLess(script.index("gate_fail_fast_args=(--fail-fast)"),
+                        script.index('\nunset PYTHONSAFEPATH\n'))
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; capture fail-fast execution requires bash")
+    def test_capture_runs_omit_fail_fast_and_keep_failure_status(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index("gate_fail_fast_args=(--fail-fast)")
+        call = next(line for line in script.splitlines()
+                    if line.startswith("python scripts/run-all-gates.py "))
+        block = script[start:script.index(call, start) + len(call)]
+        self.assertIn('\nunset PYTHONSAFEPATH\n', block)
+        self.assertIn('export PYTHONUNBUFFERED=1\n' + call, block)
+        command = '''set -euo pipefail
+gate_status=0
+only_args=()
+python() {
+  printf '%s\\n' "$@" > "$TEST_ARGS"
+  return "$TEST_RUNNER_STATUS"
+}
+''' + block + '''
+printf '%s\\n' "$gate_status"
+'''
+        for active in (None, "0", "1"):
+            for status in (0, 1):
+                with self.subTest(process_capture_active=active, status=status):
+                    with tempfile.TemporaryDirectory() as temporary:
+                        args_path = Path(temporary) / "args"
+                        env = {key: value for key, value in os.environ.items()
+                               if key not in ("BASH_ENV", "process_capture_active", "LEAF_GATE_JOBS")}
+                        env.update(TEST_ARGS=args_path.as_posix(), TEST_RUNNER_STATUS=str(status),
+                                   LEAF_CI_SCRIPT_PATH="/trusted/ci.sh")
+                        if active is not None:
+                            env["process_capture_active"] = active
+                        result = subprocess.run([BASH, "-c", command], env=env,
+                                                capture_output=True, text=True, timeout=30)
+                        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                        args = args_path.read_text(encoding="utf-8").splitlines()
+                        expected = ["scripts/run-all-gates.py", "--jobs", "auto", "--retry", "0",
+                                    "--early-feedback"]
+                        if active != "1":
+                            expected.append("--fail-fast")
+                        expected.extend(["--result-json", "/tmp/gate-results/gate-result.json",
+                                         "--log-dir", "/tmp/gate-logs", "--before-heavy-command",
+                                         "bash", "/trusted/ci.sh", "--heavy-prerequisites"])
+                        self.assertEqual(args, expected)
+                        self.assertEqual(result.stdout.strip(), str(status))
 
     def test_workflow_commands(self):
         """Pin CodeBuild's deliberate --with-deps deviation from the workflow."""
@@ -624,8 +671,9 @@ printf 'PUBLISHED %s\\n' "$readsets_status"
         gate_runs = [call for call in invocations
                      if "--verify-shard-results" not in call and "--verify-gate-proof" not in call]
         self.assertEqual(gate_runs, [invocations[0]])
-        for flag in ("--retry 0", "--early-feedback", "--fail-fast", "--result-json", "--log-dir"):
+        for flag in ("--retry 0", "--early-feedback", '"${gate_fail_fast_args[@]}"', "--result-json", "--log-dir"):
             self.assertIn(flag, invocations[0])
+        self.assertIn("gate_fail_fast_args=(--fail-fast)", script)
         self.assertNotIn("--retry 1", gate_runs[0])
         self.assertIn('LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"', script)
         self.assertIn('--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites',
