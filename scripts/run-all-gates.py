@@ -5813,7 +5813,7 @@ def load_priority_suites(suites: List[Suite]) -> frozenset[str]:
         return frozenset()
     try:
         hint = json.loads(raw)
-    except (ValueError, RecursionError):
+    except (UnicodeDecodeError, ValueError, RecursionError):
         print("PRIORITY ignored reason=malformed_json")
         return frozenset()
     if (not isinstance(hint, dict) or set(hint) != {"suite_ids"}
@@ -5843,7 +5843,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
     A pending suite is eligible when none of its conflict_resources() is held
     and no earlier pending suite shares one of them. Priority suites precede
     others in each resource queue; otherwise queues keep catalog order. A free
-    worker takes an eligible priority suite first, then uses today's weight:
+    worker takes eligible priority suites in catalog order, then uses today's weight:
     its own weight plus, for a locked suite,
     the weight still queued behind it on its resources (critical path first);
     ties go to catalog order. Idle workers wait on one condition, bounded and
@@ -5870,7 +5870,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
             queued.setdefault(name, deque()).append(index)
     # Pending lock-free suites: priority tier, then the existing weighted order.
     unlocked = deque(sorted((i for i, held in enumerate(locks) if not held),
-                            key=lambda i: (not priority[i], -weight[i], i)))
+                            key=lambda i: (False, i) if priority[i] else (True, -weight[i], i)))
     busy: set = set()
     ready = threading.Condition()
 
@@ -5884,7 +5884,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
         best, best_key = None, None
         if unlocked:
             best = unlocked[0]
-            best_key = (not priority[best], -weight[best], best)
+            best_key = (False, best) if priority[best] else (True, -weight[best], best)
         for queue in queued.values():
             if not queue:
                 continue
@@ -5894,7 +5894,8 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
                 continue
             behind = {i for name in held for i in queued[name]}
             behind.discard(head)
-            key = (not priority[head], -(weight[head] + sum(weight[i] for i in behind)), head)
+            key = ((False, head) if priority[head] else
+                   (True, -(weight[head] + sum(weight[i] for i in behind)), head))
             if best_key is None or key < best_key:
                 best, best_key = head, key
         if best is None:

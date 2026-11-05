@@ -4832,6 +4832,115 @@ def _priority_hint(monkeypatch, tmp_path, suite_ids):
     return path
 
 
+@pytest.mark.parametrize("jobs", [1, 2])
+@pytest.mark.parametrize("locked_priority", [(), (2,), (3,), (2, 3)])
+def test_priority_catalog_order_beats_weights_and_unlisted_stays_weighted(
+        tmp_path, monkeypatch, jobs, locked_priority):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    for suite, weight in zip(suites, [10.0, 50.0, 1.0, 100.0]):
+        monkeypatch.setitem(g._MEASURED_EST_S, suite.id, weight)
+    resources = {suites[i].id: frozenset({f"lock-{i}"}) for i in locked_priority}
+    monkeypatch.setattr(g, "conflict_resources", lambda s: resources.get(s.id, frozenset()))
+    _priority_hint(monkeypatch, tmp_path, [suites[3].id, suites[2].id])
+    starts, claims = [], []
+    first_started = threading.Event()
+    second_started = threading.Event()
+    unlisted_done = threading.Event()
+    real_pool = g.ThreadPoolExecutor
+
+    class ObservedPool(real_pool):
+        def submit(self, fn, seed):
+            claims.append(seed[0].id if seed else None)
+            return super().submit(fn, seed)
+
+    def run(suite, *_args):
+        if jobs == 2 and suite is suites[3]:
+            assert first_started.wait(timeout=5)
+        starts.append(suite.id)
+        if jobs == 2:
+            if suite is suites[2]:
+                first_started.set()
+                assert second_started.wait(timeout=5)
+            elif suite is suites[3]:
+                second_started.set()
+                # Leave one worker to demonstrate the unlisted weighted order.
+                assert unlisted_done.wait(timeout=5)
+            elif suite is suites[0]:
+                unlisted_done.set()
+        return g.Result(suite, "PASS", "2", 0.0), 1
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", ObservedPool)
+    monkeypatch.setattr(g, "_run_parallel_suite", run)
+    completed, state = {}, {"stopped_after": None,
+                            "priority_suites": g.load_priority_suites(suites)}
+    g.run_lanes(suites, tmp_path, jobs, 0, False, completed, state)
+    expected = [suites[i].id for i in (2, 3, 1, 0)]
+    assert claims == expected[:jobs]
+    assert starts == expected
+    assert set(completed) == {s.id for s in suites}
+    assert all(result.status == "PASS" for result, _ in completed.values())
+
+
+@pytest.mark.parametrize("multi_lock", [False, True], ids=["shared-lock", "multi-lock"])
+def test_priority_catalog_order_keeps_lock_heads_and_exclusion(
+        tmp_path, monkeypatch, multi_lock):
+    g = _load_runner()
+    suites = _jobs_catalog(g, 5)
+    resources = [frozenset({"a"}), frozenset({"a"}), frozenset({"b"}),
+                 frozenset({"a", "b"} if multi_lock else {"a"}), frozenset()]
+    by_id = {s.id: resources[i] for i, s in enumerate(suites)}
+    monkeypatch.setattr(g, "conflict_resources", lambda s: by_id[s.id])
+    for suite, weight in zip(suites, [200.0, 1.0, 1000.0, 50.0, 300.0]):
+        monkeypatch.setitem(g._MEASURED_EST_S, suite.id, weight)
+    _priority_hint(monkeypatch, tmp_path, [s.id for s in suites[1:4]][::-1])
+    first_wave = threading.Barrier(2)
+    guard = threading.Lock()
+    active = dict.fromkeys(("a", "b"), 0)
+    peak = dict(active)
+    starts, claims, overlaps = [], [], []
+    real_pool = g.ThreadPoolExecutor
+
+    class ObservedPool(real_pool):
+        def submit(self, fn, seed):
+            claims.append(seed[0].id if seed else None)
+            return super().submit(fn, seed)
+
+    def run(suite, *_args):
+        held = by_id[suite.id]
+        with guard:
+            starts.append(suite.id)
+            for name in held:
+                active[name] += 1
+                peak[name] = max(peak[name], active[name])
+                if active[name] > 1:
+                    overlaps.append((suite.id, name))
+        try:
+            if suite in suites[1:3]:
+                first_wave.wait(timeout=5)
+            return g.Result(suite, "PASS", "2", 0.0), 1
+        finally:
+            with guard:
+                for name in held:
+                    active[name] -= 1
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", ObservedPool)
+    monkeypatch.setattr(g, "_run_parallel_suite", run)
+    completed, state = {}, {"stopped_after": None,
+                            "priority_suites": g.load_priority_suites(suites)}
+    g.run_lanes(suites, tmp_path, 2, 0, False, completed, state)
+    assert claims == [suites[1].id, suites[2].id]
+    assert overlaps == []
+    assert peak == {"a": 1, "b": 1} and active == {"a": 0, "b": 0}
+    for name in active:
+        expected = [s.id for i, s in enumerate(suites) if name in resources[i]
+                    and i in (1, 2, 3)]
+        expected += [suites[0].id] if name == "a" else []
+        assert [sid for sid in starts if name in by_id[sid]] == expected
+    assert set(completed) == {s.id for s in suites}
+    assert all(result.status == "PASS" for result, _ in completed.values())
+
+
 def test_priority_jobs_two_claims_listed_suites_before_weighted_work(
         tmp_path, monkeypatch, capsys):
     g = _load_runner()
