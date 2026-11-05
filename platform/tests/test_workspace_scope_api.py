@@ -1,4 +1,5 @@
 """Canonical workspace scope through real request handlers and authority seams."""
+import os
 import uuid
 from dataclasses import replace
 from types import SimpleNamespace
@@ -28,24 +29,33 @@ def harness(monkeypatch):
     state = SimpleNamespace(
         identity=first, other_identity=second, project=uuid.uuid4(),
         role="editor", identity_active=True, binding_active=True,
-        member_active=True, visible=True, calls=[],
+        member_active=True, visible=True, calls=[], claims={},
     )
     monkeypatch.setenv("LEAF_AUTH_LIVE", "1")
+    monkeypatch.delenv("LEAF_PLATFORM_ADMIN_SUBJECTS", raising=False)
+    monkeypatch.delenv("LEAF_TENANT_CLAIM_NS", raising=False)
+
+    def claim_ns():
+        ns = os.environ.get("LEAF_TENANT_CLAIM_NS", "https://leafdesign.ai/")
+        return ns if ns.endswith("/") else ns + "/"
 
     def verify(authorization):
         state.calls.append("verify")
         # Opaque test inputs, not signed tokens. Only this verifier is replaced;
-        # deps._verified_identity still resolves the current durable binding.
+        # The scope dependency still resolves the current durable binding.
         subjects = {
             "Bearer first": first.external_subject,
             "Bearer second": second.external_subject,
         }
         if authorization not in subjects:
             raise HTTPException(401, "invalid bearer")
-        return {"sub": subjects[authorization], "org_id": str(second.platform_tenant_id)}
+        return {"sub": subjects[authorization], "org_id": str(second.platform_tenant_id),
+                **state.claims}
 
     monkeypatch.setattr(
-        deps, "_server_auth", lambda: SimpleNamespace(verify_platform_token=verify),
+        deps, "_server_auth", lambda: SimpleNamespace(
+            verify_platform_token=verify, claim_ns=claim_ns,
+        ),
     )
 
     def identity(authority, subject):
@@ -283,3 +293,68 @@ def test_invalid_stored_identity_is_not_exposed(harness, changes):
     response = h.client.get(h.url, headers=h.headers)
     assert response.status_code == 503
     assert response.json() == {"detail": "workspace scope unavailable"}
+
+
+def test_admin_editor_scope_is_owner_and_allowlist_is_live(harness, monkeypatch):
+    h = harness
+    h.claims["https://leafdesign.ai/tier"] = "admin"
+    monkeypatch.setenv(
+        "LEAF_PLATFORM_ADMIN_SUBJECTS", f" auth0|other-admin, {h.identity.external_subject} , ",
+    )
+    response = h.client.get(h.url, headers=h.headers)
+    assert response.status_code == 200
+    assert response.json() == {**expected_scope(h), "projectRole": "owner"}
+    assert h.calls == ["verify", "identity", "project", "binding", "membership"]
+    monkeypatch.delenv("LEAF_PLATFORM_ADMIN_SUBJECTS")
+    assert h.client.get(h.url, headers=h.headers).json()["projectRole"] == "editor"
+
+
+@pytest.mark.parametrize("tier,allowlist", [
+    ("admin", None), ("admin", ""), ("admin", "auth0|another-admin"),
+    ("pro", "member"), (None, "member"),
+])
+def test_admin_scope_requires_both_factors(harness, monkeypatch, tier, allowlist):
+    h = harness
+    h.claims["https://leafdesign.ai/tier"] = tier
+    if allowlist is not None:
+        monkeypatch.setenv(
+            "LEAF_PLATFORM_ADMIN_SUBJECTS",
+            h.identity.external_subject if allowlist == "member" else allowlist,
+        )
+    response = h.client.get(h.url, headers=h.headers)
+    assert response.status_code == 200
+    assert response.json() == expected_scope(h)
+
+
+@pytest.mark.parametrize("role", ["reviewer", "read_only"])
+def test_admin_scope_does_not_promote_readers(harness, monkeypatch, role):
+    h = harness
+    h.role = role
+    h.claims["https://leafdesign.ai/tier"] = "admin"
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", h.identity.external_subject)
+    response = h.client.get(h.url, headers=h.headers)
+    assert response.status_code == 200
+    assert response.json() == expected_scope(h)
+
+
+@pytest.mark.parametrize("failure", ["identity_active", "binding_active", "member_active"])
+def test_admin_scope_still_requires_active_membership(harness, monkeypatch, failure):
+    h = harness
+    setattr(h, failure, False)
+    h.claims["https://leafdesign.ai/tier"] = "admin"
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", h.identity.external_subject)
+    response = h.client.get(h.url, headers=h.headers)
+    assert response.status_code == 403
+    assert "platformUserId" not in response.json()
+
+
+def test_admin_scope_uses_configured_claim_namespace(harness, monkeypatch):
+    h = harness
+    monkeypatch.setenv("LEAF_TENANT_CLAIM_NS", "https://custom.example/claims")
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", h.identity.external_subject)
+    h.claims["https://leafdesign.ai/tier"] = "admin"
+    assert h.client.get(h.url, headers=h.headers).json()["projectRole"] == "editor"
+    h.claims["https://custom.example/claims/tier"] = "admin"
+    response = h.client.get(h.url, headers=h.headers)
+    assert response.status_code == 200
+    assert response.json()["projectRole"] == "owner"
