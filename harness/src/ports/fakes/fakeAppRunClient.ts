@@ -16,6 +16,7 @@ import type {
   SubmitRunResponse,
   ProjectPageProposalInput,
 } from "../index.js";
+import type { DeviceOperation, DeviceToolResult } from "../../agent/deviceTools.js";
 
 export const FAKE_CATALOG: CapabilityEntry[] = [
   {
@@ -73,6 +74,20 @@ function envelopeFor(tool: string): ResultEnvelope {
 }
 
 export class FakeAppRunClient implements AppRunClient {
+  readonly deviceToolCalls: Array<{
+    tenantId: string; operation: DeviceOperation; body: Record<string, unknown>;
+    authority: { sessionId: string; turnId: string };
+  }> = [];
+  deviceToolResult: DeviceToolResult = { ok: true, result: {} };
+
+  async deviceTool(
+    tenantId: string, operation: DeviceOperation, body: Record<string, unknown>,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<DeviceToolResult> {
+    this.methodLog.push("deviceTool");
+    this.deviceToolCalls.push({ tenantId, operation, body, authority });
+    return this.deviceToolResult;
+  }
   readonly pageProposalCalls: Array<{
     tenantId: string; sessionId: string; body: ProjectPageProposalInput;
     authority: { sessionId: string; turnId: string };
