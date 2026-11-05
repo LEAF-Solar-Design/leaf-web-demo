@@ -637,6 +637,12 @@ print(revision)
 LEAF_AUTOFILL_PIN
 )" || { autofill_solver_fail "pin read"; return 1; }
   [[ "$autofill_solver_revision" =~ ^[0-9a-f]{40}$ ]] || { autofill_solver_fail "pin read"; return 1; }
+  if [[ -f /work/autofill-solver-snapshot/snapshot.zip && -r /work/autofill-solver-snapshot/snapshot.zip ]]; then
+    work="$(mktemp -d)" || { autofill_solver_fail "mktemp"; return 1; }
+    timeout 10 cp /work/autofill-solver-snapshot/snapshot.zip "$work/snapshot.zip" \
+      || { autofill_solver_fail "snapshot copy"; return 1; }
+    autofill_solver_key="staged:/work/autofill-solver-snapshot/snapshot.zip"
+  else
   local prefix="forge-ci-relay/LEAF-Solar-Design/autofill-solver/${autofill_solver_revision}/"
   listing="$(timeout 10 aws s3api list-objects-v2 --bucket "$bucket" --prefix "$prefix" \
     --max-items 1000 --output json 2>/dev/null)" || { autofill_solver_fail "snapshot list"; return 1; }
@@ -656,6 +662,7 @@ print(max(zips, key=lambda o: str(o.get("LastModified", "")))["Key"])
   work="$(mktemp -d)" || { autofill_solver_fail "mktemp"; return 1; }
   timeout 30 aws s3api get-object --bucket "$bucket" --key "$autofill_solver_key" \
     "$work/snapshot.zip" >/dev/null 2>&1 || { autofill_solver_fail "snapshot download"; return 1; }
+  fi
   timeout 10 python3 -I -B - "$work/snapshot.zip" "$work" "$autofill_solver_revision" <<'LEAF_AUTOFILL_EXTRACT' || { autofill_solver_fail "snapshot extract"; return 1; }
 import json
 import shutil
