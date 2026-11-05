@@ -336,6 +336,18 @@ def catalog_info(catalog):
     return entries, fingerprint
 
 
+def bind_catalog(decision, catalog_path):
+    if decision.get("catalog_sha256") is not None or catalog_path is None:
+        return
+    try:
+        catalog, _ = load_json(catalog_path)
+        entries, fingerprint = catalog_info(catalog)
+    except (InvalidInput, OSError, ValueError, UnicodeError):
+        return
+    decision.update(catalog_sha256=fingerprint, catalog_suite_ids=sorted(entries),
+                    catalog_kind=catalog.get("kind"))
+
+
 def collection_digest(ids):
     return digest(sorted(strings(list(ids), "invalid_collection")))
 
@@ -759,6 +771,7 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                             executed_suite_ids=expanded)
         return decision
     except (InvalidInput, UnicodeError) as exc:
+        bind_catalog(decision, catalog_path)
         return full(decision, str(exc) if isinstance(exc, InvalidInput) else "invalid_encoding")
 
 
@@ -843,7 +856,12 @@ def main(argv=None):
         # Exceptions are not a valid successful decision. Clear filter state and
         # leave a diagnostic fallback when possible; the loader owns recovery.
         if args.command == "decide":
-            fallback = full({"schema": DECISION_SCHEMA}, "selector_exception")
+            fallback = {"schema": DECISION_SCHEMA}
+            try:
+                bind_catalog(fallback, args.catalog)
+            except Exception:
+                pass
+            full(fallback, "selector_exception")
             try:
                 atomic_write(Path(args.out_dir) / "only-args.nul", b"")
                 write_json(Path(args.out_dir) / "decision.json", fallback)
