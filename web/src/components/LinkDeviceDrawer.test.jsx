@@ -10,7 +10,7 @@ const json = (body, status = 200) => ({ ok: status < 400, status, json: async ()
 const catalog = [{ package: 'homeassistant', display_name: 'Home Assistant', version: 'catalog-v2', port: 8123, health_path: '/api/', relay_allow: [] }]
 const device = (over = {}) => ({
   device_id: 'd1', project_id: 'p1', label: 'Mac mini', hostname: 'mini.local',
-  agent_version: '1.0', status: 'online', last_seen_at: new Date().toISOString(), revoked_at: null,
+  agent_version: '1.0', status: 'online', last_seen_at: new Date(Date.now() - 5000).toISOString(), revoked_at: null,
   packages: [{ package: 'homeassistant', version: 'pinned-v1', status: 'installed', last_health_at: null }], ...over,
 })
 function Harness({ mock = false, initiallyOpen = true }) {
