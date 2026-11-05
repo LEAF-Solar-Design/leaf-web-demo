@@ -283,7 +283,10 @@ describe('App project Solar scope ownership', () => {
         return React.createElement('div', { 'data-testid': name })
       })]))
     const workspaceProbe = vi.fn(() => React.createElement('div', { 'data-testid': 'project-workspace' }))
-    const projectComponents = { ...components, ProjectSolarWorkspace: workspaceProbe, ProjectSolarGraphForm: () => null }
+    const publicationProbe = vi.fn(() => null)
+    const projectComponents = { ...components, ProjectSolarWorkspace: workspaceProbe,
+      ProjectSolarGraphForm: () => null, ProjectLayoutPublicationTools: publicationProbe }
+    const projectEditorBinding = { organization_id: O, project_id: P, drawing_id: D, input_version_id: V }
     const registry = { panels: 'registry' }
     components.SolarWorkspaceTools.workspacePanelsByFlow = registry
     const context = { drawingId: 'standalone-drawing', drawingVersion: 7, projectId: null }
@@ -312,6 +315,7 @@ describe('App project Solar scope ownership', () => {
     }
     const reset = () => {
       workspaceProbe.mockClear()
+      publicationProbe.mockClear()
       Object.values(components).forEach((probe) => probe.mockClear())
       Object.values(loaders).forEach((loader) => loader.mockClear())
     }
@@ -325,7 +329,8 @@ describe('App project Solar scope ownership', () => {
                 for (const ENV_SOLAR_FLOW_RAIL of [true, false]) {
                   reset()
                   const solarFlowSeated = ENV_CAD_EDIT && ENV_SOLAR_SETTINGS_FORM && ENV_SOLAR_FLOW_RAIL && profile === 'solar'
-                  const variant = { ...inputs, projectMode: true, solarFlowSeated, projectSolar: { ready, scope: { authorityKey: 'test', binding: null } },
+                  const variant = { ...inputs, projectMode: true, solarFlowSeated, projectEditorBinding,
+                    projectSolar: { ready, scope: { authorityKey: 'test', binding: null } },
                     projectSolarWorkspaceRef: { current: null }, drawerViewport: false, catalogState: {}, projectSolarRuntime: {},
                     mintCorrelationId: vi.fn(), onOpenProjectSolarTool: vi.fn(), onCloseProjectSolarTool: vi.fn(), running, routeErr,
                     surfaceSlots: { toolbar: { profile } }, ENV_CAD_EDIT, ENV_SOLAR_SETTINGS_FORM, ENV_SOLAR_FLOW_RAIL }
@@ -338,8 +343,11 @@ describe('App project Solar scope ownership', () => {
                   if (solarFlowSeated) {
                     expect(workspaceProbe).toHaveBeenCalledOnce()
                     expect(subtree.querySelector('[data-testid="project-workspace"]')).not.toBeNull()
+                    expect(publicationProbe).toHaveBeenCalledOnce()
+                    expect(publicationProbe.mock.calls[0][0].projectScope).toBe(projectEditorBinding)
                   } else {
                     expect(workspaceProbe).not.toHaveBeenCalled()
+                    expect(publicationProbe).not.toHaveBeenCalled()
                     expect(statuses[0].textContent).toBe(projectSolarAppReason('project_unavailable'))
                     expect(statuses[0].getAttribute('aria-live')).toBe('polite')
                   }
