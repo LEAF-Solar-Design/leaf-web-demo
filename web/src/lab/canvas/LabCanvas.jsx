@@ -11,6 +11,7 @@ import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeI
 import { connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
 import { pushRecent } from './libraryCategories.js'
+import { graphLayouts } from '../history/labArtifactsClient.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
@@ -22,6 +23,14 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const [layoutRunner] = useState(createDependencyLayoutRunner)
   const current = useRef(document)
   const [positions, setPositions] = useState({})
+  const placed = useRef(positions)
+  placed.current = positions
+  const draft = graph => {
+    const next = roundTrip(graph)
+    graphLayouts.set(next, { positions: () => Object.fromEntries(graph.blocks.map((block, index) =>
+      [block.id, placed.current[block.id] || { x: index * 370, y: 30 }])) })
+    return next
+  }
   const [selected, setSelected] = useState(null)
   const [armed, setArmed] = useState(null)
   const [pending, setPending] = useState(null)
@@ -39,7 +48,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     if (initialReported.current) return
     initialReported.current = true
     const { ready, problems } = validation
-    onChange?.({ document: roundTrip(document), ready, problems })
+    onChange?.({ document: draft(document), ready, problems })
   }, [document, onChange, validation])
   const commit = next => {
     // Deliver every draft so the host cannot retain an earlier valid graph.
@@ -48,7 +57,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     request.current += 1; layoutRunner.cancel(); setLayoutBusy(false)
     setDocument(current.current)
     const { ready, problems } = validateGraph(current.current, entries)
-    onChange?.({ document: roundTrip(current.current), ready, problems })
+    onChange?.({ document: draft(current.current), ready, problems })
   }
   const connect = pipe => { commit(connectPipe(current.current, pipe, entries)); setMessage('Pipe connected') }
   const disconnect = id => { commit(disconnectPipe(current.current, id)); setMessage('Pipe disconnected') }
@@ -76,12 +85,13 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       try { pushRecent(globalThis.localStorage, manifest.id) } catch { /* Storage may be unavailable. */ }
     } catch (error) { setMessage(error.message) }
   }
-  const runLayout = useCallback(async (layoutDocument, dimensions) => {
+  const runLayout = useCallback(async (layoutDocument, dimensions, stored) => {
     const token = ++request.current
     const started = performance.now()
     try {
-      const next = await layoutRunner.run(layoutDocument, dimensions)
+      const [next, saved] = await Promise.all([layoutRunner.run(layoutDocument, dimensions), stored])
       if (token !== request.current) return
+      for (const block of layoutDocument.blocks) if (saved?.positions?.[block.id]) next[block.id] = saved.positions[block.id]
       setPositions(next); setLayoutMs(performance.now() - started); setMessage('Layout updated')
     } catch (error) { if (token === request.current) setMessage(error.message) }
     finally { if (token === request.current) setLayoutBusy(false) }
@@ -92,7 +102,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     runLayout(current.current, dimensions)
   }
   useEffect(() => {
-    runLayout(initialLayoutDocument, {})
+    runLayout(initialLayoutDocument, {}, graphLayouts.get(initialDocument)?.load?.())
     return () => { request.current += 1; layoutRunner.cancel() }
     // Initial layout only. Editing never discards user positions.
   }, [initialLayoutDocument, layoutRunner, runLayout])
