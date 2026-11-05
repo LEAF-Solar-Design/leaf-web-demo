@@ -429,6 +429,68 @@ printf 'PUBLISHED %s\\n' "$readsets_status"
                     self.assertEqual(event["evidence_ref"]["manifest_sha256"],
                                      hashlib.sha256(manifest_path.read_bytes()).hexdigest())
 
+    def test_forge_device_event(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block = script.split("<<'LEAF_SELECTION_INPUTS'\n", 1)[1].split(
+            "\nLEAF_SELECTION_INPUTS", 1)[0]
+        operation = lambda kind, number, head: "ci-" + hashlib.sha256(
+            ("LEAF-Solar-Design/leaf-web-demo|" + kind + "|" + str(number) + "|" + head)
+            .encode("utf-8")).hexdigest()[:40]
+        env = {"CODEBUILD_BUILD_ID": "device:dv-0123456789abcdef",
+               "CODEBUILD_RESOLVED_SOURCE_VERSION": "a" * 40,
+               "CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED",
+               "CODEBUILD_WEBHOOK_HEAD_REF": "refs/pull/7/head",
+               "CODEBUILD_WEBHOOK_BASE_REF": "refs/heads/main",
+               "HEAD_SHA": "a" * 40, "TRUSTED_SHA": "b" * 40,
+               "LEAF_CI_BASE_SHA": "b" * 40, "LEAF_CI_BASE_REF": "main",
+               "FORGE_CI_HEAD_BRANCH": "feature/device",
+               "FORGE_CI_OPERATION": operation("pull_request", 7, "a" * 40)}
+        cases = [({}, "forge-device"),
+                 ({"CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_CREATED"}, "forge-device"),
+                 ({"CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_REOPENED"}, "forge-device"),
+                 ({"FORGE_CI_OPERATION": operation("pull_request", 8, "a" * 40)}, "github"),
+                 ({"FORGE_CI_OPERATION": operation("pull_request", 7, "c" * 40)}, "github"),
+                 ({"CODEBUILD_BUILD_ID": "device:dv-0123456789abcde"}, "github"),
+                 ({"CODEBUILD_BUILD_ID": "device:dv-0123456789abcdeg"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_HEAD_REF": "refs/pull/0/head"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/feature"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_BASE_REF": "refs/heads/../main"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_BASE_REF": "main"}, "github"),
+                 ({"HEAD_SHA": "bad"}, "github"),
+                 ({"TRUSTED_SHA": "bad"}, "github"),
+                 ({"CODEBUILD_RESOLVED_SOURCE_VERSION": "c" * 40}, "github"),
+                 ({"CODEBUILD_WEBHOOK_EVENT": "PUSH",
+                   "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main",
+                   "FORGE_CI_OPERATION": operation("push", 0, "a" * 40)}, "github")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for changes, provider in cases:
+                with self.subTest(changes=changes):
+                    (root / "catalog.json").write_text(json.dumps({
+                        "schema": "leaf.ci.catalog.v1", "suites": [{"id": "sample"}],
+                        "catalog_sha256": "e" * 64}), encoding="utf-8")
+                    current = dict(env, **changes)
+                    with patch.dict(os.environ, current, clear=True), \
+                         patch.object(sys, "argv", ["inputs", str(root), "f" * 40]):
+                        exec(compile(block, "selection-inputs", "exec"), {})
+                    event = json.loads((root / "event.json").read_text(encoding="utf-8"))
+                    self.assertEqual(event["provider"], provider)
+                    self.assertEqual(event["event"], current["CODEBUILD_WEBHOOK_EVENT"])
+                    if provider == "forge-device":
+                        self.assertEqual(event["initiator"], "leaf-ci-device")
+                        self.assertIs(event["provider_bound"], True)
+                        self.assertEqual(event["build_id"], env["CODEBUILD_BUILD_ID"])
+                        self.assertEqual(event["pr_number"], 7)
+                        self.assertEqual(event["source_version"], "")
+                        self.assertEqual(event["head_sha"], env["HEAD_SHA"])
+                        self.assertEqual(event["target_sha"], env["TRUSTED_SHA"])
+                        self.assertEqual(event["head_ref"], env["CODEBUILD_WEBHOOK_HEAD_REF"])
+                        self.assertEqual(event["target_ref"], env["CODEBUILD_WEBHOOK_BASE_REF"])
+                        self.assertEqual(event["evidence_ref"], {
+                            "build": env["CODEBUILD_BUILD_ID"], "operation": env["FORGE_CI_OPERATION"]})
+                    else:
+                        self.assertEqual(event["initiator"], "")
+
     def test_relay_receipt_event_classifier(self):
         script = CI_PATH.read_text(encoding="utf-8")
         block = script.split("<<'LEAF_SELECTION_RECEIPTS'\n", 1)[1].split(
@@ -439,6 +501,16 @@ printf 'PUBLISHED %s\\n' "$readsets_status"
                                    ("PULL_REQUEST_UPDATED", "refs/pull/0/head", "unknown")):
             with self.subTest(raw=raw, ref=ref):
                 namespace = {"e": {"CODEBUILD_INITIATOR": "states/leaf-forge-ci-relay",
+                                    "CODEBUILD_WEBHOOK_EVENT": raw,
+                                    "CODEBUILD_WEBHOOK_HEAD_REF": ref}, "re": re}
+                exec(compile(classifier, "receipt-classifier", "exec"), namespace)
+                self.assertEqual(namespace["event"], expected)
+
+        for raw, ref, expected in (("PULL_REQUEST_UPDATED", "refs/pull/7/head", "pr"),
+                                   ("PUSH", "refs/heads/main", "main"),
+                                   ("PULL_REQUEST_UPDATED", "refs/pull/0/head", "unknown")):
+            with self.subTest(device=True, raw=raw, ref=ref):
+                namespace = {"e": {"CODEBUILD_BUILD_ID": "device:dv-0123456789abcdef",
                                     "CODEBUILD_WEBHOOK_EVENT": raw,
                                     "CODEBUILD_WEBHOOK_HEAD_REF": ref}, "re": re}
                 exec(compile(classifier, "receipt-classifier", "exec"), namespace)

@@ -420,6 +420,16 @@ def validate_event(event, head, repo_slug, pr_number):
                 any(not isinstance(evidence.get(k), str) or not evidence[k]
                     for k in ("build", "operation"))):
             raise InvalidInput("unverified_event")
+    elif provider == "forge-device":
+        evidence = event.get("evidence_ref")
+        if (event.get("initiator") != "leaf-ci-device" or
+                event.get("provider_bound") is not True or
+                not isinstance(event.get("build_id"), str) or
+                not re.fullmatch(r"device:dv-[0-9a-f]{16}", event["build_id"]) or
+                not isinstance(evidence, dict) or evidence.get("build") != event["build_id"] or
+                not isinstance(evidence.get("operation"), str) or
+                not re.fullmatch(r"ci-[0-9a-f]{40}", evidence["operation"])):
+            raise InvalidInput("unverified_event")
     else:
         raise InvalidInput("unverified_event")
     number = event.get("pr_number")
@@ -430,15 +440,15 @@ def validate_event(event, head, repo_slug, pr_number):
         raise InvalidInput("invalid_pr_identity")
     if ((repo_slug is not None and repo_slug != slug) or
             (pr_number is not None and int(pr_number) != number) or
-            event.get("source_version") != ("" if provider == "forge" else "pr/" + str(number)) or
+            event.get("source_version") != ("" if provider in ("forge", "forge-device") else "pr/" + str(number)) or
             event.get("head_sha") != head):
         raise InvalidInput("contradictory_event")
-    if provider == "forge" and (
+    if provider in ("forge", "forge-device") and (
             event.get("head_ref") != "refs/pull/" + str(number) + "/head" or
             not isinstance(event.get("target_sha"), str) or
             not re.fullmatch(r"[0-9A-Fa-f]{40}", event["target_sha"])):
         raise InvalidInput("contradictory_event")
-    for key in (("target_ref",) if provider == "forge" else ("head_ref", "target_ref")):
+    for key in (("target_ref",) if provider in ("forge", "forge-device") else ("head_ref", "target_ref")):
         ref = event.get(key)
         if (not isinstance(ref, str) or not ref.startswith("refs/heads/") or
                 not ref[len("refs/heads/"):] or any(c in ref for c in " ~^:?*[\\") or
