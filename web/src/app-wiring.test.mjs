@@ -31,6 +31,53 @@ import { solarSettingsScope } from './solar/solarSettingsWire.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import { projectSolarAppReason } from './solar/solarProjectAppModel.js'
 
+it('every solar panel module is mounted from App or explicitly API-only or tutorial-only', () => {
+  const exceptions = {
+    'SolarPvcasePanel.jsx': 'tutorial-only: PVcase parity is a tutorial flow without a workspace mount',
+  }
+  const solarDirectory = new URL('./solar/', import.meta.url)
+  const panels = readdirSync(solarDirectory).filter((name) => name.endsWith('Panel.jsx'))
+  const mounted = new Set()
+  const visited = new Set()
+  function inspect(url) {
+    if (visited.has(url.href)) return
+    visited.add(url.href)
+    const tree = parseJs(readFileSync(url, 'utf8'), { sourceType: 'module', plugins: ['jsx'] })
+    const imports = new Map()
+    const dependencies = []
+    for (const node of tree.program.body) {
+      if (node.type !== 'ImportDeclaration' || !node.source.value.startsWith('.')) continue
+      const dependency = new URL(node.source.value, url)
+      if (!/\.(?:jsx|js|mjs)$/.test(dependency.pathname)) continue
+      dependencies.push(dependency)
+      for (const specifier of node.specifiers) imports.set(specifier.local.name, dependency.href)
+    }
+    function walk(node) {
+      if (!node || typeof node !== 'object') return
+      if (node.type === 'JSXOpeningElement' && node.name.type === 'JSXIdentifier') {
+        const module = imports.get(node.name.name)
+        if (module) mounted.add(module)
+      }
+      for (const value of Object.values(node)) {
+        if (Array.isArray(value)) value.forEach(walk)
+        else if (value && typeof value.type === 'string') walk(value)
+      }
+    }
+    walk(tree)
+    dependencies.forEach(inspect)
+  }
+  inspect(new URL('./App.jsx', import.meta.url))
+  for (const [name, reason] of Object.entries(exceptions)) {
+    assert.ok(panels.includes(name), `stale panel exception: ${name}`)
+    assert.match(reason, /^(?:API-only|tutorial-only): .+/)
+    assert.ok(!mounted.has(new URL(name, solarDirectory).href), `remove the exception for mounted ${name}`)
+  }
+  for (const name of panels) {
+    assert.ok(mounted.has(new URL(name, solarDirectory).href) || Object.hasOwn(exceptions, name),
+      `${name} needs an App-reachable JSX mount or a documented API-only/tutorial-only exception`)
+  }
+})
+
 it('Studio hides only the activity region and leaves command and header chrome outside it', () => {
   const source = readFileSync(new URL('./App.jsx', import.meta.url), 'utf8')
   const tree = parseJs(source, { sourceType: 'module', plugins: ['jsx'] })
