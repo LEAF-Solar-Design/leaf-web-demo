@@ -2,12 +2,13 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, HTTPException, Request
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, Response
 from starlette.concurrency import run_in_threadpool
 
 import deps
 import entitlements
 import lab_artifacts as ledger
+import lab_layouts
 from lab_diff import structural_diff
 from lab_doc_validators import InvalidGraph, MAX_RAW_BYTES, TooLarge, parse_body
 
@@ -32,6 +33,8 @@ def _actor(tenant):
 def _call(function, *args, _document_errors=False, **kwargs):
     try:
         return function(*args, **kwargs)
+    except lab_layouts.LayoutRefused as error:
+        return _layout_error(error)
     except ledger.NotFound:
         raise HTTPException(404, detail="lab_document_not_found") from None
     except ledger.KindFixed:
@@ -136,3 +139,41 @@ async def publish(doc_id: str, request: Request, tenant=Depends(deps.require_ten
     _admit(tenant, "deploy")
     body = await _body(request, ("expected_head",))
     return await run_in_threadpool(_call, ledger.publish, str(tenant), doc_id, body["expected_head"], _actor(tenant))
+
+
+def _layout_error(error):
+    return JSONResponse({"code": error.code}, status_code=413 if error.code == "lab_layout_too_large" else 400,
+                        headers={"Cache-Control": "no-store"})
+
+
+@router.get("/{doc_id}/layout/{sha256}")
+def get_layout(doc_id: str, sha256: str, tenant=Depends(deps.require_tenant)):
+    _admit(tenant, "build")
+    layout = _call(lab_layouts.get_layout, str(tenant), doc_id, sha256)
+    return layout if isinstance(layout, JSONResponse) else JSONResponse(
+        {"layout": layout}, headers={"Cache-Control": "no-store"})
+
+
+@router.put("/{doc_id}/layout/{sha256}")
+async def put_layout(doc_id: str, sha256: str, request: Request, tenant=Depends(deps.require_tenant)):
+    _admit(tenant, "build")
+    try:
+        length = request.headers.get("content-length")
+        if length is not None:
+            size = int(length)
+            if size < 0:
+                raise lab_layouts.LayoutRefused()
+            if size > lab_layouts.MAX_LAYOUT_BYTES:
+                raise lab_layouts.LayoutRefused("lab_layout_too_large")
+        data = bytearray()
+        async for chunk in request.stream():
+            if len(data) + len(chunk) > lab_layouts.MAX_LAYOUT_BYTES:
+                raise lab_layouts.LayoutRefused("lab_layout_too_large")
+            data.extend(chunk)
+        body = parse_body(bytes(data))
+    except lab_layouts.LayoutRefused as error:
+        return _layout_error(error)
+    except (ValueError, UnicodeError):
+        return _layout_error(lab_layouts.LayoutRefused())
+    result = await run_in_threadpool(_call, lab_layouts.put_layout, str(tenant), doc_id, sha256, body)
+    return result if isinstance(result, JSONResponse) else Response(status_code=204, headers={"Cache-Control": "no-store"})

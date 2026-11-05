@@ -400,6 +400,7 @@
     "server-lab-ops",
     "server-lab-evaluate",
     "server-lab-artifacts",
+    "server-lab-layouts",
     "server-lab-widgets",
     "server-lab-artifacts-git",
     "server-lab-git-authority",

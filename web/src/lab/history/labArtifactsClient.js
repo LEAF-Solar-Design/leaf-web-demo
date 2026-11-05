@@ -3,6 +3,8 @@ import { fetchWithBudget } from '../../fetchBudget.js'
 import { humanizeError } from '../../errorHumanize.js'
 
 export const SAVED_REVISION_EVENT = 'leaf.lab.saved-revision'
+// Object associations carry display state through GraphView without graph fields.
+export const graphLayouts = new WeakMap()
 export const MSG_LAB_TOO_LARGE = 'This document is too large to save.'
 export const MSG_LAB_STORAGE_FULL = 'This save is over the Lab storage limit.'
 export function isValidDocId(id) {
@@ -26,17 +28,20 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
   const fresh = token => current(token) && token.writeSeq === writeSeq
   const maximum = (left, right) => right == null ? left : left == null ? right : Math.max(left, right)
   const merge = rows => [...new Map([...state.revisions, ...rows].map(row => [row.revision, row])).values()].sort((a, b) => a.revision - b.revision)
-  async function request(id, path, body, resolveConflict = true, token = capture(id)) {
+  async function request(id, path, body, resolveConflict = true, token = capture(id), method = body === undefined ? 'GET' : 'POST') {
     identifier(id)
     const started = now()
     try {
       const response = await fetchWithBudget(fetchImpl, `${config.apiBase}/api/lab/docs/${encodeURIComponent(id)}/${path}`, {
-        method: body === undefined ? 'GET' : 'POST', credentials: 'same-origin', redirect: 'error',
+        method, credentials: 'same-origin', redirect: 'error',
         headers: { accept: 'application/json', 'content-type': 'application/json', 'X-Tenant-Id': config.tenant, ...authHeaders() },
         ...(body === undefined ? {} : { body: JSON.stringify(body) }),
       })
       const data = await response.json().catch(() => ({}))
-      if (response.ok) return { ...data, ok: true }
+      if (response.ok) {
+        if (data.graph && data.sha256) graphLayouts.set(data.graph, { load: () => getLayout(id, data.sha256) })
+        return { ...data, ok: true }
+      }
       const code = typeof data?.detail === 'string' ? data.detail : data?.detail?.code
       const detail = response.status === 413
         ? (code === 'lab_capacity_exceeded' ? MSG_LAB_STORAGE_FULL : MSG_LAB_TOO_LARGE)
@@ -52,6 +57,17 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
     finally {
       if (current(token)) update({ requestTimes: [...state.requestTimes, Math.max(0, now() - started)].slice(-20) })
     }
+  }
+  async function getLayout(id, sha256) {
+    try {
+      const result = await request(id, `layout/${encodeURIComponent(sha256)}`, undefined, false)
+      return result.ok ? result.layout ?? null : null
+    } catch { return null }
+  }
+  async function putLayout(id, sha256, layout) {
+    try {
+      return (await request(id, `layout/${encodeURIComponent(sha256)}`, layout, false, capture(id), 'PUT')).ok
+    } catch { return false }
   }
   function saved(id, row, kind, token, op) {
     const revision = kind === 'publish' ? row.new_head : row.revision
@@ -76,6 +92,7 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
     return true
   }
   return {
+    getLayout, putLayout,
     state, subscribe(listener) { listeners.add(listener); return () => listeners.delete(listener) },
     currentDocId: () => docId,
     currentGeneration: () => generation,
@@ -88,10 +105,14 @@ export function createLabArtifactsClient({ fetchImpl = (...args) => globalThis.f
       identifier(id)
       const token = capture(id), op = id === docId ? ++operation : operation
       const mine = JSON.parse(JSON.stringify(graph))
+      const positions = graphLayouts.get(graph)?.positions?.()
       const started = now()
       const result = await request(id, 'save', { graph: mine, expected_head: expectedHead }, true, token)
       if (current(token)) update({ saveTimes: [...state.saveTimes, Math.max(0, now() - started)].slice(-20) })
-      if (result.ok) saved(id, { ...result, graph: mine }, 'save', token, op)
+      if (result.ok) {
+        saved(id, { ...result, graph: mine }, 'save', token, op)
+        if (positions) await this.putLayout(id, result.sha256, { schema: 'leaf.lab-layout.v1', positions })
+      }
       else reconcile(result, token, mine)
       return result
     },
