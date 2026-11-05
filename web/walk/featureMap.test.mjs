@@ -242,9 +242,40 @@ test('C2 certifies all seven engine and disclosure controls with real recipes', 
     }
   }
   assert.equal(entryFor('control:save-version').expected_effect['nothing-edited'].reason, 'Make a change first.')
-  assert.equal(entryFor('control:save-version').expected_effect['no-target'].reason, 'download-only here: no project target')
+  assert.deepEqual(entryFor('control:save-version').expected_effect['no-target'], { kind: 'submits', target: 'engine-download-dxf' })
   assert.equal(entryFor('control:undo-edit').expected_effect['nothing-to-undo'].reason, 'nothing to undo')
   assert.equal(entryFor('control:redo-edit').expected_effect['nothing-to-redo'].reason, 'nothing to redo')
+})
+
+test('save-version no-target names the enabled Download DXF control and tooltip', () => {
+  assert.deepEqual(entryFor('control:save-version').state_contexts['no-target'], {
+    toolbar: 'Quick access', name: 'Download DXF', tooltip: 'Download the drawing to keep your changes',
+  })
+})
+
+test('save-version Download DXF name exception requires the exact record, state and effect', () => {
+  assert.doesNotThrow(() => buildFeatureMap({ overrides: clone(overrides) }))
+  for (const name of ['Download', 'Download dxf', 'Save version as DXF']) {
+    const invalid = clone(overrides)
+    invalid.controls.find((row) => row.id === 'control:save-version').state_contexts['no-target'].name = name
+    assert.throws(() => buildFeatureMap({ overrides: invalid }), /control accessible name mismatch/)
+  }
+  for (const mutate of [
+    (row) => { row.state_contexts.ready.name = 'Download DXF' },
+    (row) => { row.expected_effect['no-target'].kind = 'opens' },
+    (row) => { row.expected_effect['no-target'].target = 'engine-save-version' },
+    (row) => {
+      row.id = 'control:other-save'
+      row.source_id = 'other-save'
+      for (const effect of Object.values(row.expected_effect)) {
+        if (effect.kind === 'disabled_with_reason') effect.reason_code = row.id + ':unavailable'
+      }
+    },
+  ]) {
+    const invalid = clone(overrides)
+    mutate(invalid.controls.find((row) => row.id === 'control:save-version'))
+    assert.throws(() => buildFeatureMap({ overrides: invalid }), /control accessible name mismatch/)
+  }
 })
 
 test('Script controls name scoped effects, native running locks and the Run refusal ladder', () => {

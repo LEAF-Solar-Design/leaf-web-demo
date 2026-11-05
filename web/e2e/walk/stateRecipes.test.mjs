@@ -6127,6 +6127,37 @@ test('C2 download-only page uses the public demo and restores identity before cl
   } finally { globalThis.localStorage = originalStorage }
 })
 
+test('save-version no-target captures a DXF download without a drawing id or API request', async () => {
+  for (const filename of ['walk-v1.dxf', 'walk.txt']) {
+    let requestCalls = 0
+    const events = []
+    const route = '/app?demo=1&surface=cad'
+    const page = {
+      get request() { requestCalls++; throw new Error('Download must not call an API') },
+      getByRole: () => ({ disabled: false }),
+      getByTestId: () => ({ innerText: async () => '5' }),
+      waitForEvent: async (event, options) => {
+        events.push(event)
+        assert.equal(options.timeout, 15_000)
+        return { suggestedFilename: () => filename }
+      },
+    }
+    const runtime = { page, evidence: { censusDownloadOnly: { route }, censusDownload: { route } } }
+    const probe = { locator: { role: 'button', name: 'Download DXF' }, assertion: { target: 'engine-download-dxf' } }
+    const before = await captureCensusEffect(probe, runtime, censusAssertions)
+    assert.deepEqual(events, ['download'])
+    if (filename.endsWith('.dxf')) {
+      await assertCensusEffect(probe, runtime, {}, before, censusAssertions)
+      assert.deepEqual(runtime.evidence.censusDownload, { route, filename })
+    } else {
+      await assert.rejects(assertCensusEffect(probe, runtime, {}, before, censusAssertions), assert.AssertionError)
+      assert.deepEqual(runtime.evidence.censusDownload, { route })
+    }
+    assert.deepEqual(runtime.evidence.censusDownloadOnly, { route })
+    assert.equal(requestCalls, 0)
+  }
+})
+
 test('C2 edit and script oracles require the exact count delta, completion and opposite history step', async () => {
   for (const target of ['engine-undo-edit', 'engine-redo-edit', 'script-run']) {
     const after = target === 'engine-undo-edit' ? 4 : 6

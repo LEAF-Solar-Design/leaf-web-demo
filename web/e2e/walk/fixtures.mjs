@@ -2912,6 +2912,10 @@ export async function captureCensusEffect(probe, runtime, assertions = expect) {
   // In particular, Redo setup must finish its real Undo before counting.
   await assertions(control(page, probe.locator)).toBeEnabled()
   const before = { count: await engineCount(page) }
+  if (target === 'engine-download-dxf') {
+    runtime.censusDownload = page.waitForEvent('download', { timeout: 15_000 })
+    runtime.censusDownload.catch(() => {})
+  }
   if (target === 'engine-save-version') {
     const response = await page.request.get(`/api/drawings/${runtime.drawingId}/versions`, { timeout: 15_000 })
     assertions(response.ok()).toBe(true)
@@ -3020,6 +3024,12 @@ export async function assertCensusEffect(probe, runtime, locator, before, assert
     await assertions(page.getByRole('toolbar', { name: 'Quick access', exact: true })
       .getByRole('button', { name: target === 'engine-undo-edit' ? 'Redo edit' : 'Undo edit', exact: true })).toBeEnabled()
     runtime.evidence.censusEdit = { before: before.count, after: await engineCount(page), target }
+    return
+  }
+  if (target === 'engine-download-dxf') {
+    const download = await runtime.censusDownload
+    assertions(download.suggestedFilename().endsWith('.dxf')).toBe(true)
+    runtime.evidence.censusDownload = { ...runtime.evidence.censusDownload, filename: download.suggestedFilename() }
     return
   }
   if (target === 'engine-save-version') {
@@ -4360,7 +4370,7 @@ async function captureBefore(probe, runtime) {
     return captureEngineRepeat(probe, runtime)
   }
   if (probe.assertion.target === 'solar-step-editor') return observeSolarEditorRequests(runtime)
-  if (['engine-save-version', 'engine-undo-edit', 'engine-redo-edit', 'script-run'].includes(probe.assertion.target)) return captureCensusEffect(probe, runtime)
+  if (['engine-save-version', 'engine-download-dxf', 'engine-undo-edit', 'engine-redo-edit', 'script-run'].includes(probe.assertion.target)) return captureCensusEffect(probe, runtime)
   if (typeof barNoRung === 'function' && barNoRung(probe)) {
     if (await page.getByTestId('cad-edit-workbench').count()) await engineReady(probe, runtime)
     await page.evaluate(() => new Promise((resolve) => requestAnimationFrame(() => requestAnimationFrame(resolve))))
@@ -4530,7 +4540,7 @@ export async function assertEffect(probe, runtime, locator, before, assertions =
     await assertSolarStepEditor(probe, runtime, locator, before, assertions)
     return
   }
-  if (typeof CENSUS_DISCLOSURES !== 'undefined' && CENSUS_DISCLOSURES[target] || ['engine-save-version', 'engine-undo-edit', 'engine-redo-edit',
+  if (typeof CENSUS_DISCLOSURES !== 'undefined' && CENSUS_DISCLOSURES[target] || ['engine-save-version', 'engine-download-dxf', 'engine-undo-edit', 'engine-redo-edit',
     'ribbon-script-text', 'script-file-picker', 'script-run'].includes(target)) {
     await assertCensusEffect(probe, runtime, locator, before, assertions)
     return
