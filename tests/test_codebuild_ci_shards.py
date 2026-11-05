@@ -61,18 +61,51 @@ def test_gate_call_gets_shard_flags_only_when_unfiltered():
     assert guard + flags + "fi\n" in script
     call = next(line for line in script.splitlines()
                 if line.startswith("python scripts/run-all-gates.py "))
+    assert '"${gate_fail_fast_args[@]}"' in call
+    fail_fast = (
+        'gate_fail_fast_args=(--fail-fast)\n'
+        'if [[ "${process_capture_active:-0}" == 1 ]]; then\n'
+        "  # Capture records every suite's reads; a failure still fails the job below.\n"
+        '  gate_fail_fast_args=()\n'
+        'fi\n'
+    )
+    assert fail_fast in script
+    assert script.index(fail_fast) < script.index(call)
+    assert [line for line in script.splitlines()
+            if line.lstrip().startswith("gate_fail_fast_args=")] == [
+        'gate_fail_fast_args=(--fail-fast)', '  gate_fail_fast_args=()',
+    ]
+    assert call == (
+        'python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" '
+        '--retry 1 "${gate_fail_fast_args[@]}" '
+        '--result-json /tmp/gate-results/gate-result.json '
+        '--log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?'
+    )
     assert '"${only_args[@]}"' in call
     assert "--result-json /tmp/gate-results/gate-result.json" in call
     assert script.index(guard) < script.index(call)
     assert ('if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 '
             '|| "$CI_SHARD_INDEX_N" == 0 ]]; then') in script
-    assert (call + '\nelse\n  echo "gate: selected mode runs on shard 0 only"'
+    assert (call + '\npython -I -B scripts/ci/retain_failed_gate_logs.py \\\n'
+            '  --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs '
+            '--output /tmp/gate-results/failed-gate-logs \\\n'
+            "  || echo 'WARNING: failed gate log retention unavailable' >&2\n"
+            'if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then\n'
+            '  echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2\n'
+            '  gate_status=1\nfi\n'
+            'else\n  echo "gate: selected mode runs on shard 0 only"'
             '\n  gate_status=0\nfi') in script
 
 
 def test_gate_proof_skipped_when_sharded():
-    proof = ci_script().split("# LEAF_GATE_PROOF_BEGIN\n", 1)[1].split(
+    script = ci_script()
+    proof_region = script.split("# LEAF_GATE_PROOF_BEGIN\n", 1)[1].split(
         "# LEAF_GATE_PROOF_END", 1)[0]
+    proof, summary = proof_region.split("# LEAF_PROCESS_CAPTURE_SUMMARY_BEGIN\n", 1)
+    assert summary.endswith("# LEAF_PROCESS_CAPTURE_SUMMARY_END\n")
+    assert (script.index("# LEAF_GATE_PROOF_BEGIN\n")
+            < script.index("# LEAF_PROCESS_CAPTURE_SUMMARY_BEGIN\n")
+            < script.index("# LEAF_GATE_PROOF_END"))
     assert proof.startswith(
         'if [[ "${CI_SHARD_MODE:-all}" == shard ]]; then\n'
         "  echo 'INFO: gate proof skipped in sharded mode; build verdict unchanged'\n"
@@ -80,6 +113,9 @@ def test_gate_proof_skipped_when_sharded():
     )
     assert proof.endswith("fi\n")
     assert "--emit-proof" in proof
+    assert ('if [[ "$gate_status" == 0 ]] && python -I -B - '
+            '"$selection_dir/detail.json" <<\'LEAF_GATE_PROOF_ELIGIBLE\'\n') in proof
+    assert script.endswith('# LEAF_GATE_PROOF_END\nexit "$gate_status"\n')
 
 
 @pytest.mark.parametrize("total,index,expected", [
