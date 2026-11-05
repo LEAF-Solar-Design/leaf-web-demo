@@ -242,6 +242,143 @@ payload = {"schema": "leaf.ci.selection-decision.v1", "selection_mode": "full",
 LEAF_SELECTION_FALLBACK
 fi
 
+# LEAF_PRIORITY_SUITES_BEGIN
+# Advisory order only: freeze hints from trusted declarations before candidate setup.
+unset LEAF_PRIORITY_SUITES_FILE
+if [[ "${trusted_sha_override:-0}" != 1 && "${CODEBUILD_WEBHOOK_EVENT:-}" == PULL_REQUEST_* ]] \
+  && { [[ "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ ]] \
+    || [[ ( "${CODEBUILD_INITIATOR:-}" == states/leaf-forge-ci-relay || "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ) \
+      && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; }; then
+  if python -I -B - "$selection_dir" "$CODEBUILD_SRC_DIR" "${TRUSTED_SHA:-}" "${HEAD_SHA:-}" <<'LEAF_PRIORITY_SUITES'
+import json
+import os
+from pathlib import Path
+import posixpath
+import re
+import subprocess
+import sys
+import tempfile
+
+output = Path("/tmp/gate-results/priority-suites.json")
+temporary = None
+try:
+    output.unlink(missing_ok=True)
+    directory, repo, trusted, head = sys.argv[1:]
+    if any(not re.fullmatch(r"[0-9a-fA-F]{40}", sha) for sha in (trusted, head)):
+        raise ValueError("invalid_commit")
+
+    def load(name):
+        with (Path(directory) / name).open("rb") as stream:
+            raw = stream.read(8 * 1024 * 1024 + 1)
+        if len(raw) > 8 * 1024 * 1024:
+            raise ValueError("oversized_input")
+        return json.loads(raw)
+
+    catalog = load("catalog.json")
+    mapping = load("test-selection-map.json")
+    if (catalog.get("schema") != "leaf.ci.test-catalog.v1"
+            or not isinstance(catalog.get("suites"), list) or not catalog["suites"]
+            or mapping.get("schema") != "leaf.ci.test-selection-map.v1"
+            or not isinstance(mapping.get("suites"), dict)):
+        raise ValueError("invalid_declarations")
+    pattern = re.compile(r"[a-z0-9][a-z0-9-]{0,63}")
+    suites = catalog["suites"]
+    ids = [row["id"] for row in suites]
+    if (any(not isinstance(sid, str) or not pattern.fullmatch(sid) for sid in ids)
+            or len(ids) != len(set(ids))):
+        raise ValueError("invalid_catalog_ids")
+    known = set(ids)
+
+    def git(*args):
+        result = subprocess.run(["git", "--no-replace-objects", "-C", repo, *args],
+                                check=True, stdout=subprocess.PIPE,
+                                stderr=subprocess.DEVNULL, timeout=20)
+        if len(result.stdout) > 1024 * 1024:
+            raise ValueError("oversized_git_input")
+        return result.stdout
+
+    bases = git("merge-base", "--all", trusted, head).decode("ascii").splitlines()
+    if len(bases) != 1 or not re.fullmatch(r"[0-9a-fA-F]{40}", bases[0]):
+        raise ValueError("ambiguous_base")
+    # NUL framing preserves spaces, CRs and newlines in paths as data.
+    changed = {os.fsdecode(path) for path in git(
+        "diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
+        bases[0], head, "--").split(b"\0") if path}
+    message = git("show", "-s", "--format=%B", head, "--").decode("utf-8")
+    counts = dict(argv=0, trailer=0, read_paths=0, unknown=0, malformed=0,
+                  duplicates=0, over_limit=0)
+    selected, seen = [], set()
+
+    def add(sid, source):
+        if not isinstance(sid, str) or not pattern.fullmatch(sid):
+            counts["malformed"] += 1
+        elif sid not in known:
+            counts["unknown"] += 1
+        elif sid in seen:
+            counts["duplicates"] += 1
+        else:
+            seen.add(sid)
+            if len(selected) == 200:
+                counts["over_limit"] += 1
+            else:
+                selected.append(sid)
+                counts[source] += 1
+
+    def argv_path(word, cwd):
+        # Match entire positional argv paths (including pytest node IDs), never
+        # labels, substrings, shell snippets, globs or candidate filesystem links.
+        if word.startswith("-"):
+            return None
+        word = word.split("::", 1)[0]
+        if word.startswith("<REPO>/"):
+            path = posixpath.normpath(word[7:])
+        elif word.startswith("/"):
+            path = posixpath.relpath(word, repo)
+        else:
+            path = posixpath.normpath(posixpath.join(cwd, word))
+        return path if path != ".." and not path.startswith("../") else None
+
+    for row in suites:
+        command, cwd = row["command"], row["cwd"]
+        if (not isinstance(command, list) or any(not isinstance(word, str) for word in command)
+                or not isinstance(cwd, str)):
+            raise ValueError("invalid_catalog_command")
+        if any(argv_path(word, cwd) in changed for word in command):
+            add(row["id"], "argv")
+    # Physical trailer lines only; no continuation folding or code execution.
+    for line in message.split("\n"):
+        if line.startswith("Leaf-Impact-Suites:"):
+            for token in line[len("Leaf-Impact-Suites:"):].split(","):
+                add(token.strip(" \t"), "trailer")
+    for sid, row in mapping["suites"].items():
+        reads = row.get("read_paths", [])
+        if not isinstance(reads, list) or any(not isinstance(path, str) for path in reads):
+            raise ValueError("invalid_read_paths")
+        if changed.intersection(reads):
+            add(sid, "read_paths")
+    output.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.NamedTemporaryFile(mode="w", encoding="utf-8", dir=output.parent,
+                                     prefix=".priority-suites-", delete=False) as stream:
+        temporary = Path(stream.name)
+        stream.write(json.dumps({"suite_ids": selected, "counts": counts}, sort_keys=True) + "\n")
+    temporary.replace(output)
+except Exception:
+    for path in (temporary, output):
+        if path is not None:
+            try:
+                path.unlink(missing_ok=True)
+            except OSError:
+                pass
+    raise SystemExit(1)
+LEAF_PRIORITY_SUITES
+  then
+    export LEAF_PRIORITY_SUITES_FILE=/tmp/gate-results/priority-suites.json
+  else
+    echo 'INFO: priority suite hints unavailable; existing gate order retained'
+  fi
+fi
+# LEAF_PRIORITY_SUITES_END
+
 # Capture helpers share the frozen commit. Missing capture never grants coverage.
 reporters_ready=1
 tracing_helpers_ready=1
