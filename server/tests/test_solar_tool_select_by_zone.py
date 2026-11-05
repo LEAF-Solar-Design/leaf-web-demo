@@ -130,6 +130,15 @@ def test_builtin_is_pure(graph):
     assert second == SELECTED
 
 
+def test_malformed_zone_name_refusal_through_read_output(graph):
+    params = {"zone_name": {"name": "Roof"}}
+    before, sent = copy.deepcopy(graph), copy.deepcopy(params)
+    with pytest.raises(GraphValidationError) as error:
+        local._read_output(TOOL, graph, params)
+    assert error.value.code == "INVALID_ZONE_SELECTION"
+    assert graph == before and params == sent
+
+
 def _api(backend, tmp_path, monkeypatch):
     from fastapi import FastAPI
     from fastapi.testclient import TestClient
@@ -322,6 +331,17 @@ def test_api_run_refusals(request, case, fixture, reason):
     response = api[0].post("/api/run?wait=1", json=payload)
     assert response.status_code == 409, response.text
     assert response.json()["reason_code"] == reason
+    assert not jobs._query("SELECT job_id FROM jobs")
+    assert not api[4]["requests"]
+
+
+def test_missing_zones_refusal_preserves_drawing(no_zones_api):
+    api = no_zones_api
+    before = store.load_manifest(api[1], TENANT, "solar")
+    response = api[0].post("/api/run?wait=1", json=body(api))
+    assert response.status_code == 409, response.text
+    assert response.json()["reason_code"] == "electrical_zones_required"
+    assert store.load_manifest(api[1], TENANT, "solar") == before
     assert not jobs._query("SELECT job_id FROM jobs")
     assert not api[4]["requests"]
 
