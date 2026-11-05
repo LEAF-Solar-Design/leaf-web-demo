@@ -392,6 +392,37 @@ function setup(value = scope) {
   return { client: createIntegrationsClient({ origin: 'https://ops.example', fetchImpl }), fetchImpl,
     options: { signal: new AbortController().signal } }
 }
+
+describe('multi-operation connector grants', () => {
+  it.each([2, 100])('publishes and creates a connection with %i distinct operations', async (count) => {
+    const ids = Array.from({ length: count }, (_, index) => `operation-${index}`)
+    const { client, fetchImpl, options } = setup({ reference: ref, revision: 2 })
+    const publish = { version: 1, expectedRevision: 1, readOperationIds: ids }
+    await client.publishConnector(projectId, ref.id, publish, options)
+    expect(JSON.parse(fetchImpl.mock.calls[0][1].body)).toEqual(publish)
+    fetchImpl.mockResolvedValueOnce(response({ ...ownerSummary, operation_ids: [...ids].reverse() }))
+    const create = { id: connection.id, title: ownerSummary.title, connectorRef: ref, origin: ownerSummary.origin, operationIds: ids }
+    expect((await client.createConnection(projectId, create, options)).operation_ids).toEqual([...ids].reverse())
+    expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toEqual(create)
+  })
+
+  it.each([[], ['read', 'read'], [''], [' '], ['read', 1], Array.from({ length: 101 }, (_, index) => `operation-${index}`)].map((ids) => [ids]))(
+    'refuses invalid operation lists before dispatch: %j', async (ids) => {
+      const { client, fetchImpl, options } = setup()
+      await expect(client.publishConnector(projectId, ref.id,
+        { version: 1, expectedRevision: 1, readOperationIds: ids }, options)).rejects.toThrow('invalid')
+      await expect(client.createConnection(projectId,
+        { id: connection.id, title: ownerSummary.title, connectorRef: ref, origin: ownerSummary.origin, operationIds: ids }, options)).rejects.toThrow('invalid')
+      expect(fetchImpl).not.toHaveBeenCalled()
+    },
+  )
+
+  it('rejects a connection response with different granted operations', async () => {
+    const { client, options } = setup({ ...ownerSummary, operation_ids: ['read', 'other'] })
+    await expect(client.createConnection(projectId,
+      { id: connection.id, title: ownerSummary.title, connectorRef: ref, origin: ownerSummary.origin, operationIds: ['read', 'write'] }, options)).rejects.toThrow('invalid')
+  })
+})
 describe('scoped Vercel authorization HTTP contract', () => {
   const state = 's'.repeat(43)
   const issued = { state, expiresAt: '2026-10-28T12:00:00Z', authorizationUrl: `https://vercel.com/integrations/leaf/new?state=${state}`,

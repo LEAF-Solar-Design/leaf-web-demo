@@ -361,6 +361,115 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                     if reason == "strace_unavailable":
                         self.assertIn("120 apt-get update", result.stderr)
 
+    def test_device_capture_archive_contract(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        packaging = script.split('  publish_readsets() {\n', 1)[1]
+        guard = ('if [[ "${process_capture_active:-0}" == 1 && '
+                 '"${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ]]; then')
+        start = packaging.index(guard)
+        end = packaging.index('    local archive_cap=', start)
+        block = packaging[start:end]
+        self.assertLess(packaging.index('readsets_sha256="${digest%% *}"'), start)
+        self.assertLess(end, packaging.index('aws s3api put-object'))
+        self.assertLess(packaging.index('key="mq/leaf-web-demo/selection/'),
+                        packaging.index('aws s3api put-object'))
+        self.assertIn('cp "$archive" /tmp/process-capture/readsets.tar.gz', block)
+        self.assertIn('python -I -B - /tmp/process-capture/readsets.json "$CODEBUILD_BUILD_ID" '
+                      '"$HEAD_SHA"', block)
+        self.assertIn('"$readsets_bytes" "$readsets_sha256" "$readsets_archive_members"', block)
+        for field in ('"schema": "leaf.ci.device-capture-archive.v1"',
+                      '"build_id": sys.argv[2]', '"head_sha": sys.argv[3]',
+                      '"bytes": int(sys.argv[4])', '"sha256": sys.argv[5]',
+                      '"members": sys.argv[6].split()'):
+            self.assertIn(field, block)
+        self.assertIn('LEAF_CAPTURE device_archive $readsets_bytes $readsets_sha256', block)
+        self.assertIn('LEAF_CAPTURE device_archive_copy_failed', block)
+        self.assertNotRegex(block, r'\b(?:exit|return)\s')
+        self.assertNotRegex(block, r'\bgate_status=')
+
+    @unittest.skipUnless(BASH, "bash is not on PATH; device archive requires bash")
+    def test_device_capture_archive_before_s3_and_fail_open(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index('    readsets_error="archive measurement failed"\n')
+        stop = script.index('    if [[ "${process_capture_active:-0}" == 1 && '
+                            '${#diagnostic_members[@]} -gt 0 ]]; then', start)
+        block = script[start:stop]
+        archive_bytes = b"fake packed readsets archive\n"
+        digest = hashlib.sha256(archive_bytes).hexdigest()
+        cases = [("device:dv-0123456789abcdef", "1", "", True),
+                 ("leaf-ci:0123456789abcdef", "1", "", False),
+                 ("device:dv-0123456789abcdef", "0", "", False),
+                 ("device:dv-0123456789abcdeF", "1", "", False),
+                 ("device:dv-0123456789abcde", "1", "", False),
+                 ("device:dv-0123456789abcdef0", "1", "", False),
+                 ("device:dv-0123456789abcdef", "1", "mkdir", False),
+                 ("device:dv-0123456789abcdef", "1", "copy", False),
+                 ("device:dv-0123456789abcdef", "1", "receipt", False)]
+        for build_id, active, failure, copied in cases:
+            with self.subTest(build_id=build_id, active=active, failure=failure):
+                with tempfile.TemporaryDirectory() as temporary:
+                    directory = Path(temporary)
+                    archive = directory / "readsets.tar.gz"
+                    archive.write_bytes(archive_bytes)
+                    capture = directory / "process-capture"
+                    env = {key: value for key, value in os.environ.items() if key != "BASH_ENV"}
+                    env.update(MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*",
+                               TEST_PYTHON=sys.executable.replace("\\", "/"),
+                               TEST_ARCHIVE=archive.as_posix(), TEST_CAPTURE_DIR=capture.as_posix(),
+                               TEST_FAILURE=failure, TEST_EXPECT_COPY=str(int(copied)),
+                               CODEBUILD_BUILD_ID=build_id, process_capture_active=active,
+                               HEAD_SHA="a" * 40, TRUSTED_SHA="b" * 40, trusted_sha_override="0")
+                    # Redirect only the fixed destination; execute the real measurement,
+                    # device guard, copy, receipt, cap and S3 publication sequence.
+                    redirected = block.replace("/tmp/process-capture", shlex.quote(capture.as_posix()))
+                    command = '''set -euo pipefail
+python() {
+  [[ "$TEST_FAILURE" != receipt ]] || return 1
+  command "$TEST_PYTHON" "$@"
+}
+mkdir() {
+  [[ "$TEST_FAILURE" != mkdir ]] || return 1
+  command mkdir "$@"
+}
+cp() {
+  [[ "$TEST_FAILURE" != copy ]] || return 1
+  command cp "$@"
+}
+aws() {
+  [[ "$1 $2" == 's3api put-object' ]] || return 98
+  if [[ "$TEST_EXPECT_COPY" == 1 ]]; then
+    [[ -f "$TEST_CAPTURE_DIR/readsets.tar.gz" && -f "$TEST_CAPTURE_DIR/readsets.json" ]] || return 99
+  else
+    [[ ! -f "$TEST_CAPTURE_DIR/readsets.json" ]] || return 99
+  fi
+}
+publish_readsets() {
+  local archive="$TEST_ARCHIVE" digest build_uuid key
+  readsets_archive_members=$'readsets  full-run.json\\tcapture/context.json '
+''' + redirected + '''
+}
+publish_readsets
+printf 'PUBLISHED %s\\n' "$readsets_status"
+'''
+                    result = subprocess.run([BASH, "-c", command], env=env,
+                                            capture_output=True, text=True, timeout=30)
+                    self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                    self.assertIn("PUBLISHED uploaded\n", result.stdout)
+                    self.assertEqual("LEAF_CAPTURE device_archive_copy_failed" in result.stdout,
+                                     bool(failure))
+                    if copied:
+                        self.assertEqual((capture / "readsets.tar.gz").read_bytes(), archive_bytes)
+                        self.assertEqual(json.loads((capture / "readsets.json").read_text(encoding="utf-8")),
+                                         {"schema": "leaf.ci.device-capture-archive.v1",
+                                          "build_id": build_id, "head_sha": "a" * 40,
+                                          "bytes": len(archive_bytes), "sha256": digest,
+                                          "members": ["readsets", "full-run.json", "capture/context.json"]})
+                        self.assertIn(f"LEAF_CAPTURE device_archive {len(archive_bytes)} {digest}\n",
+                                      result.stdout)
+                    elif not failure:
+                        self.assertFalse(capture.exists())
+                        self.assertNotIn("LEAF_CAPTURE device_archive", result.stdout)
+
     def test_forge_relay_event_manifest(self):
         script = CI_PATH.read_text(encoding="utf-8")
         block = script.split("<<'LEAF_SELECTION_INPUTS'\n", 1)[1].split(
@@ -401,6 +510,68 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                     self.assertEqual(event["evidence_ref"]["manifest_sha256"],
                                      hashlib.sha256(manifest_path.read_bytes()).hexdigest())
 
+    def test_forge_device_event(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block = script.split("<<'LEAF_SELECTION_INPUTS'\n", 1)[1].split(
+            "\nLEAF_SELECTION_INPUTS", 1)[0]
+        operation = lambda kind, number, head: "ci-" + hashlib.sha256(
+            ("LEAF-Solar-Design/leaf-web-demo|" + kind + "|" + str(number) + "|" + head)
+            .encode("utf-8")).hexdigest()[:40]
+        env = {"CODEBUILD_BUILD_ID": "device:dv-0123456789abcdef",
+               "CODEBUILD_RESOLVED_SOURCE_VERSION": "a" * 40,
+               "CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_UPDATED",
+               "CODEBUILD_WEBHOOK_HEAD_REF": "refs/pull/7/head",
+               "CODEBUILD_WEBHOOK_BASE_REF": "refs/heads/main",
+               "HEAD_SHA": "a" * 40, "TRUSTED_SHA": "b" * 40,
+               "LEAF_CI_BASE_SHA": "b" * 40, "LEAF_CI_BASE_REF": "main",
+               "FORGE_CI_HEAD_BRANCH": "feature/device",
+               "FORGE_CI_OPERATION": operation("pull_request", 7, "a" * 40)}
+        cases = [({}, "forge-device"),
+                 ({"CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_CREATED"}, "forge-device"),
+                 ({"CODEBUILD_WEBHOOK_EVENT": "PULL_REQUEST_REOPENED"}, "forge-device"),
+                 ({"FORGE_CI_OPERATION": operation("pull_request", 8, "a" * 40)}, "github"),
+                 ({"FORGE_CI_OPERATION": operation("pull_request", 7, "c" * 40)}, "github"),
+                 ({"CODEBUILD_BUILD_ID": "device:dv-0123456789abcde"}, "github"),
+                 ({"CODEBUILD_BUILD_ID": "device:dv-0123456789abcdeg"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_HEAD_REF": "refs/pull/0/head"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/feature"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_BASE_REF": "refs/heads/../main"}, "github"),
+                 ({"CODEBUILD_WEBHOOK_BASE_REF": "main"}, "github"),
+                 ({"HEAD_SHA": "bad"}, "github"),
+                 ({"TRUSTED_SHA": "bad"}, "github"),
+                 ({"CODEBUILD_RESOLVED_SOURCE_VERSION": "c" * 40}, "github"),
+                 ({"CODEBUILD_WEBHOOK_EVENT": "PUSH",
+                   "CODEBUILD_WEBHOOK_HEAD_REF": "refs/heads/main",
+                   "FORGE_CI_OPERATION": operation("push", 0, "a" * 40)}, "github")]
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for changes, provider in cases:
+                with self.subTest(changes=changes):
+                    (root / "catalog.json").write_text(json.dumps({
+                        "schema": "leaf.ci.catalog.v1", "suites": [{"id": "sample"}],
+                        "catalog_sha256": "e" * 64}), encoding="utf-8")
+                    current = dict(env, **changes)
+                    with patch.dict(os.environ, current, clear=True), \
+                         patch.object(sys, "argv", ["inputs", str(root), "f" * 40]):
+                        exec(compile(block, "selection-inputs", "exec"), {})
+                    event = json.loads((root / "event.json").read_text(encoding="utf-8"))
+                    self.assertEqual(event["provider"], provider)
+                    self.assertEqual(event["event"], current["CODEBUILD_WEBHOOK_EVENT"])
+                    if provider == "forge-device":
+                        self.assertEqual(event["initiator"], "leaf-ci-device")
+                        self.assertIs(event["provider_bound"], True)
+                        self.assertEqual(event["build_id"], env["CODEBUILD_BUILD_ID"])
+                        self.assertEqual(event["pr_number"], 7)
+                        self.assertEqual(event["source_version"], "")
+                        self.assertEqual(event["head_sha"], env["HEAD_SHA"])
+                        self.assertEqual(event["target_sha"], env["TRUSTED_SHA"])
+                        self.assertEqual(event["head_ref"], env["CODEBUILD_WEBHOOK_HEAD_REF"])
+                        self.assertEqual(event["target_ref"], env["CODEBUILD_WEBHOOK_BASE_REF"])
+                        self.assertEqual(event["evidence_ref"], {
+                            "build": env["CODEBUILD_BUILD_ID"], "operation": env["FORGE_CI_OPERATION"]})
+                    else:
+                        self.assertEqual(event["initiator"], "")
+
     def test_relay_receipt_event_classifier(self):
         script = CI_PATH.read_text(encoding="utf-8")
         block = script.split("<<'LEAF_SELECTION_RECEIPTS'\n", 1)[1].split(
@@ -411,6 +582,16 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                                    ("PULL_REQUEST_UPDATED", "refs/pull/0/head", "unknown")):
             with self.subTest(raw=raw, ref=ref):
                 namespace = {"e": {"CODEBUILD_INITIATOR": "states/leaf-forge-ci-relay",
+                                    "CODEBUILD_WEBHOOK_EVENT": raw,
+                                    "CODEBUILD_WEBHOOK_HEAD_REF": ref}, "re": re}
+                exec(compile(classifier, "receipt-classifier", "exec"), namespace)
+                self.assertEqual(namespace["event"], expected)
+
+        for raw, ref, expected in (("PULL_REQUEST_UPDATED", "refs/pull/7/head", "pr"),
+                                   ("PUSH", "refs/heads/main", "main"),
+                                   ("PULL_REQUEST_UPDATED", "refs/pull/0/head", "unknown")):
+            with self.subTest(device=True, raw=raw, ref=ref):
+                namespace = {"e": {"CODEBUILD_BUILD_ID": "device:dv-0123456789abcdef",
                                     "CODEBUILD_WEBHOOK_EVENT": raw,
                                     "CODEBUILD_WEBHOOK_HEAD_REF": ref}, "re": re}
                 exec(compile(classifier, "receipt-classifier", "exec"), namespace)

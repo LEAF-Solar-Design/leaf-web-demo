@@ -336,6 +336,18 @@ def catalog_info(catalog):
     return entries, fingerprint
 
 
+def bind_catalog(decision, catalog_path):
+    if decision.get("catalog_sha256") is not None or catalog_path is None:
+        return
+    try:
+        catalog, _ = load_json(catalog_path)
+        entries, fingerprint = catalog_info(catalog)
+    except (InvalidInput, OSError, ValueError, UnicodeError):
+        return
+    decision.update(catalog_sha256=fingerprint, catalog_suite_ids=sorted(entries),
+                    catalog_kind=catalog.get("kind"))
+
+
 def collection_digest(ids):
     return digest(sorted(strings(list(ids), "invalid_collection")))
 
@@ -408,6 +420,16 @@ def validate_event(event, head, repo_slug, pr_number):
                 any(not isinstance(evidence.get(k), str) or not evidence[k]
                     for k in ("build", "operation"))):
             raise InvalidInput("unverified_event")
+    elif provider == "forge-device":
+        evidence = event.get("evidence_ref")
+        if (event.get("initiator") != "leaf-ci-device" or
+                event.get("provider_bound") is not True or
+                not isinstance(event.get("build_id"), str) or
+                not re.fullmatch(r"device:dv-[0-9a-f]{16}", event["build_id"]) or
+                not isinstance(evidence, dict) or evidence.get("build") != event["build_id"] or
+                not isinstance(evidence.get("operation"), str) or
+                not re.fullmatch(r"ci-[0-9a-f]{40}", evidence["operation"])):
+            raise InvalidInput("unverified_event")
     else:
         raise InvalidInput("unverified_event")
     number = event.get("pr_number")
@@ -418,15 +440,15 @@ def validate_event(event, head, repo_slug, pr_number):
         raise InvalidInput("invalid_pr_identity")
     if ((repo_slug is not None and repo_slug != slug) or
             (pr_number is not None and int(pr_number) != number) or
-            event.get("source_version") != ("" if provider == "forge" else "pr/" + str(number)) or
+            event.get("source_version") != ("" if provider in ("forge", "forge-device") else "pr/" + str(number)) or
             event.get("head_sha") != head):
         raise InvalidInput("contradictory_event")
-    if provider == "forge" and (
+    if provider in ("forge", "forge-device") and (
             event.get("head_ref") != "refs/pull/" + str(number) + "/head" or
             not isinstance(event.get("target_sha"), str) or
             not re.fullmatch(r"[0-9A-Fa-f]{40}", event["target_sha"])):
         raise InvalidInput("contradictory_event")
-    for key in (("target_ref",) if provider == "forge" else ("head_ref", "target_ref")):
+    for key in (("target_ref",) if provider in ("forge", "forge-device") else ("head_ref", "target_ref")):
         ref = event.get(key)
         if (not isinstance(ref, str) or not ref.startswith("refs/heads/") or
                 not ref[len("refs/heads/"):] or any(c in ref for c in " ~^:?*[\\") or
@@ -759,6 +781,7 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                             executed_suite_ids=expanded)
         return decision
     except (InvalidInput, UnicodeError) as exc:
+        bind_catalog(decision, catalog_path)
         return full(decision, str(exc) if isinstance(exc, InvalidInput) else "invalid_encoding")
 
 
@@ -843,7 +866,12 @@ def main(argv=None):
         # Exceptions are not a valid successful decision. Clear filter state and
         # leave a diagnostic fallback when possible; the loader owns recovery.
         if args.command == "decide":
-            fallback = full({"schema": DECISION_SCHEMA}, "selector_exception")
+            fallback = {"schema": DECISION_SCHEMA}
+            try:
+                bind_catalog(fallback, args.catalog)
+            except Exception:
+                pass
+            full(fallback, "selector_exception")
             try:
                 atomic_write(Path(args.out_dir) / "only-args.nul", b"")
                 write_json(Path(args.out_dir) / "decision.json", fallback)
