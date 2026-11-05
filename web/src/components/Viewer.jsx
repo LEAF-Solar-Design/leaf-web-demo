@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 'react'
 import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
+import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
 import { createCameraChannel } from './cameraChannel.js'
 import { viewportFromCamera } from './viewerMath.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
@@ -246,7 +247,7 @@ const Viewer = forwardRef(function Viewer(
     if (!sceneReady() || (bounds !== null && !validObjectBounds(bounds))) return false
     if (s.focusOutline && bounds && ['minX', 'minY', 'maxX', 'maxY'].every((key) => bounds[key] === focusMarkerRef.current?.bounds[key])) return true
     if (s.focusOutline) {
-      s.scene.remove(s.focusOutline)
+      s.root.remove(s.focusOutline)
       s.focusOutline.geometry.dispose(); s.focusOutline.material.dispose()
       s.focusOutline = null
     }
@@ -254,12 +255,12 @@ const Viewer = forwardRef(function Viewer(
     if (bounds) {
       const { minX: x, minY: y, maxX: X, maxY: Y } = bounds
       const geometry = new THREE.BufferGeometry().setFromPoints([[x, y], [X, y], [X, Y], [x, Y], [x, y]]
-        .map(([px, py]) => new THREE.Vector3(px, py, 3)))
+        .map(([px, py]) => new THREE.Vector3(px - s.origin.x, py - s.origin.y, 3)))
       const unit = Math.max(X - x, Y - y, 1) / 24
       const material = new THREE.LineDashedMaterial({ color: s.tokens.select, dashSize: unit, gapSize: unit, depthTest: false })
       s.focusOutline = new THREE.Line(geometry, material)
       s.focusOutline.computeLineDistances(); s.focusOutline.renderOrder = 11
-      s.scene.add(s.focusOutline)
+      s.root.add(s.focusOutline)
     }
     return true
   }
@@ -360,13 +361,19 @@ const Viewer = forwardRef(function Viewer(
     // additive lists) draw as sampled polylines; an intake without them
     // draws exactly as before ([] appended).
     const roundPolylines = intakeRoundPolylines(activeIntake)
-    const intakePolylines = expandBulgedPolylines(activeIntake.polylines || [])
+    const validPolyline = pl => Array.isArray(pl?.pts) && pl.pts.length >= 2 && Array.from(pl.pts).every(finiteXY)
+    const intakePolylines = expandBulgedPolylines((activeIntake.polylines || []).filter(validPolyline))
     const blocks = projectServerBlocks(activeIntake)
-    const polylines = roundPolylines.length || blocks.polylines.length
+    const polylines = (roundPolylines.length || blocks.polylines.length
       ? [...intakePolylines, ...roundPolylines, ...blocks.polylines]
-      : intakePolylines
-    const inserts = blocks.inserts
-    const faces3d = activeIntake.faces3d || []
+      : intakePolylines).filter(validPolyline)
+    const inserts = blocks.inserts.filter(ins => finiteXY(ins?.pt))
+    const faces3d = (activeIntake.faces3d || []).filter(f => f && [f.p1, f.p2, f.p3].every(finiteXY)
+      && (f.p4 == null || finiteXY(f.p4)))
+    const origin = drawingOrigin(polylines, inserts, faces3d)
+    const root = new THREE.Group()
+    root.position.set(origin.x, origin.y, 0)
+    scene.add(root)
     // W4f slice A0: an ENGINE document (the browser engine's imported DXF,
     // shown through applyVersion) and a live AutoCAD (bridge) drawing draw
     // open polylines, lines and arcs as strokes only; the console drawing
@@ -388,8 +395,8 @@ const Viewer = forwardRef(function Viewer(
     if (!isFinite(minX)) { minX = -1; minY = -1; maxX = 1; maxY = 1 }
     const dataW = maxX - minX || 1
     const dataH = maxY - minY || 1
-    const cx = (minX + maxX) / 2
-    const cy = (minY + maxY) / 2
+    const cx = minX / 2 + maxX / 2
+    const cy = minY / 2 + maxY / 2
     const dataSpan = Math.max(dataW, dataH)
     const clipSpan = Math.max(dataSpan * 4, 1000)
     camera.near = -clipSpan
@@ -495,7 +502,7 @@ const Viewer = forwardRef(function Viewer(
       }
 
       const fillGeom = new THREE.BufferGeometry()
-      fillGeom.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3))
+      fillGeom.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(fillPos, origin), 3))
       const fillMat = sculpture
         ? new THREE.MeshStandardMaterial({
           color: col, roughness: 0.72, metalness: 0.14,
@@ -511,7 +518,7 @@ const Viewer = forwardRef(function Viewer(
       pickables.push(fillMesh)
 
       const lineGeom = new THREE.BufferGeometry()
-      lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(linePos, 3))
+      lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(linePos, origin), 3))
       const lineMat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.9 })
       const lines = new THREE.LineSegments(lineGeom, lineMat)
       group.add(lines)
@@ -520,7 +527,7 @@ const Viewer = forwardRef(function Viewer(
         pickables.push(lines)
       }
 
-      scene.add(group)
+      root.add(group)
       layerGroups.set(layer, group)
     }
 
@@ -531,7 +538,7 @@ const Viewer = forwardRef(function Viewer(
       if (!groups.has(layer)) {
         const group = new THREE.Group()
         groups.set(layer, group)
-        scene.add(group)
+        root.add(group)
       }
       return groups.get(layer)
     }
@@ -549,7 +556,7 @@ const Viewer = forwardRef(function Viewer(
         side: THREE.DoubleSide,
       })
       const mesh = new THREE.Mesh(geom, mat)
-      mesh.position.set(ins.pt[0], ins.pt[1], 2)
+      mesh.position.set(ins.pt[0] - origin.x, ins.pt[1] - origin.y, 2)
       mesh.rotation.z = THREE.MathUtils.degToRad(ins.rot || 0)
       const sx = ins.scale?.[0] ?? 1
       const sy = ins.scale?.[1] ?? 1
@@ -583,7 +590,7 @@ const Viewer = forwardRef(function Viewer(
       pos.push(ring[0][0], ring[0][1], 0.5, ring[1][0], ring[1][1], 0.5, ring[2][0], ring[2][1], 0.5)
       if (ring[3]) pos.push(ring[0][0], ring[0][1], 0.5, ring[2][0], ring[2][1], 0.5, ring[3][0], ring[3][1], 0.5)
       const g = new THREE.BufferGeometry()
-      g.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      g.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(pos, origin), 3))
       const m = new THREE.MeshBasicMaterial({
         color: faceColor, transparent: true, opacity: 0.24, depthWrite: false, side: THREE.DoubleSide,
       })
@@ -600,27 +607,27 @@ const Viewer = forwardRef(function Viewer(
         bpos.push(a[0], a[1], 0.6, b[0], b[1], 0.6)
       }
       const bg = new THREE.BufferGeometry()
-      bg.setAttribute('position', new THREE.Float32BufferAttribute(bpos, 3))
+      bg.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(bpos, origin), 3))
       const bm = new THREE.LineBasicMaterial({ color: faceColor, transparent: true, opacity: 0.9 })
       faceGroup.add(new THREE.LineSegments(bg, bm))
       addPickDescriptor(pickIndex, f.handle, { kind: 'face', layer: f.layer, pts: ring })
     }
 
     // dynamic overlay containers (rebuilt on prop change)
-    const highlightGroup = new THREE.Group(); scene.add(highlightGroup)
-    const markerGroup = new THREE.Group(); scene.add(markerGroup)
-    const overlayGroup = new THREE.Group(); scene.add(overlayGroup)
-    const solarGroup = new THREE.Group(); scene.add(solarGroup)
-    const selectionGroup = new THREE.Group(); scene.add(selectionGroup)
-    const pendingGroup = new THREE.Group(); scene.add(pendingGroup)
-    const stringGroup = new THREE.Group(); scene.add(stringGroup)
+    const highlightGroup = new THREE.Group(); root.add(highlightGroup)
+    const markerGroup = new THREE.Group(); root.add(markerGroup)
+    const overlayGroup = new THREE.Group(); root.add(overlayGroup)
+    const solarGroup = new THREE.Group(); root.add(solarGroup)
+    const selectionGroup = new THREE.Group(); root.add(selectionGroup)
+    const pendingGroup = new THREE.Group(); root.add(pendingGroup)
+    const stringGroup = new THREE.Group(); root.add(stringGroup)
     // W4f slice A1: the command line's rubber band (the shape being drawn,
     // from the picked points to the cursor); set imperatively per pointer
     // move, never through React state, never rebuilding the scene.
-    const rubberGroup = new THREE.Group(); scene.add(rubberGroup)
+    const rubberGroup = new THREE.Group(); root.add(rubberGroup)
     // W4f-5: the object-snap marker (a small square at the snapped point),
     // its own group so the rubber band and the marker clear independently.
-    const snapGroup = new THREE.Group(); scene.add(snapGroup)
+    const snapGroup = new THREE.Group(); root.add(snapGroup)
 
     // rendered-count assertion (acceptance: rendered == intake lengths)
     // eslint-disable-next-line no-console
@@ -747,6 +754,7 @@ const Viewer = forwardRef(function Viewer(
       const worldPerPixel = world && adjacent
         ? Math.hypot(adjacent.x - world.x, adjacent.y - world.y) : undefined
       raycaster.params.Line.threshold = pickLineThreshold(worldPerPixel)
+      scene.updateMatrixWorld(true)
       const hits = raycaster.intersectObjects(pickables, false)
       const additive = e.shiftKey || e.ctrlKey || e.metaKey
       let handle
@@ -939,7 +947,7 @@ const Viewer = forwardRef(function Viewer(
         markerReferences: nInserts,
         omitted: blocks.truncated + (activeIntake.truncated || 0),
       },
-      scene, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
+      scene, root, origin, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
       fitToBounds, dataSpan, tokens, sculpture,
@@ -1048,7 +1056,9 @@ const Viewer = forwardRef(function Viewer(
     const s = stateRef.current
     if (!s || solarOverlay == null || solarOverlay.polylines.length === 0
       || s.intake !== solarOverlay.intake || s.drawingKey !== solarOverlay.drawingKey) return
-    const layer = buildSolarGraphOverlayLayer(solarOverlay.polylines)
+    const layer = buildSolarGraphOverlayLayer(solarOverlay.polylines.filter(polyline => polyline.pts.every(finiteXY)).map(polyline => ({
+      ...polyline, pts: polyline.pts.map(point => [point[0] - s.origin.x, point[1] - s.origin.y, ...point.slice(2)]),
+    })))
     s.solarGroup.add(layer.group)
     s.solarLayer = layer
     return () => {
@@ -1166,12 +1176,13 @@ const Viewer = forwardRef(function Viewer(
       for (const child of g.children) { child.geometry?.dispose?.(); child.material?.dispose?.() }
       g.clear()
       if (!Array.isArray(pts) || pts.length < 2) return true
+      if (!pts.every(finiteXY)) return true
       const pos = []
       const n = pts.length
       for (let i = 0; i < n - 1; i++) pos.push(pts[i][0], pts[i][1], 2, pts[i + 1][0], pts[i + 1][1], 2)
       if (closed) pos.push(pts[n - 1][0], pts[n - 1][1], 2, pts[0][0], pts[0][1], 2)
       const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(pos, s.origin), 3))
       const mat = new THREE.LineBasicMaterial({ color: s.tokens.select, depthTest: false })
       const mesh = new THREE.LineSegments(geo, mat)
       mesh.renderOrder = 10
@@ -1200,7 +1211,7 @@ const Viewer = forwardRef(function Viewer(
       const pos = []
       for (const [[x1, y1], [x2, y2]] of segments) pos.push(x1, y1, 2, x2, y2, 2)
       const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(pos, s.origin), 3))
       const mat = new THREE.LineBasicMaterial({ color: s.tokens.select, depthTest: false })
       const mesh = new THREE.LineSegments(geo, mat)
       mesh.renderOrder = 11
@@ -1243,10 +1254,10 @@ const Viewer = forwardRef(function Viewer(
     const entries = []
     for (const rt of stringRoutes) {
       const pts = rt.pts || []
-      if (pts.length < 2) continue
+      if (pts.length < 2 || !pts.every(finiteXY)) continue
       const pos = new Float32Array(pts.length * 3)
       for (let i = 0; i < pts.length; i++) {
-        pos[i * 3] = pts[i][0]; pos[i * 3 + 1] = pts[i][1]; pos[i * 3 + 2] = 4
+        pos[i * 3] = pts[i][0] - s.origin.x; pos[i * 3 + 1] = pts[i][1] - s.origin.y; pos[i * 3 + 2] = 4
       }
       const geo = new THREE.BufferGeometry()
       geo.setAttribute('position', new THREE.BufferAttribute(pos, 3))
@@ -1373,12 +1384,12 @@ const Viewer = forwardRef(function Viewer(
       }
     }
     const fg = new THREE.BufferGeometry()
-    fg.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3))
+    fg.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(fillPos, s.origin), 3))
     const fm = new THREE.MeshBasicMaterial({ color: s.tokens.select, transparent: true, opacity: 0.35, depthTest: false, depthWrite: false })
     const fMesh = new THREE.Mesh(fg, fm); fMesh.renderOrder = 10; g.add(fMesh)
 
     const lg = new THREE.BufferGeometry()
-    lg.setAttribute('position', new THREE.Float32BufferAttribute(linePos, 3))
+    lg.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(linePos, s.origin), 3))
     const lm = new THREE.LineBasicMaterial({ color: s.tokens.select, transparent: true, opacity: 1, depthTest: false })
     const lMesh = new THREE.LineSegments(lg, lm); lMesh.renderOrder = 11; g.add(lMesh)
   }, [highlightHandles, buildTick])
@@ -1409,11 +1420,11 @@ const Viewer = forwardRef(function Viewer(
         linePos.push(a[0], a[1], z + 0.1, b[0], b[1], z + 0.1)
       }
       const fg = new THREE.BufferGeometry()
-      fg.setAttribute('position', new THREE.Float32BufferAttribute(fillPos, 3))
+      fg.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(fillPos, s.origin), 3))
       const fm = new THREE.MeshBasicMaterial({ color: col, transparent: true, opacity: 0.28, depthTest: false, depthWrite: false })
       const fMesh = new THREE.Mesh(fg, fm); fMesh.renderOrder = 20; g.add(fMesh)
       const lg = new THREE.BufferGeometry()
-      lg.setAttribute('position', new THREE.Float32BufferAttribute(linePos, 3))
+      lg.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(linePos, s.origin), 3))
       const lm = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 1, depthTest: false })
       const lMesh = new THREE.LineSegments(lg, lm); lMesh.renderOrder = 21; g.add(lMesh)
     } else if (d.kind === 'insert') {
@@ -1427,7 +1438,7 @@ const Viewer = forwardRef(function Viewer(
       lg.setAttribute('position', new THREE.Float32BufferAttribute(local, 3))
       const lm = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 1, depthTest: false })
       const lMesh = new THREE.LineSegments(lg, lm)
-      lMesh.position.set(d.pt[0], d.pt[1], z)
+      lMesh.position.set(d.pt[0] - s.origin.x, d.pt[1] - s.origin.y, z)
       lMesh.rotation.z = THREE.MathUtils.degToRad(d.rot)
       lMesh.scale.set(d.scale[0], d.scale[1], 1)
       lMesh.renderOrder = 21
@@ -1456,7 +1467,7 @@ const Viewer = forwardRef(function Viewer(
       pos.push(x, y - r, 2, x - r, y, 2)
     }
     const geo = new THREE.BufferGeometry()
-    geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+    geo.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(pos, s.origin), 3))
     const mat = new THREE.LineBasicMaterial({ color: s.tokens.danger, depthTest: false })
     const mesh = new THREE.LineSegments(geo, mat); mesh.renderOrder = 12; g.add(mesh)
   }, [markers, buildTick])
@@ -1475,7 +1486,7 @@ const Viewer = forwardRef(function Viewer(
         pos.push(pts[i][0], pts[i][1], 1.5, pts[i + 1][0], pts[i + 1][1], 1.5)
       }
       const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(pos, 3))
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(pos, s.origin), 3))
       const mat = new THREE.LineBasicMaterial({ color: ov.color || s.tokens.overlay, depthTest: false })
       const mesh = new THREE.LineSegments(geo, mat); mesh.renderOrder = 9; g.add(mesh)
     }
@@ -1505,7 +1516,7 @@ const Viewer = forwardRef(function Viewer(
     }
     if (addPos.length) {
       const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(addPos, 3))
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(addPos, s.origin), 3))
       const mat = new THREE.LineDashedMaterial({
         color: addedCol, transparent: true, opacity: 0.85, depthTest: false,
         dashSize: s.dataSpan * 0.02, gapSize: s.dataSpan * 0.012,
@@ -1536,7 +1547,7 @@ const Viewer = forwardRef(function Viewer(
     }
     if (remPos.length) {
       const geo = new THREE.BufferGeometry()
-      geo.setAttribute('position', new THREE.Float32BufferAttribute(remPos, 3))
+      geo.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(remPos, s.origin), 3))
       const mat = new THREE.LineDashedMaterial({
         color: removeCol, transparent: true, opacity: 0.9, depthTest: false,
         dashSize: s.dataSpan * 0.018, gapSize: s.dataSpan * 0.01,

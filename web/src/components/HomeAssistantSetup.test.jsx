@@ -43,6 +43,57 @@ it.each(['error', 'refused'])('does not claim onboarding success for a %s result
   expect(screen.queryByText('sensitive failure payload')).not.toBeInTheDocument()
 })
 
+it('hue init step auto-selects manual then asks for the bridge IP', async () => {
+  outcomes.push(ok({ type: 'form', step_id: 'init', flow_id: 'f1' }))
+  let settle
+  const originalFetch = fetch.getMockImplementation()
+  fetch.mockImplementation((url, init) => url.includes('/commands/c2')
+    ? new Promise((resolve) => { settle = resolve }) : originalFetch(url, init))
+  render(<Harness />)
+  fireEvent.click(screen.getByRole('button', { name: 'Link Hue bridge' }))
+  await waitFor(() => expect(settle).toBeTypeOf('function'))
+  expect(screen.queryByRole('button', { name: 'Continue' })).not.toBeInTheDocument()
+  expect(screen.queryByText(/Press the round button/)).not.toBeInTheDocument()
+  expect(screen.queryByText(/s remaining|Button window expired/)).not.toBeInTheDocument()
+  await act(async () => settle(json({ result: ok({ type: 'form', step_id: 'manual', flow_id: 'f1' }) })))
+  expect(await screen.findByLabelText('Hue bridge IP address')).toBeInTheDocument()
+  expect(step('Link Hue bridge').getByText('Enter bridge IP')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Continue' })).not.toBeInTheDocument()
+  expect(commands).toEqual([
+    { op: 'ha.flow.start', args: { handler: 'hue' } },
+    { op: 'ha.flow.step', args: { flow_id: 'f1', data: { id: 'manual' } } },
+  ])
+})
+
+it('hue init auto step is sent only once', async () => {
+  outcomes.push(
+    ok({ type: 'form', step_id: 'init', flow_id: 'f1' }),
+    ok({ type: 'form', step_id: 'init', flow_id: 'f1' }),
+  )
+  render(<Harness />)
+  fireEvent.click(screen.getByRole('button', { name: 'Link Hue bridge' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('The Hue setup did not provide a link step.')
+  expect(step('Link Hue bridge').getByText('Needs attention')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Continue' })).not.toBeInTheDocument()
+  expect(commands).toEqual([
+    { op: 'ha.flow.start', args: { handler: 'hue' } },
+    { op: 'ha.flow.step', args: { flow_id: 'f1', data: { id: 'manual' } } },
+  ])
+})
+
+it.each([
+  { status: 'error', error: { code: 'upstream_error' } },
+  ok({ type: 'form', step_id: 'init', flow_id: 'f1', errors: { base: 'upstream_error' } }),
+])('shows Needs attention when the Hue init auto step fails: %j', async (result) => {
+  outcomes.push(ok({ type: 'form', step_id: 'init', flow_id: 'f1' }), result)
+  render(<Harness />)
+  fireEvent.click(screen.getByRole('button', { name: 'Link Hue bridge' }))
+  expect(await screen.findByRole('alert')).toHaveTextContent('Home Assistant could not be reached')
+  expect(step('Link Hue bridge').getByText('Needs attention')).toBeInTheDocument()
+  expect(screen.queryByRole('button', { name: 'Continue' })).not.toBeInTheDocument()
+  expect(commands).toHaveLength(2)
+})
+
 it('hue manual step asks for the bridge IP and submits host', async () => {
   outcomes.push(
     ok({ type: 'form', step_id: 'manual', flow_id: 'f1' }),
