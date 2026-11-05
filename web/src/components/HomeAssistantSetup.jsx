@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react'
 import { deviceError, useDeviceCommand } from '../useDeviceRegistry.js'
+import { createIntegrationsClient } from '../integrations/client.js'
 
 const string = (value) => typeof value === 'string' ? value : ''
 const ipv4 = (host) => /^(\d{1,3}\.){3}\d{1,3}$/.test(host) && host.split('.').every((part) => Number(part) <= 255 && String(Number(part)) === part)
@@ -12,7 +13,7 @@ const flowError = (data) => {
   return null
 }
 
-export default function HomeAssistantSetup({ deviceId, mock = false, active = true, disabled = false, onCommand, onGetCommand, onRelayToken }) {
+export default function HomeAssistantSetup({ deviceId, projectId, mock = false, active = true, disabled = false, onCommand, onGetCommand, onRelayToken }) {
   const [steps, setSteps] = useState({})
   const [hue, setHue] = useState(null)
   const [hueHost, setHueHost] = useState('')
@@ -30,6 +31,7 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
   const epoch = useRef(0)
   const hueInitFlows = useRef(new Set())
   const relayLock = useRef(false)
+  const opsRequest = useRef(null)
   const live = useRef(active)
   live.current = active
   const { run, pending } = useDeviceCommand({ active: active && !mock, onCommand, onGetCommand })
@@ -50,8 +52,8 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
     setHostError(null)
     setRelayBusy(false)
     relayLock.current = false
-    return () => { epoch.current += 1; live.current = false }
-  }, [active, deviceId, mock])
+    return () => { epoch.current += 1; live.current = false; opsRequest.current?.abort() }
+  }, [active, deviceId, projectId, mock])
 
   useEffect(() => {
     if (!active || !hue || hue.stepId === 'manual' || hue.stepId === 'init') return undefined
@@ -140,6 +142,107 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
     }
   }
 
+  const useInOps = async () => {
+    if (busy || relayLock.current || !active || !projectId || !onRelayToken || !relayLabel.trim() || relayLabel.trim().length > 120) return
+    relayLock.current = true
+    setRelayBusy(true)
+    setRelay(null)
+    setCopyError(null)
+    setStep('ops', 'Connecting')
+    const gen = epoch.current
+    const controller = new AbortController()
+    opsRequest.current = controller
+    const options = { signal: controller.signal }
+    const current = () => live.current && gen === epoch.current && !controller.signal.aborted
+    const send = async (task) => {
+      if (!current()) throw new Error()
+      const result = await task()
+      if (!current()) throw new Error()
+      return result
+    }
+    const conflict = (error) => error?.status === 409 || ['already_exists', 'already-exists'].includes(error?.code)
+    let message = 'Could not load the Home Assistant document. Try again.'
+    let credential = null
+    try {
+      const client = createIntegrationsClient()
+      const id = `ha-relay-${deviceId.slice(0, 8)}`
+      const title = relayLabel.trim()
+      const response = await send(() => fetch('/api/devices/relay-openapi/homeassistant.json', { ...options, cache: 'no-store', redirect: 'error' }))
+      if (!response.ok) throw new Error()
+      const bytes = await send(() => response.arrayBuffer())
+      const digest = await send(() => crypto.subtle.digest('SHA-256', bytes))
+      const hex = Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, '0')).join('')
+      message = 'The Home Assistant document could not be verified. Reload the page and try again.'
+      if (hex !== response.headers.get('X-Leaf-Document-Sha256')) throw new Error()
+      const document = JSON.parse(new TextDecoder().decode(bytes))
+      const origin = document.servers?.[0]?.url
+      if (origin !== window.location.origin) throw new Error()
+      message = 'Could not import the Home Assistant connector. Check your project access and try again.'
+      let imported
+      try {
+        imported = await send(() => client.importConnector(projectId, { document, options: { id, title } }, options))
+        if (!imported.reference) throw new Error()
+      } catch (error) { if (!conflict(error)) throw error }
+      const connector = await send(() => client.getConnector(projectId, id, options))
+      if (imported && (!['id', 'version', 'digest'].every((key) => connector.reference[key] === imported.reference[key]) || connector.revision !== imported.revision)) throw new Error()
+      message = 'Could not publish the Home Assistant connector. Try again.'
+      let published
+      let operationIds
+      if (connector.state === 'published') {
+        published = await send(() => client.getConnectorVersion(projectId, id, connector.reference.version, options))
+        operationIds = published.definition.operations.map((op) => op.id)
+      } else {
+        operationIds = connector.draft_definition.operations.map((op) => op.id)
+        try {
+          published = await send(() => client.publishConnector(projectId, id, { version: connector.reference.version,
+            expectedRevision: connector.revision, readOperationIds: operationIds }, options))
+        } catch (error) {
+          if (!conflict(error)) throw error
+          published = await send(() => client.getConnectorVersion(projectId, id, connector.reference.version, options))
+          if (operationIds.length !== published.definition.operations.length || !operationIds.every((op) => published.definition.operations.some((item) => item.id === op))) throw new Error()
+        }
+      }
+      if (!operationIds.includes('light-turn-on')) throw new Error()
+      message = 'Could not create the Ops connection. Check your project access and try again.'
+      let connection
+      try {
+        connection = await send(() => client.createConnection(projectId, { id, title, connectorRef: published.reference, origin, operationIds }, options))
+      } catch (error) {
+        if (!conflict(error)) throw error
+        connection = await send(() => client.getConnectionSummary(projectId, id, options))
+        if (!['setup', 'active', 'degraded', 'reconnect_required'].includes(connection.state) || connection.title !== title || connection.origin !== origin ||
+            !['id', 'version', 'digest'].every((key) => connection.connector_ref[key] === published.reference[key]) ||
+            connection.operation_ids.length !== operationIds.length || !operationIds.every((op) => connection.operation_ids.includes(op))) throw new Error()
+      }
+      message = 'Could not create the relay credential. Check that the device is available and try again.'
+      credential = await send(() => onRelayToken(deviceId, title))
+      if (!string(credential?.relay_token) || credential.relay_origin !== origin) throw new Error()
+      message = 'Could not save the relay credential in Ops. Check your project access and try again.'
+      try {
+        await send(() => client.setConnectionCredential(projectId, id, { purpose: 'access_token', value: credential.relay_token, expectedRevision: connection.revision }, options))
+      } finally { credential = null }
+      message = 'The credential was saved, but Turn lights on is not available in Ops yet. Try again.'
+      const cursors = new Set()
+      let after
+      do {
+        const catalog = await send(() => client.getActionCatalog(projectId, { ...options, limit: 50, ...(after ? { after } : {}) }))
+        if (catalog.actions.some((action) => action.connection_id === id && action.title === 'Turn lights on' && action.operation_ref.id === 'light-turn-on')) {
+          setSteps((steps) => ({ ...steps, ops: { state: 'Connected to Ops', title: connection.title } }))
+          return
+        }
+        after = catalog.next_cursor
+        if (after && cursors.has(after)) throw new Error()
+        cursors.add(after)
+      } while (after)
+      throw new Error()
+    } catch {
+      if (current()) setStep('ops', 'Needs attention', message)
+    } finally {
+      credential = null
+      if (gen === epoch.current) { relayLock.current = false; setRelayBusy(false) }
+    }
+  }
+
   const copyRelay = async () => {
     try {
       await navigator.clipboard.writeText(relay.token)
@@ -150,8 +253,9 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
   const status = (name) => (
     <>
       <span className={`state ${steps[name]?.message ? 'fail' : 'sub'}`} role="status">
-        <span className={`dot ${steps[name]?.state === 'Working' ? 'pulse' : ''}`} />{steps[name]?.state || 'Not started'}
+        <span className={`dot ${['Working', 'Connecting'].includes(steps[name]?.state) ? 'pulse' : ''}`} />{steps[name]?.state || 'Not started'}
       </span>
+      {steps[name]?.title && <p className="ca-copy">{steps[name].title}</p>}
       {steps[name]?.message && <p className="field-err" role="alert"><span className="dot red" />{steps[name].message}</p>}
     </>
   )
@@ -234,7 +338,9 @@ export default function HomeAssistantSetup({ deviceId, mock = false, active = tr
           <label className="ca-field"><span className="ca-field-k">Connector label</span>
             <input value={relayLabel} onChange={(event) => setRelayLabel(event.target.value)} maxLength={128} autoComplete="off" title="A label for this connector only" enterKeyHint="done" disabled={busy} />
           </label>
-          <button className="chip-act" disabled={busy || !relayLabel.trim() || !!relay} onClick={createRelay}>Connect to Ops</button>
+          <button className="chip-act" disabled={busy || !active || !projectId || !onRelayToken || !relayLabel.trim() || relayLabel.trim().length > 120} onClick={useInOps}>Use in Ops</button>
+          {!projectId && <p className="ca-copy">Open a project first</p>}
+          <button className="chip-neutral" disabled={busy || !relayLabel.trim() || !!relay} onClick={createRelay}>Connect to Ops</button>
           {status('ops')}
           {active && !mock && relay && <div className="ca-setup">
             <p className="ca-note">Copy this token now. It will not be shown again after copying, hiding, or closing this panel.</p>
