@@ -5922,7 +5922,7 @@ def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
                         retry: int, fail_fast: bool, *, early_feedback: bool = False,
                         before_heavy_command=None) -> tuple[List[Result], dict]:
     completed = {}
-    state = {"stopped_after": None, "stream_results": early_feedback}
+    state = {"stopped_after": None, "stream_results": True}
     early = [s for s in suites if early_feedback and s.id in _EARLY_FEEDBACK_SUITES]
     remaining = [s for s in suites if s not in early]
     # Collect all cheap failures, never retry them or let fail-fast hide one.
@@ -6982,6 +6982,7 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
 # --jobs auto sizing. Measured 2026-09-23 on leaf-ci-leaf-web-demo (428 suites):
 # 8 vCPU / 15 GB ran jobs 4 = 1048 s, jobs 6 = 982 s, jobs 8 = 975 s.
 # At 8 workers pool suite-seconds inflate x1.57 (browser suites x1.8-1.96), so a worker needs ~2 vCPU.
+# Round CPU workers half up: job 12613's 3 CPU / 12 GiB ran serially into the deadline.
 _AUTO_CPUS_PER_WORKER = 2
 # Heavy browser suites plus their servers peak near 3 GiB per worker on that same 15 GB box.
 _AUTO_GIB_PER_WORKER = 3
@@ -6994,8 +6995,11 @@ _AUTO_READ_LIMIT = 8192
 
 
 def resolve_auto_jobs(cpus: float, mem_bytes: int | None) -> int:
-    """Pure: workers = min(cpus / 2, mem_gib / 3, 16), floored, never below 1."""
-    bounds = [int(cpus // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
+    """Pure: min(cpus / 2 rounded half up, mem_gib / 3 floored, 16), at least 1.
+
+    Job 12613's 3 CPU / 12 GiB ran serially into the deadline with CPU flooring.
+    """
+    bounds = [int((cpus + _AUTO_CPUS_PER_WORKER / 2) // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
     if mem_bytes is not None:
         bounds.append(int(mem_bytes // (_AUTO_GIB_PER_WORKER * 2 ** 30)))
     return max(1, min(bounds))
