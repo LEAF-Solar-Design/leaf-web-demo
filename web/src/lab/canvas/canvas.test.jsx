@@ -304,6 +304,7 @@ describe('canvas authoring', () => {
   })
   it('supports palette drag/drop and keeps Strategy limited to Signals and Rules', async () => {
     const { container } = render(<LabCanvas />)
+    fireEvent.change(screen.getByLabelText('Group blocks'), { target: { value: 'family' } })
     expect(container.querySelectorAll('[data-element-family]')).toHaveLength(12)
     const dataTransfer = { setData: vi.fn(), getData: vi.fn(() => 'adjust-none'), effectAllowed: '' }
     fireEvent.dragStart(within(container.querySelector('[data-element-family="adjust"]')).getAllByRole('button', { name: 'Strategy' })[0], { dataTransfer })
@@ -514,7 +515,7 @@ describe('canvas authoring', () => {
     const changed = vi.fn()
     const { container } = render(<LabCanvas entries={entriesOf(manifest, second)} onChange={changed} />)
     const palette = screen.getByRole('region', { name: 'Strategy palette' })
-    expect(within(palette).getAllByRole('button')).toHaveLength(2)
+    expect(within(palette).getAllByTestId(/^library-add-/)).toHaveLength(2)
     expect(within(palette).queryByRole('button', { name: 'Market' })).not.toBeInTheDocument()
     fireEvent.click(within(palette).getByRole('button', { name: 'Strategy' }))
     const allowed = within(palette).getByRole('button', { name: 'Target price' })

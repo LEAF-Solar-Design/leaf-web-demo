@@ -9,6 +9,7 @@ import { contract, resolveManifest, registry } from './registry.js'
 import { addBlock, connectPipe, disconnectPipe, emptyGraph, missingInputs, pipeId, removeBlock, roundTrip, updateSettings, validateGraph } from './graphDoc.js'
 import { connectionStatus } from './portCompat.js'
 import { createDependencyLayoutRunner } from './dependencyLayout.js'
+import { pushRecent } from './libraryCategories.js'
 
 const nodeTypes = { block: NodeCard }
 const edgeTypes = { latency: LatencyPipe }
@@ -21,6 +22,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
   const current = useRef(document)
   const [positions, setPositions] = useState({})
   const [selected, setSelected] = useState(null)
+  const [armed, setArmed] = useState(null)
   const [pending, setPending] = useState(null)
   const [message, setMessage] = useState('')
   const [layoutMs, setLayoutMs] = useState(null)
@@ -59,6 +61,7 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
       const id = next.blocks.at(-1).id
       setPositions(previous => ({ ...previous, [id]: centre }))
       commit(next); setSelected(id); setMessage(`${manifest.title} added`)
+      try { pushRecent(globalThis.localStorage, manifest.id) } catch { /* Storage may be unavailable. */ }
     } catch (error) { setMessage(error.message) }
   }
   const runLayout = useCallback(async (layoutDocument, dimensions) => {
@@ -109,11 +112,12 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
     data: { measurement: measurements.pipes?.[pipeId(pipe)], budget: source.problem || target.problem ? null : source.manifest.latency_budget_us, disconnect } }
   })
   return <div className="lab-home lab-canvas-editor" data-canvas-editor tabIndex={-1} onKeyDown={event => {
+    if (event.key === 'Escape') setArmed(null)
     if (event.key !== '/' || event.ctrlKey || event.metaKey || event.altKey ||
       event.target.closest?.('input,textarea,select,[contenteditable="true"]') || event.currentTarget.closest('[hidden]')) return
     event.preventDefault(); search.current?.focus()
   }}>
-    <Palette entries={entries} onAdd={add} searchRef={search} tools={tools} onLoadTools={onLoadTools} />
+    <Palette entries={entries} onAdd={add} armed={armed} onArm={setArmed} searchRef={search} tools={tools} onLoadTools={onLoadTools} />
     <section className="lab-canvas-region" aria-label="Dependency canvas">
       <header><h2>Dependency canvas</h2><button type="button" disabled={layoutBusy} onClick={relayout}>Relayout</button>
         <button type="button" onClick={() => flow.fitView({ padding: 0.2 })}>Fit cards</button></header>
@@ -126,7 +130,10 @@ function Editor({ initialDocument, onChange, entries, measurements, upstream, co
         }}>
         <ReactFlow nodes={nodes} edges={edges} nodeTypes={nodeTypes} edgeTypes={edgeTypes}
           minZoom={0.1} maxZoom={3} fitView nodesConnectable edgesReconnectable={false}
-          onNodeClick={(_, node) => setSelected(node.id)} onPaneClick={() => setSelected(null)}
+          onNodeClick={(_, node) => setSelected(node.id)} onPaneClick={event => {
+            if (armed) { add(armed, flow.screenToFlowPosition({ x: event.clientX, y: event.clientY })); setArmed(null) }
+            else setSelected(null)
+          }}
           onNodesChange={changes => {
             const removed = changes.filter(change => change.type === 'remove').map(change => change.id)
             if (removed.length) {
