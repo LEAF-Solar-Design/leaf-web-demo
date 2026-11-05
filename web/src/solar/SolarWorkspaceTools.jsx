@@ -79,6 +79,10 @@ function transportTrackedClient(createClient, options, methods) {
   return tracked
 }
 
+export function ProjectLayoutPublicationTools(props) {
+  return <SolarWorkspaceTools {...props} flow="project-publication" />
+}
+
 export default function SolarWorkspaceTools({
   drawingId, projectId = null, drawingVersion, flow, checkoutHeld, busy,
   getCheckoutCapability, onPhysicalHeadChanged, onDrawingVersionChanged, onRunPlacement, transport,
@@ -577,7 +581,7 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
 
   function publicationCapture(requestId) {
     const current = publicationCurrent.current
-    const scope = getProjectScope?.() ?? current.scope
+    const scope = getProjectScope ? getProjectScope() : current.scope
     if (!scope || !activeScope.current || current.projectId !== scope.project_id
       || (scope.drawing_id !== null && current.drawingId !== scope.drawing_id)) return null
     const captured = captureSolarPublication(scope, current.readback, requestId, current.parameters)
@@ -732,13 +736,13 @@ function ToolsForScope({ drawingId, projectId, drawingVersion, flow, checkoutHel
     onPhysicalHeadChanged?.(result)
   }
 
-  const hasProjectPublication = projectId !== null && flow === 'ground-physical'
+  const hasProjectPublication = projectId !== null && (flow === 'ground-physical' || flow === 'project-publication')
   if (!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasSolarEdge && !trackerMounted) return null
   return (
     <section className="solar-workspace-tools" aria-label="Solar workspace tools"
       hidden={!hasProjectPublication && !hasLandxml && !hasCombiner && !hasTerrain && !hasTrackerRows && !hasSolarEdge}
       data-physical-head-index={physicalHead?.index ?? undefined}>
-      {projectId !== null && flow === 'ground-physical' && <div aria-label="Project layout publication">
+      {hasProjectPublication && <div aria-label="Project layout publication">
         {projectScope?.drawing_id === null && projectScope?.input_version_id === null && <div>
           <p>Use the original boundary and complete preset. No drawing upload is required.</p>
           <label>Site boundary (JSON)<textarea value={initialBoundary} maxLength={2000000}

@@ -53,7 +53,7 @@ import { ENV_SOLAR_FLOW_RAIL } from './solar/flag.js'
 import { SOLAR_SETTINGS_TOOL_NAME } from './solar/solarSettingsWire.js'
 import SolarFlowRail from './solar/SolarFlowRail.jsx'
 import SolarFlowSeat from './solar/SolarFlowSeat.jsx'
-import SolarWorkspaceTools from './solar/SolarWorkspaceTools.jsx'
+import SolarWorkspaceTools, { ProjectLayoutPublicationTools } from './solar/SolarWorkspaceTools.jsx'
 import { solarPublicationReceiptMatches } from './solar/solarProjectMaterializationClient.js'
 import SolarStepEditor from './solar/SolarStepEditor.jsx'
 import { DEFAULT_SOLAR_FLOW, MAX_FLOW_STEPS, admittedOverlays, solarFlowId, solarFlowRecordRun, solarFlowRunOutcome, solarFlowRunStatus, solarFlowRunsFor } from './solar/solarFlowModel.js'
@@ -5625,6 +5625,23 @@ export default function App() {
                   projectPending={projectSolarRuntime.projectPending}
                   projectOutcome={projectSolarRuntime.projectOutcome}
                 />
+                {projectEditorBinding && (
+                  <ProjectLayoutPublicationTools
+                    drawingId={projectEditorBinding.drawing_id}
+                    projectId={projectEditorBinding.project_id}
+                    busy={!!running || projectSolarRuntime.busy}
+                    projectScope={projectEditorBinding}
+                    getProjectScope={() => {
+                      const current = workspaceController.getSnapshot()
+                      return projectEditorScope({
+                        enabled: projectModeRef.current && sessionProof.current() && session.controller.getSnapshot().status === 'active',
+                        orgId: current.orgId, projectId: current.openProjectId,
+                        workspace: current.workspace, versionId: current.canonicalVersionId,
+                      })
+                    }}
+                    onProjectDrawingPublished={(receipt, captured, isCurrent) => seatSolarProjectPublication(workspaceController, receipt, captured, isCurrent)}
+                  />
+                )}
               </div>
             ) : <p role="status" aria-live="polite">
               {projectSolarAppReason('project_unavailable')}
@@ -5702,14 +5719,6 @@ export default function App() {
               />
               {!mock && (
                 <SolarWorkspaceTools
-                  projectScope={projectMode ? projectEditorBinding : null}
-                  getProjectScope={() => {
-                    const current = workspaceController.getSnapshot()
-                    const selected = current.workspace?.drawing_versions?.find(row => row.version_id === current.canonicalVersionId)
-                    return { organization_id: current.orgId, project_id: current.openProjectId,
-                      drawing_id: selected?.drawing_id ?? null, input_version_id: current.canonicalVersionId ?? null }
-                  }}
-                  onProjectDrawingPublished={(receipt, captured, isCurrent) => seatSolarProjectPublication(workspaceController, receipt, captured, isCurrent)}
                   drawingId={catalogRunContext?.drawingId ?? null}
                   projectId={catalogRunContext?.projectId ?? null}
                   drawingVersion={catalogRunContext?.drawingVersion ?? null}

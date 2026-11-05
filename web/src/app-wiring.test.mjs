@@ -308,6 +308,42 @@ it('R13G2B-01 standalone ribbon and host keep their exact reference and bytes', 
   })) assert.equal(r13Hash(readFileSync(`${process.cwd()}/src/solar/__fixtures__/${name}`)), hash, name)
 })
 
+it('J10-PROJECT-MOUNT routes initial and successor publication through the canonical project host', () => {
+  const { branch } = r13ProjectHosts()
+  const findPublication = node => r13Find(n => n.type === 'JSXOpeningElement' && n.name.name === 'ProjectLayoutPublicationTools', node)
+  assert.equal(findPublication(branch.alternate).length, 0)
+  const [mount] = findPublication(branch.consequent)
+  assert.ok(mount)
+  const prop = name => mount.attributes.find(attribute => attribute.name.name === name).value.expression
+  assert.equal(r13Text(prop('projectScope')), 'projectEditorBinding')
+  assert.equal(r13Text(prop('drawingId')), 'projectEditorBinding.drawing_id')
+  assert.equal(r13Text(prop('projectId')), 'projectEditorBinding.project_id')
+  const scopeHelper = r13One(n => n.type === 'FunctionDeclaration' && n.id.name === 'projectEditorScope')
+  const projectEditorScope = r13Evaluate(scopeHelper, {})
+  const initial = { orgId: 'org', openProjectId: 'project', canonicalVersionId: null,
+    workspace: { project: { org_id: 'org', project_id: 'project' }, drawing_versions: [] } }
+  let current = initial, active = true, authoritative = true
+  const read = r13Evaluate(prop('getProjectScope'), {
+    projectEditorScope, projectModeRef: { current: true },
+    workspaceController: { getSnapshot: () => current },
+    sessionProof: { current: () => authoritative },
+    session: { controller: { getSnapshot: () => ({ status: active ? 'active' : 'required' }) } },
+  })
+  assert.deepEqual(read(), { organization_id: 'org', project_id: 'project', drawing_id: null, input_version_id: null })
+  const version = { org_id: 'org', project_id: 'project', drawing_id: 'drawing', version_id: 'version' }
+  current = { ...initial, canonicalVersionId: 'version', workspace: { ...initial.workspace, drawing_versions: [version] } }
+  assert.deepEqual(read(), { organization_id: 'org', project_id: 'project', drawing_id: 'drawing', input_version_id: 'version' })
+  current = { ...current, orgId: 'foreign' }
+  assert.equal(read(), null)
+  current = initial
+  authoritative = false
+  assert.equal(read(), null)
+  authoritative = true
+  active = false
+  assert.equal(read(), null)
+  assert.match(r13Text(prop('onProjectDrawingPublished')), /seatSolarProjectPublication\(workspaceController, receipt, captured, isCurrent\)/)
+})
+
 it('R13G2B-05 workspace props use the existing canonical owners', () => {
   const mount = r13One(n => n.type === 'JSXOpeningElement' && n.name.name === 'ProjectSolarWorkspace')
   const props = Object.fromEntries(mount.attributes.map(a => [a.name.name, r13Text(a.value.expression)]))
