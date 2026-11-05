@@ -2,6 +2,7 @@ import { useEffect, useRef, useState, forwardRef, useImperativeHandle } from 're
 import { applyCameraCarry, applyViewPose, cameraCarry, cameraCarryKey, cameraPose, captureCameraCarry, nextFitState, pickLineThreshold, resizeCameraAction, safeFitFrustum, safeCenterShift, safeRectCameraAction, unprojectClientToPlane } from './viewerMath.js'
 import { blockDefinitions } from './viewerIntake.js'
 import { drawingOrigin, finiteXY, localPositions } from './viewerLocalFrame.js'
+import { vertexZ, vertexSegments } from './viewerVertexZ.js'
 import { createCameraChannel } from './cameraChannel.js'
 import { viewportFromCamera } from './viewerMath.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
@@ -378,6 +379,7 @@ const Viewer = forwardRef(function Viewer(
     // open polylines, lines and arcs as strokes only; the console drawing
     // keeps its panel fills (this flag is false for every intake the server seats).
     const strokeOnlyOpen = activeIntake.source === 'engine' || activeIntake.source === 'bridge'
+    const bridge = activeIntake.source === 'bridge'
 
     // bounds — include polylines, insert points, and face corners so the
     // whole drawing (not just polylines) is framed.
@@ -397,7 +399,13 @@ const Viewer = forwardRef(function Viewer(
     const cx = minX / 2 + maxX / 2
     const cy = minY / 2 + maxY / 2
     const dataSpan = Math.max(dataW, dataH)
-    const clipSpan = Math.max(dataSpan * 4, 1000)
+    let bridgeMinZ = 0, bridgeMaxZ = 0
+    if (bridge) for (const pl of polylines) for (const p of pl.pts) {
+      bridgeMinZ = Math.min(bridgeMinZ, vertexZ(p))
+      bridgeMaxZ = Math.max(bridgeMaxZ, vertexZ(p))
+    }
+    const clipSpan = Math.max(dataSpan * 4, 1000,
+      bridge ? (bridgeMaxZ - bridgeMinZ) * 2 + 1000 : 0)
     camera.near = -clipSpan
     camera.far = clipSpan
     camera.updateProjectionMatrix()
@@ -456,11 +464,11 @@ const Viewer = forwardRef(function Viewer(
       const triHandles = [] // triangle index -> polyline handle (fill pick map)
       for (const pl of polys) {
         const pts = pl.pts
-        const topZ = displayZ(pl)
+        const topZ = bridge ? 0 : displayZ(pl)
         const bottomZ = topZ - panelThickness
         minDisplayZ = Math.min(minDisplayZ, bottomZ)
         maxDisplayZ = Math.max(maxDisplayZ, topZ)
-        addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly })
+        addPickDescriptor(pickIndex, pl.sourceHandle ?? pl.handle, { kind: 'poly', layer: pl.layer, pts, strokeOnly: bridge || !!pl.strokeOnly, closed: !!pl.closed })
         // fan-triangulate (panels are convex quads) for a subtle fill; an
         // engine document's OPEN polyline (a line, an arc) is a stroke only.
         // AutoCAD shows bridge drawings as wireframe, including closed shapes.
@@ -491,11 +499,12 @@ const Viewer = forwardRef(function Viewer(
           }
         }
         // border segments
+        if (bridge) for (const value of vertexSegments(pts, pl.closed)) linePos.push(value)
         for (let i = 0; i < pts.length; i++) {
           const a = pts[i]
           const b = pts[(i + 1) % pts.length]
           if (i === pts.length - 1 && !pl.closed) break
-          linePos.push(a[0], a[1], topZ + 0.05, b[0], b[1], topZ + 0.05)
+          if (!bridge) linePos.push(a[0], a[1], topZ + 0.05, b[0], b[1], topZ + 0.05)
           lineHandles.push(pl.sourceHandle ?? pl.handle)
         }
       }
@@ -520,6 +529,7 @@ const Viewer = forwardRef(function Viewer(
       lineGeom.setAttribute('position', new THREE.Float32BufferAttribute(localPositions(linePos, origin), 3))
       const lineMat = new THREE.LineBasicMaterial({ color: col, transparent: true, opacity: 0.9 })
       const lines = new THREE.LineSegments(lineGeom, lineMat)
+      if (bridge) { lineMat.depthWrite = false; lines.renderOrder = 1 }
       group.add(lines)
       if (lineHandles.some(Boolean)) {
         lines.userData = { kind: 'blocklines', lineHandles }
@@ -666,17 +676,18 @@ const Viewer = forwardRef(function Viewer(
     function fitToBounds() {
       const fit = applyFrustum()
       const centerX = fit?.centerX ?? cx, centerY = fit?.centerY ?? cy
-      const targetZ = isFinite(minDisplayZ) && isFinite(maxDisplayZ)
-        ? (minDisplayZ + maxDisplayZ) / 2
-        : 0
+      const targetZ = bridge ? bridgeMinZ / 2 + bridgeMaxZ / 2
+        : isFinite(minDisplayZ) && isFinite(maxDisplayZ)
+          ? (minDisplayZ + maxDisplayZ) / 2
+          : 0
       if (sculpture && rotateEnabledRef.current) {
         camera.position.set(
           cx + dataSpan * 0.42,
           cy - dataSpan * 0.2,
-          targetZ + dataSpan * 1.15,
+          bridge ? bridgeMaxZ + Math.max(100, dataSpan * 1.15) : targetZ + dataSpan * 1.15,
         )
       } else {
-        camera.position.set(centerX, centerY, 100)
+        camera.position.set(centerX, centerY, bridge ? bridgeMaxZ + 100 : 100)
       }
       camera.zoom = 1
       camera.updateProjectionMatrix()
@@ -941,7 +952,7 @@ const Viewer = forwardRef(function Viewer(
       scene, root, origin, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
-      fitToBounds, dataSpan, tokens, sculpture,
+      fitToBounds, dataSpan, tokens, sculpture, bridge,
       solarGroup, solarLayer: null,
     }
     stateRef.current = sceneState
@@ -1368,7 +1379,8 @@ const Viewer = forwardRef(function Viewer(
         fillPos.push(pts[i][0], pts[i][1], 1)
         fillPos.push(pts[i + 1][0], pts[i + 1][1], 1)
       }
-      for (let i = 0; i < pts.length - (d.strokeOnly ? 1 : 0); i++) {
+      if (s.bridge) for (const value of vertexSegments(pts, d.closed)) linePos.push(value)
+      for (let i = 0; !s.bridge && i < pts.length - (d.strokeOnly ? 1 : 0); i++) {
         const a = pts[i], b = pts[(i + 1) % pts.length]
         linePos.push(a[0], a[1], 1.1, b[0], b[1], 1.1)
       }
@@ -1405,7 +1417,8 @@ const Viewer = forwardRef(function Viewer(
         fillPos.push(pts[i][0], pts[i][1], z)
         fillPos.push(pts[i + 1][0], pts[i + 1][1], z)
       }
-      for (let i = 0; i < pts.length - (strokeOnly ? 1 : 0); i++) {
+      if (s.bridge && d.kind === 'poly') for (const value of vertexSegments(pts, d.closed)) linePos.push(value)
+      for (let i = 0; !(s.bridge && d.kind === 'poly') && i < pts.length - (strokeOnly ? 1 : 0); i++) {
         const a = pts[i], b = pts[(i + 1) % pts.length]
         linePos.push(a[0], a[1], z + 0.1, b[0], b[1], z + 0.1)
       }
