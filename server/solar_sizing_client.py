@@ -15,6 +15,7 @@ import copy
 import hashlib
 import json
 import math
+import os
 import time
 from typing import Annotated, Literal, Optional
 
@@ -25,7 +26,23 @@ from leaf_cloud_client import StrictModel, canonical_bytes
 from leaf_cloud_grants import CloudError, resolve_grant
 from solar_design_graph import GraphValidationError, _bounded_json, require_revision, validate_graph
 
-SIZING_URL = "https://api.leafdesign.ai/string-length"
+SIZER_BASE_URLS = frozenset({"https://api.leafdesign.ai", "https://staging-api.leafdesign.ai"})
+
+
+def sizer_base_url(env=None) -> str:
+    """LEAF_STRING_SIZER_BASE_URL selects the String Sizer; unset means production. Fails closed on any other value."""
+    if env is None:
+        env = os.environ
+    value = env.get("LEAF_STRING_SIZER_BASE_URL", "")
+    if value == "":
+        return "https://api.leafdesign.ai"
+    if value in SIZER_BASE_URLS:
+        return value
+    raise RuntimeError("LEAF_STRING_SIZER_BASE_URL must be one of the allowed String Sizer base URLs")
+
+
+SIZER_BASE_URL = sizer_base_url()
+SIZING_URL = SIZER_BASE_URL + "/string-length"
 # The label every canonical exchange sent to SIZING_URL carries. The product never changes it.
 # Only an in-process test or proof bootstrap that also points SIZING_URL at a labelled replay
 # of the String Sizer sets "synthetic"; no request, parameter or environment value reaches it.
