@@ -7533,25 +7533,47 @@ function refusalRuntime() {
   return { runtime, state }
 }
 
-test('WL39b vertex-index setup fills the named input and requires idle Delete vertex', async () => {
+test('WL39b vertex-index setup arms ribbon Delete vertex and fills its input without submitting', async () => {
   const events = []
-  const button = { disabled: false }
-  const runtime = { evidence: {}, page: { getByTestId: (id) => {
-    assert.equal(id, 'cad-edit-workbench')
-    return { getByRole: (role, options) => {
-      assert.equal(options.exact, true)
-      if (role === 'textbox') {
-        assert.equal(options.name, 'vertex index')
-        return { fill: async value => events.push(['fill', value]) }
-      }
-      assert.equal(role, 'button'); assert.equal(options.name, 'Delete vertex')
-      return button
-    } }
-  } } }
+  let inputMissing = false
+  const button = { click: async options => {
+    assert.deepEqual(options, { timeout: 15_000 })
+    events.push(['click', 'delete-vertex'])
+  } }
+  const group = { getByRole: (role, options) => {
+    assert.equal(role, 'button')
+    assert.deepEqual(options, { name: 'delete-vertex', exact: true })
+    return button
+  } }
+  const toolbar = { getByRole: (role, options) => {
+    assert.equal(role, 'group')
+    assert.deepEqual(options, { name: 'Modify', exact: true })
+    return group
+  } }
+  const runtime = { evidence: {}, page: {
+    getByTestId: id => {
+      assert.equal(id, 'cad-edit-workbench')
+      events.push(['count', id])
+      return { countValue: 1 }
+    },
+    getByRole: (role, options) => {
+      assert.equal(role, 'toolbar')
+      assert.deepEqual(options, { name: 'Drafting tools', exact: true })
+      return toolbar
+    },
+    getByLabel: (label, options) => {
+      assert.equal(label, 'ribbon vertex')
+      assert.deepEqual(options, { exact: true })
+      return { fill: async value => {
+        if (inputMissing) throw new Error('ribbon vertex input missing')
+        events.push(['fill', label, value])
+      } }
+    },
+  } }
   await setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions)
-  assert.deepEqual(events, [['fill', '-1']])
-  button.disabled = true
-  await assert.rejects(setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions))
+  assert.deepEqual(events, [['count', 'cad-edit-workbench'], ['click', 'delete-vertex'], ['fill', 'ribbon vertex', '-1']])
+  inputMissing = true
+  await assert.rejects(setupStep({}, runtime, { kind: 'vertex-index', value: '-1' }, oracleAssertions), /ribbon vertex input missing/)
 })
 
 test('WL39b fake activation uses the real refusal oracle and typed red-hat verdict on both viewports', async () => {
@@ -7567,9 +7589,10 @@ test('WL39b fake activation uses the real refusal oracle and typed red-hat verdi
     const observers = runtime.walkPersonaObservers = createWalkPersonaObservers({ probe, viewport, evidence })
     const before = await captureEngineRefusal(runtime)
     await observers.observe('red-hat', 'before', before)
-    let clicks = 0
-    const locator = { click: async () => {
-      clicks++
+    let submissions = 0
+    const locator = { press: async key => {
+      assert.equal(key, 'Enter')
+      submissions++
       state.status = fault === 'status' ? '' : probe.assertion.refusal
       if (fault === 'geometry') state.geometry.entities[0].layer = 'Changed'
       if (fault === 'selection') state.selection = 'no selection'
@@ -7578,7 +7601,7 @@ test('WL39b fake activation uses the real refusal oracle and typed red-hat verdi
       if (fault === 'versions') state.versions.head++
       if (fault === 'dispatches') state.dispatches.push({ type: 'edit', op: 'deleteVertex' })
     } }
-    await locator.click()
+    await extractedActivate(oracleAssertions)(probe, runtime, locator)
     let originalError
     const assertions = value => ({ ...oracleAssertions(value),
       toEqual: expected => {
@@ -7593,7 +7616,7 @@ test('WL39b fake activation uses the real refusal oracle and typed red-hat verdi
     const check = () => runProbeOracle(probe, runtime, locator, before, assertions)
     if (fault) await assert.rejects(check(), error => error === originalError)
     else await check()
-    assert.equal(clicks, 1)
+    assert.equal(submissions, 1)
     assert.equal(evidence.engineRefusal.observed, state.status)
     const verdict = redHat.evaluate(evidence).status
     assert.equal(verdict, fault === 'status' ? 'unknown' : fault ? 'finding' : 'pass', `${viewport}/${fault}`)
