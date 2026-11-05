@@ -36,8 +36,9 @@ import test_w1_design_graph as w1
 from test_sip_r14_evidence import SMALL
 
 TOOL = "solar-panel-groups"
-TWELVE = frozenset((
-    "solar-settings", "solar-panels-from-drawing", "solar-size-strings",
+SUPPORTED = frozenset((
+    "solar-settings", "solar-design-presets", "solar-trackers-to-panel-groups",
+    "solar-panels-from-drawing", "solar-size-strings",
     "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
     "solar-string-add", "solar-assign-equipment", "solar-string-multi-add",
     "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept",
@@ -169,14 +170,16 @@ def request(a, ctx, params, **changes):
 
 def test_sip_r3e_membership(monkeypatch):
     """R3e-2-01 Exact membership, manifest identity and unsupported boundary."""
-    assert adapter.SUPPORTED_TOOLS == TWELVE
+    assert adapter.SUPPORTED_TOOLS == SUPPORTED
     assert adapter.CREATION_TOOLS == CREATING
     assert adapter._tool(TOOL, b3.manifest(TOOL)) == solar_tools.get(TOOL)
     changed = deepcopy(solar_tools.trusted_record(TOOL))
     changed["description"] += " changed"
     a3.refused("SIP_R3_TOOL_MANIFEST_MISMATCH",
                lambda: adapter._tool(TOOL, deps.catalog_tool_digest(changed)))
-    for tool in multi.UNSUPPORTED:
+    for tool in ("solar-design-presets", "solar-trackers-to-panel-groups"):
+        assert adapter._tool(tool, b3.manifest(tool)) == solar_tools.get(tool)
+    for tool in ("solar-assign-strings", "solar-pvcase-convert", "solar-string-delete"):
         a3.refused("SIP_R3_TOOL_UNSUPPORTED", lambda: adapter._tool(tool, b3.manifest(tool)))
 
 
