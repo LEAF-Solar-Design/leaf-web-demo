@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState } from 'react'
 import { deviceError, useDeviceCommand } from '../useDeviceRegistry.js'
 import { createIntegrationsClient } from '../integrations/client.js'
+import LightsControl from './LightsControl.jsx'
 
 const string = (value) => typeof value === 'string' ? value : ''
 const ipv4 = (host) => /^(\d{1,3}\.){3}\d{1,3}$/.test(host) && host.split('.').every((part) => Number(part) <= 255 && String(Number(part)) === part)
@@ -28,6 +29,8 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
   const [relay, setRelay] = useState(null)
   const [relayBusy, setRelayBusy] = useState(false)
   const [copyError, setCopyError] = useState(null)
+  const [opsClient] = useState(() => createIntegrationsClient())
+  const [connectionId, setConnectionId] = useState(null)
   const epoch = useRef(0)
   const hueInitFlows = useRef(new Set())
   const relayLock = useRef(false)
@@ -40,6 +43,7 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
   useEffect(() => {
     live.current = active
     setSteps({})
+    setConnectionId(null)
     setHue(null)
     hueInitFlows.current.clear()
     setHueHost('')
@@ -54,6 +58,33 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
     relayLock.current = false
     return () => { epoch.current += 1; live.current = false; opsRequest.current?.abort() }
   }, [active, deviceId, projectId, mock])
+
+  useEffect(() => {
+    if (!active || mock || !projectId) return undefined
+    const controller = new AbortController()
+    const gen = epoch.current
+    const discover = async () => {
+      try {
+        let after
+        const seen = new Set()
+        for (let page = 0; page < 4; page += 1) {
+          const catalog = await opsClient.getActionCatalog(projectId, { signal: controller.signal, limit: 25, ...(after ? { after } : {}) })
+          if (controller.signal.aborted || gen !== epoch.current || relayLock.current) return
+          const action = catalog.actions.find((item) => item.connection_id === `ha-relay-${deviceId.slice(0, 8)}` && item.operation_ref?.id === 'light-turn-on')
+          if (action) {
+            setConnectionId(action.connection_id)
+            setSteps((current) => ({ ...current, ops: { state: 'Connected to Ops' } }))
+            return
+          }
+          after = catalog.next_cursor
+          if (!after || seen.has(after)) return
+          seen.add(after)
+        }
+      } catch { /* Setup remains available when discovery cannot load. */ }
+    }
+    void discover()
+    return () => controller.abort()
+  }, [active, deviceId, projectId, mock, opsClient])
 
   useEffect(() => {
     if (!active || !hue || hue.stepId === 'manual' || hue.stepId === 'init') return undefined
@@ -164,7 +195,7 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
     let message = 'Could not load the Home Assistant document. Try again.'
     let credential = null
     try {
-      const client = createIntegrationsClient()
+      const client = opsClient
       const id = `ha-relay-${deviceId.slice(0, 8)}`
       const title = relayLabel.trim()
       const response = await send(() => fetch('/api/devices/relay-openapi/homeassistant.json', { ...options, cache: 'no-store', redirect: 'error' }))
@@ -228,6 +259,7 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
         const catalog = await send(() => client.getActionCatalog(projectId, { ...options, limit: 50, ...(after ? { after } : {}) }))
         if (catalog.actions.some((action) => action.connection_id === id && action.title === 'Turn lights on' && action.operation_ref.id === 'light-turn-on')) {
           setSteps((steps) => ({ ...steps, ops: { state: 'Connected to Ops', title: connection.title } }))
+          setConnectionId(id)
           return
         }
         after = catalog.next_cursor
@@ -249,6 +281,15 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
       if (live.current) { setRelay(null); setStep('ops', 'Token copied') }
     } catch { if (live.current) setCopyError('Could not copy. Select and copy the token before hiding it.') }
   }
+
+  const loadLights = () => execute('group', 'http.proxy', { package: 'homeassistant', method: 'GET', path: '/api/states' }, (data) => {
+    if (data?.status !== 200 || !Array.isArray(data.body_json)) throw { code: 'upstream_error' }
+    const rows = data.body_json.filter((row) => typeof row?.entity_id === 'string' && /^light\.[a-z0-9_]+$/.test(row.entity_id)).map((row) => ({ id: row.entity_id, name: string(row.attributes?.friendly_name) || row.entity_id }))
+    setLights([...new Map(rows.map((row) => [row.id, row])).values()])
+    setSelected([])
+    setStep('group', rows.length ? 'Choose lights' : 'No lights found')
+    return false
+  })
 
   const status = (name) => (
     <>
@@ -316,14 +357,7 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
           }}>Add by IP</button>
         </li>
         <li>
-          <button className="chip-neutral" disabled={busy} onClick={() => execute('group', 'http.proxy', { package: 'homeassistant', method: 'GET', path: '/api/states' }, (data) => {
-            if (data?.status !== 200 || !Array.isArray(data.body_json)) throw { code: 'upstream_error' }
-            const rows = data.body_json.filter((row) => typeof row?.entity_id === 'string' && /^light\.[a-z0-9_]+$/.test(row.entity_id)).map((row) => ({ id: row.entity_id, name: string(row.attributes?.friendly_name) || row.entity_id }))
-            setLights([...new Map(rows.map((row) => [row.id, row])).values()])
-            setSelected([])
-            setStep('group', rows.length ? 'Choose lights' : 'No lights found')
-            return false
-          })}>Load light entities</button>
+          <button className="chip-neutral" disabled={busy} onClick={loadLights}>Load light entities</button>
           {lights.map((light) => <label className="ca-copy" key={light.id}>
             <input type="checkbox" checked={selected.includes(light.id)} disabled={busy} onChange={(event) => setSelected((current) => event.target.checked ? [...current, light.id] : current.filter((id) => id !== light.id))} />{light.name}
           </label>)}
@@ -342,6 +376,7 @@ export default function HomeAssistantSetup({ deviceId, projectId, mock = false, 
           {!projectId && <p className="ca-copy">Open a project first</p>}
           <button className="chip-neutral" disabled={busy || !relayLabel.trim() || !!relay} onClick={createRelay}>Connect to Ops</button>
           {status('ops')}
+          {active && !mock && connectionId && <LightsControl key={`${projectId}:${deviceId}`} client={opsClient} projectId={projectId} connectionId={connectionId} lights={lights} onLoadLights={loadLights} disabled={busy} />}
           {active && !mock && relay && <div className="ca-setup">
             <p className="ca-note">Copy this token now. It will not be shown again after copying, hiding, or closing this panel.</p>
             <p className="ca-copy">Relay origin: <b>{relay.origin}</b></p>

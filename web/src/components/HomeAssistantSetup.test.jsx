@@ -333,7 +333,11 @@ function opsFixture() {
     publishConnector: published, getConnectorVersion: published, createConnection: connection, getConnectionSummary: connection,
     setConnectionCredential: { ...connection, revision: 2 },
     getActionCatalog: { actions: [{ connection_id: id, title: 'Turn lights on', operation_ref: { id: 'light-turn-on' } }], next_cursor: null } })) {
-    ops[name].mockImplementation(async () => { order.push(name); return value })
+    ops[name].mockImplementation(async (_, options) => {
+      if (name === 'getActionCatalog' && options?.limit === 25) return { actions: [], next_cursor: null }
+      order.push(name)
+      return value
+    })
   }
   const onRelayToken = vi.fn(async () => {
     order.push('mint')
@@ -356,8 +360,10 @@ it('connects the relay to the current project in order, including all write oper
   clickUseInOps()
   expect(step('Use in Ops').getByText('Connecting')).toBeInTheDocument()
   expect(await screen.findByText('Connected to Ops')).toBeInTheDocument()
+  expect(screen.getByRole('region', { name: 'Lights control' })).toBeInTheDocument()
+  expect(await screen.findByRole('button', { name: 'Load lights' })).toBeInTheDocument()
   expect(step('Use in Ops').getByText('Kitchen lights')).toBeInTheDocument()
-  expect(fixture.order).toEqual(['document', 'importConnector', 'getConnector', 'publishConnector', 'createConnection', 'mint', 'setConnectionCredential', 'getActionCatalog'])
+  expect(fixture.order).toEqual(['document', 'importConnector', 'getConnector', 'publishConnector', 'createConnection', 'mint', 'setConnectionCredential', 'getActionCatalog', 'getActionCatalog'])
   const options = { signal: expect.any(AbortSignal) }
   expect(fetch).toHaveBeenCalledWith('/api/devices/relay-openapi/homeassistant.json', { ...options, cache: 'no-store', redirect: 'error' })
   expect(ops.importConnector).toHaveBeenCalledWith(fixture.props.projectId, { document: fixture.document, options: { id: fixture.id, title: 'Kitchen lights' } }, options)
@@ -397,7 +403,7 @@ it.each([
   expect(await screen.findByRole('alert')).toHaveTextContent(message)
   expect(container.innerHTML).not.toContain('ops-only-secret')
   expect(screen.queryByText('Connected to Ops')).not.toBeInTheDocument()
-  if (method === 'setConnectionCredential') expect(ops.getActionCatalog).not.toHaveBeenCalled()
+  if (method === 'setConnectionCredential') expect(ops.getActionCatalog.mock.calls.every(([, options]) => options.limit === 25)).toBe(true)
 })
 
 it('reuses the published connector and connection on a repeat click', async () => {
@@ -458,11 +464,14 @@ it('does not dispatch duplicate attempts while connecting', async () => {
 
 it('requires the action to belong to this connection and follows catalog pages', async () => {
   const fixture = opsFixture()
-  ops.getActionCatalog.mockResolvedValueOnce({ actions: [{ connection_id: 'other', title: 'Turn lights on', operation_ref: { id: 'light-turn-on' } }], next_cursor: 'next' })
+  const catalog = ops.getActionCatalog.getMockImplementation()
+  ops.getActionCatalog.mockImplementation((projectId, options) => options.limit === 50 && !options.after
+    ? Promise.resolve({ actions: [{ connection_id: 'other', title: 'Turn lights on', operation_ref: { id: 'light-turn-on' } }], next_cursor: 'next' })
+    : catalog(projectId, options))
   render(<HomeAssistantSetup {...fixture.props} />)
   clickUseInOps()
   await screen.findByText('Connected to Ops')
-  expect(ops.getActionCatalog).toHaveBeenLastCalledWith(fixture.props.projectId, { signal: expect.any(AbortSignal), limit: 50, after: 'next' })
+  expect(ops.getActionCatalog).toHaveBeenCalledWith(fixture.props.projectId, { signal: expect.any(AbortSignal), limit: 50, after: 'next' })
 })
 
 it('does not claim success when this connection has no Turn lights on action', async () => {
@@ -495,4 +504,20 @@ it('requires a project before enabling Use in Ops', () => {
   expect(screen.getByText('Open a project first')).toBeInTheDocument()
   clickUseInOps()
   expect(fetch).not.toHaveBeenCalled()
+})
+
+it('restores this device connection from the catalog on a fresh mount and loads its lights', async () => {
+  const fixture = opsFixture()
+  ops.getActionCatalog.mockResolvedValue({ actions: [{ connection_id: fixture.id, operation_ref: { id: 'light-turn-on' } }], next_cursor: null })
+  const onCommand = vi.fn().mockResolvedValue({ command_id: 'load-lights' })
+  const onGetCommand = vi.fn().mockResolvedValue({ result: ok({ status: 200, body_json: [
+    { entity_id: 'light.desk', attributes: { friendly_name: 'Desk', token: 'private-state' } },
+  ] }) })
+  const { container } = render(<HomeAssistantSetup {...fixture.props} onCommand={onCommand} onGetCommand={onGetCommand} />)
+  expect(await screen.findByText('Connected to Ops')).toBeInTheDocument()
+  fireEvent.click(await screen.findByRole('button', { name: 'Load lights' }))
+  expect(await screen.findByRole('group', { name: 'Desk' })).toBeInTheDocument()
+  expect(onCommand).toHaveBeenCalledWith(fixture.props.deviceId, 'http.proxy', { package: 'homeassistant', method: 'GET', path: '/api/states' })
+  expect(fixture.onRelayToken).not.toHaveBeenCalled()
+  expect(container.innerHTML).not.toContain('private-state')
 })
