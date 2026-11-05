@@ -1,0 +1,17 @@
+{
+  "schema": "leaf.ci.declared-inputs.v1",
+  "suites": {
+    "web-studio-panels-proof": {
+      "roots": ["web", "vendor"],
+      "status": "unverified",
+      "evidence": "scripts/run-all-gates.py:3835; web/playwright.config.mjs:27; web/next.config.mjs:24; web/vite-plugins/engineVersion.js:12",
+      "notes": "Candidate repo roots only: Playwright launches the Next dev helper, whose config and engine discovery read web and vendor. Environment overrides, installed dependencies, browser files, temporary downloads and all actual producer reads still need managed isolation and read-topology proof. This entry grants no skip or capture eligibility."
+    },
+    "web-version-restore-proof": {
+      "roots": ["web", "vendor"],
+      "status": "unverified",
+      "evidence": "web/package.json:16; web/e2e/local/version-restore.spec.mjs:2; web/playwright.config.mjs:27; web/vite-plugins/engineVersion.js:12",
+      "notes": "This recipe selects its own spec and fixture using the shared Playwright config. Candidate web and vendor roots do not establish complete reads: environment overrides, toolchain/browser inputs and actual producer topology remain unverified. No inference applies to other suites; no skip or capture eligibility is granted."
+    }
+  }
+}
