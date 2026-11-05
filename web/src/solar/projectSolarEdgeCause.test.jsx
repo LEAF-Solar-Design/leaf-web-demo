@@ -15,6 +15,6 @@ it('SolarEdge has valid catalog rows and available standalone workspace panels',
   expect(catalogPositions.every(({ usable }) => usable)).toBe(true)
 })
 
-it.fails('SolarEdge PDF Import is available in a project — defect: project selection supplies no workspace panels', () => {
+it('SolarEdge PDF Import is available in a project with supported tracking stages', () => {
   expect(projectSolarFlowSelect(families, flow.id).available).toBe(true)
 })
