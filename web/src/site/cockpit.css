@@ -377,6 +377,25 @@
 }
 .ribbon-widget select:disabled { color: var(--leaf-ink-muted); }
 
+/* Ops controls live outside the collapsible Studio rail. Keep both triggers
+   reachable and their drawers inside the viewport, including narrow screens. */
+.studio-shell .app[data-surface] .ops-integrations {
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 8px; min-width: 0; max-width: 100%; pointer-events: auto;
+}
+.studio-shell .app[data-surface] .ops-integrations .link-svc-trigger {
+  display: inline-flex; min-width: 44px; min-height: 44px; align-items: center;
+}
+/* A filtered header contains fixed descendants. Release that containing
+   block while open so viewport bounds also work above the phone's scroller. */
+.studio-shell .app[data-surface] header.top:has(.ops-integrations .claude-pop) {
+  backdrop-filter: none; -webkit-backdrop-filter: none; overflow: visible; z-index: calc(var(--leaf-layer-overlay) + 6);
+}
+.studio-shell .app[data-surface] .ops-integrations .claude-pop {
+  position: fixed; top: calc(var(--drawer-top, 44px) + 8px); right: 12px; bottom: auto; left: auto;
+  width: 360px; max-width: calc(100vw - 24px); max-height: calc(100dvh - var(--drawer-top, 44px) - 24px);
+  box-sizing: border-box; overflow-y: auto; overscroll-behavior: contain; z-index: calc(var(--leaf-layer-overlay) + 5);
+}
+
 /* ---- y 123-155: the document tabs (the viewer toolbar becomes the band) ---- */
 .studio-shell .app:is([data-surface="cad"], [data-surface="solar"]) .viewer-toolbar {
   position: relative; height: var(--ck-doctabs); box-sizing: border-box;
