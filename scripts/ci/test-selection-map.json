@@ -394,6 +394,7 @@
     "server-jobs-terminal-mirror-durable",
     "server-kit-stream-superset",
     "server-lab-contract",
+    "server-lab-honesty",
     "server-capture-lab-wave3",
     "server-lab-ops",
     "server-lab-evaluate",
@@ -808,6 +809,16 @@
   "mandatory_justification": "L4 web-demo mandatory table expanded against build_suites; every other declaration remains mandatory because no traced classification has been admitted. Workflow, web build and license checks also remain unconditional in ci.sh.",
   "always_select_suite_ids": [],
   "suites": {
+    "server-lab-honesty": {
+      "mappable": false,
+      "read_paths": [
+        "server/lab_honesty.py",
+        "server/tests/test_lab_honesty.py",
+        "contract/fixtures/lab/leaf-lab-honesty.v1.json",
+        "contract/fixtures/lab/SOURCES.json",
+        "web/src/lab/contract/sources/leaf-lab-honesty.v1.json"
+      ]
+    },
     "server-solar-module-catalog": {
       "mappable": false,
       "read_paths": [
