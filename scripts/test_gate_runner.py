@@ -1352,6 +1352,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         suite = suites[f"web-vitest-{shard}"]
         assert suite.argv == [
             g._npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2",
+            "--no-cache",
             "--exclude=src/site/surfaceGates.test.js",
             "--exclude=src/site/toolCastStageBar.test.js",
         ]
@@ -4595,9 +4596,6 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
         "harness-tsc-noemit": "npm/npx",
         "harness-tsc-build": "npm/npx",
         "harness-audit-high": "npm/npx",
-        "web-vitest-1": "npm/npx",
-        "web-vitest-2": "npm/npx",
-        "web-vitest-3": "npm/npx",
         "web-build": "npm/npx",
         "web-link-service-flow": "PostgreSQL",
         "web-demo-gate": "nested runner",
@@ -4614,7 +4612,7 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
     for suite in suites:
         if suite.reset_authored or suite.db_gated:
             assert suite.id in serial_ids, suite.id
-        if suite.cwd in (g.HARNESS, g.WEB):
+        if suite.cwd == g.HARNESS or (suite.cwd == g.WEB and suite.id not in g._WEB_SOURCE_READERS):
             assert suite.id in serial_ids, suite.id
     assert "server-checkout-crossproc" not in serial_ids
     prelude, rest = g.plan_parallel_phases(suites)
@@ -4628,10 +4626,51 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
     assert {"web-tree", "harness-tree"} <= g.conflict_resources(by_id["web-link-service-flow"])
     assert g.conflict_resources(by_id["studio-walk-regressions"]) == frozenset({"web-tree", "harness-tree"})
     assert "studio-walk-regressions" in {s.id for s in prelude}
+    assert g.conflict_resources(by_id["server-backbone"]) == frozenset({"authored-store"})
     for shard in range(1, 4):
-        resources = g.conflict_resources(by_id[f"web-vitest-{shard}"])
-        assert resources == frozenset({"web-tree"})
+        suite = by_id[f"web-vitest-{shard}"]
+        resources = g.conflict_resources(suite)
+        assert resources == frozenset()
+        assert "--no-cache" in suite.argv
         assert not (g.conflict_resources(by_id["server-backbone"]) & resources)
+
+
+def test_web_source_readers_are_registered_read_only_pool_suites():
+    g = _load_runner()
+    by_id = {suite.id: suite for suite in g.build_suites()}
+    scripts = json.loads((g.WEB / "package.json").read_text(encoding="utf-8"))["scripts"]
+    assert isinstance(g._WEB_SOURCE_READERS, frozenset)
+    assert g._WEB_SOURCE_READERS
+    assert g._WEB_SOURCE_READERS <= by_id.keys()
+    # Vite is a server command; Vitest/startVitest is a separate unit runner.
+    forbidden = re.compile(r"playwright| dev|build|\bvite\b|serve|preview|install|proof:", re.IGNORECASE)
+    for sid in sorted(g._WEB_SOURCE_READERS):
+        suite = by_id[sid]
+        assert suite.cwd == g.WEB, sid
+        assert g.conflict_resources(suite) == frozenset(), sid
+        assert g.serial_suite_reason(suite) == "", sid
+        command = " ".join(suite.argv)
+        executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
+        if executable in ("npm", "npm.cmd", "npm.exe") and suite.argv[1:2] == ["run"]:
+            command += " " + scripts[suite.argv[2]]
+        assert not forbidden.search(command), (sid, command)
+    for suite in by_id.values():
+        if suite.cwd == g.WEB and suite.id not in g._WEB_SOURCE_READERS:
+            assert "web-tree" in g.conflict_resources(suite), suite.id
+
+
+@pytest.mark.parametrize("sid", [
+    "web-build", "web-demo-gate", "studio-walk-regressions", "web-link-service-flow",
+    "web-studio-panels-proof", "web-version-restore-proof", "web-async-author-stage",
+    "web-ios-ship-surface-proof", "web-lifecycle-panel-proof", "web-author-quota-gate",
+    "web-staging-fixes-check", "web-prod-readonly-contract", "web-walk-unit",
+])
+def test_web_writers_browser_proofs_and_nested_runners_keep_web_tree(sid):
+    g = _load_runner()
+    suite = next(suite for suite in g.build_suites() if suite.id == sid)
+    assert sid not in g._WEB_SOURCE_READERS
+    assert "web-tree" in g.conflict_resources(suite)
+    assert g.serial_suite_reason(suite)
 
 
 @pytest.mark.parametrize("prelude_slots", [(), (2, 9)])
@@ -5796,8 +5835,8 @@ def test_pp3b_gate_registration():
     assert selection["mandatory_suite_ids"].count(suite.id) == 1
     source = (runner.WEB / "e2e/project/projectProof.test.mjs").read_text(encoding="utf-8")
     assert len(re.findall(r"^it\('", source, re.MULTILINE)) == 28
-    assert runner.serial_suite_reason(suite)
-    assert runner.conflict_resources(suite) == frozenset({"web-tree"})
+    assert runner.serial_suite_reason(suite) == ""
+    assert runner.conflict_resources(suite) == frozenset()
 
 
 def test_r14f1_gate_registration():
