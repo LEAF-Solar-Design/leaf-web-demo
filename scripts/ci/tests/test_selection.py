@@ -337,6 +337,7 @@ class SelectionContracts(unittest.TestCase):
                 "generated_inputs_resolved": True, "shared_state_closure_resolved": True,
                 "shared_state_dependencies": [], "generated_rules": []}
         self.mapping["catalog_sha256"] = selector.catalog_info(self.catalog)[1]
+        self.mapping["catalog_snapshot"] = copy.deepcopy(self.catalog)
         self.put(selector.MAP_PATH, json.dumps(self.mapping, sort_keys=True) + "\n")
         self.git("add", ".")
         self.git("commit", "-m", "trusted baseline")
@@ -369,6 +370,7 @@ class SelectionContracts(unittest.TestCase):
     def rebase_fixture(self):
         """Publish a new fake trusted baseline before constructing the candidate."""
         self.mapping["catalog_sha256"] = selector.catalog_info(self.catalog)[1]
+        self.mapping["catalog_snapshot"] = copy.deepcopy(self.catalog)
         self.put(selector.MAP_PATH, json.dumps(self.mapping, sort_keys=True) + "\n")
         self.commit()
         self.trusted = self.git("rev-parse", "HEAD")
@@ -750,7 +752,10 @@ class SelectionContracts(unittest.TestCase):
             self.assertEqual(decision["execution_mode"], "selected")
             self.assertNotEqual(decision["catalog_sha256"], decision["map_catalog_sha256"])
             self.assertEqual(decision["catalog_drift"],
-                             {"new": [], "changed": [], "removed": [], "ratio": 0.0})
+                             {"new": [], "changed": ["a"], "removed": [], "ratio": 0.2})
+            self.assertEqual(decision["suite_reasons"], {"a": ["recipe_changed"]})
+            self.assertEqual(decision["known_read_paths"]["a"],
+                             sorted(self.mapping["suites"]["a"]["read_paths"]))
 
     def test_catalog_drift_within_bound_is_not_catalog_change(self):
         del self.mapping["suites"]["idle"]
@@ -762,6 +767,8 @@ class SelectionContracts(unittest.TestCase):
         self.assertEqual(decision["catalog_drift"],
                          {"new": ["idle"], "changed": [], "removed": [], "ratio": 0.2})
         self.assertEqual(decision["known_read_paths"]["idle"], [])
+        self.assertEqual(decision["suite_reasons"], {"idle": ["unmapped_suite"]})
+        self.assertIn("unmapped_suite", decision["reasons"])
 
     def test_catalog_drift_above_bound_falls_back(self):
         for sid in ("b", "idle"):
@@ -769,7 +776,8 @@ class SelectionContracts(unittest.TestCase):
         self.rebase_fixture()
         self.change()
         decision = self.choose()
-        self.assert_full(decision, "catalog_change")
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertTrue({"b", "idle"} <= set(decision["proposed_suite_ids"]))
         self.assertEqual(decision["catalog_drift"],
                          {"new": ["b", "idle"], "changed": [], "removed": [], "ratio": 0.4})
         self.mapping["max_catalog_drift_ratio"] = 0.5
@@ -825,6 +833,191 @@ class SelectionContracts(unittest.TestCase):
         self.assertEqual(decision["catalog_drift"],
                          {"new": sorted(row["id"] for row in self.catalog["suites"]), "changed": [],
                           "removed": [], "ratio": 1.0})
+
+    def test_new_catalog_suite_runs_while_unchanged_suites_are_narrowed(self):
+        entry = copy.deepcopy(next(row for row in self.catalog["suites"] if row["id"] == "idle"))
+        entry.update(id="new", module="tests/test_new.py", test_ids=["tests/test_new.py::test_new"])
+        self.catalog["suites"].append(entry)
+        self.refresh_inputs()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertEqual(decision["proposed_suite_ids"], ["a", "mandatory", "native", "new"])
+        self.assertEqual(decision["suite_reasons"], {"new": ["new_suite"]})
+        self.assertIn("new_suite", decision["reasons"])
+        self.assertEqual(decision["known_read_paths"]["new"], [])
+
+    def test_removed_catalog_suite_drops_out_of_selection(self):
+        self.catalog["suites"] = [row for row in self.catalog["suites"] if row["id"] != "idle"]
+        self.refresh_inputs()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertEqual(decision["catalog_drift"]["removed"], ["idle"])
+        self.assertNotIn("idle", decision["catalog_suite_ids"])
+        self.assertNotIn("idle", decision["proposed_suite_ids"])
+
+    def test_every_suite_recipe_field_forces_only_that_suite(self):
+        self.change()
+        for field, value in (("command", ["python", "-m", "pytest", "-x"]),
+                             ("cwd", "elsewhere"), ("kind", "different"), ("floor", 9),
+                             ("environment_class", "different"), ("skip_rule", "new-rule"),
+                             ("future_recipe_field", {"unrecognized": True})):
+            with self.subTest(field=field):
+                candidate = copy.deepcopy(self.catalog)
+                next(row for row in candidate["suites"] if row["id"] == "idle")[field] = value
+                (self.inputs / "catalog.json").write_text(json.dumps(candidate), encoding="utf-8")
+                decision = self.choose()
+                self.assertEqual(decision["execution_mode"], "selected")
+                self.assertEqual(decision["proposed_suite_ids"], ["a", "idle", "mandatory", "native"])
+                self.assertEqual(decision["suite_reasons"], {"idle": ["recipe_changed"]})
+                self.assertIn("recipe_changed", decision["reasons"])
+                self.assertEqual(decision["known_read_paths"]["idle"], ["src/idle.py"])
+
+    def test_changed_shared_runner_falls_back(self):
+        self.make_web()
+        self.change("scripts/run-all-gates.py", "# changed shared runner\n")
+        self.assert_full(self.choose(), "runner_changed")
+
+    def test_ci_adapted_catalog_recipe_drift_preserves_runner_binding(self):
+        def adapt(runner_catalog, runner_blob_sha):
+            catalog = copy.deepcopy(runner_catalog)
+            catalog["runner_catalog_sha256"] = catalog.pop("catalog_sha256")
+            catalog.update(schema="leaf.ci.test-catalog.v1", kind="web",
+                           runner_path="scripts/run-all-gates.py", runner_blob_sha=runner_blob_sha)
+            catalog["catalog_sha256"] = selector.digest(catalog)
+            return catalog
+
+        rows = [{"classification": entry["classification"], "collection_complete": True,
+                 "collection_identity": selector.collection_digest(entry["test_ids"]),
+                 "command": ["<PYTHON>", "-m", "pytest", entry["module"]], "cwd": ".",
+                 "expected": len(entry["test_ids"]), "id": entry["id"], "kind": "pytest",
+                 "label": entry["id"], "python_only": entry["python_only"],
+                 "reset_authored": False,
+                 "skip_rules": {"allowed_skip_reasons": [], "allowed_vitest_skips": [],
+                                "db_gated": False, "opt_in_env": None, "uses_database": False,
+                                "database_skip_reasons": []},
+                 "test_ids": list(entry["test_ids"]), "timeout_s": 60,
+                 "trace_kind": entry["trace_kind"]} for entry in self.catalog["suites"]]
+        # The runner fingerprint is opaque to ci.sh; preserve and adapt it just
+        # as LEAF_SELECTION_INPUTS does, including the new document digest.
+        runner_catalog = {"schema": "leaf.ci.catalog.v1", "kind": "web",
+                          "catalog_sha256": selector.digest(rows), "suites": rows}
+        runner_blob = self.git("rev-parse", self.trusted + ":scripts/run-all-gates.py")
+        self.catalog = adapt(runner_catalog, runner_blob)
+        self.rebase_fixture()
+        self.assertEqual(self.mapping["catalog_snapshot"], self.catalog)
+        self.change()
+        baseline = self.choose()
+        self.assertEqual(baseline["execution_mode"], "selected")
+        self.assertEqual(baseline["proposed_suite_ids"], ["a", "mandatory", "native"])
+
+        for change in ("suite", "runner_blob"):
+            with self.subTest(change=change):
+                candidate = copy.deepcopy(runner_catalog)
+                blob = runner_blob
+                if change == "suite":
+                    entry = next(row for row in candidate["suites"] if row["id"] == "idle")
+                    entry["test_ids"].append("tests/test_idle.py::test_new")
+                    entry["collection_identity"] = selector.collection_digest(entry["test_ids"])
+                    candidate["catalog_sha256"] = selector.digest(candidate["suites"])
+                else:
+                    blob = "0" * 40
+                self.catalog = adapt(candidate, blob)
+                self.refresh_inputs()
+                decision = self.choose()
+                if change == "runner_blob":
+                    self.assert_full(decision, "catalog_runner_change")
+                    continue
+                snapshot = self.mapping["catalog_snapshot"]
+                self.assertNotEqual(self.catalog["catalog_sha256"], snapshot["catalog_sha256"])
+                self.assertNotEqual(self.catalog["runner_catalog_sha256"], snapshot["runner_catalog_sha256"])
+                self.assertEqual(self.catalog["runner_blob_sha"], snapshot["runner_blob_sha"])
+                self.assertEqual(decision["execution_mode"], "selected")
+                self.assertEqual(decision["proposed_suite_ids"], ["a", "idle", "mandatory", "native"])
+                self.assertEqual(decision["suite_reasons"], {"idle": ["recipe_changed"]})
+                self.assertEqual(decision["shared_framework_sha256"], decision["map_shared_framework_sha256"])
+
+    def test_shared_framework_digest_is_independent_of_suite_rows(self):
+        tree = selector.Git(self.repo).tree(self.trusted)
+        schema = self.mapping["schema"]
+        original = selector.shared_framework_identity(self.catalog, tree, schema, [])
+        candidate = copy.deepcopy(self.catalog)
+        candidate["suites"].reverse()
+        candidate["suites"][0]["command"] = ["different"]
+        self.assertEqual(original, selector.shared_framework_identity(candidate, tree, schema, []))
+        self.assertNotEqual(original, selector.shared_framework_identity(candidate, tree, "different", []))
+        for path in (selector.MAP_PATH, "scripts/ci/trace_reads.py", "scripts/run-all-gates.py"):
+            with self.subTest(path=path):
+                changed_tree = dict(tree)
+                mode, kind, _ = changed_tree[path]
+                changed_tree[path] = (mode, kind, "0" * 40)
+                self.assertNotEqual(original, selector.shared_framework_identity(
+                    candidate, changed_tree, schema, []))
+
+    def test_changed_shared_catalog_identity_falls_back(self):
+        self.change()
+        for field, value in (("capture_sha", "different"), ("image", "different"),
+                             ("unknown_shared_field", {"future": True})):
+            with self.subTest(field=field):
+                candidate = dict(self.catalog, **{field: value})
+                (self.inputs / "catalog.json").write_text(json.dumps(candidate), encoding="utf-8")
+                self.assert_full(self.choose(), "catalog_change")
+
+    def test_unknown_shared_runner_identity_falls_back(self):
+        self.make_web()
+        self.catalog.pop("runner_blob_sha")
+        self.refresh_inputs()
+        self.change()
+        self.assert_full(self.choose(), "catalog_runner_change")
+
+    def test_old_map_without_recipe_identity_falls_back(self):
+        self.mapping.pop("catalog_snapshot")
+        self.put(selector.MAP_PATH, json.dumps(self.mapping, sort_keys=True) + "\n")
+        self.commit()
+        self.trusted = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/main", self.trusted)
+        self.refresh_inputs()
+        self.change()
+        self.assert_full(self.choose(), "catalog_change")
+
+    def test_stale_snapshot_cannot_authorize_catalog_drift(self):
+        self.mapping["catalog_snapshot"]["capture_sha"] = "stale"
+        self.put(selector.MAP_PATH, json.dumps(self.mapping, sort_keys=True) + "\n")
+        self.commit()
+        self.trusted = self.git("rev-parse", "HEAD")
+        self.git("update-ref", "refs/heads/main", self.trusted)
+        self.refresh_inputs()
+        self.change()
+        self.assert_full(self.choose(), "catalog_change")
+
+    def test_incomplete_stale_or_unknown_capture_rows_still_run(self):
+        for sid, update in (("idle", {"capture_complete": False}),
+                            ("b", {"full_run_ids": ["only-one-run"]}),
+                            ("a", {"children_complete": None})):
+            self.mapping["suites"][sid].update(update)
+        self.rebase_fixture()
+        self.change("src/a.py", "good\n\n")
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertTrue({"idle", "b", "a"} <= set(decision["proposed_suite_ids"]))
+
+    def test_unknown_suite_classification_still_runs(self):
+        next(row for row in self.catalog["suites"] if row["id"] == "idle")["classification"] = "unknown"
+        self.rebase_fixture()
+        self.change()
+        decision = self.choose()
+        self.assertEqual(decision["execution_mode"], "selected")
+        self.assertIn("idle", decision["proposed_suite_ids"])
+        self.assertNotIn("b", decision["proposed_suite_ids"])
+
+    def test_failed_or_unknown_gate_certificate_still_falls_back(self):
+        self.change()
+        for certificate in (False, None):
+            with self.subTest(certificate=certificate):
+                event = self.evidence()
+                event["merge_gate"]["full_status"] = certificate
+                self.assert_full(self.choose(event), "merge_gate_unverified")
 
     def test_hostile_policy(self):
         self.change(selector.MAP_PATH, '{"suites":{}}\n')

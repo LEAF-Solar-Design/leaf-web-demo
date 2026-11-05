@@ -384,6 +384,31 @@ def protected_path(path, extra_rules=()):
             any(fnmatch.fnmatchcase(path, rule) for rule in extra_rules))
 
 
+def shared_framework_identity(catalog, tree, map_schema, rules):
+    """Bind every shared catalog field and protected file, independently of recipes."""
+    # The runner fingerprint spans suites; fields absent from suite rows come
+    # from Suite definitions bound by the runner file entry and runner_blob_sha.
+    shared = {key: value for key, value in catalog.items()
+              if key not in ("suites", "catalog_sha256", "runner_catalog_sha256")}
+    runner = catalog.get("runner_path")
+    paths = {path for path in tree if protected_path(path, rules)}
+    if runner is not None:
+        runner = repo_path(runner)
+        paths.add(runner)
+        entry = tree.get(runner)
+        if not entry or catalog.get("runner_blob_sha") != entry[2]:
+            raise InvalidInput("catalog_change")
+    elif catalog.get("kind") != "pytest":
+        raise InvalidInput("catalog_change")
+    files = {}
+    for path in sorted(paths):
+        entry = tree.get(path)
+        if not entry or entry[0] not in ("100644", "100755") or entry[1] != "blob":
+            raise InvalidInput("catalog_change")
+        files[path] = entry
+    return digest({"catalog": shared, "files": files, "map_schema": map_schema})
+
+
 def timestamp(value):
     try:
         parsed = dt.datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -568,7 +593,8 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
         if (isinstance(max_ratio, bool) or not isinstance(max_ratio, (int, float)) or
                 not 0 <= max_ratio <= 1):
             raise InvalidInput("invalid_policy")
-        if ratio > max_ratio:
+        # A drift ratio is diagnostic only. It cannot establish framework identity.
+        if not suites:
             raise InvalidInput("catalog_change")
         if catalog.get("kind") not in ("pytest", "web"):
             raise InvalidInput("invalid_catalog")
@@ -625,6 +651,9 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                    for entry in (old_entry, new_entry)):
                 raise InvalidInput("submodule_or_symlink")
         rules = strings(policy.get("force_full_rules", []), "invalid_policy")
+        runner = catalog.get("runner_path")
+        if runner and head_tree.get(repo_path(runner)) != trusted_tree.get(repo_path(runner)):
+            raise InvalidInput("runner_changed")
         if any(protected_path(path, rules) for path in paths):
             raise InvalidInput("policy_path_changed")
         if any(protected_path(path, rules) and trusted_tree.get(path) != head_tree.get(path)
@@ -639,6 +668,36 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                 raise InvalidInput("catalog_runner_change")
         if catalog["kind"] == "web" and not runner:
             raise InvalidInput("catalog_runner_unbound")
+        # The snapshot is part of the trusted map blob, never candidate-supplied
+        # baseline data. Old maps have no recipe identity and must run in full.
+        snapshot = mapping.get("catalog_snapshot")
+        if not isinstance(snapshot, dict):
+            raise InvalidInput("catalog_change")
+        try:
+            baseline_entries, baseline_fingerprint = catalog_info(snapshot)
+            if baseline_fingerprint != mapping.get("catalog_sha256"):
+                raise InvalidInput("catalog_change")
+            baseline_identity = shared_framework_identity(snapshot, trusted_tree, mapping["schema"], rules)
+            candidate_identity = shared_framework_identity(catalog, head_tree, mapping["schema"], rules)
+        except (InvalidInput, TypeError, ValueError) as exc:
+            raise InvalidInput("catalog_change") from exc
+        decision.update(shared_framework_sha256=candidate_identity,
+                        map_shared_framework_sha256=baseline_identity)
+        if baseline_identity != candidate_identity:
+            raise InvalidInput("catalog_change")
+        recipe_changed = {sid for sid in set(entries) & set(baseline_entries)
+                          if digest(entries[sid]) != digest(baseline_entries[sid])}
+        added = set(entries) - set(baseline_entries)
+        unmapped = (set(entries) & set(baseline_entries)) - set(suites)
+        collection_changed = set(changed)
+        changed.update(recipe_changed)
+        removed.update(set(baseline_entries) - set(entries))
+        decision["catalog_drift"] = {
+            "new": sorted(new | added), "changed": sorted(changed), "removed": sorted(removed),
+            "ratio": round(len(new | added | changed) / len(entries), 6)}
+        decision["suite_reasons"] = {
+            sid: ["new_suite" if sid in added else "unmapped_suite" if sid in unmapped else "recipe_changed"]
+            for sid in sorted(added | unmapped | changed)}
         mandatory = set(strings(mapping.get("mandatory_suite_ids")))
         mandatory.update(strings(policy.get("mandatory_suite_ids")))
         required = mandatory | set(strings(mapping.get("always_select_suite_ids", [])))
@@ -659,7 +718,11 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
             verify_capture_epoch(mapping, capture_epoch_manifest)
         for sid, entry in entries.items():
             row = suites.get(sid, {})
-            if sid in new or sid in changed:
+            if sid in recipe_changed:
+                # Old edges can still classify changed files, but cannot skip
+                # a suite whose recipe changed.
+                required.add(sid)
+            if sid in new or sid in added or sid in collection_changed:
                 required.add(sid)
                 row = {}
             if not isinstance(row, dict):
@@ -757,7 +820,8 @@ def decide(repo, trusted_sha, head_sha, map_path, event_evidence=None, policy_pa
                         selected_test_ids=sorted(tid for sid in expanded for tid in entries[sid]["test_ids"]))
         if catalog["kind"] == "pytest" and any(not entries[sid].get("module") for sid in entries):
             raise InvalidInput("module_identity_missing")
-        decision["reasons"] = ["readset_match"]
+        decision["reasons"] = sorted({"readset_match"} | {
+            reason for reasons in decision["suite_reasons"].values() for reason in reasons})
         phase = policy.get("phase")
         if type(policy.get("selection_enabled")) is not bool or phase not in ("shadow", "active"):
             raise InvalidInput("invalid_policy")
