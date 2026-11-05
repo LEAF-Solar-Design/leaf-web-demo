@@ -28,11 +28,15 @@ vi.mock('../views.js', () => ({
   })),
 }))
 vi.mock('../canvas/LabCanvas.jsx', async () => {
-  const { useEffect, useLayoutEffect } = await import('react')
+  const { useEffect, useLayoutEffect, useRef } = await import('react')
   const empty = { schema: 'leaf.lab-graph.v1', blocks: [], pipes: [], outputs: {} }
   return { default: function Canvas({ initialDocument = canvasControl.document || empty, onChange, entries = {} }) {
+    const initialReported = useRef(false)
     useEffect(() => {
-      if (canvasControl.report) onChange({ document: initialDocument, ready: canvasControl.ready, problems: [] })
+      // Match LabCanvas: callback/provider changes are not document edits.
+      if (!canvasControl.report || initialReported.current) return
+      initialReported.current = true
+      onChange({ document: initialDocument, ready: canvasControl.ready, problems: [] })
     }, [initialDocument, onChange])
     useLayoutEffect(() => { canvasControl.onLayout?.(initialDocument) })
     return <div data-canvas-editor>
