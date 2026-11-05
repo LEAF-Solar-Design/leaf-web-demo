@@ -453,6 +453,19 @@ it('exposes setup for a running package even when its health timestamp is null',
   expect(screen.getByRole('region', { name: 'Home Assistant setup' })).toBeInTheDocument()
 })
 
+it.each(['p1', ''])('passes the device project %j to Home Assistant setup', (projectId) => {
+  render(<LinkDeviceDrawer open onRelayToken={vi.fn()} devices={[device({ project_id: projectId,
+    packages: [{ package: 'homeassistant', version: 'pinned-v1', status: 'running', last_health_at: null }] })]} />)
+  const button = screen.getByRole('button', { name: 'Use in Ops' })
+  if (projectId) {
+    expect(button).not.toBeDisabled()
+    expect(screen.queryByText('Open a project first')).not.toBeInTheDocument()
+  } else {
+    expect(button).toBeDisabled()
+    expect(screen.getByText('Open a project first')).toBeInTheDocument()
+  }
+})
+
 it('rejects a late enrollment response after Escape closes the drawer', async () => {
   let settle
   fetch.mockImplementation(async (url) => url.endsWith('/enrollments')
