@@ -5796,14 +5796,55 @@ def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result
 _LANE_IDLE_WAIT_S = 1.0  # bounded wait before an idle worker re-checks eligibility
 
 
+def load_priority_suites(suites: List[Suite]) -> frozenset[str]:
+    """Read an optional, bounded ordering hint; never change the selected set."""
+    path = os.environ.get("LEAF_PRIORITY_SUITES_FILE")
+    if not path:
+        print(f"PRIORITY ignored reason={'unset' if path is None else 'empty'}")
+        return frozenset()
+    try:
+        with open(path, "rb") as source:
+            raw = source.read(64 * 1024 + 1)
+    except (OSError, ValueError):
+        print("PRIORITY ignored reason=unreadable")
+        return frozenset()
+    if len(raw) > 64 * 1024:
+        print("PRIORITY ignored reason=oversized")
+        return frozenset()
+    try:
+        hint = json.loads(raw)
+    except (ValueError, RecursionError):
+        print("PRIORITY ignored reason=malformed_json")
+        return frozenset()
+    if (not isinstance(hint, dict) or set(hint) != {"suite_ids"}
+            or not isinstance(hint["suite_ids"], list)
+            or any(not isinstance(sid, str) for sid in hint["suite_ids"])):
+        print("PRIORITY ignored reason=invalid_shape")
+        return frozenset()
+    # Same bounded suite-id pattern as ci/retain_failed_gate_logs.py.
+    if any(not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", sid)
+           for sid in hint["suite_ids"]):
+        print("PRIORITY ignored reason=invalid_suite_id")
+        return frozenset()
+    unique = list(dict.fromkeys(hint["suite_ids"]))
+    # The cap applies before filtering unknown IDs; duplicates consume no slot.
+    retained = unique[:200]
+    selected = {suite.id for suite in suites}
+    priority = frozenset(sid for sid in retained if sid in selected)
+    print(f"PRIORITY suites={len(priority)} unknown={len(retained) - len(priority)} "
+          f"dropped={len(unique) - len(retained)}")
+    return priority
+
+
 def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
               fail_fast: bool, completed: dict, state: dict) -> None:
     """Run suites on at most `jobs` workers; suites sharing a resource never overlap.
 
     A pending suite is eligible when none of its conflict_resources() is held
-    and no earlier (catalog order) pending suite shares one of them, so every
-    resource sees its suites in catalog order. A free worker takes the eligible
-    suite with the highest priority: its own weight plus, for a locked suite,
+    and no earlier pending suite shares one of them. Priority suites precede
+    others in each resource queue; otherwise queues keep catalog order. A free
+    worker takes an eligible priority suite first, then uses today's weight:
+    its own weight plus, for a locked suite,
     the weight still queued behind it on its resources (critical path first);
     ties go to catalog order. Idle workers wait on one condition, bounded and
     re-checked, and exit when nothing is pending or fail-fast stopped admission.
@@ -5819,15 +5860,17 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
         return
     locks = [conflict_resources(s) for s in suites]
     weight = [suite_weight(s) for s in suites]
+    priority = [s.id in state.get("priority_suites", ()) for s in suites]
     position = {id(s): i for i, s in enumerate(suites)}
-    # Pending locked suites per resource in catalog order; only a head may run next.
+    # One common order across resources prevents multi-lock queue cycles.
+    # Only a head may run next; priority never bypasses a held lock.
     queued: dict[str, deque] = {}
-    for index, held in enumerate(locks):
-        for name in sorted(held):
+    for index in sorted(range(len(suites)), key=lambda i: not priority[i]):
+        for name in sorted(locks[index]):
             queued.setdefault(name, deque()).append(index)
-    # Pending lock-free suites, heaviest first, ties by catalog index.
+    # Pending lock-free suites: priority tier, then the existing weighted order.
     unlocked = deque(sorted((i for i, held in enumerate(locks) if not held),
-                            key=lambda i: (-weight[i], i)))
+                            key=lambda i: (not priority[i], -weight[i], i)))
     busy: set = set()
     ready = threading.Condition()
 
@@ -5841,7 +5884,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
         best, best_key = None, None
         if unlocked:
             best = unlocked[0]
-            best_key = (-weight[best], best)
+            best_key = (not priority[best], -weight[best], best)
         for queue in queued.values():
             if not queue:
                 continue
@@ -5851,7 +5894,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
                 continue
             behind = {i for name in held for i in queued[name]}
             behind.discard(head)
-            key = (-(weight[head] + sum(weight[i] for i in behind)), head)
+            key = (not priority[head], -(weight[head] + sum(weight[i] for i in behind)), head)
             if best_key is None or key < best_key:
                 best, best_key = head, key
         if best is None:
@@ -5920,9 +5963,11 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
 
 def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
                         retry: int, fail_fast: bool, *, early_feedback: bool = False,
-                        before_heavy_command=None) -> tuple[List[Result], dict]:
+                        before_heavy_command=None,
+                        priority_suites: frozenset[str] = frozenset()) -> tuple[List[Result], dict]:
     completed = {}
-    state = {"stopped_after": None, "stream_results": True}
+    state = {"stopped_after": None, "stream_results": True,
+             "priority_suites": priority_suites}
     early = [s for s in suites if early_feedback and s.id in _EARLY_FEEDBACK_SUITES]
     remaining = [s for s in suites if s not in early]
     # Collect all cheap failures, never retry them or let fail-fast hide one.
@@ -7293,6 +7338,7 @@ def main() -> int:
                      f"--shard-index {args.shard_index}"
                      f"  -> {len(suites)} of {total} suites")
 
+    priority_suites = load_priority_suites(suites)
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
           f"separate processes, logs -> {log_dir}")
     print(f"  selection: {selection}")
@@ -7326,8 +7372,9 @@ def main() -> int:
         results, attempts_by_id = run_suites_parallel(
             suites, log_dir, args.jobs, args.retry, args.fail_fast,
             early_feedback=args.early_feedback,
-            before_heavy_command=args.before_heavy_command)
-      for suite in suites if not phased else ():
+            before_heavy_command=args.before_heavy_command,
+            priority_suites=priority_suites)
+      for suite in sorted(suites, key=lambda s: s.id not in priority_suites) if not phased else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         record_attempt(res, log_dir, 1)
@@ -7376,6 +7423,9 @@ def main() -> int:
         elif will_reset and not authored_existed:
             AUTHORED_TOOLS.unlink(missing_ok=True)
 
+    # Serial admission may follow the hint, but all final output stays catalog ordered.
+    result_by_id = {result.suite.id: result for result in results}
+    results = [result_by_id[s.id] for s in suites if s.id in result_by_id]
     wall = time.perf_counter() - wall0
     print_scoreboard(results, log_dir, wall, selection)
 

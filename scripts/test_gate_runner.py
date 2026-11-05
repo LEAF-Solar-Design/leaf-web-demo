@@ -39,6 +39,7 @@ def _isolate_nested_process_capture(monkeypatch):
     # This suite runs within the outer supervisor; its drills must stay untraced.
     monkeypatch.delenv("LEAF_PROCESS_CAPTURE_CONTEXT", raising=False)
     monkeypatch.delenv("LEAF_PROCESS_CAPTURE_OUT", raising=False)
+    monkeypatch.delenv("LEAF_PRIORITY_SUITES_FILE", raising=False)
 
 
 def _load_runner():
@@ -4822,6 +4823,426 @@ def test_lane_priority_runs_a_long_resource_chain_ahead_of_a_short_pool_suite(
     assert starts == [suites[1].id, suites[2].id, suites[0].id, suites[3].id]
     assert set(completed) == {s.id for s in suites}
     assert state["stopped_after"] is None
+
+
+def _priority_hint(monkeypatch, tmp_path, suite_ids):
+    path = tmp_path / "priority.json"
+    path.write_text(json.dumps({"suite_ids": suite_ids}), encoding="utf-8")
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES_FILE", str(path))
+    return path
+
+
+def test_priority_jobs_two_claims_listed_suites_before_weighted_work(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = _jobs_catalog(g, 5)
+    # Both a long resource chain and a heavy lock-free suite used to win.
+    for suite in suites[:2]:
+        suite.reset_authored = True
+    for suite in suites[:3]:
+        monkeypatch.setitem(g._MEASURED_EST_S, suite.id, 100.0)
+    monkeypatch.setattr(g, "AUTHORED_TOOLS", tmp_path / "authored.json")
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    _priority_hint(monkeypatch, tmp_path, [suites[4].id, suites[3].id])
+    first_wave = threading.Barrier(2)
+    starts = []
+    claims = []
+    real_pool = g.ThreadPoolExecutor
+
+    class ObservedPool(real_pool):
+        def submit(self, fn, seed):
+            claims.append(seed[0].id if seed else None)
+            return super().submit(fn, seed)
+
+    def run(suite, *_args, **_kwargs):
+        starts.append(suite.id)
+        if suite in suites[3:]:
+            first_wave.wait(timeout=5)
+        return g.Result(suite, "PASS", "2", 0.0)
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", ObservedPool)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    rc, output = _jobs_main(g, monkeypatch, capsys, tmp_path,
+                            ["--jobs", "2", "--retry", "0"])
+    assert rc == 0
+    # Hint order does not break existing catalog ties.
+    assert claims == [suites[3].id, suites[4].id]
+    assert set(starts[:2]) == {suites[3].id, suites[4].id}
+    assert sorted(starts) == sorted(s.id for s in suites)
+    assert output.count("PRIORITY suites=2 unknown=0 dropped=0") == 1
+
+
+def test_priority_conflicting_suites_peak_one_and_blocked_priority_allows_free_work(
+        tmp_path, monkeypatch):
+    g = _load_runner()
+    names = ["unlisted-web", "priority-web-first", "priority-web-second", "unlisted-free"]
+    suites = [g.Suite(name, name, "script", g.WEB if i < 3 else tmp_path,
+                      ["npm", "test"] if i < 3 else ["fixture"], None)
+              for i, name in enumerate(names)]
+    _priority_hint(monkeypatch, tmp_path, names[1:3][::-1])
+    priority = g.load_priority_suites(suites)
+    first_wave = threading.Barrier(2)
+    lock = threading.Lock()
+    active = peak = 0
+    starts = []
+
+    def run(suite, *_args, **_kwargs):
+        nonlocal active, peak
+        held = g.conflict_resources(suite)
+        with lock:
+            starts.append(suite.id)
+            if held:
+                active += 1
+                peak = max(peak, active)
+        try:
+            if suite.id in (names[1], names[3]):
+                first_wave.wait(timeout=5)
+            return g.Result(suite, "PASS", "-", 0.0)
+        finally:
+            with lock:
+                if held:
+                    active -= 1
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 0, False,
+                                              priority_suites=priority)
+    assert all(r.status == "PASS" for r in results), [r.note for r in results]
+    assert peak == 1 and active == 0
+    assert set(starts[:2]) == {names[1], names[3]}
+    assert [sid for sid in starts if sid != names[3]] == [names[1], names[2], names[0]]
+    assert [r.suite.id for r in results] == names
+    assert attempts == dict.fromkeys(names, 1)
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_priority_all_phase_barriers_and_prerequisites_hold(tmp_path, monkeypatch, jobs):
+    g = _load_runner()
+    names = ["unlisted-rest", "priority-rest", "web-build", "harness-tsc-build",
+             "web-page-service-smoke", "harness-tsc-noemit", "gate-runner-selftest"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    _priority_hint(monkeypatch, tmp_path, [names[1], names[3], names[4], names[6]])
+    events = []
+
+    def run(suite, *_args, **_kwargs):
+        events.extend([(suite.id, "start"), (suite.id, "end")])
+        return g.Result(suite, "PASS", "-", 0.0)
+
+    def prerequisites(command, **kwargs):
+        assert command == ["trusted-ci", "--heavy-prerequisites"]
+        assert kwargs == {"cwd": g.REPO, "check": False}
+        events.append(("prerequisites", "end"))
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", prerequisites)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, jobs, 3, True,
+        early_feedback=True, before_heavy_command=["trusted-ci", "--heavy-prerequisites"],
+        priority_suites=g.load_priority_suites(suites))
+    phases = [names[5:], ["prerequisites"], [names[4]], names[2:4], names[:2]]
+    for earlier, later in zip(phases, phases[1:]):
+        assert max(events.index((sid, "end")) for sid in earlier) < min(
+            events.index((sid, "start" if sid != "prerequisites" else "end")) for sid in later)
+    if jobs == 1:
+        assert [sid for sid, event in events if event == "start"] == [
+            names[6], names[5], names[4], names[3], names[2], names[1], names[0]]
+    assert [r.suite.id for r in results] == names
+    assert all(r.status == "PASS" for r in results)
+    assert attempts == dict.fromkeys(names, 1)
+
+
+@pytest.mark.parametrize("failure", ["cheap", "prerequisites"])
+def test_priority_later_phases_stay_unstarted_after_required_failure(
+        tmp_path, monkeypatch, failure):
+    g = _load_runner()
+    names = ["priority-rest", "web-build", "web-page-service-smoke", "harness-tsc-noemit"]
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None) for name in names]
+    _priority_hint(monkeypatch, tmp_path, names[:-1])
+    starts = []
+
+    def run(suite, *_args, **_kwargs):
+        starts.append(suite.id)
+        return g.Result(suite, "FAIL" if failure == "cheap" else "PASS", "-", 0.0)
+
+    def prerequisites(*_args, **_kwargs):
+        assert failure == "prerequisites", "cheap red must prevent prerequisites"
+        return SimpleNamespace(returncode=17)
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", prerequisites)
+    options = dict(early_feedback=True, before_heavy_command=["trusted-ci"],
+                   priority_suites=g.load_priority_suites(suites))
+    if failure == "prerequisites":
+        with pytest.raises(g.HeavyPrerequisitesFailed) as raised:
+            g.run_suites_parallel(suites, tmp_path, 2, 3, True, **options)
+        assert raised.value.status == 17
+        assert list(raised.value.completed) == [names[-1]]
+    else:
+        results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 3, True, **options)
+        assert [r.suite.id for r in results] == [names[-1]]
+        assert attempts == {names[-1]: 1}
+    assert starts == [names[-1]]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_priority_exact_result_json_and_catalog_scoreboard_parity(
+        tmp_path, monkeypatch, capsys, jobs):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "time", SimpleNamespace(perf_counter=lambda: 0.0))
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    starts = []
+
+    def run(suite, _log_dir, attempt, **_kwargs):
+        starts.append(suite.id)
+        status = "FAIL" if (suite == suites[1] and attempt == 1) or suite == suites[2] else "PASS"
+        return g.Result(suite, status, "2", 0.0, note="fixture")
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    result_file = tmp_path / "result.json"
+    flags = ["--jobs", str(jobs), "--retry", "1", "--result-json", str(result_file)]
+    plain = _jobs_main(g, monkeypatch, capsys, tmp_path, flags)
+    plain_json = json.loads(result_file.read_text(encoding="utf-8"))
+    starts.clear()
+    _priority_hint(monkeypatch, tmp_path, [suites[3].id, suites[1].id])
+    hinted = _jobs_main(g, monkeypatch, capsys, tmp_path, flags)
+    hinted_json = json.loads(result_file.read_text(encoding="utf-8"))
+    assert plain[0] == hinted[0] == 1
+    assert hinted_json == plain_json
+    assert [r["id"] for r in hinted_json["results"]] == [s.id for s in suites]
+    assert [r["attempts"] for r in hinted_json["results"]] == [1, 2, 2, 1]
+    assert hinted[1][hinted[1].index("GATE SCOREBOARD"):] == plain[1][plain[1].index("GATE SCOREBOARD"):]
+    if jobs == 1:
+        assert starts == [suites[1].id, suites[1].id, suites[3].id,
+                          suites[0].id, suites[2].id, suites[2].id]
+
+
+def test_priority_fail_fast_stops_unlisted_work_and_settles_running_suite(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    _priority_hint(monkeypatch, tmp_path, [suites[3].id, suites[2].id])
+    rendezvous = threading.Barrier(2)
+    red_published = threading.Event()
+    starts, finishes = [], []
+    real_pool = g.ThreadPoolExecutor
+
+    class ObservedPool(real_pool):
+        def submit(self, fn, seed):
+            future = super().submit(fn, seed)
+            if seed and seed[0].id == suites[2].id:
+                future.add_done_callback(lambda _: red_published.set())
+            return future
+
+    def run(suite, *_args, **_kwargs):
+        starts.append(suite.id)
+        rendezvous.wait(timeout=5)
+        if suite == suites[2]:
+            return g.Result(suite, "FAIL", "err", 0.0, note="priority red")
+        assert red_published.wait(5), "running suite must wait for published failure"
+        finishes.append(suite.id)
+        return g.Result(suite, "PASS", "2", 0.0)
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", ObservedPool)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    results, attempts = g.run_suites_parallel(suites, tmp_path, 2, 0, True,
+        priority_suites=g.load_priority_suites(suites))
+    assert set(starts) == {suites[2].id, suites[3].id} and len(starts) == 2
+    assert finishes == [suites[3].id]
+    assert [r.suite.id for r in results] == [suites[2].id, suites[3].id]
+    assert [r.status for r in results] == ["FAIL", "PASS"]
+    assert attempts == {suites[2].id: 1, suites[3].id: 1}
+    assert f"stopping after {suites[2].id}; in-flight suites finished" in capsys.readouterr().out
+
+
+def test_priority_unknown_duplicate_and_over_200_ids_are_bounded(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = _jobs_catalog(g, 202)
+    ids = [s.id for s in suites]
+    _priority_hint(monkeypatch, tmp_path, ["unknown", "unknown", ids[0], ids[0], *ids[1:]])
+    priority = g.load_priority_suites(suites)
+    assert priority == frozenset(ids[:199])
+    assert capsys.readouterr().out == "PRIORITY suites=199 unknown=1 dropped=3\n"
+
+
+@pytest.mark.parametrize("payload,reason", [
+    (b"", "malformed_json"),
+    (b"not json", "malformed_json"),
+    (b"\xff", "malformed_json"),
+    (b'{}', "invalid_shape"),
+    (b'[]', "invalid_shape"),
+    (b'null', "invalid_shape"),
+    (b'{"suite_ids":"pool-1"}', "invalid_shape"),
+    (b'{"suite_ids":[1]}', "invalid_shape"),
+    (b'{"suite_ids":[null]}', "invalid_shape"),
+    (b'{"suite_ids":[],"trailer":"ignored"}', "invalid_shape"),
+    (b'{"suite_ids":[""]}', "invalid_suite_id"),
+    (b'{"suite_ids":["../pool-1"]}', "invalid_suite_id"),
+    (b'{"suite_ids":["pool-1\\n"]}', "invalid_suite_id"),
+    (b'{"suite_ids":["pool-1; echo injected"]}', "invalid_suite_id"),
+    (b'{"suite_ids":["' + b'a' * 129 + b'"]}', "invalid_suite_id"),
+    (b'{"suite_ids":["pool-1"]}\n$(echo injected)', "malformed_json"),
+    (b' ' * (64 * 1024 + 1), "oversized"),
+])
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_priority_bad_input_falls_back_to_existing_order(
+        tmp_path, monkeypatch, capsys, payload, reason, jobs):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    # Preserve the existing weighted order, rather than substituting catalog order.
+    monkeypatch.setitem(g._MEASURED_EST_S, suites[3].id, 10.0)
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    starts, claims = [], []
+    real_pool = g.ThreadPoolExecutor
+
+    class ObservedPool(real_pool):
+        def submit(self, fn, seed):
+            claims.append(seed[0].id if seed else None)
+            return super().submit(fn, seed)
+
+    def run(suite, *_args, **_kwargs):
+        starts.append(suite.id)
+        return g.Result(suite, "PASS", "2", 0.0)
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", ObservedPool)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    flags = ["--jobs", str(jobs), "--retry", "0"]
+    plain = _jobs_main(g, monkeypatch, capsys, tmp_path, flags)
+    plain_order = list(claims if jobs > 1 else starts)
+    starts.clear()
+    claims.clear()
+    path = tmp_path / "bad-priority.json"
+    path.write_bytes(payload)
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES_FILE", str(path))
+    bad = _jobs_main(g, monkeypatch, capsys, tmp_path, flags)
+    assert plain[0] == bad[0] == 0
+    assert (claims if jobs > 1 else starts) == plain_order
+    assert [line for line in bad[1].splitlines() if line.startswith("PRIORITY ")] == [
+        f"PRIORITY ignored reason={reason}"]
+
+
+@pytest.mark.parametrize("path_kind", ["unset", "empty", "missing", "directory", "denied"])
+def test_priority_absent_or_unreadable_file_uses_existing_order(
+        tmp_path, monkeypatch, capsys, path_kind):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    if path_kind != "unset":
+        path = {"empty": "", "missing": str(tmp_path / "missing"),
+                "directory": str(tmp_path), "denied": "denied"}[path_kind]
+        monkeypatch.setenv("LEAF_PRIORITY_SUITES_FILE", path)
+    if path_kind == "denied":
+        def denied(*_args, **_kwargs):
+            raise PermissionError("denied")
+        monkeypatch.setattr(g, "open", denied, raising=False)
+    assert g.load_priority_suites(suites) == frozenset()
+    reason = path_kind if path_kind in ("unset", "empty") else "unreadable"
+    assert capsys.readouterr().out == f"PRIORITY ignored reason={reason}\n"
+
+
+def test_priority_json_newline_and_literal_path_are_safe_at_size_boundary(
+        tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    # A shell would interpret this path; the runner only opens it as data.
+    path = tmp_path / "priority ; $(ignored).json"
+    payload = b'{"suite_ids":["pool-1"]}\n'
+    path.write_bytes(payload + b' ' * (64 * 1024 - len(payload)))
+    monkeypatch.setenv("LEAF_PRIORITY_SUITES_FILE", str(path))
+    assert g.load_priority_suites(suites) == {"pool-1"}
+    assert capsys.readouterr().out == "PRIORITY suites=1 unknown=0 dropped=0\n"
+    # Validate all entries, even ones beyond the retained 200 unique IDs.
+    _priority_hint(monkeypatch, tmp_path, [f"valid-{i}" for i in range(200)] + ["bad\n"])
+    assert g.load_priority_suites(suites) == frozenset()
+    assert capsys.readouterr().out == "PRIORITY ignored reason=invalid_suite_id\n"
+
+
+@pytest.mark.parametrize("ids,expected,unknown", [
+    ([], frozenset(), 0),
+    (["unknown", "unknown"], frozenset(), 1),
+    (["pool-1", "pool-1", "pool-0"], frozenset({"pool-0", "pool-1"}), 0),
+    (["A" + "a" * 127, "_invalid"], None, 0),
+    (["A" + "a" * 127], frozenset(), 1),
+])
+def test_priority_empty_duplicate_unknown_and_id_length_boundaries(
+        tmp_path, monkeypatch, capsys, ids, expected, unknown):
+    g = _load_runner()
+    _priority_hint(monkeypatch, tmp_path, ids)
+    priority = g.load_priority_suites(_jobs_catalog(g))
+    if expected is None:
+        assert priority == frozenset()
+        assert capsys.readouterr().out == "PRIORITY ignored reason=invalid_suite_id\n"
+    else:
+        assert priority == expected
+        assert capsys.readouterr().out == f"PRIORITY suites={len(expected)} unknown={unknown} dropped=0\n"
+
+
+@pytest.mark.parametrize("flags", [["--only", "pool-0"],
+    ["--shard-count", "2", "--shard-index", "1"]])
+def test_priority_counts_unknown_against_selected_run_without_changing_membership(
+        tmp_path, monkeypatch, capsys, flags):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    starts = []
+
+    def run(suite, *_args, **_kwargs):
+        starts.append(suite.id)
+        return g.Result(suite, "PASS", "2", 0.0)
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    plain = _jobs_main(g, monkeypatch, capsys, tmp_path, ["--retry", "0", *flags])
+    selected = list(starts)
+    starts.clear()
+    _priority_hint(monkeypatch, tmp_path, [s.id for s in suites] + ["unknown"])
+    hinted = _jobs_main(g, monkeypatch, capsys, tmp_path, ["--retry", "0", *flags])
+    assert plain[0] == hinted[0] == 0
+    assert starts == selected
+    assert f"PRIORITY suites={len(selected)} unknown={len(suites) + 1 - len(selected)} dropped=0" in hinted[1]
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_priority_main_and_pin_without_hint_keep_existing_order(
+        tmp_path, monkeypatch, capsys, jobs):
+    g = _load_runner()
+    suites = _jobs_catalog(g)
+    monkeypatch.setattr(g, "build_suites", lambda: suites)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    starts = []
+    claims = []
+    real_pool = g.ThreadPoolExecutor
+
+    class ObservedPool(real_pool):
+        def submit(self, fn, seed):
+            claims.append(seed[0].id if seed else None)
+            return super().submit(fn, seed)
+
+    def run(suite, *_args, **_kwargs):
+        starts.append(suite.id)
+        return g.Result(suite, "PASS", "2", 0.0)
+
+    monkeypatch.setattr(g, "ThreadPoolExecutor", ObservedPool)
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    for revision in ("main", "pin"):
+        monkeypatch.setenv("CODEBUILD_SOURCE_VERSION", revision)
+        starts.clear()
+        claims.clear()
+        rc, output = _jobs_main(g, monkeypatch, capsys, tmp_path,
+                                ["--jobs", str(jobs), "--retry", "0"])
+        assert rc == 0
+        assert sorted(starts) == sorted(s.id for s in suites)
+        if jobs == 1:
+            assert starts == [s.id for s in suites]
+        else:
+            assert claims == [suites[0].id, suites[1].id]
+        assert output.count("PRIORITY ignored reason=unset") == 1
 
 
 def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
