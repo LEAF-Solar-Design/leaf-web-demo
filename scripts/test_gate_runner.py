@@ -4543,7 +4543,10 @@ def test_jobs_four_keeps_the_same_scoreboard_and_catalog_order(
                         ["--retry", "0", "--jobs", "1"])
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path,
                           ["--retry", "0", "--jobs", "4"])
-    assert parallel == serial
+    assert parallel[0] == serial[0]
+    # Ordinary phased runs add completion blocks before the unchanged final rows.
+    assert (parallel[1].split("GATE_RESULT", 1)[0]
+            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
     assert parallel[0] == 0
     rows = [line for line in parallel[1].splitlines() if line.startswith("pool suite")]
     assert len(rows) == len(suites)
@@ -4840,7 +4843,10 @@ def test_jobs_red_and_spawn_retry_keep_the_verdict_rows_and_flaked_callout(
     serial = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "1"])
     serial_json = json.loads(result_file.read_text(encoding="utf-8"))
     parallel = _jobs_main(g, monkeypatch, capsys, tmp_path, [*flags, "--jobs", "4"])
-    assert parallel == serial
+    assert parallel[0] == serial[0]
+    # Ordinary phased runs add completion blocks before the unchanged final rows.
+    assert (parallel[1].split("GATE_RESULT", 1)[0]
+            + parallel[1][parallel[1].index("  ... "):]) == serial[1]
     assert parallel[0] == 1
     data = json.loads(result_file.read_text(encoding="utf-8"))
     assert data == serial_json
@@ -4900,6 +4906,11 @@ _GIB = 2 ** 30
     (72, 144 * _GIB, 16),
     (24, 72 * _GIB, 12),
     (36, 9 * _GIB, 3),
+    (3, 12 * _GIB, 2),
+    (3, 5 * _GIB, 1),
+    (5, 15 * _GIB, 3),
+    (2.5, 8 * _GIB, 1),
+    (3.0, None, 2),
 ])
 def test_resolve_auto_jobs_is_bound_by_cpu_memory_and_the_cap(cpus, mem_bytes, expected):
     g = _load_runner()
@@ -5937,6 +5948,102 @@ def test_early_feedback_healthy_catalog_parity_and_dependency_barrier(tmp_path, 
     assert seen.index("web-build") < seen.index("web-studio-panels-proof")
 
 
+def test_ordinary_phased_run_streams_scrubbed_results(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", tmp_path, ["fixture"], None)
+              for name in ["ordinary-pass", "ordinary-fail"]]
+
+    def run(suite, *_args, **_kwargs):
+        if suite.id == "ordinary-fail":
+            return g.Result(suite, "FAIL", "err", 0.01, note="token=abc123")
+        return g.Result(suite, "PASS", "-", 0.01)
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    g.run_suites_parallel(suites, tmp_path, 2, 0, False, early_feedback=False)
+    lines = capsys.readouterr().out.splitlines()
+    streamed = [line for line in lines if line.startswith("GATE_RESULT ")]
+    assert len(streamed) == 2
+    assert any(line.startswith("GATE_RESULT id=ordinary-pass status=PASS ") for line in streamed)
+    failed = next(line for line in streamed if line.startswith("GATE_RESULT id=ordinary-fail status=FAIL "))
+    assert "note=token=[redacted]" in failed
+    assert "abc123" not in "\n".join(streamed)
+    rows = [line for line in lines if line.startswith("  ... ")]
+    assert [line.split()[1] for line in rows] == [suite.id for suite in suites]
+    assert max(lines.index(line) for line in streamed) < min(lines.index(line) for line in rows)
+
+
+def test_ordinary_phased_run_streams_and_still_honors_conflict_locks(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    suites = [g.Suite(name, name, "script", g.WEB, ["npm", "test"], None)
+              for name in ["ordinary-web-first", "ordinary-web-second"]]
+    assert all(g.conflict_resources(suite) == {"web-tree"} for suite in suites)
+    lock = threading.Lock()
+    active = peak = 0
+    events = []
+
+    def run(suite, *_args, **_kwargs):
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            events.append((suite.id, "enter"))
+        try:
+            time.sleep(0.02)
+            return g.Result(suite, "PASS", "-", 0.02)
+        finally:
+            with lock:
+                events.append((suite.id, "exit"))
+                active -= 1
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    results, _ = g.run_suites_parallel(suites, tmp_path, 2, 0, False, early_feedback=False)
+    assert all(result.status == "PASS" for result in results)
+    assert active == 0 and peak == 1
+    assert events == [(suite.id, event) for suite in suites for event in ("enter", "exit")]
+    output = capsys.readouterr().out
+    for suite in suites:
+        assert f"GATE_RESULT id={suite.id} status=PASS" in output
+
+
+def test_ordinary_phased_run_streams_before_the_slowest_suite_finishes(tmp_path, monkeypatch, capsys):
+    g = _load_runner()
+    finished_fast = threading.Event()
+    release = threading.Event()
+    finished_slow = threading.Event()
+    slow = g.Suite("ordinary-slow", "slow", "script", tmp_path, ["fixture"], None)
+    fast = g.Suite("ordinary-fast", "fast", "script", tmp_path, ["fixture"], None)
+
+    def run(suite, *_args, **_kwargs):
+        if suite.id == slow.id:
+            assert release.wait(5), "test did not release slow suite"
+            finished_slow.set()
+        else:
+            finished_fast.set()
+        return g.Result(suite, "PASS", "-", 0.01)
+
+    monkeypatch.setattr(g, "run_suite_guarded", run)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    thread = threading.Thread(target=lambda: g.run_suites_parallel(
+        [slow, fast], tmp_path, 2, 0, False, early_feedback=False))
+    thread.start()
+    try:
+        assert finished_fast.wait(5)
+        deadline = time.monotonic() + 5
+        output = ""
+        while "GATE_RESULT id=ordinary-fast status=PASS" not in output and time.monotonic() < deadline:
+            output += capsys.readouterr().out
+            time.sleep(0.01)
+        assert "GATE_RESULT id=ordinary-fast status=PASS" in output
+        assert not finished_slow.is_set(), "report must precede the slow suite finishing"
+        assert thread.is_alive()
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+
+
 def test_early_failure_is_visible_while_another_cheap_check_is_running(tmp_path, monkeypatch, capsys):
     g = _load_runner()
     failed = threading.Event()
@@ -5993,7 +6100,9 @@ def test_early_feedback_shell_uses_exact_trusted_script_and_one_gate_invocation(
     assert 'LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"' in source
     line = next(line for line in source.splitlines() if line.startswith("python scripts/run-all-gates.py --jobs"))
     assert source.rindex('export PYTHONUNBUFFERED=1', 0, source.index(line)) < source.index(line)
-    assert '--early-feedback' in line and '--retry 0' in line and '--fail-fast' in line
+    assert '--early-feedback' in line and '--retry 0' in line
+    assert '--fail-fast' in line or ('"${gate_fail_fast_args[@]}"' in line
+                                     and 'gate_fail_fast_args=(--fail-fast)' in source)
     assert '--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites' in line
     assert '"${only_args[@]}"' in line
     entry = source[source.index('if [[ "${1:-}" == --heavy-prerequisites') : source.index('# Freeze policy before any candidate installation')]
