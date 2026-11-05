@@ -223,6 +223,8 @@ describe('Lab embedded mode', () => {
     await canvas()
     const connection = connections[0]
     const provider = createHostProvider({ framed: true })
+    // Admission and the initial canvas report must settle before measuring restore.
+    await waitFor(() => expect(connection.proposal).toHaveBeenCalledOnce())
     connection.proposal.mockClear()
     const rows = [{ source: 'markets', as_of: Date.now(), data: { price: 42 } }]
     provider.announce(rows)
