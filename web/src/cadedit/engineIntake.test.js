@@ -86,7 +86,8 @@ describe('engine text glyphs', () => {
 describe('intake bulges for the console viewer', () => {
   it('carries strokeOnly into the pick descriptor and both highlight loops', () => {
     const source = readFileSync(path.resolve(process.cwd(), 'src/components/Viewer.jsx'), 'utf8')
-    expect(source).toContain("{ kind: 'poly', layer: pl.layer, pts, strokeOnly: !!pl.strokeOnly }")
+    // Bridge drawings are wireframe, so their descriptors are stroke-only and carry closure for per-vertex Z highlights.
+    expect(source).toContain("{ kind: 'poly', layer: pl.layer, pts, strokeOnly: bridge || !!pl.strokeOnly, closed: !!pl.closed }")
     expect((source.match(/d\.strokeOnly/g) || []).length).toBeGreaterThanOrEqual(2)
   })
   const open = { layer: 'A', handle: '10', closed: false, pts: [[0, 0, 2], [10, 0, 2]] }
