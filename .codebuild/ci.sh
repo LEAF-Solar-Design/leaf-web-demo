@@ -1342,6 +1342,26 @@ LEAF_CAPTURE_REFERENCES
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
     digest="$(sha256sum "$archive")" || return 1
     readsets_sha256="${digest%% *}"
+    if [[ "${process_capture_active:-0}" == 1 && "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ]]; then
+      if mkdir -p /tmp/process-capture \
+        && cp "$archive" /tmp/process-capture/readsets.tar.gz \
+        && python -I -B - /tmp/process-capture/readsets.json "$CODEBUILD_BUILD_ID" "$HEAD_SHA" \
+          "$readsets_bytes" "$readsets_sha256" "$readsets_archive_members" <<'LEAF_DEVICE_CAPTURE_ARCHIVE'
+import json
+from pathlib import Path
+import sys
+
+receipt = {"schema": "leaf.ci.device-capture-archive.v1", "build_id": sys.argv[2],
+           "head_sha": sys.argv[3], "bytes": int(sys.argv[4]), "sha256": sys.argv[5],
+           "members": sys.argv[6].split()}
+Path(sys.argv[1]).write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+LEAF_DEVICE_CAPTURE_ARCHIVE
+      then
+        echo "LEAF_CAPTURE device_archive $readsets_bytes $readsets_sha256"
+      else
+        echo 'LEAF_CAPTURE device_archive_copy_failed'
+      fi
+    fi
     local archive_cap=209715200
     if [[ "${process_capture_active:-0}" == 1 ]]; then
       archive_cap=1073741824
