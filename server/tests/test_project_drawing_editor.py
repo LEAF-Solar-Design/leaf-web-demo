@@ -1,5 +1,5 @@
 """Mounted browser-editor custody proof on an explicitly private PostgreSQL."""
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 import hashlib
 import json
 import os
@@ -7,7 +7,6 @@ from pathlib import Path
 import re
 import subprocess
 import sys
-import tempfile
 from types import SimpleNamespace
 from uuid import UUID, uuid4
 
@@ -174,8 +173,14 @@ def canonical_pg_guard(monkeypatch, tmp_path):
     monkeypatch.setenv("DATABASE_URL", "postgresql://postgres@127.0.0.1:54329/leaf_gate")
     state_file = tmp_path / "leaf-ci-postgres.state"
     monkeypatch.setenv("LEAF_CI_PG_STATE", str(state_file))
-    with tempfile.TemporaryDirectory(prefix="leaf-ci-postgres.", dir="/tmp") as root:
-        data = Path(root)
+    with ExitStack() as cleanup:
+        # Match the shell producer's eight alphanumeric mktemp characters.
+        # Python TemporaryDirectory also emits underscores, which are not its shape.
+        data = Path("/tmp") / ("leaf-ci-postgres." + uuid4().hex[:8])
+        data.mkdir(mode=0o700)
+        cleanup.callback(data.rmdir)
+        for name in ("PG_VERSION", "postmaster.pid"):
+            cleanup.callback((data / name).unlink, missing_ok=True)
         (data / "PG_VERSION").write_text("16\n")
         (data / "postmaster.pid").write_text(f"12345\n{data}\n123\n54329\n{data}\n127.0.0.1\n")
         state_file.write_text(f"mode=native\nbin=/usr/lib/postgresql/16/bin\ndata={data}\n")
