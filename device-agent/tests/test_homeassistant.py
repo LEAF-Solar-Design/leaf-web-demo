@@ -213,6 +213,8 @@ def ha_server():
                             assert body == {"next_step_id": "light"}
                         else:
                             assert body == {"name": "Living room", "entities": ["light.one", "light.two"], "hide_members": False, "all": False}
+                    elif handler == "hue" and current["step_id"] == "init":
+                        assert set(body) == {"id"} and isinstance(body["id"], str)
                     elif current["step_id"] in {"manual", "user"}:
                         assert body == {"host": "10.0.0.20"}
                     else:
@@ -691,6 +693,83 @@ def test_keychain_secret_uses_stdin_and_cache_expires(tmp_path, caplog):
     assert handler.auth_headers() == {"Authorization": "Bearer rotated-private-secret"}
     assert len(calls) == reads + 1 and not (handler.root / "credentials.json").exists()
     assert "private" not in caplog.text
+
+
+@pytest.mark.parametrize("options", [
+    [["001788fffe123456", "Hue Bridge"], ["manual", "Manually add"]],
+    [("manual", "Manually add"), ("001788fffe123456", "Hue Bridge")],
+    ["manual", "001788fffe123456"],
+    {"manual": "Manually add", "001788fffe123456": "Hue Bridge"},
+    [{"value": "manual", "label": "Manually add"},
+     {"value": "001788fffe123456", "label": "Hue Bridge"}],
+    [[], ["invalid"], [None, "Invalid"], ["manual", "Manually add"],
+     ["001788fffe123456", "Hue Bridge"]],
+])
+def test_hue_init_choice_parses_select_pairs(options):
+    result = {"data_schema": [{"type": "select", "options": options,
+                               "name": "id", "required": True}]}
+    assert HomeAssistant._hue_init_choice(result) == "001788fffe123456"
+
+
+@pytest.mark.parametrize("options", [
+    {"type": "select", "options": [["001788fffe123456", "Hue Bridge (10.0.0.226)"],
+                                    ["manual", "Manually add"]], "required": True},
+    {"options": {"001788fffe123456": "Hue Bridge (10.0.0.226)", "manual": "Manually add"}},
+    {"in": ["manual", "001788fffe123456"]},
+    {"type": {"in": {"001788fffe123456": "Hue Bridge", "manual": "Manually add"}}},
+    {"options": {"in": [None, {}, "001788fffe123456", "manual"]}},
+])
+def test_hue_init_picks_discovered_bridge(tmp_path, ha_server, options):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": [{"name": "id", **options}]}
+    ha_server.flows["hue"] = [init, ha_server.flows["hue"][1]]
+    result = handler.handle("ha.flow.start", {"handler": "hue", "data": {"host": "10.0.0.20"}})
+    assert result["step_id"] == "link"
+    assert set(result) <= FLOW_KEYS and "data_schema" not in result
+    assert "001788fffe123456" not in json.dumps(result)
+    posts = [(path, data) for method, path, data, headers in ha_server.requests if method == "POST"]
+    assert posts == [(FLOW_PATH, {"handler": "hue", "show_advanced_options": False}),
+                     (FLOW_PATH + "/hue-user", {"id": "001788fffe123456"})]
+
+
+@pytest.mark.parametrize("schema", [
+    [{"name": "id", "options": {"manual": "Manually add"}}],
+    None, {}, [None, {"name": "other", "options": ["ignored"]}],
+    [{"name": "id", "options": 42}],
+])
+def test_hue_init_falls_back_to_manual(tmp_path, ha_server, schema):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": schema}
+    ha_server.flows["hue"].insert(0, init)
+    result = handler.handle("ha.flow.start", {"handler": "hue"})
+    assert result["step_id"] == "manual" and set(result) <= FLOW_KEYS
+    assert ha_server.requests[-1][2] == {"id": "manual"}
+
+
+def test_hue_step_on_init_with_empty_data_chooses_bridge(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": [{"name": "id", "options": {"001788fffe123456": "Hue Bridge", "manual": "Manually add"}}]}
+    ha_server.flows["hue"] = [init, ha_server.flows["hue"][1]]
+    ha_server.current["hue-user"] = init
+    ha_server.positions["hue-user"] = 0
+    result = handler.handle("ha.flow.step", {"flow_id": "hue-user", "data": {}})
+    assert result["step_id"] == "link" and set(result) <= FLOW_KEYS
+    assert ha_server.requests[-1][2] == {"id": "001788fffe123456"}
+
+
+def test_hue_init_retries_are_bounded(tmp_path, ha_server):
+    handler = local_handler(tmp_path, ha_server)
+    init = {"flow_id": "hue-user", "handler": "hue", "type": "form", "step_id": "init",
+            "data_schema": [{"name": "id", "in": ["manual"]}]}
+    ha_server.flows["hue"] = [init, init, init]
+    result = handler.handle("ha.flow.start", {"handler": "hue", "data": {}})
+    assert result["step_id"] == "init" and set(result) <= FLOW_KEYS
+    assert [data for method, path, data, headers in ha_server.requests if path == FLOW_PATH + "/hue-user"] == [
+        {"id": "manual"}, {"id": "manual"},
+    ]
 
 
 def test_hue_link_retry_and_success(tmp_path, ha_server):
