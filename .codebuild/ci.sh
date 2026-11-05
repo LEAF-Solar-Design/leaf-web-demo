@@ -144,6 +144,18 @@ try:
                      provider_bound=manifest_status == "verified", relay_manifest=manifest_status,
                      evidence_ref={"build": e.get("CODEBUILD_BUILD_ARN") or e.get("CODEBUILD_BUILD_ID", ""),
                                    "manifest_sha256": manifest_sha256, "operation": operation})
+    elif (re.fullmatch(r"device:dv-[0-9a-f]{16}", event["build_id"]) and
+            event["event"] in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") and
+            relay_head and re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", relay_base) and
+            ".." not in relay_base and
+            re.fullmatch(r"[0-9A-Fa-f]{40}", head) and re.fullmatch(r"[0-9A-Fa-f]{40}", trusted) and
+            e.get("CODEBUILD_RESOLVED_SOURCE_VERSION") == head and
+            operation == "ci-" + hashlib.sha256(
+                ("LEAF-Solar-Design/leaf-web-demo|pull_request|" + relay_head[1] + "|" + head)
+                .encode("utf-8")).hexdigest()[:40]):
+        event.update(provider="forge-device", initiator="leaf-ci-device", provider_bound=True,
+                     source_version="", pr_number=int(relay_head[1]), head_sha=head, target_sha=trusted,
+                     evidence_ref={"build": event["build_id"], "operation": operation})
 except Exception:
     pass
 # No queue/filter/revocation claim is manufactured from webhook presence.
@@ -153,7 +165,7 @@ LEAF_SELECTION_INPUTS
         then
           pr_number="${CODEBUILD_SOURCE_VERSION:-}"
           pr_number="${pr_number#pr/}"
-          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
+          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && ( "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" || "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ) && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
             pr_number="${BASH_REMATCH[1]}"
           fi
           if python -I -B "$selection_dir/select_tests.py" decide \
@@ -304,7 +316,8 @@ ref = e.get("CODEBUILD_WEBHOOK_HEAD_REF", "")
 raw = e.get("CODEBUILD_WEBHOOK_EVENT", "")
 event = ("merge_group" if "gh-readonly-queue/" in ref else
          "pr" if source.startswith("pr/") and raw.startswith("PULL_REQUEST_") else
-         "pr" if e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" and
+         "pr" if (e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" or
+                  re.fullmatch(r"device:dv-[0-9a-f]{16}", e.get("CODEBUILD_BUILD_ID", ""))) and
          raw.startswith("PULL_REQUEST_") and re.fullmatch(r"refs/pull/[1-9][0-9]*/head", ref) else
          "main" if ref == "refs/heads/main" and raw == "PUSH" else
          "manual" if not raw and e.get("CODEBUILD_INITIATOR") else "unknown")

@@ -781,6 +781,48 @@ class SelectionContracts(unittest.TestCase):
         self.assertEqual((slug, number), ("fixture/repo", self.pr))
         self.assertEqual(bucket, selector.validate_event(self.evidence(), event["head_sha"], None, None)[2])
 
+    def forge_device_evidence(self):
+        event = self.forge_evidence()
+        build_id = "device:dv-0123456789abcdef"
+        operation = "ci-" + hashlib.sha256(
+            ("fixture/repo|pull_request|" + str(self.pr) + "|" + event["head_sha"])
+            .encode("utf-8")).hexdigest()[:40]
+        event.update(provider="forge-device", initiator="leaf-ci-device", build_id=build_id,
+                     evidence_ref={"build": build_id, "operation": operation})
+        event.pop("relay_manifest")
+        return event
+
+    def test_forge_device_event_validates(self):
+        event = self.forge_device_evidence()
+        slug, number, bucket = selector.validate_event(event, event["head_sha"], "fixture/repo", self.pr)
+        self.assertEqual((slug, number), ("fixture/repo", self.pr))
+        self.assertEqual(bucket, selector.validate_event(self.evidence(), event["head_sha"], None, None)[2])
+
+    def test_forge_device_event_refusals(self):
+        evidence = self.forge_device_evidence()["evidence_ref"]
+        cases = [({"provider_bound": False}, "unverified_event"),
+                 ({"provider_bound": 1}, "unverified_event"),
+                 ({"initiator": "forge-ci-relay"}, "unverified_event"),
+                 ({"build_id": "fixture-build"}, "unverified_event"),
+                 ({"build_id": "device:dv-0123456789abcde"}, "unverified_event"),
+                 ({"build_id": "device:dv-0123456789abcdeg"}, "unverified_event"),
+                 ({"build_id": 42}, "unverified_event"),
+                 ({"evidence_ref": "receipt"}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, build="other-build")}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-fixture")}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-" + "a" * 39)}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-" + "g" * 40)}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation=42)}, "unverified_event"),
+                 ({"source_version": "pr/7"}, "contradictory_event"),
+                 ({"head_ref": "refs/heads/feature"}, "contradictory_event"),
+                 ({"target_sha": "bad"}, "contradictory_event"),
+                 ({"event": "PUSH"}, "non_pr_event")]
+        for changes, reason in cases:
+            with self.subTest(changes=changes):
+                event = dict(self.forge_device_evidence(), **changes)
+                with self.assertRaisesRegex(selector.InvalidInput, "^" + reason + "$"):
+                    selector.validate_event(event, event["head_sha"], None, None)
+
     def test_forge_event_refusals(self):
         cases = [({"provider_bound": False}, "unverified_event"),
                  ({"initiator": "GitHub-Hook"}, "unverified_event"),
