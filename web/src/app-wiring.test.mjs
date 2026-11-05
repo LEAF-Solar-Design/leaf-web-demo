@@ -1552,7 +1552,7 @@ describe('A1b-2 stored Solar graph wiring', () => {
     assert.ok(!body.slice(body.indexOf('return () =>')).includes('stateRef.current'))
     const build = effects.find(effect => text(effect.arguments[0], viewerSource).includes('new THREE.WebGLRenderer'))
     const buildBody = text(build.arguments[0], viewerSource)
-    assert.ok(buildBody.includes('const solarGroup = new THREE.Group(); scene.add(solarGroup)'))
+    assert.ok(buildBody.includes('const solarGroup = new THREE.Group(); root.add(solarGroup)'))
     assert.ok(buildBody.includes('const sceneState ='))
     assert.ok(buildBody.includes('solarGroup, solarLayer: null'))
     const disposeAt = buildBody.indexOf('sceneState.solarLayer?.dispose()')
