@@ -3396,7 +3396,7 @@ def build_suites() -> List[Suite]:
         # shards files, not test counts; require nonempty execution until CI
         # supplies measured per-shard floors (752 / 3 is not a safe floor).
         *(Suite(f"web-vitest-{shard}", f"web npm run test:unit (vitest {shard}/3)", "vitest", WEB,
-              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2", "--no-cache"], 1,
+              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -5506,7 +5506,6 @@ _SERIAL_SUITE_REASONS = {
 # Read-only: no server, port, build, install or write under web/ or ../artifacts/.
 # Eight green runs: jobs=3 wall p50 1402-1561s vs ~2900 suite-seconds;
 # the web-tree chain alone cost ~1100s. Only audited source readers bypass it.
-# Vitest shards: --no-cache removes their only shared write; tests use port 0 or private temp dirs.
 _WEB_SOURCE_READERS = frozenset({
     "web-customization-check",
     "web-customize-panel-check",
@@ -5532,9 +5531,6 @@ _WEB_SOURCE_READERS = frozenset({
     "web-route-scene-contract",
     "web-usage-contract",
     "web-error-classify-contract",
-    "web-vitest-1",
-    "web-vitest-2",
-    "web-vitest-3",
 })
 
 

@@ -572,7 +572,6 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
         suite = suites[f"web-vitest-{shard}"]
         assert suite.argv == [
             g._npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2",
-            "--no-cache",
         ]
         assert suite.allowed_vitest_skips == (
             ("src/cad/engineWasmHarness.realwasm.test.js", 1),
@@ -3812,8 +3811,11 @@ def test_jobs_conflicts_are_classified_into_resource_lanes():
     for shard in range(1, 4):
         suite = by_id[f"web-vitest-{shard}"]
         resources = g.conflict_resources(suite)
-        assert resources == frozenset()
-        assert "--no-cache" in suite.argv
+        assert suite.id not in g._WEB_SOURCE_READERS
+        assert "npm/npx shares node_modules" in g.serial_suite_reason(suite)
+        assert resources == frozenset({"web-tree"})
+        assert "--no-cache" not in suite.argv
+        assert suite.argv[-1] == "--maxWorkers=2"
         assert not (g.conflict_resources(by_id["server-backbone"]) & resources)
 
 
@@ -3822,6 +3824,7 @@ def test_web_source_readers_are_registered_read_only_pool_suites():
     by_id = {suite.id: suite for suite in g.build_suites()}
     scripts = json.loads((g.WEB / "package.json").read_text(encoding="utf-8"))["scripts"]
     assert isinstance(g._WEB_SOURCE_READERS, frozenset)
+    assert len(g._WEB_SOURCE_READERS) == 24
     assert g._WEB_SOURCE_READERS
     assert g._WEB_SOURCE_READERS <= by_id.keys()
     # Vite is a server command; Vitest/startVitest is a separate unit runner.
