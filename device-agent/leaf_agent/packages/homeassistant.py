@@ -598,14 +598,22 @@ class HomeAssistant:
     def _flow_start(self, handler, data=None):
         if handler not in {"hue", "wiz", "group"}:
             raise HAError("Unsupported flow handler")
+        if handler == "group":
+            group_data = dict(data) if data is not None else {}
+            group_type = group_data.pop("group_type", "light")
+            if group_type != "light":
+                raise HAError("Unsupported group type")
+            if data is not None:
+                data = {"hide_members": False, "all": False,
+                        **{key: value for key, value in group_data.items()
+                           if key in {"name", "entities", "hide_members", "all"}}}
         result = self._request("POST", FLOW_PATH, {"handler": handler, "show_advanced_options": False})
         self._remember(result, handler)
         if handler == "group" and result["type"] == "menu":
-            result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]), {"next_step_id": "light"})
+            result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]), {"next_step_id": group_type})
             self._remember(result, handler)
         if result["type"] == "form" and data is not None:
-            result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]),
-                                   {"hide_members": False, "all": False, **data} if handler == "group" else data)
+            result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]), data)
         return self._remember(result, handler)
 
     def _flow_step(self, flow_id, data):
