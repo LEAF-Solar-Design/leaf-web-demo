@@ -15,7 +15,7 @@ import solar_project_jobs as service
 import solar_tools
 from leaf_platform import canonical_jobs as jobs
 from test_sip_r3a_graph import publish, proof, refused
-from test_sip_r3b_tools import memory, prepare, commit, output, manifest, forbidden  # noqa: F401
+from test_sip_r3b_tools import TOOLS, memory, prepare, commit, output, manifest, forbidden  # noqa: F401
 from test_sip_r3b_chain import ELEVEN, created, forge, UNKNOWN
 import test_sip_r3c_multi_add as multi
 import test_sip_r4_jobs as r4
@@ -69,7 +69,7 @@ def identities(g):
 
 # BSP23 adds tracking acceptance; sixteen supported writes, four creation tools.
 def test_sip_r3d_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 16
+    assert adapter.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 18
     assert adapter.CREATION_TOOLS == {
         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-panel-groups"}
     assert TOOL not in adapter.CREATION_TOOLS

@@ -27,7 +27,7 @@ import test_sip_r4_jobs as r4
 import test_w1_design_graph as w1
 
 
-# BSP23 adds tracking acceptance; sixteen supported writes, four creation tools.
+# Historical sixteen-tool policy scenarios remain fixed; r3b.TOOLS pins current admission.
 ELEVEN = frozenset((
     "solar-assign-equipment", "solar-combiners", "solar-feeders", "solar-homeruns",
     "solar-panels-from-drawing", "solar-schedule", "solar-settings",
@@ -112,7 +112,7 @@ def test_sip_r5_flag_defaults_off(monkeypatch):
 
 def test_sip_r5_exact_supported_identity(monkeypatch):
     a = setup(monkeypatch)
-    assert graph.SUPPORTED_TOOLS == ELEVEN and len(solar_tools.entries()) == 54
+    assert graph.SUPPORTED_TOOLS == r3b.TOOLS and len(solar_tools.entries()) == 54
     calls = []
     monkeypatch.setattr(service, "submit_project_graph_job", lambda *args, **kwargs:
         calls.append((args, kwargs)) or {"admissible": True, "replay": False})

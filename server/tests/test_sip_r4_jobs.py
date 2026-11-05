@@ -22,7 +22,7 @@ import tool_validate
 from leaf_platform import canonical_jobs as jobs, entitlements
 from solar_design_graph import GraphValidationError
 from test_sip_r3a_graph import UNITS, prepare as seed, publish, refused
-from test_sip_r3b_tools import chain, memory, manifest, prepare  # noqa: F401
+from test_sip_r3b_tools import TOOLS, chain, memory, manifest, prepare  # noqa: F401
 from test_sip_r3b_chain import ELEVEN, S, E, PANELS, rev4, commit, through_string
 from test_w1_design_graph import graph as graph_fixture  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
@@ -146,7 +146,7 @@ def submit(a, **changes):
 
 
 def test_sip_r4_membership_and_worker_choice(monkeypatch):
-    assert graph.SUPPORTED_TOOLS == ELEVEN and len(ELEVEN) == 16
+    assert graph.SUPPORTED_TOOLS == TOOLS and len(TOOLS) == 18
     assert set(worker.ADAPTERS) == {worker.autofill.TOOL_NAME, worker.arlo_design.TOOL_NAME}
     assert inspect.signature(worker.run_once).parameters["tool_name"].default == worker.autofill.TOOL_NAME
     source = inspect.getsource(worker.main)
@@ -162,7 +162,7 @@ def test_sip_r4_membership_and_worker_choice(monkeypatch):
             worker.main()
         assert exc.value.code == 0
     choice = next(action for action in parsers[0]._actions if action.dest == "tool")
-    assert choice.choices == sorted(set(worker.ADAPTERS) | ELEVEN)
+    assert choice.choices == sorted(set(worker.ADAPTERS) | TOOLS)
     assert choice.default == worker.autofill.TOOL_NAME
     calls = []
     monkeypatch.setattr(service, "run_once", lambda *a, **k: calls.append((a, k)) or False)

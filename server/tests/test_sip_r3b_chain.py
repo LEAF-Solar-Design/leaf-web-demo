@@ -14,7 +14,7 @@ import solar_project_context as project
 import solar_project_graph as adapter
 from solar_equipment import FIELDS
 from test_sip_r3a_graph import proof, publish, refused
-from test_sip_r3b_tools import (HASHES, assigned_parent, chain, commit, forbidden, manifest,  # noqa: F401
+from test_sip_r3b_tools import (TOOLS, HASHES, assigned_parent, chain, commit, forbidden, manifest,  # noqa: F401
                                 memory, prepare)
 from test_w1_design_graph import graph  # noqa: F401
 from test_w1_equipment import case, equipment, licensed  # noqa: F401
@@ -22,7 +22,7 @@ from test_w2_string_add import free_panels, solved  # noqa: F401
 
 STRING = "solar-string-add"
 EQUIPMENT = "solar-assign-equipment"
-# BSP23 adds tracking acceptance; sixteen supported writes, four creation tools.
+# Historical sixteen-tool scenarios remain fixed; TOOLS pins current admission.
 ELEVEN = {"solar-settings", "solar-panels-from-drawing", "solar-size-strings",
         "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept"}
@@ -146,9 +146,9 @@ def derived(ctx, tool, params, kind, index):
 
 
 def test_sip_r3b_chain_membership(memory):
-    assert adapter.SUPPORTED_TOOLS == ELEVEN
+    assert adapter.SUPPORTED_TOOLS == TOOLS
     for tool in ("solar-assign-strings",
-                 "solar-pvcase-convert", "solar-trackers-to-panel-groups",
+                 "solar-pvcase-convert",
                  "solar-string-delete"):
         refused("SIP_R3_TOOL_UNSUPPORTED", lambda: prepare(memory, tool, {}))
     for tool in (STRING, EQUIPMENT):
