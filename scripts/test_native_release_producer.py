@@ -290,6 +290,86 @@ def test_inrelease_refresh_failure_preserves_original_build_error(tmp_path, monk
     assert all(len(items) == 1 for items in calls.values())
 
 
+APP_FRONTEND_LOG = '''#0 building with "default" instance using docker driver
+
+#1 [internal] load build definition from Dockerfile.app
+#1 transferring dockerfile: 18.41kB done
+#1 DONE 0.0s
+
+#2 resolve image config for docker-image://docker.io/docker/dockerfile:1
+#2 DONE 0.2s
+
+#3 docker-image://docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e
+#3 resolve docker.io/docker/dockerfile:1@sha256:4edf897a3ffa55b89f906fc8cc78afdb3f1834cc9c7083565e611a8a7d5fe99e done
+#3 DONE 0.3s
+Dockerfile.app:1
+--------------------
+   1 | >>> # syntax=docker/dockerfile:1
+   2 |     #
+--------------------
+ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly
+'''
+
+
+def test_frontend_app_retries_once_same_inputs_preserving_siblings(tmp_path, monkeypatch, git_smoke_calls):
+    run, calls, refreshes, _, _ = pin_race_case(tmp_path, monkeypatch, service="app", markers=APP_FRONTEND_LOG)
+    images = run()
+    assert refreshes == []
+    assert {name: len(rows) for name, rows in calls.items()} == {name: 2 if name == 'app' else 1 for name in SERVICES}
+    assert calls['app'][1] == (calls['app'][0][0], tmp_path / 'app.retry1.json', tmp_path / 'app.retry1.log')
+    assert calls['app'][1][0] is calls['app'][0][0]
+    assert images == {name: {'service': name, 'attempt': 2 if name == 'app' else 1} for name in SERVICES}
+    assert git_smoke_calls == [images]
+    assert (tmp_path / 'app.log').read_text() == APP_FRONTEND_LOG
+
+
+@pytest.mark.parametrize('retry_log', [APP_FRONTEND_LOG, 'InRelease: FAILED\ncomputed checksum did NOT match\n'])
+def test_frontend_second_failure_is_terminal_without_pin_retry(tmp_path, monkeypatch, retry_log):
+    failure = subprocess.CalledProcessError(2, ['docker', 'buildx'])
+    run, calls, refreshes, _, _ = pin_race_case(tmp_path, monkeypatch, service='app', markers=APP_FRONTEND_LOG, retry_error=failure)
+    build = producer.build_image
+    def again(*args, **kwargs):
+        try:
+            return build(*args, **kwargs)
+        finally:
+            if kwargs.get('log_path') == tmp_path / 'app.retry1.log':
+                kwargs['log_path'].write_text(retry_log)
+    monkeypatch.setattr(producer, 'build_image', again)
+    with pytest.raises(subprocess.CalledProcessError) as raised:
+        run()
+    assert raised.value is failure and refreshes == []
+    assert len(calls['app']) == 2
+    assert all(len(calls[name]) == 1 for name in SERVICES if name != 'app')
+
+
+@pytest.mark.parametrize('fault', ['missing', 'truncated-start', 'oversized', 'later-step', 'extra-error', 'incomplete',
+                                 'wrong-dockerfile', 'wrong-frontend', 'nonprocess', 'broker', 'web'])
+def test_frontend_nonqualifying_failure_remains_terminal(tmp_path, monkeypatch, fault):
+    log = APP_FRONTEND_LOG
+    if fault == 'truncated-start': log = log[log.index('#1'):]
+    if fault == 'oversized': log = 'x' * (producer.BUILD_LOG_TAIL_BYTES + 1) + log
+    if fault == 'later-step': log = log.replace('Dockerfile.app:1', '#4 [build 1/1] RUN compile\nDockerfile.app:1')
+    if fault == 'extra-error': log = log.replace('Dockerfile.app:1', 'ERROR: source compilation failed\nDockerfile.app:1')
+    if fault == 'incomplete': log = log.replace('#3 DONE 0.3s\n', '')
+    if fault == 'wrong-dockerfile': log = log.replace('Dockerfile.app', 'Dockerfile.broker')
+    if fault == 'wrong-frontend': log = log.replace('docker/dockerfile:1', 'other/frontend:1')
+    error = ValueError('not a build process failure') if fault == 'nonprocess' else None
+    service = fault if fault in ('broker', 'web') else 'app'
+    run, calls, refreshes, original, _ = pin_race_case(tmp_path, monkeypatch, service=service, markers=log, error=error)
+    build = producer.build_image
+    def maybe_missing(*args, **kwargs):
+        try:
+            return build(*args, **kwargs)
+        finally:
+            if fault == 'missing' and kwargs.get('log_path') == tmp_path / 'app.log':
+                kwargs['log_path'].unlink()
+    monkeypatch.setattr(producer, 'build_image', maybe_missing)
+    with pytest.raises(type(original)) as raised:
+        run()
+    assert raised.value is original and refreshes == []
+    assert all(len(rows) == 1 for rows in calls.values())
+
+
 def test_refresh_debian_freshness_fetches_only_service_channels(monkeypatch):
     urls = []
 
