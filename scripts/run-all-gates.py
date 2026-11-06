@@ -3916,7 +3916,7 @@ def build_suites() -> List[Suite]:
                "e2e/campaign-panel.spec.mjs", "e2e/recovery-controls.spec.mjs",
                "e2e/workspace-create-no-prompt.spec.mjs", "e2e/viewer-grid-toggle.spec.mjs",
                "e2e/studio-ux-regressions.spec.mjs", "e2e/project-page-editor.spec.mjs",
-               "--workers=1"], None),
+               "e2e/project-page-editor.phone.spec.mjs", "--workers=2"], None),
         Suite("web-lifecycle-panel-proof", "web mounted project lifecycle panel browser proof", "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.lifecycle.config.mjs",
                "e2e/project-lifecycle-panel.spec.mjs", "--workers=1"], None),
