@@ -290,11 +290,13 @@ def normalize_spawn_command(
 # identical nodes, rootdir and conftest chains under both registered setups.
 # Alias grep for EVERY exclusion below:
 #   rg -n 'OVERLAY_PG_URL|ANNOTATION_PG_URL' platform -g '*.py'
-# Only test_overlay_store_postgres.py and test_annotation_store_postgres.py
-# match. Neither is imported by these files or their imported platform modules;
-# both remain in platform. Thus the aliases absent from the owners are unread.
+# Only test_overlay_store_postgres.py, test_annotation_store_postgres.py and
+# bsp43_pg_probe.py match. None is imported by these files or their imported
+# platform modules (bsp43_pg_probe.py only by test_bsp43_checkout_custody_postgres.py);
+# all remain in platform. Thus the aliases absent from the owners are unread.
 PLATFORM_SINGLE_OWNER_FILES = {
     "test_org_invitations.py": "platform-org-invitations",
+    "test_project_editor_publication.py": "platform-project-editor-publication",
     "test_native_service_binding.py": "platform-native-service-binding",
     "test_tenant_cost_store.py": "platform-tenant-cost-store",
     "test_aps_cost_sync.py": "platform-aps-cost-sync",

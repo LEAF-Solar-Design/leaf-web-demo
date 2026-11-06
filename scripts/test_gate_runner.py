@@ -3712,7 +3712,10 @@ def test_platform_family_nodes_have_single_owner(platform_family_collection):
     alias_readers = {p.name for p in (REPO / "platform").rglob("*.py")
                      if any(alias in p.read_text(encoding="utf-8")
                             for alias in suites["platform"].db_env_aliases)}
-    assert alias_readers == {"test_overlay_store_postgres.py", "test_annotation_store_postgres.py"}
+    # bsp43_pg_probe.py lists the aliases and is imported only by
+    # test_bsp43_checkout_custody_postgres.py, which stays in platform.
+    assert alias_readers == {"test_overlay_store_postgres.py", "test_annotation_store_postgres.py",
+                             "bsp43_pg_probe.py"}
     for filename, owner_id in g.PLATFORM_SINGLE_OWNER_FILES.items():
         file = "platform/tests/" + filename
         owner = suites[owner_id]
