@@ -595,6 +595,29 @@ class HomeAssistant:
         # Never expose HA entry data/result objects (Hue stores bridge keys).
         return {key: value for key, value in result.items() if key in FLOW_KEYS}
 
+    @staticmethod
+    def _hue_init_choice(result):
+        schema = result.get("data_schema")
+        if not isinstance(schema, list):
+            return "manual"
+        for field in schema:
+            if not isinstance(field, dict) or field.get("name") != "id":
+                continue
+            options = field.get("options", field.get("in", field.get("type")))
+            for _ in range(3):
+                if not isinstance(options, dict) or not ("options" in options or "in" in options):
+                    break
+                options = options.get("options", options.get("in"))
+            if isinstance(options, (list, dict)):
+                for option in options:
+                    if isinstance(option, dict):
+                        option = option.get("value")
+                    elif isinstance(option, (list, tuple)) and len(option) == 2:
+                        option = option[0]
+                    if isinstance(option, str) and option and option != "manual":
+                        return option
+        return "manual"
+
     def _flow_start(self, handler, data=None):
         if handler not in {"hue", "wiz", "group"}:
             raise HAError("Unsupported flow handler")
@@ -608,11 +631,20 @@ class HomeAssistant:
                         **{key: value for key, value in group_data.items()
                            if key in {"name", "entities", "hide_members", "all"}}}
         result = self._request("POST", FLOW_PATH, {"handler": handler, "show_advanced_options": False})
+        hue_init = False
+        if handler == "hue":
+            for _ in range(2):
+                if result.get("type") != "form" or result.get("step_id") != "init":
+                    break
+                hue_init = True
+                result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]),
+                                       {"id": self._hue_init_choice(result)})
         self._remember(result, handler)
         if handler == "group" and result["type"] == "menu":
             result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]), {"next_step_id": group_type})
             self._remember(result, handler)
-        if result["type"] == "form" and data is not None:
+        if (result["type"] == "form" and data is not None and
+                (not hue_init or result.get("step_id") == "manual")):
             result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]), data)
         return self._remember(result, handler)
 
@@ -622,6 +654,8 @@ class HomeAssistant:
         handler = current.get("handler")
         if handler not in {"hue", "wiz", "group"}:
             raise HAError("Unsupported flow handler")
+        if handler == "hue" and current.get("step_id") == "init" and "id" not in data:
+            data = {"id": self._hue_init_choice(current)}
         if handler == "group":
             if current["type"] == "menu":
                 data = {"next_step_id": "light"}

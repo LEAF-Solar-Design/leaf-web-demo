@@ -43,8 +43,15 @@ def stage_process_capture(output, readsets, selection):
     """Flatten per-attempt reports, preserving every certificate and its outcome stream."""
     output, readsets, selection = Path(output), Path(readsets), Path(selection)
     diagnostics = readsets.parent / "diagnostics"
+    diagnostics.mkdir(parents=True, exist_ok=True)
     if readsets.exists():
-        shutil.move(str(readsets), str(diagnostics))
+        children = sorted(readsets.iterdir(), key=lambda child: child.name)
+        for child in children:
+            destination = diagnostics / child.name
+            if destination.exists() or destination.is_symlink():
+                raise ValueError("diagnostics_collision")
+        for child in children:
+            shutil.move(str(child), str(diagnostics / child.name))
     readsets.mkdir(parents=True, exist_ok=True)
     reports = selection / "reports"
     reports.mkdir(parents=True, exist_ok=True)

@@ -11,6 +11,8 @@ export const SPINE_TOOL_NAMES = [
   "customize_platform", "finish_project", "project_completion_status",
   "integration_datasets", "integration_action_catalog", "integration_query",
   "integration_save_element", "propose_project_page",
+  "device_list", "device_install_package", "device_ha_step", "device_light",
+  "device_light_states", "device_command_status",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 
@@ -25,9 +27,16 @@ import type {
   TenantMutationFence,
   TenantRepoProvider as VendoredTenantRepoProvider,
 } from "../vendor/mushy-author/ports/index.js";
+import type { DeviceOperation, DeviceToolResult } from "../agent/deviceTools.js";
 
 /** Host-only overlay authority handoff; the app resolves the active turn's actor. */
 export interface AppRunClient extends VendoredAppRunClient {
+  deviceTool?(
+    tenantId: string,
+    operation: DeviceOperation,
+    body: Record<string, unknown>,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<DeviceToolResult>;
   proposeProjectPage(
     tenantId: string,
     sessionId: string,

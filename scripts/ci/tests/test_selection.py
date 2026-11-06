@@ -180,6 +180,84 @@ class PluginBindingContracts(unittest.TestCase):
                 self.assertEqual(rows, state.attempts)
 
 
+class CatalogBindingContracts(unittest.TestCase):
+    def setUp(self):
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        self.root = Path(temporary.name)
+        self.catalog = {"schema": "leaf.ci.test-catalog.v1", "kind": "pytest",
+                        "suites": [{"id": "z", "test_ids": ["test_z.py::test_z"]},
+                                   {"id": "a", "test_ids": ["test_a.py::test_a"]}]}
+        self.catalog_path = self.root / "catalog.json"
+        self.catalog_path.write_text(json.dumps(self.catalog), encoding="utf-8")
+        self.event_path = self.root / "event.json"
+
+    def choose(self, event_name):
+        self.event_path.write_text(json.dumps({"event": event_name}), encoding="utf-8")
+        return selector.decide(self.root, "trusted", "head", self.root / "missing-map.json",
+                               event_evidence=self.event_path, catalog_path=self.catalog_path)
+
+    def assert_bound(self, decision):
+        self.assertEqual(decision["catalog_sha256"], selector.catalog_info(self.catalog)[1])
+        self.assertEqual(decision["catalog_kind"], "pytest")
+        self.assertEqual(decision["catalog_suite_ids"], ["a", "z"])
+        self.assertEqual(decision["executed_suite_ids"], decision["catalog_suite_ids"])
+        self.assertEqual(decision["execution_mode"], "full")
+        self.assertIs(decision["apply_filter"], False)
+
+    def test_non_pr_full_run_binds_catalog(self):
+        for event_name in ("MANUAL", "PUSH"):
+            with self.subTest(event=event_name):
+                decision = self.choose(event_name)
+                self.assert_bound(decision)
+                self.assertIn("non_pr_event", decision["reasons"])
+                self.assertEqual(decision["selection_mode"], "full")
+                self.assertIsNone(decision["assigned_arm"])
+
+    def test_unavailable_or_invalid_catalog_stays_unbound(self):
+        self.catalog_path.unlink()
+        for contents in (None, "not json", "{}", "[]", "\ufffd"):
+            with self.subTest(contents=contents):
+                if contents is not None:
+                    self.catalog_path.write_text(contents, encoding="utf-8")
+                decision = self.choose("MANUAL")
+                self.assertIsNone(decision["catalog_sha256"])
+                self.assertEqual(decision["catalog_suite_ids"], [])
+                self.assertEqual(decision["executed_suite_ids"], [])
+                self.assertIn("non_pr_event", decision["reasons"])
+
+    def test_existing_binding_is_never_replaced(self):
+        decision = {"catalog_sha256": "existing", "catalog_suite_ids": ["original"],
+                    "catalog_kind": "web", "selection_mode": "selected",
+                    "execution_mode": "selected", "apply_filter": True,
+                    "assigned_arm": "selected", "reasons": ["existing"]}
+        original = copy.deepcopy(decision)
+        selector.bind_catalog(decision, self.catalog_path)
+        self.assertEqual(decision, original)
+
+    def test_binding_only_changes_catalog_fields(self):
+        decision = {"catalog_sha256": None, "catalog_suite_ids": [],
+                    "selection_mode": "shadow", "execution_mode": "full",
+                    "apply_filter": False, "assigned_arm": "control", "reasons": ["original"]}
+        original = copy.deepcopy(decision)
+        selector.bind_catalog(decision, self.catalog_path)
+        for key in ("selection_mode", "execution_mode", "apply_filter", "assigned_arm", "reasons"):
+            self.assertEqual(decision[key], original[key])
+        self.assertEqual(decision["catalog_sha256"], selector.catalog_info(self.catalog)[1])
+
+    def test_selector_exception_fallback_binds_catalog(self):
+        output = self.root / "out"
+        with mock.patch.object(selector, "decide", side_effect=RuntimeError("synthetic exception")):
+            rc = selector.main(["decide", "--repo", str(self.root), "--trusted-sha", "trusted",
+                                "--head-sha", "head", "--map", str(self.root / "map.json"),
+                                "--catalog", str(self.catalog_path), "--out-dir", str(output)])
+        self.assertEqual(rc, 1)
+        decision = json.loads((output / "decision.json").read_text(encoding="utf-8"))
+        self.assert_bound(decision)
+        self.assertEqual(decision["reasons"], ["selector_exception"])
+        self.assertEqual((output / "only-args.nul").read_bytes(), b"")
+
+
 class SelectionContracts(unittest.TestCase):
     def setUp(self):
         self.temporary = tempfile.TemporaryDirectory(prefix="selection-contract-",
@@ -780,6 +858,48 @@ class SelectionContracts(unittest.TestCase):
         slug, number, bucket = selector.validate_event(event, event["head_sha"], "fixture/repo", self.pr)
         self.assertEqual((slug, number), ("fixture/repo", self.pr))
         self.assertEqual(bucket, selector.validate_event(self.evidence(), event["head_sha"], None, None)[2])
+
+    def forge_device_evidence(self):
+        event = self.forge_evidence()
+        build_id = "device:dv-0123456789abcdef"
+        operation = "ci-" + hashlib.sha256(
+            ("fixture/repo|pull_request|" + str(self.pr) + "|" + event["head_sha"])
+            .encode("utf-8")).hexdigest()[:40]
+        event.update(provider="forge-device", initiator="leaf-ci-device", build_id=build_id,
+                     evidence_ref={"build": build_id, "operation": operation})
+        event.pop("relay_manifest")
+        return event
+
+    def test_forge_device_event_validates(self):
+        event = self.forge_device_evidence()
+        slug, number, bucket = selector.validate_event(event, event["head_sha"], "fixture/repo", self.pr)
+        self.assertEqual((slug, number), ("fixture/repo", self.pr))
+        self.assertEqual(bucket, selector.validate_event(self.evidence(), event["head_sha"], None, None)[2])
+
+    def test_forge_device_event_refusals(self):
+        evidence = self.forge_device_evidence()["evidence_ref"]
+        cases = [({"provider_bound": False}, "unverified_event"),
+                 ({"provider_bound": 1}, "unverified_event"),
+                 ({"initiator": "forge-ci-relay"}, "unverified_event"),
+                 ({"build_id": "fixture-build"}, "unverified_event"),
+                 ({"build_id": "device:dv-0123456789abcde"}, "unverified_event"),
+                 ({"build_id": "device:dv-0123456789abcdeg"}, "unverified_event"),
+                 ({"build_id": 42}, "unverified_event"),
+                 ({"evidence_ref": "receipt"}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, build="other-build")}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-fixture")}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-" + "a" * 39)}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation="ci-" + "g" * 40)}, "unverified_event"),
+                 ({"evidence_ref": dict(evidence, operation=42)}, "unverified_event"),
+                 ({"source_version": "pr/7"}, "contradictory_event"),
+                 ({"head_ref": "refs/heads/feature"}, "contradictory_event"),
+                 ({"target_sha": "bad"}, "contradictory_event"),
+                 ({"event": "PUSH"}, "non_pr_event")]
+        for changes, reason in cases:
+            with self.subTest(changes=changes):
+                event = dict(self.forge_device_evidence(), **changes)
+                with self.assertRaisesRegex(selector.InvalidInput, "^" + reason + "$"):
+                    selector.validate_event(event, event["head_sha"], None, None)
 
     def test_forge_event_refusals(self):
         cases = [({"provider_bound": False}, "unverified_event"),

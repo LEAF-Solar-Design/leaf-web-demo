@@ -29,6 +29,7 @@ export function validateWebhookReceipt(value, input) {
   return result
 }
 const slug = z.string().regex(/^[a-z0-9]+(?:[-_][a-z0-9]+)*(?![\s\S])/).min(1).max(128)
+const operationIds = z.array(slug).min(1).max(100).refine((ids) => new Set(ids).size === ids.length)
 const revision = z.number().int().positive().max(Number.MAX_SAFE_INTEGER)
 const vercelState = z.string().regex(/^[A-Za-z0-9_-]{43}(?![\s\S])/)
 const vercelId = z.string().regex(/^[A-Za-z0-9_-]{1,256}(?![\s\S])/)
@@ -454,7 +455,7 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     },
     async publishConnector(id, connectorId, input, options) {
       parse(slug, connectorId)
-      const body = parse(z.strictObject({ version: revision, expectedRevision: revision, readOperationIds: z.array(slug).length(1) }), input)
+      const body = parse(z.strictObject({ version: revision, expectedRevision: revision, readOperationIds: operationIds }), input)
       return setupResponse(refResult, id, `connectors/${connectorId}/publish`, { ...options, method: 'POST', body },
         (value) => value.reference.id === connectorId && value.reference.version === body.version)
     },
@@ -469,10 +470,11 @@ export function createIntegrationsClient({ origin = import.meta.env.VITE_INTEGRA
     },
     async createConnection(id, input, options) {
       const body = parse(z.strictObject({ id: slug, title, connectorRef: IntegrationRefV1, origin: ConnectionV1.shape.origin,
-        operationIds: z.array(slug).length(1) }), input)
+        operationIds }), input)
       return setupResponse(ownerConnection, id, 'connections', { ...options, method: 'POST', body },
         (value) => value.id === body.id && value.title === body.title && sameRef(value.connector_ref, body.connectorRef) &&
-          value.origin === body.origin && value.operation_ids.length === 1 && value.operation_ids[0] === body.operationIds[0])
+          value.origin === body.origin && value.operation_ids.length === body.operationIds.length &&
+          body.operationIds.every((operationId) => value.operation_ids.includes(operationId)))
     },
     async getConnectionSummary(id, connectionId, options) {
       parse(slug, connectionId)

@@ -3586,6 +3586,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_device_relay.py"), 56),
         Suite("server-devices-router", "server tests/test_devices_router.py", "pytest", SERVER,
               _py_pytest("tests/test_devices_router.py"), 60),
+        Suite("server-device-tools", "server tests/test_device_tools.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_tools.py"), 52),
         Suite("device-agent-tests", "device-agent tests", "pytest", REPO / "device-agent",
               _py_pytest("tests"), 71),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
@@ -5497,12 +5499,41 @@ _SERIAL_SUITE_REASONS = {
         "server-operator-stage-release",
     ), "shared PostgreSQL schema"),
     "server-sessions-e2e": "rebuilds shared harness/dist with npm",
-    "web-elk-rank": "node --test shares web/node_modules and build outputs in its cwd",
-    "web-project-proof-contract": "Vitest shares web/node_modules and build outputs in its cwd",
     "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
     "studio-walk-regressions": "nested stack boots services and rebuilds shared production bundle",
     "harness-container-smoke": "fixed compose project and container ports 8130/8150",
 }
+
+
+# Read-only: no server, port, build, install or write under web/ or ../artifacts/.
+# Eight green runs: jobs=3 wall p50 1402-1561s vs ~2900 suite-seconds;
+# the web-tree chain alone cost ~1100s. Only audited source readers bypass it.
+_WEB_SOURCE_READERS = frozenset({
+    "web-customization-check",
+    "web-customize-panel-check",
+    "web-checkout-identity-check",
+    "web-deployed-acceptance-contract",
+    "web-deployed-surface-synthetic-acceptance",
+    "web-deployed-auth0-spa-origin-acceptance",
+    "web-deployed-auth0-production-spa-origin-acceptance",
+    "web-collect-staging-auth0-principal-b",
+    "web-proof-receipt-contract",
+    "web-author-quota-live-proof",
+    "web-workbench-id-contract",
+    "web-app-wiring",
+    "web-project-proof-contract",
+    "web-elk-rank",
+    "web-honesty-ladder",
+    "web-tour-anchors",
+    "web-composer-contract",
+    "web-project-session-binding",
+    "web-markdown-contract",
+    "web-panel-fold-contract",
+    "web-pending-approvals-contract",
+    "web-route-scene-contract",
+    "web-usage-contract",
+    "web-error-classify-contract",
+})
 
 
 def serial_suite_reason(suite: Suite) -> str:
@@ -5511,6 +5542,8 @@ def serial_suite_reason(suite: Suite) -> str:
         return "resets shared authored_tools.json"
     if suite.db_gated or suite.uses_database:
         return "shared PostgreSQL through DATABASE_URL"
+    if suite.id in _WEB_SOURCE_READERS:
+        return ""
     executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
     if executable in ("npm", "npm.cmd", "npm.exe", "npx", "npx.cmd", "npx.exe"):
         return "npm/npx shares node_modules and build outputs in its cwd"

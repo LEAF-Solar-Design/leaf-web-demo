@@ -317,6 +317,7 @@
     "server-deployment-source-identity",
     "server-developer-jobs-transport",
     "server-device-store",
+    "server-device-tools",
     "server-devices-router",
     "server-drawing-authority-cutover-marker",
     "server-drawing-authority-postgres",
