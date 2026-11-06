@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import pickle
 import plistlib
+import re
 import socket
 import struct
 import subprocess
@@ -292,6 +293,8 @@ def install_stub(monkeypatch, *, available=None, fail_pip=False, clock=None, bre
             if fail_pip:
                 kwargs["stdout"].write("\n".join(f"pip diagnostic {number:02d}" for number in range(55)).encode())
                 raise subprocess.CalledProcessError(1, argv)
+        if argv[0] == "pgrep":
+            return SimpleNamespace(returncode=1, stdout="")
         return SimpleNamespace(returncode=0, stdout="")
 
     return run, calls
@@ -338,7 +341,7 @@ def test_install_existing_python_plist_and_health_wait(tmp_path, monkeypatch, ha
     assert argv[-1] == ["launchctl", "bootstrap", "gui/501", str(handler._service_path())]
     plist = plistlib.loads(handler._service_path().read_bytes())
     assert plist["Label"] == LABEL
-    assert plist["ProgramArguments"] == [str(handler.root / "venv/bin/hass"), "-c", str(handler.root / "config")]
+    assert plist["ProgramArguments"] == ["/usr/bin/open", "-W", str(handler._app_path())]
     assert plist["RunAtLoad"] and plist["KeepAlive"] and plist["ThrottleInterval"] == 30
     assert plist["StandardOutPath"] == plist["StandardErrorPath"] == str(handler.root / "hass.log")
     assert (handler.root / "config/configuration.yaml").read_text() == "default_config:\nlogger:\n  default: warning\nrecorder:\n  purge_keep_days: 3\n"
@@ -429,8 +432,11 @@ def test_lan_reachable_stops_and_fails(tmp_path, monkeypatch, ha_server, platfor
         handler.handle("pkg.install", {"version": PINNED_VERSION})
     argv = [item[0] for item in calls]
     if platform == "darwin":
-        assert argv[-2][:2] == ["launchctl", "bootstrap"]
-        assert argv[-1] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
+        stop = -1 if remove_fails else -2
+        assert argv[stop - 1][:2] == ["launchctl", "bootstrap"]
+        assert argv[stop] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
+        if not remove_fails:
+            assert argv[-1] == ["pgrep", "-f", "^" + re.escape(str(handler._app_path() / "Contents/MacOS/leaf-ha-launcher")) + "$"]
     else:
         assert ["systemctl", "--user", "disable", "--now", LABEL + ".service"] in argv
         if not remove_fails:
@@ -918,6 +924,8 @@ def test_mac_uninstall_bootout_and_keychain_deletion(tmp_path, returncode):
 
     def runner(argv, **kwargs):
         calls.append(argv)
+        if argv[0] == "pgrep":
+            return SimpleNamespace(returncode=1, stdout="")
         return SimpleNamespace(returncode=returncode)
 
     handler = HomeAssistant(tmp_path, platform="darwin", user_home=tmp_path / "user", uid=501,
@@ -926,8 +934,9 @@ def test_mac_uninstall_bootout_and_keychain_deletion(tmp_path, returncode):
     handler._service_path().touch()
     handler.handle("pkg.uninstall", {"keep_data": False})
     assert calls[0] == ["launchctl", "bootout", "gui/501", str(handler._service_path())]
-    assert [item[-1] for item in calls[1:]] == ["password", "token", "refresh_token"]
-    assert all(item[:2] == ["/usr/bin/security", "delete-generic-password"] for item in calls[1:])
+    assert calls[1] == ["pgrep", "-f", "^" + re.escape(str(handler._app_path() / "Contents/MacOS/leaf-ha-launcher")) + "$"]
+    assert [item[-1] for item in calls[2:]] == ["password", "token", "refresh_token"]
+    assert all(item[:2] == ["/usr/bin/security", "delete-generic-password"] for item in calls[2:])
     assert not handler._service_path().exists()
 
 
