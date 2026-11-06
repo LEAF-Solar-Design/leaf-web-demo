@@ -19,6 +19,7 @@ import type {
 import { CanonicalChangeSetId } from "../index.js";
 import { AppRunClientError, projectAuthorStageStatus } from "../impl/appRunClient.js";
 import type { ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
+import type { DeviceOperation, DeviceToolResult } from "../../agent/deviceTools.js";
 
 export const FAKE_CATALOG: CapabilityEntry[] = [
   {
@@ -102,6 +103,20 @@ export class FakeAppRunClient implements AppRunClient {
     const row = this.authorStages.get(tenantId)?.get(changeSetId);
     if (!row) throw new AppRunClientError("Author stage status unavailable.", 404);
     return projectAuthorStageStatus(changeSetId, row);
+  }
+  readonly deviceToolCalls: Array<{
+    tenantId: string; operation: DeviceOperation; body: Record<string, unknown>;
+    authority: { sessionId: string; turnId: string };
+  }> = [];
+  deviceToolResult: DeviceToolResult = { ok: true, result: {} };
+
+  async deviceTool(
+    tenantId: string, operation: DeviceOperation, body: Record<string, unknown>,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<DeviceToolResult> {
+    this.methodLog.push("deviceTool");
+    this.deviceToolCalls.push({ tenantId, operation, body, authority });
+    return this.deviceToolResult;
   }
   readonly pageProposalCalls: Array<{
     tenantId: string; sessionId: string; body: ProjectPageProposalInput;

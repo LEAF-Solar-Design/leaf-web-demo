@@ -34,6 +34,10 @@ import { CanonicalChangeSetId, INTEGRATION_TOOL_INPUTS, ProjectPhotoAssignmentRe
 import { z } from "zod";
 import { photoRequest, PHOTO_FAILURE, PHOTO_MAX_RESPONSE, type ProjectPhotoInspectionInput } from "../../agent/projectPhotoInspection.js";
 import {
+  DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS, DeviceToolResponse, deviceToolError,
+} from "../../agent/deviceTools.js";
+import type { DeviceOperation, DeviceToolName, DeviceToolResult } from "../../agent/deviceTools.js";
+import {
   DatasetReadV1, IntegrationActionCatalogV1, IntegrationElementV1, IntegrationRefV1,
 } from "../../vendor/mushy-author/contracts/integration.js";
 
@@ -474,6 +478,79 @@ export class HttpAppRunClient implements AppRunClient {
 
   integrationDatasets(tenantId: string, input: IntegrationDatasetsInput, authority: IntegrationAuthority) {
     return this.integrationRequest("integration_datasets", tenantId, input, authority);
+  }
+
+  /** Same total deadline and response cap as integrations; no implicit polling. */
+  async deviceTool(
+    tenantId: string, operation: DeviceOperation, input: Record<string, unknown>,
+    authority: IntegrationAuthority,
+  ): Promise<DeviceToolResult> {
+    const validId = (id: unknown): id is string => typeof id === "string" &&
+      id.length > 0 && id.length <= 200 && id.trim() === id && !/[\u0000-\u001f\u007f-\u009f]/.test(id);
+    if (!this.secret || !validId(authority?.sessionId) || !validId(authority?.turnId)) {
+      return deviceToolError("unavailable");
+    }
+    const tool = (Object.keys(DEVICE_TOOL_OPERATIONS) as DeviceToolName[])
+      .find(name => DEVICE_TOOL_OPERATIONS[name] === operation);
+    const normalized = tool ? DEVICE_TOOL_INPUTS[tool].safeParse(input) : undefined;
+    if (!normalized?.success || !z.string().uuid().safeParse(tenantId).success ||
+        tenantId === "00000000-0000-0000-0000-000000000000" || tenantId !== tenantId.toLowerCase()) {
+      return deviceToolError("invalid_input");
+    }
+    let body: string;
+    try { body = JSON.stringify(normalized.data); }
+    catch { return deviceToolError("invalid_input"); }
+    if (Buffer.byteLength(body, "utf8") > 16 * 1024) return deviceToolError("invalid_input");
+    const controller = new AbortController();
+    let reader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    const cancel = () => {
+      controller.abort();
+      void reader?.cancel().catch(() => {});
+    };
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const deadline = new Promise<DeviceToolResult>(resolve => {
+      timer = setTimeout(() => { cancel(); resolve(deviceToolError("unavailable")); }, 15_000);
+    });
+    try {
+      const work = async (): Promise<DeviceToolResult> => {
+        const response = await this.fetchImpl(`${this.baseUrl}/internal/integrations/devices/${operation}`, {
+          method: "POST", redirect: "error", signal: controller.signal,
+          headers: { ...this.headers(tenantId),
+            "x-authority-session-id": authority.sessionId,
+            "x-authority-turn-id": authority.turnId },
+          body,
+        });
+        if (controller.signal.aborted) {
+          void response.body?.cancel().catch(() => {});
+          return deviceToolError("unavailable");
+        }
+        if (!response.body || response.redirected) return deviceToolError("unavailable");
+        reader = response.body.getReader();
+        const chunks: Uint8Array[] = [];
+        let size = 0;
+        while (true) {
+          const next = await reader.read();
+          if (controller.signal.aborted) return deviceToolError("unavailable");
+          if (next.done) break;
+          size += next.value.byteLength;
+          if (size > 256 * 1024) return deviceToolError("unavailable");
+          chunks.push(next.value);
+        }
+        const raw = new TextDecoder("utf-8", { fatal: true }).decode(Buffer.concat(chunks));
+        const json: unknown = JSON.parse(raw);
+        if (reflectsSecret(raw, this.secret) || reflectsSecret(json, this.secret)) return deviceToolError("unavailable");
+        const parsed = DeviceToolResponse.safeParse(json);
+        if (!parsed.success || response.ok !== parsed.data.ok) return deviceToolError("unavailable");
+        return parsed.data;
+      };
+      return await Promise.race([work(), deadline]);
+    } catch {
+      return deviceToolError("unavailable");
+    } finally {
+      clearTimeout(timer);
+      cancel();
+      try { reader?.releaseLock(); } catch { /* cancelled pending read */ }
+    }
   }
 
   integrationActionCatalog(tenantId: string, input: IntegrationActionCatalogInput, authority: IntegrationAuthority) {

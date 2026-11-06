@@ -11,6 +11,8 @@ import type { ConverseSdkRunnerOptions } from "../../vendor/mushy-author/ports/i
 import type { ConverseRunInput, ConverseRunnerEvent } from "../index.js";
 import { AuthorStageStatusInput, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY } from "../index.js";
 import { ProjectPhotoInspectionShape, photoRequest, projectPhotoResult, PHOTO_FAILURE, type PhotoContent } from "../../agent/projectPhotoInspection.js";
+import { DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS } from "../../agent/deviceTools.js";
+import type { DeviceToolName } from "../../agent/deviceTools.js";
 
 export const SPINE_MCP_TOOL_NAMES = SPINE_TOOL_NAMES.map(name => `mcp__spine__${name}`);
 
@@ -140,6 +142,25 @@ export class ConverseSdkRunner {
                   } catch { return failure; }
                 },
               ));
+              for (const name of Object.keys(DEVICE_TOOL_INPUTS) as DeviceToolName[]) {
+                if (tools.some(tool => tool?.name === name)) throw new Error("Duplicate private device tool");
+                if (!input.tools.list().includes(name)) continue;
+                tools.push(target.tool(
+                  name, `Home device operation: ${DEVICE_TOOL_OPERATIONS[name]}. Commands are asynchronous; use device_command_status to poll.`,
+                  DEVICE_TOOL_INPUTS[name].shape,
+                  async args => {
+                    try {
+                      const result = await input.tools.execute(name, args);
+                      if (typeof result.content !== "string" || Buffer.byteLength(result.content, "utf8") > 256 * 1024 ||
+                          (result.isError !== undefined && typeof result.isError !== "boolean")) throw new Error("Invalid device result");
+                      return { content: [{ type: "text", text: result.content }],
+                        ...(result.isError !== undefined ? { isError: result.isError } : {}) };
+                    } catch {
+                      return { content: [{ type: "text", text: "Device tools are unavailable. Please try again later." }], isError: true };
+                    }
+                  },
+                ));
+              }
               return target.createSdkMcpServer({ ...options, tools });
             };
             const value: unknown = Reflect.get(target, property);

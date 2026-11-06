@@ -11,6 +11,8 @@ export const SPINE_TOOL_NAMES = [
   "customize_platform", "finish_project", "project_completion_status",
   "integration_datasets", "integration_action_catalog", "integration_query",
   "integration_save_element", "propose_project_page", "inspect_project_photo", "propose_project_photo_assignments",
+  "device_list", "device_install_package", "device_ha_step", "device_light",
+  "device_light_states", "device_command_status",
 ] as const;
 export type SpineToolName = (typeof SPINE_TOOL_NAMES)[number];
 
@@ -53,6 +55,7 @@ import type {
   TenantMutationFence,
   TenantRepoProvider as VendoredTenantRepoProvider,
 } from "../vendor/mushy-author/ports/index.js";
+import type { DeviceOperation, DeviceToolResult } from "../agent/deviceTools.js";
 
 export interface ProjectDrawingState {
   binding: { schema: "leaf.project-execution-context.v1"; organization_id: string;
@@ -78,6 +81,12 @@ export interface AppRunClient extends VendoredAppRunClient {
     authority: { sessionId: string; turnId: string },
   ): Promise<Record<string, unknown>>;
   getAuthorStageStatus(tenantId: string, changeSetId: string): Promise<Record<string, unknown>>;
+  deviceTool?(
+    tenantId: string,
+    operation: DeviceOperation,
+    body: Record<string, unknown>,
+    authority: { sessionId: string; turnId: string },
+  ): Promise<DeviceToolResult>;
   proposeProjectPage(
     tenantId: string,
     sessionId: string,

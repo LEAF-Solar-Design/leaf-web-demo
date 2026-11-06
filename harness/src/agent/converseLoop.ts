@@ -19,6 +19,10 @@ import { SPINE_SYSTEM_PROMPT } from "./spineSystemPrompt.js";
 import { ProjectPhotoInspection, photoRequest, PHOTO_FAILURE } from "./projectPhotoInspection.js";
 import { INTEGRATION_TOOL_INPUTS, SPINE_TOOL_NAMES, ProjectPhotoAssignmentRequest, PHOTO_ASSIGNMENT_FAILURE, PHOTO_ASSIGNMENT_SUMMARY, type ProjectPhotoAssignmentInput } from "../ports/index.js";
 import {
+  DEVICE_TOOL_GUIDANCE, DEVICE_TOOL_INPUTS, DEVICE_TOOL_OPERATIONS,
+  DeviceToolResponse, deviceToolError, isDeviceTool,
+} from "./deviceTools.js";
+import {
   IntegrationClientError, integrationErrorMessage, validateIntegrationResponse,
   ProjectPageProposalRequest,
 } from "../ports/impl/appRunClient.js";
@@ -560,7 +564,7 @@ export class ConverseLoop {
       }
       const run = this.ports.runner.run({
         systemPrompt: SPINE_SYSTEM_PROMPT + "\nFor saved portfolio TEXT changes, use propose_project_page with the current project_material_context page revision and digest. It creates a private review proposal only. Use neither drawing overlays nor customize_platform for portfolio text." +
-          "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos.",
+          "\nFor requested photo inspection use inspect_project_photo: page through catalog using next_cursor and source witnesses, then request previews by stable material ID and preview digest. Only preview image blocks provide actual pixels; never claim unseen images were inspected. Assignments describe the current saved page only. After actual pixel inspection and the source catalog, use propose_project_photo_assignments for requested photo assignments with the current saved page revision/digest and material digest witnesses. Never infer photo content from filenames alone. Review privately; do not autonomously save or publish photos." + DEVICE_TOOL_GUIDANCE,
         userMessage,
         ...(resumeSdkSessionId ? { resumeSdkSessionId } : {}),
         ...(resumeSdkSessionId
@@ -741,6 +745,13 @@ export class ConverseLoop {
       args: Record<string, unknown>,
     ): Promise<{ action: string; args: Record<string, unknown> }> => {
       switch (tool) {
+        case "device_list":
+        case "device_install_package":
+        case "device_ha_step":
+        case "device_light":
+        case "device_light_states":
+        case "device_command_status":
+          throw new Error("Device tools require host authority.");
         case "integration_datasets":
         case "integration_action_catalog":
         case "integration_query":
@@ -1034,9 +1045,29 @@ export class ConverseLoop {
         // Integrations execute behind the host's sole gate and already return
         // their result. All other tools retain consult/check/dispatch.
         let hosted: IntegrationToolResult<unknown> | undefined;
+        let deviceResult: SpineToolResult | undefined;
         let consult: { action: string; args: Record<string, unknown> };
         let verdict: GateCheckResult;
-        if (isIntegrationTool(tool)) {
+        if (isDeviceTool(tool)) {
+          const parsed = DEVICE_TOOL_INPUTS[tool].safeParse(args);
+          const validAuthority = (id: unknown): id is string => typeof id === "string" &&
+            id.length > 0 && id.length <= 200 && id.trim() === id && !/[\u0000-\u001f\u007f-\u009f]/.test(id);
+          let response = deviceToolError("unavailable");
+          if (!parsed.success) {
+            response = deviceToolError("invalid_input");
+          } else if (validAuthority(instant.authoritySessionId) && validAuthority(instant.authorityTurnId) && appRun.deviceTool) {
+            args = parsed.data;
+            const body = JSON.stringify(args);
+            response = Buffer.byteLength(body, "utf8") > 16 * 1024
+              ? deviceToolError("invalid_input")
+              : DeviceToolResponse.parse(await appRun.deviceTool(tenantId, DEVICE_TOOL_OPERATIONS[tool], args, {
+                sessionId: instant.authoritySessionId, turnId: instant.authorityTurnId,
+              }));
+          }
+          deviceResult = { content: JSON.stringify(response), ...(!response.ok ? { isError: true } : {}) };
+          consult = { action: tool, args };
+          verdict = { decision: "allow" };
+        } else if (isIntegrationTool(tool)) {
           const parsed = INTEGRATION_TOOL_INPUTS[tool].safeParse(args);
           if (!parsed.success) throw new IntegrationClientError("invalid_input");
           args = parsed.data;
@@ -1150,6 +1181,8 @@ export class ConverseLoop {
             });
             result = ok(JSON.stringify({ pending: true, confirmation_id: confirmationId }));
           }
+        } else if (deviceResult) {
+          result = deviceResult;
         } else if (hosted) {
           result = ok(JSON.stringify(hosted.result));
         } else if (tool === "propose_project_photo_assignments") {
@@ -1197,6 +1230,8 @@ export class ConverseLoop {
         result = tool === "propose_project_photo_assignments" ? err(PHOTO_ASSIGNMENT_FAILURE)
           : tool === "inspect_project_photo" ? err(PHOTO_FAILURE) : tool === "propose_project_page"
           ? err("Portfolio proposal failed.")
+          : isDeviceTool(tool)
+          ? err(JSON.stringify(deviceToolError("unavailable")))
           : isIntegrationTool(tool)
           ? err(e instanceof IntegrationClientError ? integrationErrorMessage(e.code) : integrationErrorMessage("unavailable"))
           : err(`tool error: ${(e as Error).message}`);
@@ -1250,6 +1285,13 @@ export class ConverseLoop {
         return err(PHOTO_ASSIGNMENT_FAILURE); // Only the bound per-turn executor may propose.
       case "inspect_project_photo":
         return err(PHOTO_FAILURE); // Only the per-turn witness executor may inspect.
+      case "device_list":
+      case "device_install_package":
+      case "device_ha_step":
+      case "device_light":
+      case "device_light_states":
+      case "device_command_status":
+        return err(JSON.stringify(deviceToolError("unavailable")));
       case "propose_project_page": {
         const body = ProjectPageProposalRequest.parse(args);
         const source = ctx.pageProposalSource;
@@ -1885,6 +1927,7 @@ function truncate(s: string, n: number): string {
 /** Short HUMAN summary — never the full params (wire contract section 3). */
 function argsSummary(tool: SpineToolName, args: Record<string, unknown>): string {
   if (tool === "inspect_project_photo") return "inspect current project photo";
+  if (isDeviceTool(tool)) return `home device: ${DEVICE_TOOL_OPERATIONS[tool]}`;
   switch (tool) {
     case "integration_datasets":
       return "discover datasets";
@@ -2249,6 +2292,16 @@ function projectPublicationResult(content: string): Record<string, unknown> | un
 
 function resultSummary(tool: SpineToolName, result: SpineToolResult): string {
   if (tool === "inspect_project_photo") return result.isError ? PHOTO_FAILURE : "Project photo inspection returned privately.";
+  if (isDeviceTool(tool)) {
+    const response = DeviceToolResponse.safeParse(safeDeviceJson(result.content));
+    if (!response.success) return "device request unavailable";
+    if (!response.data.ok) return truncate(response.data.error.message, 120);
+    const value = response.data.result;
+    if (typeof value.command_id === "string") return `command ${truncate(value.command_id, 80)} queued`;
+    if (tool === "device_list") return `${Array.isArray(value.devices) ? value.devices.length : 0} devices`;
+    if (tool === "device_command_status") return `command ${String(value.state ?? "status unavailable")}`;
+    return "device request complete";
+  }
   if (result.isError) {
     try {
       const parsed = JSON.parse(result.content) as Record<string, unknown>;
@@ -2275,6 +2328,10 @@ function resultSummary(tool: SpineToolName, result: SpineToolResult): string {
     // non-JSON content: fall through
   }
   return tool === "drawing_state" ? "ok" : truncate(result.content, 80);
+}
+
+function safeDeviceJson(content: string): unknown {
+  try { return JSON.parse(content); } catch { return undefined; }
 }
 
 /** Deterministic catalog ranking: name hits weigh 3x description hits. */

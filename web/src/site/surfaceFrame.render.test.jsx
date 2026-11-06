@@ -27,8 +27,9 @@
 // why the slot mounts stayed exactly where the elements already stood.
 import { readFileSync, writeFileSync } from 'node:fs'
 import { join } from 'node:path'
+import { useState } from 'react'
 
-import { act, cleanup, fireEvent, render } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, within } from '@testing-library/react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import EntitlementGate from '../components/EntitlementGate.jsx'
@@ -117,6 +118,64 @@ function studioFrame(surface) {
     <SurfaceFrame.Frame />
   </SurfaceFrame>
 }
+
+it.each([true, false])('keeps Ops Devices reachable with the Studio rail hidden=%s', (railHidden) => {
+  // Use the actual App parent structure: the slot is mounted inside the
+  // activity rail, whose hidden/inert state must not hide the Ops controls.
+  const cockpitCss = readFileSync(join(process.cwd(), 'src/site/cockpit.css'), 'utf8')
+  const rules = cockpitCss.match(/\.studio-shell \.app\[data-surface\] (?:\.ops-integrations|header\.top:has\(\.ops-integrations)[^{}]*\{[^{}]*\}/g)
+  expect(rules).toHaveLength(4)
+  // Keep the heartbeat stable across shell rerenders and earlier than the
+  // drawer's initial clock, so opening it cannot make the device look future-dated.
+  const devices = [{
+    device_id: 'd1', label: 'Mac mini', hostname: 'mini.local',
+    last_seen_at: new Date(Date.now() - 5000).toISOString(),
+    packages: [{ package: 'homeassistant', version: 'v1', status: 'running' }],
+  }]
+  function OpsShell() {
+    const [open, onToggle] = useState(false)
+    return <SurfaceFrame scene="console" activeSurface="ops" studioShell states={STATES}
+      integrations={{ servers: [], open: false, onToggle: noop }}
+      devices={{ projectId: 'p1', open, onToggle, devices }}>
+      <div className="studio-shell">
+        <style>{rules.join('\n')}</style>
+        <div className="app" data-surface="ops" data-studio-shell="cockpit" data-environment-panel="none">
+          <header className="top"><div className="who" /></header>
+          <div className="rail-stack" id="project-workspace-activity" hidden={railHidden}
+            inert={railHidden ? '' : undefined} aria-hidden={railHidden || undefined}>
+            <SurfaceFrame.Integrations />
+          </div>
+        </div>
+      </div>
+    </SurfaceFrame>
+  }
+  const { container, getAllByRole, getByRole, queryByRole } = render(<OpsShell />)
+  const header = container.querySelector('header.top .who')
+  const trigger = within(header).getByRole('button', { name: /Devices/ })
+  expect(getAllByRole('button', { name: /Devices/ })).toHaveLength(1)
+  expect(within(header).getByRole('button', { name: /Linked services/ }).parentElement.nextElementSibling).toBe(trigger.parentElement)
+  expect(trigger).toBeVisible()
+  expect(trigger.closest('[hidden], [inert], [aria-hidden="true"]')).toBeNull()
+  // jsdom does not lay out boxes. Assert real CSS's positive size floor
+  // instead of mocking getBoundingClientRect and pretending to measure it.
+  expect(getComputedStyle(trigger).minWidth).toBe('44px')
+  expect(getComputedStyle(trigger).minHeight).toBe('44px')
+  expect(queryByRole('dialog', { name: 'Devices' })).toBeNull()
+  fireEvent.click(trigger)
+  expect(trigger).toHaveAttribute('aria-expanded', 'true')
+  const drawer = getByRole('dialog', { name: 'Devices' })
+  expect(drawer).toBeVisible()
+  expect(drawer.closest('[hidden], [inert], [aria-hidden="true"]')).toBeNull()
+  expect(getComputedStyle(drawer).position).toBe('fixed')
+  expect(getComputedStyle(drawer).overflowY).toBe('auto')
+  expect(within(drawer).getAllByText('Mac mini')).toHaveLength(1)
+  expect(within(drawer).getByRole('region', { name: 'Home Assistant setup' })).toBeVisible()
+  expect(within(drawer).getByRole('button', { name: 'Load light entities' })).toBeVisible()
+  fireEvent.click(within(drawer).getByRole('button', { name: 'Close devices panel' }))
+  expect(trigger).toHaveAttribute('aria-expanded', 'false')
+  expect(queryByRole('region', { name: 'Home Assistant setup' })).toBeNull()
+  expect(trigger).toHaveFocus()
+})
 
 if (!CAPTURE) it.each(['browser', 'ios'])('%s uses a compact inspector in the cockpit and retains the paper frame outside it', (surface) => {
   const { container, rerender } = render(studioFrame(surface))

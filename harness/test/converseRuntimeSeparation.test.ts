@@ -58,7 +58,7 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
     });
   }
 
-  it("converseLoop imports only the spine prompt, ports, schema validation, and redactor", () => {
+  it("converseLoop imports only the spine prompt, ports, schema validation, device tool schemas, and redactor", () => {
     const source = readFileSync(join(SRC, "agent/converseLoop.ts"), "utf8");
     const specifiers = [...source.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
     for (const spec of specifiers) {
@@ -68,6 +68,9 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
           spec === "zod" ||
           spec === "./spineSystemPrompt.js" ||
           spec === "./projectPhotoInspection.js" ||
+          // Admitted only because deviceTools.ts imports nothing but zod;
+          // the leaf-purity assertion below pins that restriction.
+          spec === "./deviceTools.js" ||
           spec === "../ports/index.js" ||
           // Canonical integration validation and fixed errors, with the same
           // SDK and dynamic-import exclusions checked above.
@@ -87,6 +90,15 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
       .toEqual(["node:crypto", "zod"]);
     expect(photoSource.match(/\bimport\s/g)).toHaveLength(2);
     expect(photoSource).not.toMatch(/@anthropic-ai|claude-agent-sdk|agentSdkRunner|\bimport\s*\(/);
+  });
+
+  it("the device tool schemas stay leaf-pure", () => {
+    const source = readFileSync(join(SRC, "agent/deviceTools.ts"), "utf8");
+    const specifiers = [...source.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!);
+    for (const spec of specifiers) {
+      expect(spec).toBe("zod");
+    }
+    expect(source).not.toMatch(/\bimport\s*\(/);
   });
 
   it("the redactor stays leaf-pure, so admitting it into the lane imports nothing else", () => {
