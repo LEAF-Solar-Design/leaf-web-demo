@@ -142,8 +142,10 @@ export class SpineTurnAdapter implements ConverseRunner {
 
   async *runTurn(
     input: ConverseTurnInput,
-    opts?: ConverseRunOptions,
+    opts?: ConverseRunOptions & { projectExecution?: "canonical-read" },
   ): AsyncGenerator<HarnessTurnEvent> {
+    const appRun = this.ports.appRun.forTurn?.({ tenantId: input.tenant_id,
+      sessionId: input.session_id, turnId: input.turn_id }) ?? this.ports.appRun;
     // 1. Grant FIRST, before any yield. A per-session bring-your-own credential
     //    on the wire ("mount your LLM") is used for THIS turn instead of the
     //    tenant's linked grant — mapped to the internal AgentGrant, injected into
@@ -228,8 +230,11 @@ export class SpineTurnAdapter implements ConverseRunner {
     // why nothing downstream of here needs a scrubbing wrapper.
     const store = this.ports.store;
 
+    const projectState = await appRun.getProjectDrawingState?.();
+    const drawingId = projectState?.binding.drawing_id ?? input.drawing_id;
+
     // 2. The loop's own session row (idempotent per tenant+drawing).
-    const session = await store.createOrGetSession(input.tenant_id, input.drawing_id);
+    const session = await store.createOrGetSession(input.tenant_id, drawingId);
 
     // 3. Resilience seed for the confirm mirror (see header).
     if (input.confirm) {
@@ -239,7 +244,7 @@ export class SpineTurnAdapter implements ConverseRunner {
     const loop = new ConverseLoop(
       {
         runner: this.ports.runnerFor(grant),
-        appRun: this.ports.appRun,
+        appRun,
         // The loop owns separate durable session/turn ids for SDK resume and
         // confirmation binding. Preserve the authenticated app wire ids as a
         // second, explicit authority tuple for the app-side entitlement lookup.
@@ -275,7 +280,8 @@ export class SpineTurnAdapter implements ConverseRunner {
         : {};
     const contextPacket: Record<string, unknown> = {
       ...input.context_packet,
-      drawing_id: input.drawing_id,
+      drawing_id: drawingId,
+      ...(projectState ? { project_execution_context: projectState.binding } : {}),
       ...priorMessages,
     };
 
@@ -333,6 +339,7 @@ export class SpineTurnAdapter implements ConverseRunner {
       priorMessages: input.messages,
       instantAssignment: opts?.instantAssignment,
       instantDrawingContext: opts?.instantDrawingContext,
+      projectExecution: opts?.projectExecution,
       authoritySessionId: input.session_id,
       authorityTurnId: input.turn_id,
       ...(this.ports.standardServicesResolver

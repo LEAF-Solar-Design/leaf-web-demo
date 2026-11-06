@@ -10,6 +10,9 @@ import json
 from types import SimpleNamespace
 import uuid
 import zipfile
+import subprocess
+from pathlib import Path
+from datetime import datetime, timezone
 
 import pytest
 
@@ -22,6 +25,132 @@ import project_material_images as images
 import project_preview_source as source
 import write_loop
 import store
+
+
+@pytest.fixture
+def native_repository(custody, tmp_path, monkeypatch):
+    """Actual Git bundle/package bytes; inert session, membership and HTTP boundaries."""
+    import browser_project_flow as flow
+    import project_reference_materials as originals
+    import project_repository_source as export
+    from leaf_platform import project_reference_materials as metadata
+    from project_repository_edit_contract import parse_staged_receipt, staged_receipt_digest
+    c = custody
+    c.edit, c.repo, c.sid, c.tid, c.mid = (str(uuid.uuid4()) for _ in range(5))
+    c.original = b'{"full":"original input","tail":[1,2,3]}\n'
+    digest = hashlib.sha256(c.original).hexdigest()
+    c.refs = [dict(material_id=c.mid, sha256=digest)]
+    c.body = dict(source_request_id=c.edit, source_operation='create', requirements='Use all original values.', material_refs=c.refs)
+    c.bound = dict(tenant_id=c.org, organization_id=c.org, project_id=c.project, repo_key=c.repo)
+    c.material = dict(org_id=c.org, project_id=c.project, actor_binding_id=c.actor,
+        material_id=c.mid, sha256=digest, byte_size=len(c.original), media_type='application/json')
+    c.files = {'project.yml': ('100644', source.NATIVE_PROJECT_SPEC.replace('${bundleId}', 'private.leaf.project.p'+c.project.replace('-', '')).encode()),
+        'Sources/LeafProjectApp.swift': ('100644', source.NATIVE_APP_SOURCE.encode()),
+        'Sources/ContentView.swift': ('100644', b'import SwiftUI\nstruct ContentView: View { var body: some View { Text("Original input") } }\n'),
+        'Resources/Input/'+c.mid+'.json': ('100644', c.original)}
+    repository = tmp_path/'native-git'
+    repository.mkdir()
+    def git(*args):
+        return subprocess.check_output(['git', '-C', str(repository), *args], stderr=subprocess.DEVNULL)
+    git('init', '--initial-branch=main')
+    for name, (_, raw) in c.files.items():
+        p = repository/name
+        p.parent.mkdir(parents=True, exist_ok=True)
+        p.write_bytes(raw)
+    git('add', '.')
+    git('-c', 'user.name=Native fixture', '-c', 'user.email=fixture@invalid.test', 'commit', '-m', 'fixture source, not model evidence')
+    c.commit, c.tree = (git('rev-parse', revision).decode().strip() for revision in ('HEAD', 'HEAD^{tree}'))
+    c.bundle_path = tmp_path/'source.bundle'
+    git('bundle', 'create', str(c.bundle_path), 'refs/heads/main')
+    c.bundle = c.bundle_path.read_bytes()
+    key = flow._request_key(c.body, source.NATIVE_PROFILE, c.sid, c.tid)
+    raw_receipt = dict(c.bound, contract='leaf.project-repository-edit.v2', edit_id=c.edit,
+        state='staged', operation='edit', source_edit_id=None, actor_binding_id=c.actor,
+        writer_lease_id=str(uuid.uuid4()), writer_lease_generation=1,
+        base_commit='1'*40, staged_head_commit=c.commit, staged_tree=c.tree,
+        changed_paths=sorted(c.files), diff_digest='2'*64,
+        instruction_digest=hashlib.sha256(c.body['requirements'].encode()).hexdigest(), idempotency_key=key)
+    now = datetime.now(timezone.utc)
+    c.row = dict(raw_receipt, state='published', version=4, receipt_json=raw_receipt,
+        receipt_digest=staged_receipt_digest(parse_staged_receipt(raw_receipt)),
+        observed_main_commit=c.commit, observed_main_tree=c.tree, observed_private_ref_commit=c.commit,
+        created_at=now, updated_at=now)
+    marker = dict(source_profile=source.NATIVE_PROFILE, action='create', source_request_id=c.edit,
+        request=c.body, authority=[c.org, c.project, c.actor], payload_digest=hashlib.sha256(flow.canonical(dict(
+            source_profile=source.NATIVE_PROFILE, action='create', source_request_id=c.edit, payload=c.body))).hexdigest())
+    started = dict(stage_authority=True, text=c.body['requirements'],
+        classifier_hint=flow._hint('create', c.edit, c.body, source_profile=source.NATIVE_PROFILE))
+    events = [dict(seq=1, turn_id=c.tid, type='turn_started', data=started),
+              dict(seq=2, turn_id=c.tid, type='browser_source_dispatch', data=marker)]
+    monkeypatch.setattr(flow.session_store, 'get_session', lambda sid: dict(last_seq=2) if sid == c.sid else None)
+    monkeypatch.setattr(flow.session_store, 'events_after', lambda sid, seq, limit: copy.deepcopy(events))
+    monkeypatch.setattr(flow.session_store, 'turn_started_data', lambda sid, tid, org: copy.deepcopy(started) if (sid,tid,org)==(c.sid,c.tid,c.org) else None)
+    monkeypatch.setattr(flow, '_store', lambda: SimpleNamespace(get_edit=lambda *a: copy.deepcopy(c.row) if a == (*c.bound.values(), c.edit) else None))
+    monkeypatch.setattr(flow.platform_link, 'platform_store', lambda: SimpleNamespace(resolve_project_repository_authority=lambda *a: copy.deepcopy(c.bound)))
+    monkeypatch.setattr(metadata, 'get_material', lambda *args: copy.deepcopy(c.material) if args == (c.org,c.project,c.actor,c.mid) else None)
+    c.backend.put_if_absent_or_verify(originals.object_key(c.org, c.project, digest), c.original)
+    def role(org, project, actor, *, write=False):
+        if (org,project)!=(c.org,c.project) or actor not in (c.actor,getattr(c,'worker',c.actor)) or not c.active:
+            raise lifecycle.LifecycleForbidden('fixture revoked')
+        return 'editor'
+    monkeypatch.setattr(lifecycle, 'require_project_role', role)
+    c.export_calls = []
+    monkeypatch.setenv('LEAF_AUTHOR_HARNESS_URL', 'https://harness.invalid')
+    monkeypatch.setattr(export.broker_client, 'harness_headers', lambda: {'X-Harness-Secret':'fixture-only'})
+    def post(url, *, data, **kwargs):
+        assert url.endswith('/internal/project-repository-source/export') and kwargs['stream'] and not kwargs['allow_redirects']
+        body = json.loads(data)
+        assert body == dict(c.bound, source_commit=c.commit, source_tree=c.tree)
+        c.export_calls.append(body)
+        request_digest = hashlib.sha256(json.dumps(dict(body, contract=export.BUNDLE_CONTRACT), sort_keys=True, separators=(',', ':')).encode()).hexdigest()
+        headers = {'Content-Type':'application/octet-stream','Content-Length':str(len(c.bundle)),
+            'X-Leaf-Source-Contract':export.BUNDLE_CONTRACT,'X-Leaf-Request-Digest':request_digest,
+            'X-Leaf-Source-Commit':c.commit,'X-Leaf-Source-Tree':c.tree,
+            'X-Leaf-Bundle-Sha256':hashlib.sha256(c.bundle).hexdigest(),
+            'X-Leaf-Lease-Id':str(uuid.uuid4()),'X-Leaf-Lease-Generation':'2'}
+        return SimpleNamespace(status_code=getattr(c,'export_status',200), headers=headers,
+            iter_content=lambda **kw: iter([c.bundle]), close=lambda: None)
+    monkeypatch.setattr(export.requests, 'post', post)
+    c.prepare_native = lambda: source.prepare_native_source(c.org,c.project,c.actor,source_request_id=c.edit)
+    return c
+
+
+def test_native_real_bundle_persisted_tree_and_original_bytes(native_repository):
+    c = native_repository
+    descriptor = c.prepare_native()
+    raw = source.read_source(c.org,c.project,c.actor,descriptor)
+    files = source.verify_native_archive(raw,descriptor)
+    assert files == c.files and source.native_tree(files) == c.tree
+    assert files['Resources/Input/'+c.mid+'.json'][1] == c.original
+    assert descriptor['source_commit'] == c.commit and descriptor['source_profile'] == source.NATIVE_PROFILE
+    assert 'revision' not in descriptor and len(c.export_calls) == 2
+    assert not c.exports  # Never substitute the Portfolio source producer.
+
+
+@pytest.mark.parametrize('kind', ['foreign-actor','unpublished','wrong-profile','stale-tree','oversize','hash','corrupt-bundle','stale-main'])
+def test_native_refusals_do_not_publish_sdk_package(native_repository, kind):
+    c = native_repository
+    if kind == 'foreign-actor': c.row['actor_binding_id'] = str(uuid.uuid4())
+    elif kind == 'unpublished': c.row['state'] = 'awaiting_confirmation'
+    elif kind == 'wrong-profile': c.row['idempotency_key'] = 'browser-source:'+'f'*64
+    elif kind == 'stale-tree': c.row['observed_main_tree'] = 'f'*40
+    elif kind == 'oversize': c.material['byte_size'] = 1048577
+    elif kind == 'hash': c.material['sha256'] = 'f'*64
+    elif kind == 'corrupt-bundle': c.bundle = b'not a Git bundle'
+    elif kind == 'stale-main': c.export_status = 409
+    with pytest.raises(Exception): c.prepare_native()
+    assert not any('/repository-source/' in p.as_posix() for p in Path(c.backend.root).rglob('*'))
+
+
+def test_native_custody_rechecks_current_authority_and_private_archive(native_repository):
+    c = native_repository
+    d = c.prepare_native()
+    c.active = False
+    with pytest.raises(lifecycle.LifecycleForbidden): source.read_source(c.org,c.project,c.actor,d)
+    c.active = True
+    key, _ = source._keys(d)
+    c.backend.put(key, b'corrupt')
+    with pytest.raises(source.SourceStoreUnavailable): source.read_source(c.org,c.project,c.actor,d)
 
 
 @pytest.fixture

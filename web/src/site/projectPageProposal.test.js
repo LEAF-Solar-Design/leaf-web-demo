@@ -1,5 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
-import { loadProjectPage, portfolioTextChanges, proposeProjectPage } from './projectPageClient.js'
+import { createHash, webcrypto } from 'node:crypto'
+import { loadProjectPage, portfolioTextChanges, proposeProjectPage, validateProjectPageProposal, validateProjectPhotoAssignmentProposal } from './projectPageClient.js'
 
 const unauthorized = vi.hoisted(() => vi.fn())
 vi.mock('../api.js', () => ({ config: { apiBase: 'https://api.example.test' },
@@ -21,6 +22,92 @@ const result = () => ({ source: { project_id: PROJECT, revision: 7, digest: 'a'.
 const reply = value => new Response(JSON.stringify(value), { headers: { 'content-type': 'application/json' } })
 const propose = (source = saved(), instruction = 'Shorten the headline', options) => proposeProjectPage(PROJECT, source, instruction, options)
 const INVALID = 'The text proposal could not be verified. Try again.'
+
+const photoDigest = document => createHash('sha256').update(JSON.stringify(document, (_, value) => value && typeof value === 'object' && !Array.isArray(value)
+  ? Object.fromEntries(Object.keys(value).sort().map(key => [key, value[key]])) : value)).digest('hex')
+const photoSaved = () => ({ ...saved(), digest: photoDigest(document()) })
+const photoProposal = () => {
+  const proposed = document()
+  proposed.categories[0].images.push({ material_id: '33333333-3333-4333-8333-333333333333', sha256: 'e'.repeat(64), preview_sha256: 'f'.repeat(64), title: 'Crème cake', alt: 'A fresh cake' })
+  return { schema: 'leaf.project-photo-assignment-proposal.v1', source: { ...result().source, digest: photoSaved().digest }, proposed_document: proposed, proposed_digest: photoDigest(proposed),
+    changes: [{ op: 'assign', material_id: proposed.categories[0].images[2].material_id, material_name: 'Cake original.jpg', gallery_slug: 'cakes', gallery_title: 'Cakes', index: 2, title: 'Crème cake', alt: 'A fresh cake' }] }
+}
+
+describe('closed original-photo proposal validation', () => {
+  it('hashes Python canonical UTF8, detaches before await and deeply freezes the append-only result', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const input = photoProposal(), source = photoSaved(), expected = JSON.parse(JSON.stringify(input))
+    const pending = validateProjectPhotoAssignmentProposal(PROJECT, source, input)
+    input.proposed_document.categories[0].images[0].title = 'Injected'
+    input.changes[0].material_name = 'Injected'
+    const validated = await pending
+    expect(validated).toEqual(expected)
+    for (const value of [validated, validated.source, validated.changes, validated.changes[0], validated.proposed_document, validated.proposed_document.categories[0].images[2]]) expect(Object.isFrozen(value)).toBe(true)
+    expect(source).toEqual(photoSaved())
+  })
+
+  it.each([
+    ['schema', value => { value.extra = true }],
+    ['project', value => { value.source.project_id = OTHER }],
+    ['revision', value => { value.source.revision++ }],
+    ['source digest', value => { value.source.digest = 'b'.repeat(64) }],
+    ['digest', value => { value.proposed_digest = '0'.repeat(64) }],
+    ['image hash', value => { value.proposed_document.categories[0].images[2].sha256 = '0'.repeat(64) }],
+    ['change caption', value => { value.changes[0].title = 'Different' }],
+    ['duplicate assignment', value => { value.changes.push({ ...value.changes[0] }) }],
+    ['already assigned', value => { value.changes[0].material_id = PROJECT; value.proposed_document.categories[0].images[2].material_id = PROJECT }],
+    ['reorder', value => { value.proposed_document.categories[0].images.reverse() }],
+    ['removal', value => { value.proposed_document.categories[0].images.splice(0, 1) }],
+    ['old caption', value => { value.proposed_document.categories[0].images[0].title = 'Rewritten' }],
+    ['design', value => { value.proposed_document.galleryLayout = 'single' }],
+    ['hero', value => { value.proposed_document.categories[0].hero = 1 }],
+    ['gallery', value => { value.changes[0].gallery_title = 'Invented' }],
+    ['index', value => { value.changes[0].index = 1 }],
+    ['unknown change field', value => { value.changes[0].sha256 = 'e'.repeat(64) }],
+    ['unsafe caption', value => { value.proposed_document.categories[0].images[2].title = value.changes[0].title = '<script>' }],
+    ['empty alt', value => { value.proposed_document.categories[0].images[2].alt = value.changes[0].alt = '' }],
+    ['oversized filename', value => { value.changes[0].material_name = 'x'.repeat(1025) }],
+    ['oversized envelope', value => { value.padding = 'x'.repeat(1024 * 1024) }],
+    ['too many changes', value => { value.changes = Array.from({ length: 201 }, () => ({ ...value.changes[0] })) }],
+    ['empty changes', value => { value.changes = [] }],
+  ])('rejects %s with a fixed safe error', async (label, corrupt) => {
+    vi.stubGlobal('crypto', webcrypto)
+    const value = photoProposal(); corrupt(value)
+    // Structural tampering must fail even with a matching document digest.
+    if (!['digest', 'image hash'].includes(label)) value.proposed_digest = photoDigest(value.proposed_document)
+    await expect(validateProjectPhotoAssignmentProposal(PROJECT, photoSaved(), value)).rejects.toThrow('The photo assignment proposal could not be verified. Try again.')
+  })
+
+  it('appends operations in order across existing galleries while retaining original design and captions', async () => {
+    vi.stubGlobal('crypto', webcrypto)
+    const source = photoSaved()
+    source.document.textStyles = { headline: { size: 48, lineHeight: 1.5 } }
+    source.document.categories[0].images[0].display = { fit: 'cover', focal: 'top-left' }
+    source.document.categories.push({ ...source.document.categories[0], slug: 'bread', title: 'Bread', images: [source.document.categories[0].images[1]] })
+    source.digest = photoDigest(source.document)
+    const value = photoProposal()
+    value.source.digest = source.digest
+    value.proposed_document = JSON.parse(JSON.stringify(source.document))
+    const first = { ...photoProposal().proposed_document.categories[0].images[2] }
+    const second = { ...first, material_id: '44444444-4444-4444-8444-444444444444', title: 'Second original' }
+    value.proposed_document.categories[1].images.push(first)
+    value.proposed_document.categories[0].images.push(second)
+    value.changes = [{ ...value.changes[0], gallery_slug: 'bread', gallery_title: 'Bread', index: 1 },
+      { ...value.changes[0], material_id: second.material_id, title: second.title }]
+    value.proposed_digest = photoDigest(value.proposed_document)
+    const validated = await validateProjectPhotoAssignmentProposal(PROJECT, source, value)
+    expect(validated.proposed_document.categories[0].images.slice(0, 2)).toEqual(source.document.categories[0].images)
+    expect(validated.proposed_document.textStyles).toEqual(source.document.textStyles)
+    expect(validated.changes.map(change => change.gallery_slug)).toEqual(['bread', 'cakes'])
+  })
+
+  it('keeps the closed text schema and text-only structure boundary', () => {
+    expect(validateProjectPageProposal(PROJECT, saved(), result())).toEqual(result())
+    expect(() => validateProjectPageProposal(PROJECT, saved(), photoProposal())).toThrow(INVALID)
+    const value = result(); value.proposed_document = photoProposal().proposed_document
+    expect(() => validateProjectPageProposal(PROJECT, saved(), value)).toThrow(INVALID)
+  })
+})
 
 beforeEach(() => { vi.stubGlobal('fetch', vi.fn()); unauthorized.mockClear() })
 afterEach(() => { vi.useRealTimers(); vi.unstubAllGlobals(); vi.restoreAllMocks() })

@@ -138,6 +138,7 @@ def route_lane(lane, tmp_path, monkeypatch):
     monkeypatch.setattr(session_store, "_store_mode", lambda: "legacy")
     session_store.ensure_started()
     sid = session_store.get_or_create_session("T", "D")["session_id"]
+    assert session_store.try_begin_turn(sid, "turn-1", 60, tier="demo")
     session_store.append_event(sid, "turn-1", "turn_started", {"entity_scope": B})
     monkeypatch.setattr(jobs.platform_link, "resolve_submission_context", lambda *a: None)
     monkeypatch.setattr(jobs_router, "_checkout_identity", lambda *a: ("anonymous", None))

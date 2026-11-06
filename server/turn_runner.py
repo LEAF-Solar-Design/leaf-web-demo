@@ -59,6 +59,7 @@ user-message record) and, only as a last-resort backstop, a synthetic
 from __future__ import annotations
 from copy import deepcopy
 import entity_scope as entity_scope_binding
+import project_execution_context as project_context_binding
 
 import json
 import base64
@@ -723,6 +724,7 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                turn_id: Optional[str] = None,
                journal_claimed: bool = False,
                entity_scope: Optional[Dict[str, Any]] = None,
+               project_execution_context: Optional[Dict[str, Any]] = None,
                integration_capture=None) -> str:
     if queued_id is not None or journal_claimed:
         integration_capture = None
@@ -761,6 +763,14 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         entitlement_elevated = entitlement_elevated is True
     tenant_id = str(tenant_id)
     sess = _require_session(tenant_id, session_id)
+    if project_execution_context is not None:
+        try:
+            project_execution_context = project_context_binding.validate_binding(project_execution_context)
+            if (str(sess.get("project_id")) != project_execution_context["project_id"]
+                    or str(sess.get("org_id")) != project_execution_context["organization_id"]):
+                raise project_context_binding.ContextError("project_context_session_mismatch")
+        except project_context_binding.ContextError as exc:
+            raise TurnRejected(exc.status_code, ErrorCode.BAD_PARAMS, str(exc), pre_harness=True) from exc
 
     authority_only = is_stage_authority_hint(classifier_hint)
     if authority_only and (not subject or confirm is not None or images
@@ -825,6 +835,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
     user_data: Dict[str, Any] = {}
     if entity_scope is not None:
         user_data["entity_scope"] = deepcopy(entity_scope)
+    if project_execution_context is not None:
+        user_data[project_context_binding.KEY] = deepcopy(project_execution_context)
     if text is not None:
         user_data["text"] = text
     if images:
@@ -907,7 +919,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         "tenant_id": tenant_id,
         "session_id": session_id,
         "turn_id": turn_id,
-        "drawing_id": sess["drawing_id"],
+        "drawing_id": (project_execution_context["drawing_id"]
+                       if project_execution_context is not None else sess["drawing_id"]),
         "messages": _prior_messages(session_id, exclude_turn_id=turn_id),
     }
     if text is not None:
@@ -932,6 +945,9 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
         payload["credential_grant"] = credential_grant
     instant_assignment = instant_execution.assignment_for_session(tenant_id, session_id)
     harness_headers = broker_client.harness_headers()
+    if project_execution_context is not None:
+        # Constant marker only. The execution back-edge resolves durable turn custody.
+        harness_headers["x-leaf-project-execution"] = "canonical-read"
     # Plan-first rides the SIDECAR, not the frozen turn body (the
     # instant-assignment precedent): consumed by the harness before the runner
     # starts, never in the transcript. Reading the policy can never sink a
@@ -1113,7 +1129,8 @@ def start_turn(tenant_id: str, session_id: str, *, text: Optional[str] = None,
                  entitlement_elevated=entitlement_elevated,
                  subject=subject,
                  request_id=request_id,
-                 **({"entity_scope": deepcopy(entity_scope)} if entity_scope is not None else {}))
+                 **({"entity_scope": deepcopy(entity_scope)} if entity_scope is not None else {}),
+                 **({"project_execution_context": deepcopy(project_execution_context)} if project_execution_context is not None else {}))
     return turn_id
 
 
@@ -1273,7 +1290,8 @@ def queued_prompt(session_id: str) -> Optional[Dict[str, Any]]:
 def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
                      classifier_hint: Optional[Dict[str, Any]] = None,
                      model: Optional[str] = None,
-                     request_id: Optional[str] = None) -> tuple:
+                     request_id: Optional[str] = None,
+                     project_execution_context: Optional[Dict[str, Any]] = None) -> tuple:
     """Queue ONE text prompt to start when the active turn ends.
 
     Returns ("queued", queued_id) or ("full", None). Only plain text turns are
@@ -1311,6 +1329,8 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
             "classifier_hint": classifier_hint,
             "model": model,
         }
+        if project_execution_context is not None:
+            recoverable[project_context_binding.KEY] = project_context_binding.validate_binding(project_execution_context)
         try:
             queued = request_journal.queue_request(request_id, recoverable)
         except request_journal.CredentialMaterial as exc:
@@ -1355,6 +1375,8 @@ def try_enqueue_turn(tenant_id: str, session_id: str, *, text: str,
         "created_at": time.time(),
         "starting": False,
     }
+    if project_execution_context is not None:
+        payload[project_context_binding.KEY] = project_context_binding.validate_binding(project_execution_context)
     with _queued_lock:
         if session_id in _queued:
             return ("full", None)
@@ -1496,6 +1518,8 @@ def _kick_durable_queued(session_id: Optional[str] = None) -> int:
                 text=payload["text"],
                 classifier_hint=payload.get("classifier_hint"),
                 model=payload.get("model"),
+                **({"project_execution_context": payload[project_context_binding.KEY]}
+                   if project_context_binding.KEY in payload else {}),
                 tier=(payload.get("tier")
                       if payload.get("entitlement_tier") is not None
                       else getattr(live_tenant, "tier", None)),
@@ -1681,6 +1705,8 @@ def _kick_queued(session_id: str) -> None:
                            text=payload["text"],
                            classifier_hint=payload["classifier_hint"],
                            model=payload["model"],
+                           **({"project_execution_context": payload[project_context_binding.KEY]}
+                              if project_context_binding.KEY in payload else {}),
                            tier=payload["tier"],
                            subject=payload["subject"],
                            queued_id=payload["queued_id"],
@@ -2053,8 +2079,14 @@ def _try_one_policy_confirm(tenant_id: str, session_id: str, cid: str,
                 binding = entity_scope_binding.stored_binding(consumed.get("payload"))
             except entity_scope_binding.ScopeError as exc:
                 raise TurnRejected(409, ErrorCode.BAD_PARAMS, str(exc), pre_harness=True) from exc
+            project_binding = project_context_binding.stored_binding(consumed.get("payload"))
+            if (project_binding is None and (session_store.get_session(session_id) or {}).get("project_id") is not None
+                    and consumed.get("capability") in ("drawing.read", "drawing.write")):
+                raise TurnRejected(409, ErrorCode.BAD_PARAMS, "project_execution_context_required", pre_harness=True)
             start_turn(tenant_id, session_id, confirm=confirm_payload,
                        tier=tier, subject=subject,
+                       **({"project_execution_context": project_binding}
+                          if project_binding is not None else {}),
                        **({"entity_scope": binding} if binding is not None else {}))
             _forget_parked()
             return True
@@ -2119,8 +2151,10 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                  entitlement_elevated: bool = False,
                  subject: Optional[str] = None,
                  request_id: Optional[str] = None,
-                 entity_scope: Optional[Dict[str, Any]] = None) -> None:
+                 entity_scope: Optional[Dict[str, Any]] = None,
+                 project_execution_context: Optional[Dict[str, Any]] = None) -> None:
     entity_scope = deepcopy(entity_scope)
+    project_execution_context = deepcopy(project_execution_context)
     # ONE deadline, shared by both terminal paths (see _drain_terminal). The
     # watchdog's own wait is anchored here too, so neither path can drift from
     # the other.
@@ -2353,11 +2387,11 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 # keeping the server-authored confirmation wire
                                 # argument-exact with the app gate.
                                 kind="run_capability",
-                                payload=entity_scope_binding.approval_payload((
+                                payload=project_context_binding.approval_payload(entity_scope_binding.approval_payload((
                                     {"dwg": data.get("dwg")}
                                     if isinstance(data.get("dwg"), str)
                                     else None
-                                ), entity_scope),
+                                ), entity_scope), project_execution_context),
                                 ttl_s=approval_ttl_s(),
                             )
                         except sqlite3.IntegrityError:
@@ -2372,8 +2406,8 @@ def _spawn_relay(tenant_id: str, session_id: str, turn_id: str,
                                 turn_id=turn_id, tool=proposal.get("tool"),
                                 params=proposal.get("params"), capability=proposal.get("capability"),
                                 rationale=proposal.get("rationale"), kind=data.get("kind"),
-                                payload=entity_scope_binding.approval_payload(
-                                    data.get("payload"), entity_scope), ttl_s=approval_ttl_s(),
+                                payload=project_context_binding.approval_payload(entity_scope_binding.approval_payload(
+                                    data.get("payload"), entity_scope), project_execution_context), ttl_s=approval_ttl_s(),
                             )
                         except sqlite3.IntegrityError:
                             pass  # row created at proposed_run (pair flow)

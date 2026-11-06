@@ -247,6 +247,11 @@ def test_sip_r6_download_and_etag(http):
 
 
 def test_sip_r6_download_refusals(http, monkeypatch):
+    assert routes._OUTPUT_FAILURES["IMPORT_STORE_UNAVAILABLE"] == (503, "Project source storage is unavailable.")
+    assert routes._OUTPUT_FAILURES["ARTIFACT_STORE_UNAVAILABLE"] == (503, "Project artifact storage is unavailable.")
+    assert routes._OUTPUT_FAILURES["IMPORT_WRITES_DRAINED"] == (503, "Project source creation is temporarily unavailable.")
+    assert routes._OUTPUT_FAILURES["REPORT_WRITES_DRAINED"] == (503, "Project report creation is temporarily unavailable.")
+    assert routes._OUTPUT_FAILURES["ARTIFACT_WRITES_DRAINED"] == (503, "Project artifact creation is temporarily unavailable.")
     prepared = files.save(http.s)
     path = file_path(http, prepared.meta["artifact_id"])
     for reason, (status, sentence) in routes._OUTPUT_FAILURES.items():
@@ -255,7 +260,10 @@ def test_sip_r6_download_refusals(http, monkeypatch):
                 raise GraphValidationError(reason)
             patch.setattr(artifacts, "read_project_artifact", failure)
             error = refusal(http.client.get(path), reason, status, sentence)
-            assert error["retryable"] is (reason in ("ARTIFACT_STORE_UNAVAILABLE", "ARTIFACT_WRITES_DRAINED"))
+            assert error["retryable"] is (reason in (
+                "ARTIFACT_STORE_UNAVAILABLE", "ARTIFACT_WRITES_DRAINED",
+                "IMPORT_STORE_UNAVAILABLE", "IMPORT_WRITES_DRAINED", "REPORT_WRITES_DRAINED",
+                "REPORT_BUSY", "REPORT_PARSE_TIMEOUT", "REPORT_PARSE_UNAVAILABLE"))
     for reason, status, retry in (("CONTEXT_NOT_FOUND", 404, False), ("PROJECT_FORBIDDEN", 403, False),
                                 ("INTAKE_DIGEST_MISMATCH", 500, False), ("STORE_UNAVAILABLE", 503, True)):
         with monkeypatch.context() as patch:

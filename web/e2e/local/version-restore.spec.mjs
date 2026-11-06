@@ -1,6 +1,19 @@
 import { expect, test } from '@playwright/test'
 import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
 
+// Synthetic fixture diagnostics, emitted only for the two previously failed cases.
+const restoreProofDiagnostics = new WeakMap()
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status === testInfo.expectedStatus) return
+  if (!['the /app history drawer shows deltas and restores an old version as a new head',
+    'an unreadable restored head keeps its warning through history refresh and does not refresh the viewer'].includes(testInfo.title)) return
+  const read = restoreProofDiagnostics.get(page)
+  if (!read) return
+  const body = JSON.stringify({ title: testInfo.title, status: testInfo.status, ...read() })
+  console.log(`RESTORE_DIAGNOSTIC ${body}`)
+  await testInfo.attach('restore-fixture-diagnostic', { body, contentType: 'application/json' })
+})
+
 // A DRAWING mutation, which is what "read-only preview" is about. Telemetry is
 // a non-GET too, but it carries no drawing write and the surface emits it on
 // interaction (including the preview click itself), so counting it makes the
@@ -8,6 +21,12 @@ import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture
 // Everything else non-GET still counts, so a real write during a preview
 // fails these rows exactly as before.
 const TELEMETRY_PATHS = new Set(['/api/telemetry'])
+const SAVE_DXF = [
+  '0', 'SECTION', '2', 'ENTITIES',
+  '0', 'LINE', '5', '10', '8', 'Panels',
+  '10', '0', '20', '0', '30', '0', '11', '100', '21', '50', '31', '0',
+  '0', 'ENDSEC', '0', 'EOF', '',
+].join('\n')
 function isDrawingMutation(method, path) {
   return method !== 'GET' && !TELEMETRY_PATHS.has(path)
 }
@@ -35,6 +54,7 @@ async function mountVersionSurface(page, {
   staleFirstHeadAfterRestore = false,
   splitReadFirstHeadAfterRestore = false,
   undoLandedOnSecondRead = false,
+  coverSaves = false,
   beforeApprove,
 } = {}) {
   const proofState = makeCatProofState()
@@ -42,10 +62,18 @@ async function mountVersionSurface(page, {
   let restoreCount = 0
   let intakeReadsAfterRestore = 0
   let deltasRequested = false
+  const savedRows = versionRows(3)
+  const saveRequests = []
   // Every drawing-mutating request the surface makes to the API. A read-only
   // preview must add NOTHING to this list; asserting on disabled buttons alone
   // would pass against a UI that greys a control and still fires the request.
   const mutating = []
+  const diagnosticStarted = Date.now()
+  const diagnosticRoutes = []
+  restoreProofDiagnostics.set(page, () => ({
+    head, restoreCount, intakeReadsAfterRestore, deltasRequested,
+    mutating: [...mutating], routes: diagnosticRoutes.slice(-24),
+  }))
   let releaseHistoryRefresh
   const historyRefreshGate = new Promise((resolve) => { releaseHistoryRefresh = resolve })
 
@@ -54,24 +82,55 @@ async function mountVersionSurface(page, {
     const url = new URL(request.url())
     const method = request.method()
     const path = url.pathname
-    const body = request.postData() ? request.postDataJSON() : {}
+    if (path.startsWith('/api/drawings/cat-panels/versions') || path === '/api/drawings/cat-panels/intake') {
+      diagnosticRoutes.push({ method, path, elapsedMs: Date.now() - diagnosticStarted })
+    }
+    const multipart = request.headers()['content-type']?.startsWith('multipart/form-data')
+    const body = request.postData() && !multipart ? request.postDataJSON() : {}
     if (isDrawingMutation(method, path)) mutating.push(`${method} ${path}`)
     let result
 
-    if (path === '/api/drawings/cat-panels/versions' && method === 'GET') {
+    if (coverSaves && path === '/api/drawings/cat-panels/dxf' && method === 'GET') {
+      await route.fulfill({
+        status: 200, contentType: 'application/dxf', body: SAVE_DXF,
+        headers: {
+          'access-control-allow-origin': '*',
+          'access-control-expose-headers': 'x-leaf-version, x-leaf-head',
+          'x-leaf-version': String(head), 'x-leaf-head': String(head),
+        },
+      })
+      return
+    }
+    if (coverSaves && /^\/api\/drawings\/cat-panels\/versions\/(edited|plan)$/.test(path) && method === 'POST') {
+      const kind = path.split('/').at(-1)
+      saveRequests.push({ kind, multipart, body: request.postDataBuffer().toString('utf8') })
+      const parent = head++
+      savedRows.push({
+        v: head, parent, tool: kind === 'edited' ? 'cad-edit-surface' : 'cad-edit-plan',
+        note: 'Saved browser edit', delta: { added: 1, modified: 0, deleted: 0 },
+      })
+      result = { status: 201, body: {
+        drawing_id: 'cat-panels', head, latest: head,
+        new_version: { drawing_id: 'cat-panels', version: head, parent },
+        ...(kind === 'plan' ? { commit: 'dwg-plan' } : {}),
+      } }
+    } else if (path === '/api/drawings/cat-panels/versions' && method === 'GET') {
       deltasRequested ||= url.searchParams.get('include_deltas') === '1'
       if (restoreCount && stallHistoryAfterRestore) await historyRefreshGate
       result = {
         status: 200,
         body: {
-          drawing_id: 'cat-panels', head, latest: head, checkout: null,
-          versions: versionRows(head),
+          drawing_id: 'cat-panels', head, latest: head, checkout: coverSaves ? proofState.checkout : null,
+          versions: coverSaves ? savedRows : versionRows(head),
         },
       }
-    } else if (/^\/api\/drawings\/cat-panels\/versions\/[12]\/restore$/.test(path) && method === 'POST') {
+    } else if (/^\/api\/drawings\/cat-panels\/versions\/[123]\/restore$/.test(path) && method === 'POST') {
       const restoredFrom = Number(path.split('/').at(-2))
       restoreCount += 1
-      head = 3 + restoreCount
+      if (coverSaves) {
+        const parent = head++
+        savedRows.push({ v: head, parent, tool: 'restore', note: `restore of version ${restoredFrom}` })
+      } else head = 3 + restoreCount
       result = {
         status: 200,
         body: {
@@ -80,6 +139,13 @@ async function mountVersionSurface(page, {
           new_version: { drawing_id: 'cat-panels', version: head, parent: head - 1 },
         },
       }
+    } else if (coverSaves && path === '/api/drawings/cat-panels/intake' && method === 'GET') {
+      if (restoreCount) intakeReadsAfterRestore += 1
+      const requested = url.searchParams.get('version')
+      const version = requested && requested !== 'head' ? Number(requested) : head
+      result = { status: 200, body: {
+        drawing_id: 'cat-panels', intake: proofState.base, version, head, latest: head,
+      } }
     } else if (path === '/api/drawings/cat-panels/intake' && method === 'GET' && restoreCount) {
       intakeReadsAfterRestore += 1
       result = failFirstRepairRead && intakeReadsAfterRestore === 1
@@ -108,6 +174,9 @@ async function mountVersionSurface(page, {
       result = catProofResponse({
         method, path, body, query: Object.fromEntries(url.searchParams),
       }, proofState)
+      if (coverSaves && path === '/api/jobs/cat-job-0002' && method === 'GET') {
+        result.body.result.result.new_version = { drawing_id: 'cat-panels', version: 3, parent: 2 }
+      }
     }
 
     await route.fulfill({
@@ -147,6 +216,7 @@ async function mountVersionSurface(page, {
     deltasRequested: () => deltasRequested,
     intakeReadsAfterRestore: () => intakeReadsAfterRestore,
     restoreCount: () => restoreCount,
+    saveRequests,
     releaseHistoryRefresh,
   }
 }
@@ -190,6 +260,97 @@ test('the /app history drawer shows deltas and restores an old version as a new 
   await expect(reopened.getByTestId('vh-row-v1')).toBeVisible()
   expect(observed.restoreCount()).toBe(1)
   expect(observed.intakeReadsAfterRestore()).toBeGreaterThan(0)
+})
+
+async function saveAndRestoreVersion(page, kind) {
+  const observed = await mountVersionSurface(page, { coverSaves: true })
+  const history = page.getByRole('dialog', { name: 'Version history' })
+  await expect(history.getByTestId('vh-row-v3').locator('.vh-mark')).toHaveText('head')
+  await history.getByRole('button', { name: 'Close version history' }).click()
+
+  // Production control: EngineRibbonClusters.jsx, fileTools/save-version,
+  // calls session.actions.save(). App.jsx engineSaveTarget.save chooses
+  // saveEditedDrawingVersion for a hand import and saveDrawingVersionPlan
+  // for a diff against the loaded head. There are no separate save buttons.
+  const ribbon = page.getByTestId('drafting-ribbon')
+  await page.getByRole('tab', { name: 'Insert', exact: true }).click()
+  const save = ribbon.locator('[data-tool="save-version"]')
+  if (await save.count() === 0) {
+    test.fail(true, `Missing /app Save version control (data-tool="save-version") for the ${kind}-version save; App.jsx gates EngineRibbonClusters on ENV_CAD_EDIT.`)
+    expect(await save.count(), 'the ribbon Save version control must exist').toBe(1)
+    return
+  }
+
+  await expect(page.locator('.workspace-card[data-engine-document="cat-panels-v3.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+  if (kind === 'edited') {
+    const open = ribbon.locator('[data-tool="import-dxf"]')
+    await open.click()
+    await page.getByLabel('DXF file', { exact: true }).setInputFiles({
+      name: 'history-edit.dxf', mimeType: 'application/dxf', buffer: Buffer.from(SAVE_DXF),
+    })
+    await expect(page.locator('.workspace-card[data-engine-document="history-edit.dxf"]')).toHaveCount(1, { timeout: 60_000 })
+    await open.click()
+  }
+
+  // Use the cockpit's real LINE operands and Run control, as in the
+  // one-shell-mount proof. A hand import has no committed base for a plan.
+  await page.getByRole('tab', { name: 'Draw', exact: true }).click()
+  await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('1')
+  await ribbon.locator('[data-tool="draw:createLine"]').click()
+  await page.getByLabel('ribbon x', { exact: true }).fill('0')
+  await page.getByLabel('ribbon y', { exact: true }).fill('0')
+  await page.getByLabel('ribbon x2', { exact: true }).fill('10')
+  await page.getByLabel('ribbon y2', { exact: true }).fill('10')
+  await page.getByTestId('cockpit-prompt-run').click()
+  await expect(page.getByTestId('cad-edit-entity-count')).toHaveText('2', { timeout: 60_000 })
+  await page.keyboard.press('Escape')
+  await page.getByRole('tab', { name: 'Insert', exact: true }).click()
+  await expect(save).toBeEnabled()
+  const beforeSave = observed.mutating().length
+  await save.click()
+  await expect.poll(() => observed.saveRequests.length).toBe(1)
+  const submitted = observed.saveRequests[0]
+  expect(submitted.kind).toBe(kind)
+  expect(submitted.multipart).toBe(true)
+  expect(submitted.body).toMatch(/name="parent_version"\r\n\r\n3\r\n/)
+  expect(submitted.body.includes('name="plan"')).toBe(kind === 'plan')
+  expect(observed.mutating().slice(beforeSave)).toContain(`POST /api/drawings/cat-panels/versions/${kind}`)
+
+  // A success message is not the persistence oracle: reopen server-backed
+  // history and require exactly one new head with the actual kind label.
+  await expect(save).toBeDisabled()
+  await page.getByRole('button', { name: 'History', exact: true }).click()
+  const saved = history.getByTestId('vh-row-v4')
+  await expect(saved.locator('.vh-mark')).toHaveText('head')
+  await expect(saved.locator('.vh-tool')).toHaveText(kind === 'edited' ? 'cad-edit-surface' : 'cad-edit-plan')
+  await expect(history.locator('.vh-mark')).toHaveCount(1)
+  await expect(history.getByTestId('vh-row-v3').locator('.vh-mark')).toHaveCount(0)
+
+  const previous = history.getByTestId('vh-row-v3')
+  await previous.getByRole('button', { name: 'Restore', exact: true }).click()
+  await previous.getByRole('button', { name: 'Restore v3', exact: true }).click()
+  await expect(history).toBeHidden()
+  await page.getByRole('button', { name: 'History', exact: true }).click()
+  // Restore appends a copy of v3, rather than moving the head pointer back.
+  const restored = history.getByTestId('vh-row-v5')
+  await expect(restored.locator('.vh-mark')).toHaveText('head')
+  await expect(restored.locator('.vh-tool')).toHaveText('restore')
+  await expect(restored).toContainText('restore of version 3')
+  await expect(saved.locator('.vh-mark')).toHaveCount(0)
+  await expect(history.locator('.vh-mark')).toHaveCount(1)
+  expect(observed.restoreCount()).toBe(1)
+  expect(observed.intakeReadsAfterRestore()).toBeGreaterThan(0)
+  expect(observed.saveRequests).toHaveLength(1)
+}
+
+test('saving an edited version makes it head with its kind, then restores the previous version', async ({ page }) => {
+  test.setTimeout(180_000)
+  await saveAndRestoreVersion(page, 'edited')
+})
+
+test('saving a plan version makes it head with its kind, then restores the previous version', async ({ page }) => {
+  test.setTimeout(180_000)
+  await saveAndRestoreVersion(page, 'plan')
 })
 
 test('an unreadable restored head keeps its warning through history refresh and does not refresh the viewer', async ({ page }) => {

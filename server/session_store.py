@@ -33,6 +33,9 @@ single global lock (identical posture to jobs.py), not a database-level
 transaction isolation guarantee; it is correct because ALL access to the
 shared connection funnels through this module.
 
+Conditional event appends additionally acquire SQLite's writer lock with
+BEGIN IMMEDIATE before reading last_seq, fencing independent processes too.
+
 DDL:
 
     sessions(
@@ -84,7 +87,7 @@ Store API v1 (signatures FROZEN — downstream lanes S3/S4 call these exactly):
     ensure_started() -> None
     get_or_create_session(tenant_id, drawing_id) -> dict
     get_session(session_id) -> Optional[dict]
-    append_event(session_id, turn_id, type, data) -> int
+    append_event(session_id, turn_id, type, data, *, expected_seq=None) -> int
     append_confirmation_resolved_once(session_id, turn_id, confirmation_id,
                                       approved, by) -> (seq, inserted)
     events_after(session_id, after_seq, limit=500) -> list
@@ -108,6 +111,7 @@ import sys
 import threading
 import time
 import uuid
+from contextlib import nullcontext
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -555,62 +559,77 @@ def turn_started_data(session_id: str, turn_id: str, tenant_id: str) -> Optional
 
 
 def append_event(session_id: str, turn_id: Optional[str], type: str,
-                  data: Dict[str, Any]) -> int:
+                  data: Dict[str, Any], *, expected_seq: Optional[int] = None) -> int:
     """Allocate the NEXT seq for this session and durably store the event, in
     ONE locked transaction: SELECT sessions.last_seq -> seq = last_seq + 1 ->
     INSERT INTO session_events -> UPDATE sessions.last_seq/updated_at -> commit.
     This is the ONLY place in the codebase that allocates seq. Raises
     KeyError if session_id is unknown (callers should have already resolved
     the session via get_session/get_or_create_session)."""
+    if expected_seq is not None and (
+        isinstance(expected_seq, bool) or not isinstance(expected_seq, int)
+        or expected_seq <= 0
+    ):
+        raise ValueError("expected_seq must be a positive integer")
     now = time.time()
     data_json = json.dumps(data if data is not None else {})
     with _lock:
         conn = _db()
         conn.row_factory = sqlite3.Row
-        cur = conn.execute("SELECT last_seq FROM sessions WHERE session_id = ?", (session_id,))
-        row = cur.fetchone()
-        if row is None:
-            raise KeyError(f"unknown session_id {session_id!r}")
-        seq = int(row["last_seq"]) + 1
-        conn.execute(
-            "INSERT INTO session_events (session_id, seq, turn_id, type, data_json, created_at)"
-            " VALUES (?,?,?,?,?,?)",
-            (session_id, seq, turn_id, type, data_json, now),
-        )
-        conn.execute(
-            "UPDATE sessions SET last_seq = ?, updated_at = ? WHERE session_id = ?",
-            (seq, now, session_id),
-        )
-        if type == "turn_started":
-            # Slice 6b: the listed title is the FIRST user text, written once
-            # in the same transaction as the event that carries it. `title IS
-            # NULL` keeps every later turn from rewriting it.
-            title = title_from_turn_started(data)
-            if title is not None:
-                conn.execute(
-                    "UPDATE sessions SET title = ? WHERE session_id = ? AND title IS NULL",
-                    (title, session_id),
+        # The connection context rolls back every conditional failure. Acquire
+        # SQLite's writer lock BEFORE reading the cursor: _lock alone cannot
+        # exclude writers using independent connections or processes.
+        with conn if expected_seq is not None else nullcontext():
+            if expected_seq is not None:
+                conn.execute("BEGIN IMMEDIATE")
+            cur = conn.execute("SELECT last_seq FROM sessions WHERE session_id = ?", (session_id,))
+            row = cur.fetchone()
+            if row is None:
+                raise KeyError(f"unknown session_id {session_id!r}")
+            seq = int(row["last_seq"]) + 1
+            if expected_seq is not None and seq != expected_seq:
+                raise RuntimeError(
+                    f"session event sequence mismatch: expected={expected_seq}, actual={seq}"
                 )
-            # Review finding 3: maintained here, in the same transaction as
-            # the event, so the list route never counts turn_started rows
-            # itself.
             conn.execute(
-                "UPDATE sessions SET turn_count = turn_count + 1 WHERE session_id = ?",
-                (session_id,),
+                "INSERT INTO session_events (session_id, seq, turn_id, type, data_json, created_at)"
+                " VALUES (?,?,?,?,?,?)",
+                (session_id, seq, turn_id, type, data_json, now),
             )
-        if type in ("turn_complete", "error") and turn_id is not None:
-            # Publish the terminal event and release its active-turn CAS in the
-            # same transaction. A transcript reader that sees the terminal
-            # event can therefore start the next turn without racing the relay's
-            # later metering work.
             conn.execute(
-                "UPDATE sessions SET active_turn_id = NULL,"
-                " turn_started_at = NULL, active_turn_tier = NULL,"
-                " active_turn_subject = NULL"
-                " WHERE session_id = ? AND active_turn_id = ?",
-                (session_id, turn_id),
+                "UPDATE sessions SET last_seq = ?, updated_at = ? WHERE session_id = ?",
+                (seq, now, session_id),
             )
-        conn.commit()
+            if type == "turn_started":
+                # Slice 6b: the listed title is the FIRST user text, written once
+                # in the same transaction as the event that carries it. `title IS
+                # NULL` keeps every later turn from rewriting it.
+                title = title_from_turn_started(data)
+                if title is not None:
+                    conn.execute(
+                        "UPDATE sessions SET title = ? WHERE session_id = ? AND title IS NULL",
+                        (title, session_id),
+                    )
+                # Review finding 3: maintained here, in the same transaction as
+                # the event, so the list route never counts turn_started rows
+                # itself.
+                conn.execute(
+                    "UPDATE sessions SET turn_count = turn_count + 1 WHERE session_id = ?",
+                    (session_id,),
+                )
+            if type in ("turn_complete", "error") and turn_id is not None:
+                # Publish the terminal event and release its active-turn CAS in the
+                # same transaction. A transcript reader that sees the terminal
+                # event can therefore start the next turn without racing the relay's
+                # later metering work.
+                conn.execute(
+                    "UPDATE sessions SET active_turn_id = NULL,"
+                    " turn_started_at = NULL, active_turn_tier = NULL,"
+                    " active_turn_subject = NULL"
+                    " WHERE session_id = ? AND active_turn_id = ?",
+                    (session_id, turn_id),
+                )
+            conn.commit()
         return seq
 
 
@@ -1917,9 +1936,27 @@ def list_sessions(
 
 def append_event(
     session_id: str, turn_id: Optional[str], type: str, data: Dict[str, Any],
+    *, expected_seq: Optional[int] = None,
 ) -> int:
+    """Append, optionally requiring expected_seq to be the NEXT sequence.
+
+    Conditional appends are atomic in either authoritative store. Migration
+    modes that write both stores cannot share a transaction and are refused
+    before either store is touched. Read-only shadow mode uses SQLite's fence.
+    """
+    if expected_seq is not None and (
+        isinstance(expected_seq, bool) or not isinstance(expected_seq, int)
+        or expected_seq <= 0
+    ):
+        raise ValueError("expected_seq must be a positive integer")
     mode = _store_mode()
+    if expected_seq is not None and mode in _DUAL_WRITE_MODES:
+        raise RuntimeError("conditional session event append is unavailable in dual-write modes")
     if mode == "postgres":
+        if expected_seq is not None:
+            return _pg_append_event(
+                session_id, turn_id, type, data, expected_seq=expected_seq,
+            )
         return _pg_append_event(session_id, turn_id, type, data)
     if mode in _DUAL_WRITE_MODES:
         # Review finding 11: verify the mirror can accept this write BEFORE
@@ -1928,6 +1965,10 @@ def append_event(
         postgres_before = _pg_get_session(session_id)
         if postgres_before is None:
             raise RuntimeError("PostgreSQL session mirror is missing")
+    if expected_seq is not None:
+        return _legacy_append_event(
+            session_id, turn_id, type, data, expected_seq=expected_seq,
+        )
     seq = _legacy_append_event(session_id, turn_id, type, data)
     if mode in _DUAL_WRITE_MODES:
         mirrored = _legacy_get_session(session_id)

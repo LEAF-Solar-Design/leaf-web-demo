@@ -789,6 +789,7 @@ def _put_intake_cache_fenced(
 def _finalize_pg_ready_attempt(
     backend, tenant_id: str, drawing_id: str, marker: Dict[str, Any],
     owner: str, fence: int, key: str, data: bytes, version: int = 1,
+    original_dxf: Optional[bytes] = None,
 ) -> str:
     """Publish cache, version visibility, and ready marker as one DB commit."""
     from psycopg.types.json import Jsonb
@@ -833,6 +834,9 @@ def _finalize_pg_ready_attempt(
         ).fetchone()
         if row is None:
             raise RuntimeError("upload extraction lease is stale")
+
+        if original_dxf is not None:
+            _preserve_original_dxf(backend, tenant_id, drawing_id, marker, original_dxf)
 
         version_row = conn.execute(
             """
@@ -1260,6 +1264,26 @@ def staged_path(tenant_id: str, drawing_id: str, ext: str) -> Path:
     return uploads_dir() / f"{tenant_id}--{drawing_id}{ext}"
 
 
+def original_dxf_key(tenant_id: str, drawing_id: str, digest: str) -> str:
+    """Immutable original DXF, independent of the extracted intake object."""
+    tenant_id = _safe_path_id(tenant_id, "tenant_id")
+    drawing_id = _safe_path_id(drawing_id, "drawing_id")
+    if not isinstance(digest, str) or re.fullmatch(r"[0-9a-f]{64}", digest) is None:
+        raise ValueError("invalid original DXF digest")
+    return f"tenants/{tenant_id}/drawings/{drawing_id}/sources/{digest}.dxf"
+
+
+def _preserve_original_dxf(backend, tenant_id, drawing_id, marker, raw):
+    digest = marker.get("content_sha256")
+    if (not isinstance(raw, bytes) or type(marker.get("bytes")) is not int
+            or marker["bytes"] != len(raw) or hashlib.sha256(raw).hexdigest() != digest):
+        raise ValueError("original DXF does not match its reserved upload")
+    key = original_dxf_key(tenant_id, drawing_id, digest)
+    backend.put_if_absent_or_verify(key, raw)
+    if backend.get(key) != raw:
+        raise ValueError("immutable original DXF verification failed")
+
+
 def _verify_staged_source(
     tenant_id: str, drawing_id: str, ext: str, marker: Dict[str, Any],
 ) -> Path:
@@ -1527,6 +1551,9 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
             cache_key = write_loop.intake_cache_key(tenant_id, drawing_id, 1)
             cache_data = json.dumps(
                 intake, separators=(",", ":")).encode("utf-8")
+            original_dxf = None
+            if ext == ".dxf" and marker.get("tenant_kind") == "account":
+                original_dxf = _verify_staged_source(tenant_id, drawing_id, ext, marker).read_bytes()
             if upload_store_mode() == "postgres":
                 ready_marker = dict(marker)
                 ready_marker["status"] = "ready"
@@ -1536,7 +1563,8 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                     cache_data).hexdigest()
                 _finalize_pg_ready_attempt(
                     backend, tenant_id, drawing_id, ready_marker,
-                    extraction_owner, extraction_fence, cache_key, cache_data)
+                    extraction_owner, extraction_fence, cache_key, cache_data,
+                    original_dxf=original_dxf)
             else:
                 # Guarded for the same reason the ingest is, and it is a
                 # SEPARATE window: `ingest_drawing` released the shared lock
@@ -1549,6 +1577,8 @@ def _run_extraction(tenant_id: str, drawing_id: str, ext: str) -> None:
                 # and this attempt stops without leaving a trace.
                 try:
                     with store.legacy_drawing_guard(backend, tenant_id, drawing_id):
+                        if original_dxf is not None:
+                            _preserve_original_dxf(backend, tenant_id, drawing_id, marker, original_dxf)
                         backend.put(cache_key, cache_data)
                 except KeyError:
                     return  # purged between the ingest and the cache write

@@ -71,7 +71,7 @@ describe('CatalogStatus', () => {
     render(<CatalogStatus state="failed" onRetry={onRetry} />)
     const alert = screen.getByRole('alert')
     expect(alert.className).toBe('catalog-status')
-    expect(alert.querySelector('p').textContent).toBe('The tool list did not load. Your saved tools are still available below.')
+    expect(alert.querySelector('p').textContent).toBe('The tool list did not load. Try again.')
     const retry = screen.getByRole('button', { name: 'Retry' })
     expect(alert.contains(retry)).toBe(true)
     expect(retry.type).toBe('button')

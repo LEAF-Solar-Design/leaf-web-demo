@@ -25,6 +25,9 @@ _TEXT_LIMITS = {"label": (1, 120), "headline": (1, 240),
                 "description": (0, 1200), "status": (0, 80)}
 _ENUMS = {"theme": ("cream", "light", "dark"), "alignment": ("center", "left")}
 _URL = re.compile(r"(?:[a-z][a-z0-9+.-]*://|\b(?:https?|ftp|file|data|javascript):|\bwww\.)", re.I)
+_EMAIL = re.compile(r'[A-Za-z0-9]+(?:[._+-][A-Za-z0-9]+)*@[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*(?:\.[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*)+')
+_ACTION_HTTPS = re.compile(r'https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+(?::[0-9]{1,5})?'
+                           r'(?:[/?#](?:[A-Za-z0-9._~!$&()*+,;=:@/?#-]|%[0-9A-Fa-f]{2})*)?')
 MAX_DOCUMENT_BYTES = 8192
 PACKAGE_VERSIONS = {"next": "16.4.3", "react": "18.3.1", "react-dom": "18.3.1"}
 
@@ -88,6 +91,8 @@ PAGE_CSS = """.project-page {
   line-height: 1.6;
   color: var(--page-muted);
 }
+.project-page__action { margin: 2.5rem 0 0; overflow-wrap: anywhere; }
+.project-page__action a { color: inherit; text-decoration: underline; }
 """
 
 _PAGE_JSX = """import page from '../page.json';
@@ -101,6 +106,7 @@ export default function Page() {
         <h1 className="project-page__headline" style={textStyle(page.textStyles?.headline)}>{page.headline}</h1>
         {page.description && <p className="project-page__description" style={textStyle(page.textStyles?.description)}>{page.description}</p>}
         {page.status && <p className="project-page__status" style={textStyle(page.textStyles?.status)}>{page.status}</p>}
+        {page.action && <p className="project-page__action"><a href={page.action.href}>{page.action.label}</a></p>}
       </div>
     </main>
   );
@@ -139,6 +145,7 @@ repeatable subsequent installs. This export does not claim a completed build.
 ## Change the page
 
 Edit page.json for text, theme (cream, light, dark), and alignment (center, left).
+The optional action contains a label and an href with an https or mailto link.
 Text remains React data, not HTML. The layout is in app/page.jsx and styles are
 in app/globals.css. No external fonts or image services are required.
 
@@ -169,13 +176,14 @@ def _canonical_json(value: object) -> bytes:
 def validate_document(document: dict) -> dict:
     """Return a detached canonical document, or raise ValueError.
 
-    Only literal text and the two closed preset enums enter the model. There
-    is no field for executable source, HTML, CSS, links, or resource fetching.
+    Only literal text, the two closed preset enums, optional design fields and
+    one bounded https or mailto action enter the model. There is no field for
+    executable source, HTML, CSS, or resource fetching.
     Text is preserved exactly, including newlines; no silent trimming occurs.
     """
     if type(document) is dict and 'schema' in document:
         return _portfolio_template().validate_document(document)
-    if type(document) is not dict or set(document) - set(DESIGN_FIELDS['page']) != set(_TEXT_LIMITS) | set(_ENUMS):
+    if type(document) is not dict or set(document) - set(DESIGN_FIELDS['page']) - {'action'} != set(_TEXT_LIMITS) | set(_ENUMS):
         raise ValueError("Page must contain exactly the six supported fields")
     validate_node(document, 'page')
     for field, (minimum, maximum) in _TEXT_LIMITS.items():
@@ -191,6 +199,26 @@ def validate_document(document: dict) -> dict:
     for field, choices in _ENUMS.items():
         if type(document[field]) is not str or document[field] not in choices:
             raise ValueError(f"Invalid {field} preset")
+    if 'action' in document:
+        action = document['action']
+        if type(action) is not dict or set(action) != {'label', 'href'}:
+            raise ValueError("Action must contain exactly label and href")
+        label = action['label']
+        if type(label) is not str or not 1 <= len(label) <= 60 or not label.strip():
+            raise ValueError("Invalid action label length")
+        if any(unicodedata.category(char) in ('Cc', 'Cf', 'Cs') for char in label):
+            raise ValueError("Control characters are not allowed in action label")
+        if '<' in label or '>' in label or _URL.search(label):
+            raise ValueError("Use plain text without HTML or URLs in action label")
+        href = action['href']
+        if type(href) is not str or not 1 <= len(href) <= 2048:
+            raise ValueError("Invalid action href length")
+        if any(char.isspace() or unicodedata.category(char) in ('Cc', 'Cf', 'Cs')
+               or char in '<>\"\'`' for char in href):
+            raise ValueError("Invalid characters in action href")
+        if not (_ACTION_HTTPS.fullmatch(href)
+                or (href.startswith('mailto:') and _EMAIL.fullmatch(href[7:]))):
+            raise ValueError("Action href must be an https or mailto link")
     result = {key: document[key] for key in sorted(document)}
     if len(_canonical_json(result)) > MAX_DOCUMENT_BYTES:
         raise ValueError("Page document is too large")

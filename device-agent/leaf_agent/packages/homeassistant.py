@@ -19,8 +19,8 @@ a credential-backed temporary token. GET config_entries/flow returns 405;
 listing uses WS config_entries/flow/progress plus locally tracked user flows.
 Completed onboarding has no status view after restart (404).
 The group menu accepts next_step_id=light; its form also defaults all=false.
-Apple SecurityTool/macOS/keychain_add.c confirms that a bare -w prompts twice;
-security runs in a detached session and receives both answers only on stdin.
+Keychain writes use security -i commands on stdin to avoid getpass truncation;
+each write is verified by reading the full value back.
 No HA credentials or upstream exception text are logged or returned.
 """
 from __future__ import annotations
@@ -36,6 +36,7 @@ import plistlib
 import re
 import secrets
 import shutil
+import signal
 import socket
 import struct
 import subprocess
@@ -45,7 +46,7 @@ from urllib.error import HTTPError
 from urllib.parse import urlencode
 from urllib.request import Request
 
-from .. import launchd
+from .. import __version__, launchd
 from ..client import secure_opener
 from ..config import Config, atomic_write, write_json
 
@@ -53,6 +54,7 @@ PINNED_VERSION = "2026.10.4"
 REQUIRES_PYTHON = ">=3.14.2"
 INSTALL_BUDGET_S = 1440  # Leave 60 seconds for error persistence before the worker deadline.
 LABEL = "ai.leaf.homeassistant"
+APP_IDENTIFIER = "ai.leaf.homeassistant.app"
 CLIENT_ID = "http://127.0.0.1:8123/"
 FLOW_PATH = "/api/config/config_entries/flow"
 MAX_BODY = 1048576
@@ -219,12 +221,17 @@ class HomeAssistant:
 
     def _save_credential(self, name, value):
         if self.platform == "darwin":
-            # security's missing -w argument prompts twice via getpass. Detach
-            # from the controlling terminal so both prompts consume stdin.
-            result = self.runner(["/usr/bin/security", "add-generic-password", "-U", "-s", LABEL, "-a", name, "-w"],
-                                 input=value + "\n" + value + "\n", start_new_session=True,
-                                 check=False, capture_output=True, text=True, timeout=15)
-            if result.returncode:
+            if not value or any(char in value for char in '"\\\n\r\x00'):
+                raise HAError("Invalid credential value")
+            try:
+                self.runner(["/usr/bin/security", "-i"],
+                            input=f'add-generic-password -U -s "{LABEL}" -a "{name}" -w "{value}"\nquit\n',
+                            start_new_session=True, check=False, capture_output=True, text=True, timeout=15)
+                # security -i may exit nonzero after quit even when the write landed.
+                saved = self._credential(name)
+            except Exception:
+                raise HAError("Credential write failed") from None
+            if saved != value:
                 raise HAError("Credential write failed")
         else:
             values = self._load("credentials.json", {})
@@ -316,10 +323,79 @@ class HomeAssistant:
     def _service_path(self):
         return launchd.service_path(self.platform, self.user_home).with_name(LABEL + (".plist" if self.platform == "darwin" else ".service"))
 
+    def _app_path(self):
+        home = self.user_home if self.user_home is not None else Path.home()
+        return home / "Applications/Leaf Home Assistant.app"
+
+    def _build_app(self):
+        app = self._app_path()
+        values = [str(self.root / "lan.status"), str(self.root / "hass.log"),
+                  str(self.root / "venv/bin/hass"), "-c", str(self.root / "config")]
+        if any(any(char in value for char in "\n\r\x00") for value in values):
+            raise HAError("Invalid Home Assistant launcher argument")
+        contents = app / "Contents"
+        (contents / "MacOS").mkdir(parents=True, exist_ok=True)
+        (contents / "Resources").mkdir(exist_ok=True)
+        atomic_write(contents / "Info.plist", plistlib.dumps({
+            "CFBundleIdentifier": APP_IDENTIFIER,
+            "CFBundleName": "Leaf Home Assistant",
+            "CFBundleDisplayName": "Leaf Home Assistant",
+            "CFBundleExecutable": "leaf-ha-launcher",
+            "CFBundlePackageType": "APPL",
+            "CFBundleVersion": __version__,
+            "CFBundleShortVersionString": __version__,
+            "LSUIElement": True,
+            "NSLocalNetworkUsageDescription": "Leaf Home Assistant controls the lights on your home network.",
+            "NSBluetoothAlwaysUsageDescription": "Home Assistant can find Bluetooth devices near this computer.",
+            "NSBonjourServices": ["_hue._tcp"],
+        }, sort_keys=True))
+        launcher = contents / "MacOS/leaf-ha-launcher"
+        shutil.copyfile(Path(__file__).parent / "assets/leaf-ha-launcher", launcher)
+        launcher.chmod(0o755)
+        atomic_write(contents / "Resources/run.args", ("\n".join(values) + "\n").encode("utf-8"))
+        self.runner(["codesign", "--force", "--deep", "-s", "-", str(app)],
+                    check=True, capture_output=True, timeout=30)
+        return app
+
+    def _stop_app(self):
+        launcher = self._app_path() / "Contents/MacOS/leaf-ha-launcher"
+        # pgrep patterns are regular expressions: anchor and escape the entire
+        # executable path so another app or a command mentioning it cannot match.
+        result = self.runner(["pgrep", "-f", "^" + re.escape(str(launcher)) + "$"],
+                             check=False, capture_output=True, text=True, timeout=10)
+        if result.returncode == 1:
+            return
+        if result.returncode != 0:
+            raise HAError("Home Assistant launcher lookup failed")
+        try:
+            pids = {int(value) for value in result.stdout.splitlines()}
+            if any(pid <= 0 for pid in pids):
+                raise ValueError
+        except (ValueError, AttributeError):
+            raise HAError("Invalid Home Assistant launcher PID") from None
+        for pid in pids:
+            try:
+                os.kill(pid, signal.SIGTERM)
+            except ProcessLookupError:
+                pass
+        deadline = self.clock() + 10
+        while pids:
+            for pid in tuple(pids):
+                try:
+                    os.kill(pid, 0)
+                except ProcessLookupError:
+                    pids.remove(pid)
+            if not pids:
+                return
+            remaining = deadline - self.clock()
+            if remaining <= 0:
+                raise HAError("Home Assistant launcher stop failed")
+            self.sleep(min(0.1, remaining))
+
     def _stop(self, *, remove=False):
         path = self._service_path()
         if self.platform == "darwin":
-            if not path.exists():
+            if not path.exists() and not self._app_path().exists():
                 return
             uid = os.getuid() if self.uid is None else self.uid
             result = self.runner(["launchctl", "bootout", f"gui/{uid}", str(path)], check=False, capture_output=True, timeout=15)
@@ -330,19 +406,27 @@ class HomeAssistant:
             absent_codes = {5}
         if getattr(result, "returncode", 0) not in {0, *absent_codes}:
             raise HAError("Home Assistant service stop failed")
+        if self.platform == "darwin":
+            self._stop_app()
         if remove:
             path.unlink(missing_ok=True)
-            if self.platform != "darwin":
+            if self.platform == "darwin":
+                if self._app_path().exists():
+                    shutil.rmtree(self._app_path())
+            else:
                 self.runner(["systemctl", "--user", "daemon-reload"], check=True, capture_output=True, timeout=15)
 
     def _start(self):
         path = self._service_path()
         hass, config, log = self.root / "venv/bin/hass", self.root / "config", self.root / "hass.log"
         if self.platform == "darwin":
+            app = self._build_app()
             rendered = plistlib.loads(launchd.render_plist(self.home, str(hass)))
-            rendered.update(Label=LABEL, ProgramArguments=[str(hass), "-c", str(config)],
+            rendered.update(Label=LABEL, ProgramArguments=["/usr/bin/open", "-W", str(app)],
+                            AssociatedBundleIdentifiers=[APP_IDENTIFIER],
                             StandardOutPath=str(log), StandardErrorPath=str(log))
             atomic_write(path, plistlib.dumps(rendered, sort_keys=True))
+            (self.root / "lan.status").unlink(missing_ok=True)
             uid = os.getuid() if self.uid is None else self.uid
             self.runner(["launchctl", "bootstrap", f"gui/{uid}", str(path)], check=True, capture_output=True, timeout=15)
         else:
@@ -595,6 +679,29 @@ class HomeAssistant:
         # Never expose HA entry data/result objects (Hue stores bridge keys).
         return {key: value for key, value in result.items() if key in FLOW_KEYS}
 
+    @staticmethod
+    def _hue_init_choice(result):
+        schema = result.get("data_schema")
+        if not isinstance(schema, list):
+            return "manual"
+        for field in schema:
+            if not isinstance(field, dict) or field.get("name") != "id":
+                continue
+            options = field.get("options", field.get("in", field.get("type")))
+            for _ in range(3):
+                if not isinstance(options, dict) or not ("options" in options or "in" in options):
+                    break
+                options = options.get("options", options.get("in"))
+            if isinstance(options, (list, dict)):
+                for option in options:
+                    if isinstance(option, dict):
+                        option = option.get("value")
+                    elif isinstance(option, (list, tuple)) and len(option) == 2:
+                        option = option[0]
+                    if isinstance(option, str) and option and option != "manual":
+                        return option
+        return "manual"
+
     def _flow_start(self, handler, data=None):
         if handler not in {"hue", "wiz", "group"}:
             raise HAError("Unsupported flow handler")
@@ -608,11 +715,20 @@ class HomeAssistant:
                         **{key: value for key, value in group_data.items()
                            if key in {"name", "entities", "hide_members", "all"}}}
         result = self._request("POST", FLOW_PATH, {"handler": handler, "show_advanced_options": False})
+        hue_init = False
+        if handler == "hue":
+            for _ in range(2):
+                if result.get("type") != "form" or result.get("step_id") != "init":
+                    break
+                hue_init = True
+                result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]),
+                                       {"id": self._hue_init_choice(result)})
         self._remember(result, handler)
         if handler == "group" and result["type"] == "menu":
             result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]), {"next_step_id": group_type})
             self._remember(result, handler)
-        if result["type"] == "form" and data is not None:
+        if (result["type"] == "form" and data is not None and
+                (not hue_init or result.get("step_id") == "manual")):
             result = self._request("POST", FLOW_PATH + "/" + self._flow_id(result["flow_id"]), data)
         return self._remember(result, handler)
 
@@ -622,6 +738,8 @@ class HomeAssistant:
         handler = current.get("handler")
         if handler not in {"hue", "wiz", "group"}:
             raise HAError("Unsupported flow handler")
+        if handler == "hue" and current.get("step_id") == "init" and "id" not in data:
+            data = {"id": self._hue_init_choice(current)}
         if handler == "group":
             if current["type"] == "menu":
                 data = {"next_step_id": "light"}
@@ -674,8 +792,15 @@ class HomeAssistant:
                 raise HAError("Invalid keep_data")
             return self._uninstall(args["keep_data"])
         if op == "pkg.health":
-            return self.state() or {"package": "homeassistant", "version": PINNED_VERSION,
-                                    "status": "stopped", "last_health_at": None}
+            result = self.state() or {"package": "homeassistant", "version": PINNED_VERSION,
+                                      "status": "stopped", "last_health_at": None}
+            if self.platform == "darwin":
+                try:
+                    access = (self.root / "lan.status").read_text(encoding="utf-8").strip()
+                except FileNotFoundError:
+                    access = "unknown"
+                result["lan_access"] = access if access in {"ok", "denied"} else "unknown"
+            return result
         if op == "ha.onboard":
             return self._onboard()
         if op == "ha.flow.start":

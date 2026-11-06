@@ -327,7 +327,7 @@ def run_case(case, value):
 
 def publish_request_cases():
     """Exercise identical publication boundaries and patterns in both twins."""
-    payload = {"doc": {"padding": "é"},
+    payload = {"doc": {"padding": "Ã©"},
                "source": {"artifact_id": "widget", "revision": 1, "digest": "0" * 64},
                "renderer_version": "1.0.0"}
     message = dict(GOLDEN["messages"][0], kind="widget.publish-request", payload=payload)
@@ -384,12 +384,20 @@ def test_frozen_sources_and_schemas():
         Draft202012Validator.check_schema(schema)
     lanes = {lane["id"] for lane in load("lanes.json")["lanes"]}
     words = {term["plain"] for term in load("glossary.json")["terms"]}
+    local = load("local-glossary.json")
+    assert local["source"] == "blocks.json#local_source"
+    local_titles = {term["id"]: term["plain"] for term in local["terms"]}
+    assert len(local_titles) == len(local["terms"])
+    assert set(local_titles) == set(load("blocks.json")["local_source"]["ids"])
     assert len(lanes) == 9
     assert len(TRUSTED) == len(BLOCKS)
     assert {block["kind"] for block in BLOCKS} == {"builtin", "settings", "rust"}
     for block in BLOCKS:
         assert block["lane"] in lanes
-        assert block["title"] in words
+        if block["id"] in local_titles:
+            assert block["title"] == local_titles[block["id"]]
+        else:
+            assert block["title"] in words
         validate_block(block, block)
 
 
@@ -418,10 +426,10 @@ def test_golden_protocol_and_replay():
 
 def test_actual_bytes_not_only_reported_length():
     document = copy.deepcopy(GRAPH)
-    document["blocks"][0]["settings"] = {"padding": "é" * 131073}
+    document["blocks"][0]["settings"] = {"padding": "Ã©" * 131073}
     with pytest.raises(ValueError, match="byte limit"):
         validate_graph(document, TRUSTED)
-    message = dict(GOLDEN["messages"][3], payload={"rows": [{"padding": "é" * 131073}]})
+    message = dict(GOLDEN["messages"][3], payload={"rows": [{"padding": "Ã©" * 131073}]})
     with pytest.raises(ValueError, match="byte limit"):
         validate_embed(message, GOLDEN["context"], copy.deepcopy(GOLDEN["state"]))
 

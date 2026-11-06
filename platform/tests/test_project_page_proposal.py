@@ -243,7 +243,7 @@ def test_live_identity_uses_server_actor_despite_forged_dev_headers(client, save
 
 
 @pytest.mark.parametrize('changes', [
-    {'expected_revision': True}, {'expected_revision': 0}, {'expected_revision': 2147483648},
+    {'expected_revision': True}, {'expected_revision': 0, 'expected_digest': '1' * 64}, {'expected_revision': 2147483648},
     {'expected_revision': 1.0}, {'expected_revision': '1'}, {'expected_digest': 'A' * 64},
     {'expected_digest': '0' * 63}, {'instruction': ''}, {'instruction': ' \n '},
     {'instruction': 'x' * 4001}, {'instruction': 5}, {'tenant_id': 'foreign'},
@@ -609,3 +609,211 @@ def test_catalog_and_internal_payload_limits_reject_without_truncation(client, s
     with pytest.raises(proposals.ProposalError) as error:
         proposals._catalog(document)
     assert error.value.status == 422
+
+
+@pytest.fixture
+def fresh(client, make_org):
+    org = make_org().org_id
+    actor = store.create_identity_binding(org, 'auth0', str(uuid.uuid4()), role='owner').binding_id
+    project = uuid.UUID(project_lifecycle.create_blank_project(
+        org, actor, name='Coming soon', idempotency_key=str(uuid.uuid4()))['project']['project_id'])
+    return {'org': org, 'project': project, 'actor': actor,
+            'url': f'/api/projects/{project}/page', 'auth': headers(org, actor)}
+
+
+def first_page_request():
+    return {'expected_revision': 0, 'expected_digest': '0' * 64,
+            'instruction': 'Introduce our new studio and invite people to contact us'}
+
+
+def first_page_edits():
+    return [{'id': 'f0001', 'value': 'New studio'},
+            {'id': 'f0002', 'value': 'Something wonderful is coming'},
+            {'id': 'f0003', 'value': 'We are getting ready to open'},
+            {'id': 'f0005', 'value': 'Contact us'},
+            {'id': 'f0006', 'value': 'https://example.com/contact'}]
+
+
+@pytest.mark.parametrize('kind', ['portfolio', 'coming-soon'])
+def test_first_page_existing_source_conflicts_without_transport(client, saved, fresh, monkeypatch, kind):
+    source = saved
+    if kind == 'coming-soon':
+        source = fresh
+        project_web_page.save(source['org'], source['project'], source['actor'], expected_revision=0,
+            document={'label': 'Soon', 'headline': 'Coming soon', 'description': '', 'status': '',
+                      'theme': 'cream', 'alignment': 'center'})
+    calls, _ = install_transport(monkeypatch, lambda payload: Response(encoded(result(payload))))
+    response = client.post(source['url'] + '/proposals', headers=source['auth'], json=first_page_request())
+    assert response.status_code == 409, response.text
+    assert calls == []
+
+
+def test_first_page_proposal_catalog_document_and_review_only(client, fresh, monkeypatch, caplog):
+    edits = first_page_edits()
+    calls, responses = install_transport(monkeypatch, lambda payload: Response(encoded(result(payload, edits))))
+    response = client.post(fresh['url'] + '/proposals', headers=fresh['auth'], json=first_page_request())
+    assert response.status_code == 200, response.text
+    proposal = response.json()
+    assert set(proposal) == {'source', 'proposed_document', 'proposed_digest', 'edits', 'model', 'usage'}
+    assert proposal['source'] == {'project_id': str(fresh['project']), 'revision': 0, 'digest': '0' * 64}
+    expected = {'label': 'New studio', 'headline': 'Something wonderful is coming',
+                'description': 'We are getting ready to open', 'status': '',
+                'theme': 'cream', 'alignment': 'center',
+                'action': {'label': 'Contact us', 'href': 'https://example.com/contact'}}
+    assert proposal['proposed_document'] == validate_document(expected)
+    assert proposal['proposed_digest'] == document_digest(expected)
+    assert proposal['edits'] == edits and proposal['model'] == 'claude-test-1'
+    assert proposal['usage'] == {'input_tokens': 12, 'output_tokens': 4}
+    assert len(calls) == 1 and responses[0].closed
+    url, _, payload, _ = calls[0]
+    assert url == 'http://harness.invalid/internal/portfolio/proposals'
+    assert set(payload) == {'tenant_id', 'source', 'instruction', 'fields'}
+    assert payload['tenant_id'] == str(fresh['org'])
+    assert payload['instruction'] == first_page_request()['instruction']
+    assert payload['source'] == {'project_id': str(fresh['project']), 'revision': 0, 'digest64hex': '0' * 64}
+    assert payload['fields'] == [
+        {'id': f'f{index:04d}', 'value': '', 'max_length': limit, 'role': role}
+        for index, (limit, role) in enumerate([
+            (120, 'page label'), (240, 'headline'), (1200, 'description'), (80, 'status line'),
+            (60, 'contact button label'), (2048, 'contact link')], 1)]
+    assert project_web_page.read(fresh['org'], fresh['project'], fresh['actor']) is None
+    assert failure_records(caplog) == []
+    applied = client.put(fresh['url'], headers=fresh['auth'], json={
+        'expected_revision': proposal['source']['revision'], 'document': proposal['proposed_document']})
+    assert applied.status_code == 200 and applied.json()['page']['revision'] == 1
+
+
+@pytest.mark.parametrize('kind', ['empty-headline', 'label-only', 'unsafe-href'])
+def test_first_page_document_validation(client, fresh, monkeypatch, caplog, kind):
+    edits = first_page_edits()
+    if kind == 'empty-headline':
+        edits = [edit for edit in edits if edit['id'] != 'f0002']
+    elif kind == 'label-only':
+        edits = [edit for edit in edits if edit['id'] != 'f0006']
+    else:
+        edits[-1]['value'] = 'javascript:alert(1)'
+    _, responses = install_transport(monkeypatch, lambda payload: Response(encoded(result(payload, edits))))
+    response = client.post(fresh['url'] + '/proposals', headers=fresh['auth'], json=first_page_request())
+    if kind == 'label-only':
+        assert response.status_code == 200, response.text
+        document = response.json()['proposed_document']
+        assert 'action' not in document
+        assert response.json()['proposed_digest'] == document_digest(document)
+        assert failure_records(caplog) == []
+    else:
+        assert response.status_code == 502, response.text
+        assert response.json() == {'detail': 'Invalid portfolio proposal response.'}
+        assert_failure(caplog, 'document', 'invalid_document')
+    assert responses[0].closed
+    assert project_web_page.read(fresh['org'], fresh['project'], fresh['actor']) is None
+
+
+@pytest.mark.parametrize('change,status', [('source', 409), ('role', 403), ('delete', 404)])
+def test_first_page_rechecks_source_and_authority(client, fresh, monkeypatch, caplog, change, status):
+    saved_page = []
+
+    def produce(payload):
+        if change == 'source':
+            saved_page.append(project_web_page.save(fresh['org'], fresh['project'], fresh['actor'],
+                expected_revision=0, document={'label': 'Saved elsewhere', 'headline': 'Already here',
+                    'description': '', 'status': '', 'theme': 'light', 'alignment': 'left'}))
+        elif change == 'delete':
+            store.soft_delete_project(fresh['org'], fresh['project'])
+        else:
+            def operation(conn):
+                with conn.cursor() as cur:
+                    cur.execute("UPDATE project_member_bindings SET role='read_only' "
+                        'WHERE org_id=%s AND project_id=%s AND binding_id=%s',
+                        (fresh['org'], fresh['project'], fresh['actor']))
+            run_transaction(operation)
+        return Response(encoded(result(payload, first_page_edits())))
+
+    calls, responses = install_transport(monkeypatch, produce)
+    response = client.post(fresh['url'] + '/proposals', headers=fresh['auth'], json=first_page_request())
+    assert response.status_code == status, response.text
+    assert len(calls) == 1 and responses[0].closed
+    assert failure_records(caplog) == []
+    if change == 'source':
+        assert project_web_page.read(fresh['org'], fresh['project'], fresh['actor']) == saved_page[0]
+
+
+def test_first_page_service_without_database(monkeypatch):
+    org = uuid.UUID('00000000-0000-0000-0000-000000000001')
+    project = uuid.UUID('00000000-0000-0000-0000-000000000002')
+    actor = uuid.UUID('00000000-0000-0000-0000-000000000003')
+    reads, roles, calls = [], [], []
+
+    def read(*args):
+        reads.append(args)
+        return None
+
+    def require_role(*args, **kwargs):
+        roles.append((args, kwargs))
+
+    def transport(payload):
+        calls.append(payload)
+        values = ['New studio', 'Something wonderful is coming', 'We are getting ready to open',
+                  'Opening soon', 'Get updates', 'mailto:hello@example.com']
+        return encoded(result(payload, [
+            {'id': f'f{index:04d}', 'value': value} for index, value in enumerate(values, 1)]))
+
+    monkeypatch.setattr(proposals.project_web_page, 'read', read)
+    monkeypatch.setattr(proposals.lifecycle, 'require_project_role', require_role)
+    monkeypatch.setattr(proposals, '_transport', transport)
+    proposal = proposals.propose(org, project, actor, **first_page_request())
+
+    assert reads == [(org, project, actor)] * 2
+    assert roles == [((org, project, actor), {'write': True})] * 2
+    assert len(calls) == 1
+    assert calls[0]['source'] == {'project_id': str(project), 'revision': 0, 'digest64hex': '0' * 64}
+    assert calls[0]['fields'] == [
+        {'id': f'f{index:04d}', 'value': '', 'max_length': limit, 'role': role}
+        for index, (limit, role) in enumerate([
+            (120, 'page label'), (240, 'headline'), (1200, 'description'), (80, 'status line'),
+            (60, 'contact button label'), (2048, 'contact link')], 1)]
+    assert proposal['source'] == {'project_id': str(project), 'revision': 0, 'digest': '0' * 64}
+    assert proposal['proposed_document']['action'] == {
+        'label': 'Get updates', 'href': 'mailto:hello@example.com'}
+    assert proposal['proposed_digest'] == document_digest(proposal['proposed_document'])
+
+
+def test_first_page_service_existing_page_conflicts(monkeypatch):
+    org = uuid.UUID('00000000-0000-0000-0000-000000000001')
+    project = uuid.UUID('00000000-0000-0000-0000-000000000002')
+    actor = uuid.UUID('00000000-0000-0000-0000-000000000003')
+    calls = []
+
+    def transport(payload):
+        calls.append(payload)
+        return encoded(result(payload, first_page_edits()))
+
+    monkeypatch.setattr(proposals.project_web_page, 'read', lambda *args: {'revision': 1})
+    monkeypatch.setattr(proposals.lifecycle, 'require_project_role', lambda *args, **kwargs: None)
+    monkeypatch.setattr(proposals, '_transport', transport)
+    with pytest.raises(proposals.lifecycle.LifecycleConflict, match='Portfolio proposal source changed.'):
+        proposals.propose(org, project, actor, **first_page_request())
+    assert calls == []
+
+
+def test_first_page_service_page_saved_during_model_call(monkeypatch):
+    org = uuid.UUID('00000000-0000-0000-0000-000000000001')
+    project = uuid.UUID('00000000-0000-0000-0000-000000000002')
+    actor = uuid.UUID('00000000-0000-0000-0000-000000000003')
+    pages = iter([None, {'revision': 1}])
+    reads, calls = [], []
+
+    def read(*args):
+        reads.append(args)
+        return next(pages)
+
+    def transport(payload):
+        calls.append(payload)
+        return encoded(result(payload, first_page_edits()))
+
+    monkeypatch.setattr(proposals.project_web_page, 'read', read)
+    monkeypatch.setattr(proposals.lifecycle, 'require_project_role', lambda *args, **kwargs: None)
+    monkeypatch.setattr(proposals, '_transport', transport)
+    with pytest.raises(proposals.lifecycle.LifecycleConflict, match='Portfolio proposal source changed.'):
+        proposals.propose(org, project, actor, **first_page_request())
+    assert reads == [(org, project, actor)] * 2
+    assert len(calls) == 1

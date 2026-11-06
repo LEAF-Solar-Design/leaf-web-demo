@@ -124,3 +124,50 @@ describe('layerBounds (Up frames the selected layer)', () => {
     expect(layerBounds(null, 'Walls')).toBeNull()
   })
 })
+
+// APS/DXF producer shape: raw WCS insertion point, radians, kind-based children.
+const serverBlocks = () => ({
+  polylines: [],
+  blocks: { Fixture: { base: [10, 20, 0], count: 1, complete: true,
+    children: [{ kind: 'LINE', layer: '0', pts: [[10, 20, 0], [14, 22, 0]] }] } },
+  inserts: [{ handle: 'A100', name: 'Fixture', layer: 'Panels', x: 100, y: 200, z: 0,
+    rot: Math.PI / 2, scale: [-2, 3, 1], nrm: [0, 0, 1] }],
+})
+const blockBounds = { minX: 94, minY: 192, maxX: 100, maxY: 200 }
+
+it('frames exact server block children on their rendered layers and leaves the source unchanged', () => {
+  const intake = serverBlocks(), before = structuredClone(intake)
+  expect(layerBounds(intake, 'Panels')).toEqual(blockBounds)
+  expect(intake).toEqual(before)
+  intake.blocks.Fixture.children[0].layer = 'Detail'
+  expect(layerBounds(intake, 'Detail')).toEqual(blockBounds)
+  expect(layerBounds(intake, 'Panels')).toBeNull()
+})
+
+it('uses partial block paths and only the normalized insertion fallback for missing geometry', () => {
+  const intake = serverBlocks()
+  intake.blocks.Fixture.complete = false
+  intake.blocks.Fixture.children[0].layer = 'Detail'
+  expect(layerBounds(intake, 'Detail')).toEqual(blockBounds)
+  expect(layerBounds(intake, 'Panels')).toEqual({ minX: 99.5, minY: 199.5, maxX: 100.5, maxY: 200.5 })
+  intake.blocks = {}
+  expect(layerBounds(intake, 'Panels')).toEqual({ minX: 99.5, minY: 199.5, maxX: 100.5, maxY: 200.5 })
+  intake.inserts[0].x = Infinity
+  expect(layerBounds(intake, 'Panels')).toBeNull()
+})
+
+it.each(['engine', 'bridge'])('preserves existing %s projection and insertion-point bounds', (source) => {
+  const intake = serverBlocks()
+  intake.source = source
+  intake.polylines = [{ handle: 'A100', layer: 'Panels', pts: [[94, 192, 0], [100, 200, 0]] }]
+  intake.inserts = [{ handle: 'A100', layer: 'Panels', pt: [101, 201, 0], incomplete: false }]
+  expect(layerBounds(intake, 'Panels')).toEqual({ ...blockBounds, maxX: 101, maxY: 201 })
+})
+
+it('uses the shared projector for OCS child coordinates without changing drawing units', () => {
+  const intake = serverBlocks()
+  intake.blocks.Fixture.base = [0, 0, 0]
+  intake.blocks.Fixture.children[0].pts = [[0, 0, 0], [2, 3, 4]]
+  Object.assign(intake.inserts[0], { x: 10, y: 20, z: 30, rot: 0, scale: [1, 1, 1], nrm: [0, 1, 0] })
+  expect(layerBounds(intake, 'Panels')).toEqual({ minX: 8, minY: 20, maxX: 10, maxY: 24 })
+})

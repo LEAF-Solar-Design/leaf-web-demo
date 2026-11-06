@@ -52,6 +52,9 @@ def test_migration_exists_and_its_number_is_unique():
     """
     names = sorted(p.name for p in (PLATFORM_DIR / "migrations").glob(MIGRATION_GLOB))
     assert MIGRATION.name in names
+    # Both historical 0096 files are tracked by full name and hash.
+    if {"0096_device_bridge.sql", "0096_project_reference_materials.sql"}.issubset(names):
+        names.remove("0096_project_reference_materials.sql")
     numbers = [name.split("_", 1)[0] for name in names]
     duplicates = sorted({n for n in numbers if numbers.count(n) > 1})
     assert not duplicates, f"duplicate migration numbers: {duplicates}"

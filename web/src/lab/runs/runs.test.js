@@ -2,7 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { act, cleanup, renderHook, waitFor } from '@testing-library/react'
 import * as api from '../../api.js'
 import { createValueStore, useBlockValue } from './valueStore.js'
-import { cancelRun, openRunStream, submitRun } from './runStream.js'
+import { cancelRun, newSubmissionId, openRunStream, submitRun } from './runStream.js'
 
 const handles = []
 const open = options => { const handle = openRunStream(options); handles.push(handle); return handle }
@@ -18,6 +18,24 @@ function stream(chunks, hold = false) {
 }
 const parked = () => stream([], true)
 afterEach(() => { cleanup(); handles.splice(0).forEach(handle => handle.stop()); localStorage.removeItem('leaf.jwt'); vi.restoreAllMocks() })
+
+it('keeps unknown submission intent for explicit recovery and separates rejection', async () => {
+  const submissionId = newSubmissionId()
+  expect(submissionId).toMatch(/^v1\.[0-9]{13}\.[0-9a-f]{32}$/)
+  expect(newSubmissionId()).not.toBe(submissionId)
+  const fetchImpl = vi.fn().mockRejectedValueOnce(new Error('response lost'))
+    .mockResolvedValueOnce(json({ run_id: 'existing', state: 'running' }, 202))
+    .mockResolvedValueOnce(json({ detail: 'lab_submission_mismatch' }, 409))
+    .mockResolvedValueOnce(json({ detail: 'lab_run_queue_full' }, 409))
+    .mockResolvedValueOnce(json({}, 202))
+  const args = { docId: 'doc', graphRevision: 1, submissionId, fetchImpl }
+  expect(await submitRun(args)).toMatchObject({ ok: false, outcomeUnknown: true })
+  expect(await submitRun({ ...args, reconcileOnly: true })).toEqual({ ok: true, runId: 'existing', state: 'running' })
+  expect(JSON.parse(fetchImpl.mock.calls[1][1].body)).toMatchObject({ submission_id: submissionId, reconcile_only: true })
+  expect(await submitRun(args)).toMatchObject({ ok: false, detail: 'lab_submission_mismatch', outcomeUnknown: false })
+  expect(await submitRun(args)).toMatchObject({ ok: false, detail: 'lab_run_queue_full', outcomeUnknown: false })
+  expect(await submitRun(args)).toMatchObject({ ok: false, outcomeUnknown: true })
+})
 
 describe('bounded shared values', () => {
   it('delegates auth-change resume only to a paused run with a supporting control', () => {

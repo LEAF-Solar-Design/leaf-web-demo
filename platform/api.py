@@ -732,6 +732,91 @@ def get_project_material_content(
     })
 
 
+def _reference_response(operation):
+    import project_reference_materials as originals
+    try:
+        return _lifecycle_response(operation)
+    except originals.ReferenceStoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc),
+                            headers={'Cache-Control': 'private, no-store'}) from None
+
+
+@router.post('/projects/{project_id}/reference-files', status_code=201)
+async def import_project_reference(
+    project_id: uuid.UUID, request: Request,
+    filename: str = Query(min_length=1, max_length=255),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    import project_reference_materials as originals
+    from . import project_reference_materials as references
+    # Keep a raw Request: membership must be checked before any body read.
+    await run_in_threadpool(_lifecycle_response, lambda: project_lifecycle.require_project_role(
+        actor.org_id, project_id, actor.binding_id, write=True))
+    content_type = request.headers.get('content-type', '')
+    name, _, maximum = _reference_response(lambda: originals.upload_policy(filename, content_type))
+    length = request.headers.get('content-length')
+    count = None
+    if length is not None:
+        if not length or not length.isascii() or not length.isdecimal() or len(length) > 20:
+            raise HTTPException(status_code=400, detail='Invalid Content-Length.')
+        count = int(length)
+        if count > maximum:
+            raise HTTPException(status_code=413, detail='Reference exceeds its size limit (MOV 64 MiB; TXT/JSON 8 MiB).')
+    data = bytearray()
+    async for chunk in request.stream():
+        if len(data) + len(chunk) > maximum:
+            raise HTTPException(status_code=413, detail='Reference exceeds its size limit (MOV 64 MiB; TXT/JSON 8 MiB).')
+        if count is not None and len(data) + len(chunk) > count:
+            raise HTTPException(status_code=400, detail='Body does not match Content-Length.')
+        data.extend(chunk)
+    if count is not None and count != len(data):
+        raise HTTPException(status_code=400, detail='Body does not match Content-Length.')
+    prepared = await run_in_threadpool(_reference_response, lambda: originals.prepare_and_store(
+        actor.org_id, project_id, name, content_type, bytes(data)))
+    try:
+        material = await run_in_threadpool(_lifecycle_response, lambda: references.commit(
+            actor.org_id, project_id, actor.binding_id, prepared))
+    except HTTPException:
+        raise
+    except Exception:
+        LOGGER.warning('reference_metadata_commit_unavailable')
+        raise HTTPException(status_code=503, detail='Original stored, but attachment could not be confirmed. Retry this file safely.',
+                            headers={'Cache-Control': 'private, no-store'}) from None
+    return JSONResponse({'material': material}, status_code=201, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/reference-files')
+def list_project_references(
+    project_id: uuid.UUID, cursor: uuid.UUID | None = None,
+    limit: int = Query(default=200, ge=1, le=200),
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    from . import project_reference_materials as references
+    result = _lifecycle_response(lambda: references.list_materials(
+        actor.org_id, project_id, actor.binding_id, cursor=cursor, limit=limit))
+    return JSONResponse(result, headers={'Cache-Control': 'private, no-store'})
+
+
+@router.get('/projects/{project_id}/reference-files/{material_id}/content')
+def get_project_reference_content(
+    project_id: uuid.UUID, material_id: uuid.UUID,
+    actor: _LifecycleActor = Depends(_get_lifecycle_actor),
+):
+    from urllib.parse import quote
+    import project_reference_materials as originals
+    from . import project_reference_materials as references
+    material = _lifecycle_response(lambda: references.get_material(
+        actor.org_id, project_id, actor.binding_id, material_id))
+    raw = _reference_response(lambda: originals.read_content(actor.org_id, project_id, material))
+    _lifecycle_response(lambda: project_lifecycle.require_project_role(
+        actor.org_id, project_id, actor.binding_id, write=False))
+    return Response(raw, media_type=material['media_type'], headers={
+        'Cache-Control': 'private, no-store', 'X-Content-Type-Options': 'nosniff',
+        'Content-Disposition': f'attachment; filename="reference"; filename*=UTF-8\'\'{quote(material["name"], safe="")}',
+        'X-Content-SHA256': material['sha256'],
+    })
+
+
 @router.put("/orgs/{org_id}/identities/{binding_id}/label")
 def set_identity_display_name(
     org_id: uuid.UUID, binding_id: uuid.UUID, body: SetIdentityDisplayNameBody,

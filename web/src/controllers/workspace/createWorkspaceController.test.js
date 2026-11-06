@@ -13,6 +13,280 @@ function setup(options = {}) {
   return { controller, services, storage }
 }
 
+function mapStorage(entries = []) {
+  const values = new Map(entries)
+  return {
+    getItem: vi.fn((key) => values.get(key) ?? null),
+    setItem: vi.fn((key, value) => { values.set(key, String(value)) }),
+    removeItem: vi.fn((key) => { values.delete(key) }),
+  }
+}
+
+function deferred() {
+  let resolve
+  let reject
+  const promise = new Promise((yes, no) => { resolve = yes; reject = no })
+  return { promise, resolve, reject }
+}
+
+describe('remembered project selection', () => {
+  const selectionKey = (orgId) => `leaf.project_id:${orgId}`
+  const rememberedStorage = () => mapStorage([
+    [WORKSPACE_ORG_KEY, 'o1'], [selectionKey('o1'), 'p1'],
+  ])
+
+  it.each(['open', 'create'])('restores a successful %s in a new controller after listing', async (action) => {
+    const storage = mapStorage([[WORKSPACE_ORG_KEY, 'o1']])
+    const first = setup({ storage })
+    if (action === 'create') await first.controller.createProject('Maple')
+    else await first.controller.openProject('p1')
+    expect(storage.getItem(selectionKey('o1'))).toBe('p1')
+    expect(storage.setItem.mock.calls).toEqual([[selectionKey('o1'), 'p1']])
+
+    const second = setup({ storage })
+    expect(second.controller.getSnapshot().openProjectId).toBeNull()
+    expect(second.services.openProject).not.toHaveBeenCalled()
+    await second.controller.loadProjects()
+    expect(second.services.openProject).toHaveBeenCalledExactlyOnceWith('p1', 'o1')
+    expect(second.controller.getSnapshot()).toMatchObject({ openProjectId: 'p1',
+      workspace: { project: { project_id: 'p1' } }, workspaceLoading: false })
+    await second.controller.loadProjects()
+    expect(second.services.openProject).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps an explicit close across controller replacement', async () => {
+    const storage = rememberedStorage()
+    const first = setup({ storage })
+    await first.controller.openProject('p1')
+    first.controller.closeProject()
+    expect(storage.getItem(selectionKey('o1'))).toBeNull()
+    const second = setup({ storage })
+    await second.controller.loadProjects()
+    expect(second.services.openProject).not.toHaveBeenCalled()
+    expect(second.controller.getSnapshot().openProjectId).toBeNull()
+  })
+
+  it('never requests an unlisted remembered project', async () => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    services.listProjects.mockResolvedValue([{ project_id: 'p2' }])
+    await controller.loadProjects()
+    expect(services.openProject).not.toHaveBeenCalled()
+    expect(controller.getSnapshot().openProjectId).toBeNull()
+  })
+
+  it.each(['open', 'create'])('does not remember a failed %s hydration', async (action) => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    services.openProject.mockRejectedValue(new Error('Offline'))
+    services.createProject.mockResolvedValue({ project_id: 'p2' })
+    if (action === 'create') await controller.createProject('Birch')
+    else await controller.openProject('p2')
+    expect(storage.getItem(selectionKey('o1'))).toBe('p1')
+    expect(storage.setItem).not.toHaveBeenCalled()
+  })
+
+  it('does not store an unscoped selection or restore it in another org', async () => {
+    const storage = mapStorage()
+    const { controller, services } = setup({ storage, authLive: true })
+    await controller.openProject('p1')
+    expect(storage.setItem).not.toHaveBeenCalled()
+    controller.closeProject()
+    controller.adoptOrgId('o1')
+    await controller.loadProjects()
+    expect(services.openProject.mock.calls).toEqual([['p1', null]])
+  })
+
+  it('uses each organization\'s own authorized selection', async () => {
+    const storage = rememberedStorage()
+    storage.setItem(selectionKey('o2'), 'p2')
+    const { controller, services } = setup({ storage })
+    services.listProjects.mockResolvedValue([{ id: 'p1' }, { id: 'p2' }])
+    await controller.loadProjects()
+    controller.adoptOrgId('o2')
+    await controller.loadProjects()
+    expect(services.openProject.mock.calls).toEqual([['p1', 'o1'], ['p2', 'o2']])
+    controller.closeProject()
+    expect(storage.getItem(selectionKey('o1'))).toBe('p1')
+    expect(storage.getItem(selectionKey('o2'))).toBeNull()
+    controller.adoptOrgId('o3')
+    await controller.loadProjects()
+    expect(services.openProject).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['open', 'close', 'org'])('respects manual %s while the list awaits', async (action) => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    const list = deferred()
+    services.listProjects.mockReturnValueOnce(list.promise)
+    const loading = controller.loadProjects()
+    if (action === 'open') await controller.openProject('p2')
+    if (action === 'close') controller.closeProject()
+    if (action === 'org') controller.adoptOrgId('o2')
+    list.resolve([{ project_id: 'p1' }])
+    await loading
+    expect(services.openProject.mock.calls).toEqual(action === 'open' ? [['p2', 'o1']] : [])
+    expect(controller.getSnapshot().openProjectId).toBe(action === 'open' ? 'p2' : null)
+    expect(storage.getItem(selectionKey('o1'))).toBe(action === 'open' ? 'p2' : action === 'close' ? null : 'p1')
+  })
+
+  it.each(['open', 'close', 'org'])('does not persist a late auto-open after manual %s', async (action) => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    const open = deferred()
+    services.openProject.mockReturnValueOnce(open.promise)
+    const loading = controller.loadProjects()
+    await Promise.resolve()
+    expect(services.openProject).toHaveBeenCalledExactlyOnceWith('p1', 'o1')
+    if (action === 'open') await controller.openProject('p2')
+    if (action === 'close') controller.closeProject()
+    if (action === 'org') controller.adoptOrgId('o2')
+    const snapshot = controller.getSnapshot()
+    const writes = storage.setItem.mock.calls.length
+    open.resolve({ project: { project_id: 'p1' } })
+    await loading
+    expect(controller.getSnapshot()).toBe(snapshot)
+    expect(storage.setItem).toHaveBeenCalledTimes(writes)
+    expect(storage.getItem(selectionKey('o1'))).toBe(action === 'open' ? 'p2' : action === 'close' ? null : 'p1')
+  })
+
+  it('respects a synchronous close when the authorized list is published', async () => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    const unsubscribe = controller.subscribe(() => {
+      if (controller.getSnapshot().projectsLoaded) {
+        unsubscribe()
+        controller.closeProject()
+      }
+    })
+    await controller.loadProjects()
+    expect(services.openProject).not.toHaveBeenCalled()
+  })
+
+  it('does not repersist after a synchronous close on successful open publication', async () => {
+    const storage = rememberedStorage()
+    const { controller } = setup({ storage })
+    const unsubscribe = controller.subscribe(() => {
+      if (controller.getSnapshot().workspace) {
+        unsubscribe()
+        controller.closeProject()
+      }
+    })
+    await controller.openProject('p1')
+    expect(storage.getItem(selectionKey('o1'))).toBeNull()
+    expect(controller.getSnapshot().openProjectId).toBeNull()
+  })
+
+  it('retains preference through list and open errors without duplicate resume loops', async () => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    services.listProjects.mockRejectedValueOnce(new Error('Offline'))
+    await controller.loadProjects()
+    expect(storage.getItem(selectionKey('o1'))).toBe('p1')
+    const open = deferred()
+    services.openProject.mockReturnValueOnce(open.promise)
+    const loading = controller.loadProjects()
+    await Promise.resolve()
+    await controller.loadProjects()
+    expect(services.openProject).toHaveBeenCalledTimes(1)
+    open.reject(new Error('Offline'))
+    await loading
+    await controller.loadProjects()
+    expect(services.openProject).toHaveBeenCalledTimes(1)
+    expect(storage.getItem(selectionKey('o1'))).toBe('p1')
+    const next = setup({ storage })
+    await next.controller.loadProjects()
+    expect(next.services.openProject).toHaveBeenCalledExactlyOnceWith('p1', 'o1')
+  })
+
+  it.each(['open', 'close', 'org', 'mock', 'dispose'])('never remembers a stale manual open after %s', async (action) => {
+    const storage = mapStorage([[WORKSPACE_ORG_KEY, 'o1']])
+    const { controller, services } = setup({ storage })
+    const open = deferred()
+    services.openProject.mockReturnValueOnce(open.promise)
+    const opening = controller.openProject('p1')
+    if (action === 'open') await controller.openProject('p2')
+    if (action === 'close') controller.closeProject()
+    if (action === 'org') controller.adoptOrgId('o2')
+    if (action === 'mock') controller.setMock(true)
+    if (action === 'dispose') controller.dispose()
+    open.resolve({ project: { project_id: 'p1' } })
+    expect(await opening).toBeNull()
+    expect(storage.getItem(selectionKey('o1'))).toBe(action === 'open' ? 'p2' : null)
+  })
+
+  it.each(['open', 'close'])('respects manual %s while creation awaits', async (action) => {
+    const storage = mapStorage([[WORKSPACE_ORG_KEY, 'o1']])
+    const { controller, services } = setup({ storage })
+    const create = deferred()
+    services.createProject.mockReturnValueOnce(create.promise)
+    const creating = controller.createProject('Maple')
+    if (action === 'open') await controller.openProject('p2')
+    else controller.closeProject()
+    create.resolve({ project_id: 'p1' })
+    await creating
+    expect(services.openProject.mock.calls).toEqual(action === 'open' ? [['p2', 'o1']] : [])
+    expect(storage.getItem(selectionKey('o1'))).toBe(action === 'open' ? 'p2' : null)
+    expect(controller.getSnapshot().projectBusy).toBe(false)
+  })
+
+  it('does not remember a created project whose opening was superseded', async () => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    const open = deferred()
+    services.openProject.mockReturnValueOnce(open.promise)
+    const creating = controller.createProject('Maple')
+    await Promise.resolve()
+    controller.closeProject()
+    open.resolve({ project: { project_id: 'p1' } })
+    await creating
+    expect(storage.getItem(selectionKey('o1'))).toBeNull()
+  })
+
+  it('does not restore preference from a late refresh after closing', async () => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage })
+    await controller.openProject('p1')
+    const open = deferred()
+    services.openProject.mockReturnValueOnce(open.promise)
+    const refreshing = controller.rehydrate()
+    controller.closeProject()
+    open.resolve({ project: { project_id: 'p1' } })
+    expect(await refreshing).toBeNull()
+    expect(storage.getItem(selectionKey('o1'))).toBeNull()
+  })
+
+  it('does not restore or change real selection in mock mode', async () => {
+    const storage = rememberedStorage()
+    const { controller, services } = setup({ storage, mock: true })
+    await controller.loadProjects()
+    expect(services.openProject).not.toHaveBeenCalled()
+    await controller.openProject('p2')
+    await controller.rehydrate()
+    await controller.createProject('Mock')
+    controller.closeProject()
+    expect(storage.getItem(selectionKey('o1'))).toBe('p1')
+    expect(storage.setItem).not.toHaveBeenCalled()
+    expect(storage.removeItem).not.toHaveBeenCalled()
+  })
+
+  it.each(['read', 'write', 'remove', 'all', 'absent'])('keeps normal use working with %s storage failure', async (failure) => {
+    const storage = failure === 'absent' ? null : rememberedStorage()
+    const unavailable = () => { throw new Error('Storage unavailable') }
+    if (failure === 'read' || failure === 'all') storage.getItem.mockImplementation(unavailable)
+    if (failure === 'write' || failure === 'all') storage.setItem.mockImplementation(unavailable)
+    if (failure === 'remove' || failure === 'all') storage.removeItem.mockImplementation(unavailable)
+    const { controller } = setup({ storage, authLive: true })
+    await controller.loadProjects()
+    expect(await controller.openProject('p2')).toEqual({ project: { project_id: 'p1' } })
+    controller.closeProject()
+    await controller.loadProjects()
+    expect(controller.getSnapshot().openProjectId).toBeNull()
+    await controller.createProject('Maple')
+    expect(controller.getSnapshot()).toMatchObject({ openProjectId: 'p1', workspaceLoading: false })
+  })
+})
+
 describe('workspace open hydration', () => {
   it('joins an in-flight open without publishing or issuing another read', async () => {
     const callbacks = { onWorkspaceOpened: vi.fn(), onWorkspaceRehydrated: vi.fn() }

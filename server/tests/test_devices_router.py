@@ -338,17 +338,41 @@ def test_package_archive_is_cached_deterministic_and_matches_installer(api, monk
     assert first.status_code == 200
     digest = hashlib.sha256(first.content).hexdigest()
     assert digest == first.headers["x-leaf-document-sha256"]
-    assert "immutable" in first.headers["cache-control"]
+    assert first.headers["cache-control"] == "no-store"
     cached = devices._PACKAGE
-    assert api.client.get("/api/devices/agent/package.tar.gz").content == first.content
+    addressed = api.client.get(f"/api/devices/agent/package.tar.gz?sha256={digest}")
+    assert addressed.status_code == 200
+    assert addressed.content == first.content
+    assert "immutable" in addressed.headers["cache-control"]
     assert devices._PACKAGE is cached
     installer = api.client.get("/api/devices/agent/install.sh")
     assert installer.status_code == 200
-    assert digest in installer.text
+    assert f"package.tar.gz?sha256={digest}" in installer.text
     assert "export LEAF_SERVER_ORIGIN='https://platform.leafdesign.ai'" in installer.text
     assert "@SHA256@" not in installer.text and "@VERSION@" not in installer.text
     monkeypatch.setattr(devices, "_PACKAGE", None)
     assert api.client.get("/api/devices/agent/package.tar.gz").content == first.content
+
+
+def test_package_wrong_sha_is_404_not_archive(api, monkeypatch):
+    monkeypatch.setattr(devices, "_PACKAGE", (b"package archive", "installer", "a" * 64))
+    response = api.client.get("/api/devices/agent/package.tar.gz?sha256=" + "b" * 64)
+    assert response.status_code == 404
+    assert response.json()["error"]["code"] == "not_found"
+    assert response.headers["cache-control"] == "no-store"
+    assert response.headers["content-type"] == "application/json"
+
+
+@pytest.mark.parametrize("query", [
+    "sha256=" + "A" * 64,
+    "sha256=abc",
+    "sha256=" + "a" * 64 + "&extra=1",
+])
+def test_package_bad_query_is_400(api, query):
+    response = api.client.get("/api/devices/agent/package.tar.gz?" + query)
+    assert response.status_code == 400
+    assert response.json()["error"]["code"] == "invalid_request"
+    assert response.headers["cache-control"] == "no-store"
 
 
 @pytest.mark.parametrize("host,origin", [

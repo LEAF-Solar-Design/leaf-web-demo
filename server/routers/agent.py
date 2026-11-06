@@ -50,7 +50,9 @@ import hmac
 import os
 from typing import Any, Dict, Optional
 
-from fastapi import APIRouter, Depends, Header
+from fastapi import APIRouter, Depends, Header, HTTPException
+from fastapi.exceptions import RequestValidationError
+from fastapi.routing import APIRoute
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
@@ -420,3 +422,90 @@ def killswitch(tenant=Depends(deps.require_tenant)) -> Any:
     # Read-only BY DESIGN: the kill switch is file-presence
     # (LEAF_AGENT_KILL_FILE) and has NO API off-toggle at any privilege level.
     return with_envelope_fields({"active": agent_gate.kill_switch_active()})
+
+
+class ProjectDrawingStateRequest(BaseModel):
+    tenant_id: str
+    session_id: str
+    turn_id: str
+
+
+@router.post("/internal/agent/project-drawing-state")
+def internal_project_drawing_state(req: ProjectDrawingStateRequest,
+                                  x_dispatch_secret: Optional[str] = Header(default=None)):
+    denied = _require_dispatch(x_dispatch_secret)
+    if denied is not None:
+        return denied
+    import project_execution_context as context
+    try:
+        return JSONResponse(content=context.drawing_state(req.session_id, req.turn_id, req.tenant_id),
+                            headers={"Cache-Control": "no-store"})
+    except context.ContextError as exc:
+        return JSONResponse(content={"error": {"error_code": exc.code,
+                            "message": "Project drawing state unavailable."}}, status_code=exc.status_code,
+                            headers={"Cache-Control": "no-store"})
+    except Exception:
+        return JSONResponse(content={"error": {"error_code": "project_context_unavailable"}},
+                            status_code=503, headers={"Cache-Control": "no-store"})
+
+
+class CheckoutCustodyRequest(BaseModel):
+    session_id: str
+    input_version_id: str
+
+    class Config:
+        extra = "forbid"
+
+
+class CheckoutCustodyRevokeRequest(BaseModel):
+    session_id: str
+    delegation_id: str
+
+    class Config:
+        extra = "forbid"
+
+
+def _checkout_custody_response(operation):
+    import project_checkout_custody as custody
+    try:
+        return JSONResponse(content=operation(), headers={"Cache-Control": "no-store"})
+    except custody.CustodyError as exc:
+        return JSONResponse(content={"error": {"error_code": exc.code,
+            "message": "Checkout delegation unavailable."}}, status_code=exc.status_code,
+            headers={"Cache-Control": "no-store"})
+
+
+def issue_checkout_custody(confirmation_id: str, req: CheckoutCustodyRequest,
+        tenant=Depends(deps.require_active_tenant),
+        x_checkout_capability: Optional[str] = Header(default=None)):
+    import project_checkout_custody as custody
+    return _checkout_custody_response(lambda: custody.issue(tenant, confirmation_id,
+        req.session_id, req.input_version_id, x_checkout_capability))
+
+
+def revoke_checkout_custody(confirmation_id: str, req: CheckoutCustodyRevokeRequest,
+                           tenant=Depends(deps.require_active_tenant)):
+    import project_checkout_custody as custody
+    return _checkout_custody_response(lambda: custody.revoke(tenant, confirmation_id,
+        req.session_id, req.delegation_id))
+
+
+class _CheckoutCustodyRoute(APIRoute):
+    def get_route_handler(self):
+        handler = super().get_route_handler()
+        async def guarded(request):
+            try:
+                response = await handler(request)
+            except (HTTPException, RequestValidationError) as exc:
+                response = JSONResponse(status_code=getattr(exc, "status_code", 422),
+                    content={"error": {"error_code": "checkout_custody_denied",
+                        "message": "Checkout delegation unavailable."}})
+            response.headers["Cache-Control"] = "no-store"
+            return response
+        return guarded
+
+
+router.add_api_route("/api/agent/approvals/{confirmation_id}/checkout-custody",
+    issue_checkout_custody, methods=["POST"], route_class_override=_CheckoutCustodyRoute)
+router.add_api_route("/api/agent/approvals/{confirmation_id}/checkout-custody",
+    revoke_checkout_custody, methods=["DELETE"], route_class_override=_CheckoutCustodyRoute)

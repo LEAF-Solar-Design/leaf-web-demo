@@ -1,12 +1,15 @@
 [project]
 name = "leaf-device-agent"
-version = "0.1.0"
+version = "0.1.1"
 description = "Outbound-only Leaf Studio device bridge"
 requires-python = ">=3.11"
 dependencies = ["cryptography==50.0.0"]
 
 [project.scripts]
 leaf-agent = "leaf_agent.__main__:main"
+
+[tool.setuptools.package-data]
+"leaf_agent.packages" = ["assets/*"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

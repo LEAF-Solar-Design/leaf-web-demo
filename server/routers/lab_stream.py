@@ -16,7 +16,7 @@ from fastapi.responses import StreamingResponse
 import deps
 import lab_run_store as store
 from routers.lab_artifacts import _admit
-from routers.lab_runs import _call, _public_event
+from routers.lab_runs import _call, _public_event, _authorize_corpus_run
 
 router = APIRouter(prefix="/api/lab/stream", tags=["lab_stream"])
 logger = logging.getLogger(__name__)
@@ -254,7 +254,11 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
             for run_id in cursors:
                 if pending[run_id]:
                     try:
-                        await asyncio.to_thread(store.get, str(tenant), run_id)
+                        row = await asyncio.to_thread(store.get, str(tenant), run_id)
+                        await asyncio.to_thread(_call, _authorize_corpus_run, tenant, row)
+                    except HTTPException:
+                        yield _frame('close', {'reason': 'corpus_project_refused'})
+                        return
                     except store.NotFound:
                         pending[run_id].clear()
                         reason = "run_missing"
@@ -284,6 +288,13 @@ async def event_stream(tenant, cursors, principal, stream_id, signal, *,
                     reason = "run_missing"
                     yield _frame("close", {"reason": reason, "run_id": run_id})
                     return
+                if events:
+                    row = await asyncio.to_thread(store.get, str(tenant), run_id)
+                    try:
+                        await asyncio.to_thread(_call, _authorize_corpus_run, tenant, row)
+                    except HTTPException:
+                        yield _frame('close', {'reason': 'corpus_project_refused'})
+                        return
                 for event in events:
                     closed = await closing_reason()
                     if closed:
@@ -341,7 +352,8 @@ async def runs(request: Request, runs: str | None = Query(None), after_seq: str 
         raise HTTPException(422, detail="lab_stream_runs_required")
     cursors = _cursors(runs, after_seq, request.headers.get("last-event-id"))
     for run_id in cursors:
-        await asyncio.to_thread(_call, store.get, str(tenant), run_id)
+        row = await asyncio.to_thread(_call, store.get, str(tenant), run_id)
+        await asyncio.to_thread(_call, _authorize_corpus_run, tenant, row)
     principal = getattr(tenant, "subject", None) or "tenant:" + str(tenant)
     stream_id = uuid.uuid4().hex
     signal = asyncio.Event()

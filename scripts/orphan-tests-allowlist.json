@@ -1,0 +1,82 @@
+[
+  {
+    "path": "server/tests/test_acadrust_adapter.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_active_session_authority.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_arlo_design_adapter.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_campaign_capability_api_postgres.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_conversation_model.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_conversation_poison.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_conversation_recovery.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_conversation_retention.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_conversation_write.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_count_by_layer_lsp_json.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_customization_postgres_integration.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_demand.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_project_repository_edit_coordination.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_published_source_containment.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_request_journal_activation_postgres.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_rewind.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_solar_cad_template_manifest.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_template_store.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "server/tests/test_uploaded_live_read_production_contract.py",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  },
+  {
+    "path": "web/e2e/project/project-authority.spec.mjs",
+    "reason": "unregistered as of 057b4a0a; registration is root record S8a"
+  }
+]

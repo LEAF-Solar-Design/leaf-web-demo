@@ -84,10 +84,33 @@ async function owner() {
 
 // One turn the shell already dispatched into this session before the publication arrives.
 const history = [{ turnId: 'turn-0', text: 'Publish a tool' }]
+
+it('the publication fixture reads the approval declaration and canonical allowlist from App', async () => {
+  const o = await owner()
+  const read = (source) => shellWiring(source, 'studio', { ...o.value, state: o.controller.getState() }, {
+    knownGuest: false, conversationProjectContext: null,
+  })
+  const wiring = read(sources.studio)
+  expect(wiring.panel.prepareApprovedProjectRun).toBe(wiring.scope.prepareApprovedProjectRun)
+  expect(wiring.panel.canonicalProjectWriteTools).toBe(wiring.scope.PROJECT_SOLAR_SUPPORTED_TOOLS)
+  expect(wiring.panel.canonicalProjectWriteTools).toBeInstanceOf(Set)
+  expect(wiring.panel.canonicalProjectWriteTools.has('solar-solve-proposal')).toBe(true)
+  const request = { confirmationId: 'fixture-confirmation', sessionId: 'session-1', projectContext: null }
+  expect(await wiring.panel.prepareApprovedProjectRun(request)).toBeNull()
+  // Falsification control: a changed production callback must change the
+  // evaluated result. A hard-coded null stub would conceal this mutation.
+  const changed = sources.studio.replace('if (!owner.ready || !client) return null',
+    'if (!owner.ready || !client) return { fixtureUnexpectedApproval: true }')
+  expect(changed).not.toBe(sources.studio)
+  expect(await read(changed).panel.prepareApprovedProjectRun(request)).toEqual({ fixtureUnexpectedApproval: true })
+})
+
 function Seat({ shell, o, destination, shown = true, turns = [] }) {
   const state = useSyncExternalStore(o.controller.subscribe, o.controller.getState, o.controller.getState)
   const wiring = shellWiring(sources[shell], shell, { ...o.value, state }, {
     knownGuest: false,
+    // These publication cases use the existing unscoped catalog session.
+    conversationProjectContext: null,
     onPublishAuthor: o.author, publishAuthoredTool: o.author,
     onAttachAgentJob: o.job, refreshJobs: o.job, attachJob: o.job,
     agentTurns: turns, turns,
