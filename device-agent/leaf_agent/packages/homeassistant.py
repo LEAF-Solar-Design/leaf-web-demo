@@ -19,8 +19,8 @@ a credential-backed temporary token. GET config_entries/flow returns 405;
 listing uses WS config_entries/flow/progress plus locally tracked user flows.
 Completed onboarding has no status view after restart (404).
 The group menu accepts next_step_id=light; its form also defaults all=false.
-Apple SecurityTool/macOS/keychain_add.c confirms that a bare -w prompts twice;
-security runs in a detached session and receives both answers only on stdin.
+Keychain writes use security -i commands on stdin to avoid getpass truncation;
+each write is verified by reading the full value back.
 No HA credentials or upstream exception text are logged or returned.
 """
 from __future__ import annotations
@@ -221,12 +221,17 @@ class HomeAssistant:
 
     def _save_credential(self, name, value):
         if self.platform == "darwin":
-            # security's missing -w argument prompts twice via getpass. Detach
-            # from the controlling terminal so both prompts consume stdin.
-            result = self.runner(["/usr/bin/security", "add-generic-password", "-U", "-s", LABEL, "-a", name, "-w"],
-                                 input=value + "\n" + value + "\n", start_new_session=True,
-                                 check=False, capture_output=True, text=True, timeout=15)
-            if result.returncode:
+            if not value or any(char in value for char in '"\\\n\r\x00'):
+                raise HAError("Invalid credential value")
+            try:
+                self.runner(["/usr/bin/security", "-i"],
+                            input=f'add-generic-password -U -s "{LABEL}" -a "{name}" -w "{value}"\nquit\n',
+                            start_new_session=True, check=False, capture_output=True, text=True, timeout=15)
+                # security -i may exit nonzero after quit even when the write landed.
+                saved = self._credential(name)
+            except Exception:
+                raise HAError("Credential write failed") from None
+            if saved != value:
                 raise HAError("Credential write failed")
         else:
             values = self._load("credentials.json", {})

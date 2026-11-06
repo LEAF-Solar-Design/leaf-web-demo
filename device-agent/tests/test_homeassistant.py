@@ -9,6 +9,7 @@ from pathlib import Path
 import pickle
 import plistlib
 import re
+import shlex
 import socket
 import struct
 import subprocess
@@ -675,15 +676,19 @@ def test_keychain_secret_uses_stdin_and_cache_expires(tmp_path, caplog):
 
     def runner(argv, **kwargs):
         calls.append((argv, kwargs))
-        assert argv[0] == "/usr/bin/security" and argv[argv.index("-s") + 1] == LABEL
-        name = argv[argv.index("-a") + 1]
-        if argv[1] == "add-generic-password":
-            assert argv[-1] == "-w" and kwargs["start_new_session"] is True
-            secret, confirm, empty = kwargs["input"].split("\n")
-            assert secret == confirm and empty == ""
+        assert argv[0] == "/usr/bin/security"
+        if argv[1] == "-i":
+            assert argv == ["/usr/bin/security", "-i"] and kwargs["start_new_session"] is True
+            command, quit_command, empty = kwargs["input"].split("\n")
+            assert quit_command == "quit" and empty == ""
+            args = shlex.split(command)
+            assert args[:4] == ["add-generic-password", "-U", "-s", LABEL]
+            name, secret = args[args.index("-a") + 1], args[args.index("-w") + 1]
             assert secret not in argv and "-A" not in argv
             values[name] = secret
             return SimpleNamespace(returncode=0, stdout="")
+        assert argv[1] == "find-generic-password" and argv[argv.index("-s") + 1] == LABEL
+        name = argv[argv.index("-a") + 1]
         return SimpleNamespace(returncode=0 if name in values else 44, stdout=values.get(name, "") + "\n")
 
     handler = HomeAssistant(tmp_path, platform="darwin", runner=runner, clock=clock)
