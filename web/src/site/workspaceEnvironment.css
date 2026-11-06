@@ -60,6 +60,22 @@
 @media (min-width: 1024px) and (max-width: 1279px) {
   .environment-strip { bottom: 80px; }
 }
+@media (max-width: 599px) {
+  /* Reserve Objects beside Find and keep its open list below search. */
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .drawing-navigation {
+    width: calc(100vw - 120px);
+  }
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .drawing-objects-panel:not([open]) {
+    left: auto; right: 8px; top: calc(var(--ck-canvas-top-live) + 64px);
+  }
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .drawing-objects-panel[open] {
+    top: calc(var(--ck-canvas-top-live) + 148px);
+    max-height: max(0px, calc(100dvh - var(--ck-canvas-top-live) - 148px - var(--environment-controls-bottom, 190px) - 8px));
+  }
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .drawing-objects-panel > summary {
+    min-height: 44px; padding: 12px 8px;
+  }
+}
 @media (max-width: 1023px) {
   .environment-strip { bottom: calc(100px + env(safe-area-inset-bottom, 0px)); width: 100%; }
   .environment-strip label { flex: 1; }
@@ -86,11 +102,11 @@
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity aside.nav { display: block; padding: 12px; overflow: visible; min-height: 0; }
 .studio-shell .app[data-studio-shell][data-surface][data-environment-panel] > #project-workspace-activity,
 .studio-shell:has(.workspace-environment) .browser-project-panel { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); }
-/* Drafting profiles publish the toolbar edge on the shared shell. Keep the
-   navigation below that assembly, including when the phone header wraps.
-   One pixel clears the desktop producer's rounded-down measurement. */
+/* Workspace navigation precedes the drafting tools. Use only the measured
+   header edge here: depending on the toolbar would create a circular offset.
+   One pixel clears the header producer's rounded-down measurement. */
 .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) {
-  --environment-strip-top: calc(max(var(--drawer-top, 44px), var(--cockpit-band-bottom, 0px), var(--cockpit-stack-top, 0px)) + 1px);
+  --environment-strip-top: calc(var(--drawer-top, 44px) + 1px);
   --environment-strip-height: 50px; /* 44px controls + 4px padding + 2px border */
   --environment-strip-bottom: calc(var(--environment-strip-top) + var(--environment-strip-height));
 }
@@ -103,6 +119,11 @@
   --ck-canvas-top-live: max(var(--ck-canvas-top), var(--cockpit-band-bottom, 0px), var(--environment-strip-bottom));
 }
 @media (min-width: 1024px) {
+  /* The desktop host follows the header in the grid. Reserve the strip's
+     height once so its ribbon and document tabs remain in normal flow. */
+  .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] .center-col {
+    padding-top: calc(var(--environment-strip-height) + 1px); box-sizing: border-box;
+  }
   /* Find used the static edge; keep its existing row below the live view strip. */
   .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-surface][data-environment-panel] .drawing-navigation {
     top: calc(var(--ck-canvas-top-live) + 26px);
@@ -124,7 +145,7 @@
      and useBandHeight publishes the resulting toolbar edge for navigation.
      Clear the header measurement's nearest-pixel rounding by one pixel. */
   .studio-shell:has(.workspace-environment:is([data-profile="cad"], [data-profile="solar"])) .app[data-studio-shell][data-drawer][data-surface][data-environment-panel] .center-col {
-    top: calc(var(--drawer-top) + 1px);
+    top: var(--environment-strip-bottom);
   }
   /* The narrow view strip was absolute inside viewer-wrap, above the dock's
      live boundary. Use viewport coordinates and retain the separate Find row. */

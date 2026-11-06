@@ -45,6 +45,55 @@ def canonical(value):
                                      allow_nan=False).encode("utf-8")).hexdigest()
 
 
+@pytest.mark.parametrize('ordering', ['original', 'canonical', 'reversed'])
+def test_current_native_preset_order_preserves_original_pack_and_geometry(ordering):
+    from dataclasses import asdict
+    from test_solar_ground_conversion import canonical_preset
+    original = canonical_preset()
+    supplied = (json.loads(json.dumps(original, sort_keys=True)) if ordering == 'canonical'
+                else dict(reversed(list(original.items()))) if ordering == 'reversed' else original)
+    loaded, _ = fp.load_current_preset(supplied)
+    expected, _ = fp.load_current_preset(original)
+    assert asdict(loaded) == asdict(expected)
+    assert [(s.kind, s.count) for s in loaded.tracker_pack.segments] == [
+        ('Modules', 6), ('JointGap', 1), ('Motor', 1), ('Modules', 6)]
+    assert (loaded.rows, loaded.columns, loaded.module_power_wp) == (6, 12, 715)
+    assert frames.frame_footprint(loaded) == pytest.approx((14.654, 16.336))
+    boundary = [[0, 0], [15, 0], [15, 18], [0, 18]]
+    doc, _ = fp.prepare_initial_frames(boundary=boundary, preset=supplied, drawing_units='m', current_native=True)
+    base, _ = fp.prepare_initial_frames(boundary=boundary, preset=original, drawing_units='m', current_native=True)
+    assert ps.encode_document(doc) == ps.encode_document(base)
+
+
+def test_current_native_original_conflicting_material_is_not_rewritten(graph):
+    from dataclasses import asdict
+    import solar_ground_conversion as conversion
+    from test_solar_ground_graph_codec import ground_base
+    before = copy.deepcopy(PRESET)
+    loaded, _ = fp.load_current_preset(PRESET)
+    doc, _ = fp.prepare_initial_frames(boundary=GEN['boundary'], preset=PRESET, drawing_units='m', current_native=True)
+    assert (loaded.rows, loaded.columns, loaded.module_power_wp) == (6, 1, 715)
+    assert sum(s.count for s in loaded.tracker_pack.segments if s.kind == 'Modules') == 6
+    # Exact native geometry is retained. It is not relabeled as a genuine module layout.
+    assert frames.frame_footprint(loaded) == pytest.approx((7.918, 7.818))
+    view = {'kind': 'canonical_version_intake', 'index': 0,
+        'state': {'artifact_id': 'a'*64, 'content_sha256': 'b'*64},
+        'parameters': {'generation_models': [asdict(loaded)],
+                       'frame_generations': {f['handle']: 0 for f in doc['state']['frames']}}}
+    g = ground_base(graph)
+    with pytest.raises(conversion.GroundConversionError, match='GROUND_CONVERSION_INPUT_INVALID'):
+        conversion.convert_physical_state(view, doc, g, provenance=g['project']['provenance'], rev=g['rev'])
+    assert PRESET == before
+
+
+def test_historical_snapshot_collection_reuse_remains_explicit_and_unchanged():
+    legacy, _ = fp.load_preset(PRESET)
+    replaced, _ = fp.load_preset(PRESET, replicate_list_reuse=False)
+    assert sum(s.count for s in legacy.tracker_pack.segments if s.kind == 'Modules') == 12
+    assert sum(s.count for s in replaced.tracker_pack.segments if s.kind == 'Modules') == 6
+    assert legacy.frame_power_kwp == replaced.frame_power_kwp == 4.29
+
+
 def ev():
     return producer("solar_ground_studio_evidence")
 
@@ -180,7 +229,25 @@ def test_frames_piles_first_generate_is_the_evidence_g1(backend):
     assert document["state"]["next_handle"] == 145
     assert (result["head"]["state"]["artifact_id"], result["head"]["state"]["byte_length"]) == MEASURED_G1_STATE
     assert canonical(result) == MEASURED_G1_RESULT
-    assert len(keys(backend) - before) == 3
+    state_meta, _ = ps.solar_artifacts.read_artifact(backend, TENANT, DRAWING, result['head']['state']['artifact_id'])
+    context = {'project_id': state_meta['project_id'], 'resolved_version': state_meta['source_version'],
+               'graph_sha256': state_meta['graph_sha256']}
+    parameter_id = canonical(ps.solar_artifacts.artifact_binding(
+        TENANT, DRAWING, context, ps.PARAMETERS_TOOL, document['source']['sha256']))
+    parameter_meta, parameter_raw = ps.solar_artifacts.read_artifact(backend, TENANT, DRAWING, parameter_id)
+    parameters = ps.load_operation_parameters(backend, TENANT, DRAWING, state_meta, document)
+    request = {'operation': 'frame-generate', 'base': None, 'drawing_units': 'm',
+               'boundary': GEN['boundary'], 'preset': PRESET}
+    assert parameters == json.loads(parameter_raw) == {
+        'schema': ps.PARAMETERS_SCHEMA, 'operation': request, 'generation': request, 'piling': None}
+    assert parameter_meta['filename'] == 'physical-parameters.json'
+    assert keys(backend) - before == {
+        f"{PREFIX}artifacts/{state_meta['artifact_id']}.json",
+        f"{PREFIX}artifacts/blobs/{state_meta['content_sha256']}.bin",
+        ph.entry_key(TENANT, DRAWING, 0),
+        f"{PREFIX}artifacts/{parameter_id}.json",
+        f"{PREFIX}artifacts/blobs/{parameter_meta['content_sha256']}.bin",
+    }
 
 
 MEASURED_G1_STATE = ("4431effa54c7630c12269f5ae9ee2b9a9edd54d5b152ba810bf409e5ca9bfc3b", 50469)

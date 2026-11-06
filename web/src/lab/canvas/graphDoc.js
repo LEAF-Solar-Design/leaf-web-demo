@@ -41,6 +41,24 @@ export function removeBlock(document, id) {
     pipes: document.pipes.filter(pipe => pipe.from.node !== id && pipe.to.node !== id),
     outputs: Object.fromEntries(Object.entries(document.outputs).filter(([, endpoint]) => endpoint.node !== id)) }
 }
+export function setOutput(document, name, endpoint, entries = registry) {
+  if (typeof name !== 'string') throw new Error('Output name must be text')
+  const block = document.blocks.find(item => item.id === endpoint.node)
+  if (!block) throw new Error('Output block missing')
+  if (!Object.hasOwn(manifestFor(block, entries).outputs, endpoint.port)) throw new Error('Output port missing')
+  const existing = Object.hasOwn(document.outputs, name) && document.outputs[name]
+  if (existing && (existing.node !== endpoint.node || existing.port !== endpoint.port)) {
+    throw new Error('Output name already belongs to another endpoint')
+  }
+  const next = { ...document, outputs: { ...document.outputs, [name]: roundTrip(endpoint) } }
+  contract.schema(next, 'lab-graph.v1.schema.json')
+  return roundTrip(next)
+}
+export function removeOutput(document, name) {
+  const next = { ...document, outputs: Object.fromEntries(Object.entries(document.outputs).filter(([key]) => key !== name)) }
+  contract.schema(next, 'lab-graph.v1.schema.json')
+  return roundTrip(next)
+}
 export function updateSettings(document, id, settings, entries = registry) {
   const block = document.blocks.find(item => item.id === id)
   if (!block) throw new Error('Block missing')
@@ -66,6 +84,16 @@ export function validateGraph(document, entries = registry) {
   const started = performance.now()
   try {
     const problems = document.blocks.map(block => resolveManifest(block, entries).problem).filter(Boolean)
+    if (problems.length) return { ready: false, problems, message: problems.join('; '), ms: performance.now() - started }
+    for (const block of document.blocks) {
+      const { manifest } = resolveManifest(block, entries)
+      for (const key of (manifest.settings_schema.required || []).filter(key => !Object.hasOwn(block.settings || {}, key))) {
+        problems.push(`${manifest.title || block.id}: setting "${key}" is required`)
+      }
+      for (const name of missingInputs(document, block, entries)) {
+        problems.push(`${manifest.title || block.id}: input "${name}" needs a connection`)
+      }
+    }
     if (problems.length) return { ready: false, problems, message: problems.join('; '), ms: performance.now() - started }
     contract.graph(document, entries); return { ready: true, problems: [], message: 'Ready', ms: performance.now() - started }
   }

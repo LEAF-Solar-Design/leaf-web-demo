@@ -516,6 +516,12 @@ _mount_platform_router()
 from routers import project_repository_edit as project_repository_edit_router  # noqa: E402
 
 app.include_router(project_repository_edit_router.router)
+from routers import browser_project  # noqa: E402
+app.middleware("http")(browser_project.no_store_responses)
+app.include_router(browser_project.router)
+from routers import native_project  # noqa: E402
+app.middleware("http")(native_project.no_store_responses)
+app.include_router(native_project.router)
 
 
 # --- operator control plane (contract/OPERATOR.md; Wave 1, dark by default) --- #

@@ -23,6 +23,13 @@
 .portfolio-editor__disclosure > summary { box-sizing: border-box; min-height: 44px; padding: 12px 4px; cursor: pointer; color: var(--leaf-ink, #202020); overflow-wrap: anywhere; }
 .portfolio-editor__disclosure > summary:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
 .portfolio-editor__fields { display: grid; gap: 14px; min-width: 0; padding: 8px 0 12px; }
+.portfolio-editor__photo-picker { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; min-width: 0; max-width: 100%; }
+.portfolio-editor .portfolio-editor__photo-choice { box-sizing: border-box; display: grid; gap: 6px; min-width: 0; max-width: 100%; min-height: 44px; min-inline-size: 44px; padding: 8px; text-align: left; overflow-wrap: anywhere; cursor: pointer; }
+.portfolio-editor__photo-choice .portfolio-photo { min-width: 0; min-height: 80px; }
+.portfolio-editor__photo-choice img { display: block; width: 100%; height: 96px; object-fit: contain; }
+.portfolio-editor__photo-choice:focus-visible { outline: 2px solid currentColor; outline-offset: 2px; }
+.portfolio-editor__photo-choice:disabled { cursor: default; }
+@media(max-width:400px) { .portfolio-editor__photo-picker { grid-template-columns: minmax(0, 1fr); } }
 .portfolio-editor h3, .portfolio-editor h4 { margin-bottom: 0; }
 .browser-asset-viewport:has(.portfolio) { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); height: auto; overflow: auto; }
 .browser-asset-viewport .portfolio-viewer { top: calc(var(--drawer-top, 44px) + 49px); bottom: var(--environment-controls-bottom, 190px); display: flex; flex-direction: column; overscroll-behavior: contain; }

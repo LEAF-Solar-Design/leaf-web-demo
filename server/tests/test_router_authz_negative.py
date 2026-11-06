@@ -46,6 +46,7 @@ RUN_CASES = [
     ("POST", "/private-run/cancel", None),
     ("POST", "/worker/pause", {"reason": "maintenance"}),
     ("POST", "/worker/resume", None),
+    pytest.param("GET", "/corpus-options", None, id="corpus-options"),
 ]
 ACTIVATION_CASES = [
     ("POST", "", {"doc_id": DOC, "interval_s": 60}),
@@ -196,6 +197,7 @@ def test_route_inventory_is_complete():
             for path, route in iter_leaf_routes(lab_runs.router.routes)
             for method in route.methods} == {
         ("POST", "/api/lab/runs"),
+        ("GET", "/api/lab/runs/corpus-options"),
         ("GET", "/api/lab/runs/{run_id}"),
         ("GET", "/api/lab/runs/{run_id}/events"),
         ("POST", "/api/lab/runs/{run_id}/cancel"),

@@ -43,6 +43,7 @@ TRACKED_DRAWINGS = (
     "engine/corpus/02_open_lwpolyline_two_layers.dxf",
     "engine/corpus/03_classic_polyline_vertex_seqend.dxf",
     "engine/corpus/04_empty_entities_section.dxf",
+    "vendor/acadrust-worker/fixtures/bsp6-rooftop.dxf",
 )
 ENTITY_KINDS = ("polylines", "circles", "arcs", "texts", "dimensions", "inserts", "mleaders")
 TRACKED_DRAWING_TIMEOUT_MS = 10000.0

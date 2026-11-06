@@ -1,6 +1,19 @@
 import { expect, test } from '@playwright/test'
 import { REQUEST, catProofResponse, makeCatProofState } from '../catProofFixture.mjs'
 
+// Synthetic fixture diagnostics, emitted only for the two previously failed cases.
+const restoreProofDiagnostics = new WeakMap()
+test.afterEach(async ({ page }, testInfo) => {
+  if (testInfo.status === testInfo.expectedStatus) return
+  if (!['the /app history drawer shows deltas and restores an old version as a new head',
+    'an unreadable restored head keeps its warning through history refresh and does not refresh the viewer'].includes(testInfo.title)) return
+  const read = restoreProofDiagnostics.get(page)
+  if (!read) return
+  const body = JSON.stringify({ title: testInfo.title, status: testInfo.status, ...read() })
+  console.log(`RESTORE_DIAGNOSTIC ${body}`)
+  await testInfo.attach('restore-fixture-diagnostic', { body, contentType: 'application/json' })
+})
+
 // A DRAWING mutation, which is what "read-only preview" is about. Telemetry is
 // a non-GET too, but it carries no drawing write and the surface emits it on
 // interaction (including the preview click itself), so counting it makes the
@@ -55,6 +68,12 @@ async function mountVersionSurface(page, {
   // preview must add NOTHING to this list; asserting on disabled buttons alone
   // would pass against a UI that greys a control and still fires the request.
   const mutating = []
+  const diagnosticStarted = Date.now()
+  const diagnosticRoutes = []
+  restoreProofDiagnostics.set(page, () => ({
+    head, restoreCount, intakeReadsAfterRestore, deltasRequested,
+    mutating: [...mutating], routes: diagnosticRoutes.slice(-24),
+  }))
   let releaseHistoryRefresh
   const historyRefreshGate = new Promise((resolve) => { releaseHistoryRefresh = resolve })
 
@@ -63,6 +82,9 @@ async function mountVersionSurface(page, {
     const url = new URL(request.url())
     const method = request.method()
     const path = url.pathname
+    if (path.startsWith('/api/drawings/cat-panels/versions') || path === '/api/drawings/cat-panels/intake') {
+      diagnosticRoutes.push({ method, path, elapsedMs: Date.now() - diagnosticStarted })
+    }
     const multipart = request.headers()['content-type']?.startsWith('multipart/form-data')
     const body = request.postData() && !multipart ? request.postDataJSON() : {}
     if (isDrawingMutation(method, path)) mutating.push(`${method} ${path}`)

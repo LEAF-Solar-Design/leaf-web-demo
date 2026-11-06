@@ -67,6 +67,7 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
           // Schema validation of the private proposal result adds no SDK path.
           spec === "zod" ||
           spec === "./spineSystemPrompt.js" ||
+          spec === "./projectPhotoInspection.js" ||
           // Admitted only because deviceTools.ts imports nothing but zod;
           // the leaf-purity assertion below pins that restriction.
           spec === "./deviceTools.js" ||
@@ -82,6 +83,13 @@ describe("invariant v2 — static: the converse lane never imports the Agent SDK
           spec === "../redact.js",
       ).toBe(true);
     }
+    // The admitted photo validator remains leaf-pure: no SDK or author-runner
+    // path can enter the conversational lane through this module.
+    const photoSource = readFileSync(join(SRC, "agent/projectPhotoInspection.ts"), "utf8");
+    expect([...photoSource.matchAll(/from\s+"([^"]+)"/g)].map((m) => m[1]!))
+      .toEqual(["node:crypto", "zod"]);
+    expect(photoSource.match(/\bimport\s/g)).toHaveLength(2);
+    expect(photoSource).not.toMatch(/@anthropic-ai|claude-agent-sdk|agentSdkRunner|\bimport\s*\(/);
   });
 
   it("the device tool schemas stay leaf-pure", () => {

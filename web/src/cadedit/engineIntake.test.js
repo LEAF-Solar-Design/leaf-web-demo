@@ -7,6 +7,51 @@ import { bulgePoints, ARC_STEP_DEG, CIRCLE_SEGMENTS, DIM_EXT_PAST, MAX_POINTS, M
 
 const near = (a, b, eps = 1e-9) => Math.abs(a - b) < eps
 
+describe('source object summary', () => {
+  const panel = { type: 'LWPOLYLINE', layer: 'Panels', closed: true, vertices: [[0, 0], [2, 0], [2, 1], [0, 1]] }
+  const label = { type: 'TEXT', vertices: [[0, 0]], text: 'A', height: 1 }
+
+  it('keeps the 80 rooftop objects separate from their rendered label contours', () => {
+    const entities = [
+      ...Array.from({ length: 64 }, (_, i) => ({ ...panel, id: String(i + 1) })),
+      ...Array.from({ length: 10 }, (_, i) => ({ ...panel, id: String(i + 65), layer: 'Roof' })),
+      ...Array.from({ length: 2 }, (_, i) => ({ ...label, id: String(i + 75), layer: 'InverterLabels' })),
+      ...Array.from({ length: 4 }, (_, i) => ({ ...label, id: String(i + 77), layer: 'StringLabels' })),
+    ]
+    const intake = engineIntake(entities, 'rooftop.dxf')
+    expect(intake.documentId).toBe('rooftop.dxf')
+    expect(intake.sourceSummary).toEqual({ entityCount: 80,
+      countsByType: { LWPOLYLINE: 74, TEXT: 6 },
+      countsByLayer: { Panels: 64, Roof: 10, InverterLabels: 2, StringLabels: 4 } })
+    expect(intake.polylines).toHaveLength(86)
+    expect(intake.polylines.filter((pl) => pl.handle === '4B')).toHaveLength(2)
+  })
+
+  it('counts a block once and counts omitted dimensions and unsupported object kinds', () => {
+    const entities = Object.assign([
+      { id: '10', type: 'INSERT', layer: 'Equipment', name: 'B', ip: [0, 0, 0], scale: [1, 1, 1], rotationDeg: 0 },
+      { id: '11', type: 'DIMENSION', dimtype: 'RADIUS', layer: 'Notes' },
+      { id: '12', type: 'PROXY_ENTITY', layer: 'Notes' },
+    ], { blocks: [{ name: 'B', base: [0, 0, 0], complete: true,
+      children: [{ ...panel, layer: '0' }, { ...panel, layer: '0' }] }] })
+    const intake = engineIntake(entities)
+    expect(intake.sourceSummary).toEqual({ entityCount: 3,
+      countsByType: { INSERT: 1, DIMENSION: 1, PROXY_ENTITY: 1 },
+      countsByLayer: { Equipment: 1, Notes: 2 } })
+    expect(intake.polylines).toHaveLength(2)
+    expect(intake.inserts).toHaveLength(1)
+    expect(intake.polylines.every((pl) => pl.handle === 'A' && pl.sourceHandle === 'A')).toBe(true)
+    expect(intake.diagnostics.omittedDimensions).toEqual({ RADIUS: 1 })
+  })
+
+  it('uses the engine total independently of projected records and preserves source names', () => {
+    const intake = engineIntake([{ ...panel, layer: '__proto__' }], 'roof.dxf', [], 5)
+    expect(intake.sourceSummary.entityCount).toBe(5)
+    expect(Object.entries(intake.sourceSummary.countsByLayer)).toEqual([['__proto__', 1]])
+    for (const count of [null, -1, NaN]) expect(engineIntake([panel], '', [], count).sourceSummary.entityCount).toBe(1)
+  })
+})
+
 describe('engine text glyphs', () => {
   const text = { id: '26', type: 'TEXT', layer: 'Notes', vertices: [[10, 20, 0]], text: 'A', height: 2, rotationDeg: 0 }
   const dimension = (dimtype = 'LINEAR', measurement = 3) => ({ id: '500', type: 'DIMENSION', dimtype, layer: '0',

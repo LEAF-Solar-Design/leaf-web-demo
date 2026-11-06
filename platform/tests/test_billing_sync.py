@@ -66,16 +66,17 @@ def test_wrong_secret_is_403(client, make_org, live_sync):
 # --------------------------------------------------------------------------- #
 def test_upgrade_applies_plan_tier(client, make_org, live_sync):
     org = make_org(tier="hosted_starter")
+    event_id = f"evt_test_1-{org.org_id}"
     r = _sync(client, org.org_id, {"plan": "pro", "subscription_active": True,
                                    "subscription_status": "active",
-                                   "stripe_event_id": "evt_test_1"})
+                                   "stripe_event_id": event_id})
     assert r.status_code == 200
     body = r.json()
     assert body["previous_tier"] == "hosted_starter"
     assert body["tier"] == "hosted_pro"
     assert body["applied"] is True
     assert body["event_recorded"] is True
-    assert body["stripe_event_id"] == "evt_test_1"
+    assert body["stripe_event_id"] == event_id
     assert store.get_org(org.org_id).tier == "hosted_pro"
     with cursor() as cur:
         cur.execute(
@@ -85,7 +86,7 @@ def test_upgrade_applies_plan_tier(client, make_org, live_sync):
             {"org_id": org.org_id},
         )
         event = cur.fetchone()
-    assert event["stripe_event_ref_sha256"] != "evt_test_1"
+    assert event["stripe_event_ref_sha256"] != event_id
     assert len(event["stripe_event_ref_sha256"]) == 64
     assert event["subscription_ref_sha256"] is None
 
@@ -127,11 +128,13 @@ def test_stripe_event_replay_is_measured_once_and_cannot_regress_tier(
     client, make_org, live_sync,
 ):
     org = make_org(tier="hosted_starter")
+    replay_event_id = f"evt_replay_guard-{org.org_id}"
+    cancel_event_id = f"evt_later_cancel-{org.org_id}"
     first = _sync(client, org.org_id, {
         "plan": "pro",
         "subscription_active": True,
         "subscription_status": "active",
-        "stripe_event_id": "evt_replay_guard",
+        "stripe_event_id": replay_event_id,
         "stripe_event_type": "customer.subscription.updated",
         "current_period_start": "2026-08-01T00:00:00Z",
         "current_period_end": "2026-09-01T00:00:00Z",
@@ -141,7 +144,7 @@ def test_stripe_event_replay_is_measured_once_and_cannot_regress_tier(
         "plan": "pro",
         "subscription_active": False,
         "subscription_status": "canceled",
-        "stripe_event_id": "evt_later_cancel",
+        "stripe_event_id": cancel_event_id,
         "stripe_event_type": "customer.subscription.deleted",
     })
     assert lapsed.status_code == 200
@@ -149,7 +152,7 @@ def test_stripe_event_replay_is_measured_once_and_cannot_regress_tier(
         "plan": "pro",
         "subscription_active": True,
         "subscription_status": "active",
-        "stripe_event_id": "evt_replay_guard",
+        "stripe_event_id": replay_event_id,
         "stripe_event_type": "customer.subscription.updated",
         "current_period_start": "2026-08-01T00:00:00Z",
         "current_period_end": "2026-09-01T00:00:00Z",
@@ -169,12 +172,13 @@ def test_stripe_event_replay_is_measured_once_and_cannot_regress_tier(
 
 def test_stripe_event_id_facts_drift_is_409(client, make_org, live_sync):
     org = make_org()
+    event_id = f"evt_drift_guard-{org.org_id}"
     first = _sync(client, org.org_id, {
-        "plan": "pro", "stripe_event_id": "evt_drift_guard",
+        "plan": "pro", "stripe_event_id": event_id,
     })
     assert first.status_code == 200
     drift = _sync(client, org.org_id, {
-        "plan": "starter", "stripe_event_id": "evt_drift_guard",
+        "plan": "starter", "stripe_event_id": event_id,
     })
     assert drift.status_code == 409
     assert "different facts" in drift.json()["detail"]

@@ -658,7 +658,7 @@ export default function PromptBox({
   const pickScope = (s) => {
     setScopePicked(true)
     setScopeOpen(false)
-    if (s.lane === 'build') { setActiveScope(null); focusPrompt(); onOpenAuthor?.(); return }
+    if (s.lane === 'build') { setActiveScope(null); focusPrompt(); onOpenAuthor?.({ images: attachments }); return }
     // Slice 10b/10c: find/act now resolve to a real resolver (the palette or
     // the search results) instead of just returning focus to a blank
     // composer. Reselecting the SAME scope while it is already active is a
@@ -1040,8 +1040,8 @@ export default function PromptBox({
             className="bar-add"
             style={{ display: 'inline-flex' }}
             onClick={() => openScope(2)}
-            aria-label="Add: build a new capability"
-            title="Add: build a new capability"
+            aria-label="Add: build a new capability or project source"
+            title="Add: build a new capability or project source"
           >
             +
           </button>

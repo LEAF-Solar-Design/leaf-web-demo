@@ -98,6 +98,56 @@ it('MS06 mirror-replace', async () => { await exerciseCase(5) })
 
 it('MS07 mirror-copy', async () => { await exerciseCase(6) })
 
+it('BSP2 changes a selected layer in one batch and one undo entry without changing geometry', async () => {
+  const h = await selectionSession()
+  const changed = D.map((entity) => S.includes(entity.id) ? { ...entity, layer: 'PanelsReviewed' } : entity)
+  expect(modifyOpReason('setLayer', h.current)).toBe('')
+  act(() => h.current.actions.applyEdit('setLayer', { layer: '  PanelsReviewed  ' }))
+  expect(h.worker.posted).toEqual([batch('setLayer', S, { layer: 'PanelsReviewed' })])
+  expect(Array.from(h.current.entities)).toEqual(Array.from(D))
+  expect(h.current.undoDepth).toBe(0)
+  const saved = new Uint8Array([8, 9, 10])
+  replyBatch(h, changed, { bytes: saved, byteLength: saved.length })
+  expect(Array.from(h.current.entities)).toEqual(changed)
+  expect(h.current.entities.map(({ layer, ...entity }) => entity)).toEqual(D.map(({ layer, ...entity }) => entity))
+  expect(h.current.entities.filter((entity) => !S.includes(entity.id))).toEqual(D.filter((entity) => !S.includes(entity.id)))
+  expect(h.current.savedBytes).toBe(saved)
+  assertSet(h, S)
+  expect(h.current.undoDepth).toBe(1)
+  expect(diffPlan(D, h.current.entities)).toEqual({
+    mutations: { set_layer: [{ handle: '10', layer: 'PanelsReviewed' }, { handle: '13', layer: 'PanelsReviewed' }] },
+    count: 2, reason: null,
+  })
+  h.worker.posted.length = 0
+  act(() => h.current.actions.undo())
+  expect(h.worker.posted).toHaveLength(1)
+  expect(h.worker.posted[0].type).toBe('loadDocument')
+  expect(Array.from(h.worker.posted[0].bytes)).toEqual(Array.from(new TextEncoder().encode('0\nEOF\n')))
+  h.worker.emit(loadedMessage(D))
+  expect(Array.from(h.current.entities)).toEqual(Array.from(D))
+  expect(h.current.undoDepth).toBe(0)
+})
+
+it('BSP2 refuses invalid layer operands and members before posting a batch', async () => {
+  const h = await selectionSession()
+  act(() => h.current.actions.applyEdit('setLayer', { layer: '  ' }))
+  expect(h.current.status).toBe('Set layer refused: enter a layer name.')
+  expect(h.worker.posted).toEqual([])
+  expect(h.current.undoDepth).toBe(0)
+  assertSet(h, S)
+  expect(buildSelectionEditPayload('setLayer', ['16', 'missing'], { layer: 'PanelsReviewed' }, D)).toEqual({
+    refusal: 'Edit refused: a selected object is no longer in the document.',
+  })
+  const unsupported = [...D, { ...common, id: '20', type: 'INSERT', editable: false }]
+  expect(buildSelectionEditPayload('setLayer', ['16', '20'], { layer: 'PanelsReviewed' }, unsupported)).toEqual({
+    refusal: 'A block can be placed here but not edited.',
+  })
+  const tooMany = Array.from({ length: 257 }, (_, i) => ({ ...D[0], id: String(i + 16) }))
+  expect(buildSelectionEditPayload('setLayer', tooMany.map((entity) => entity.id), { layer: 'PanelsReviewed' }, tooMany)).toEqual({
+    refusal: 'Edit refused: select at most 256 objects.',
+  })
+})
+
 it('MS08 delete-index-shift', async () => {
   const h = await selectionSession(D, ['16', '18'])
   act(() => h.current.actions.applyEdit('delete', {}))

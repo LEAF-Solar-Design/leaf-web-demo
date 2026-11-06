@@ -35,7 +35,7 @@
  *   * State is ONE frozen record behind ONE setState: a transition costs one
  *     render, not one per field.
  */
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from 'react'
 
 import { EngineBoundary } from '../cad/engineWorker.js'
 import { SESSION_ERROR } from './engineSessionErrors.js'
@@ -1535,7 +1535,9 @@ export default function useEngineSession({
     // opener's call), so the entity list this load produces becomes the base
     // a save diffs against. Any other shape (a hand import) keeps no base.
     committedLoadRef.current = !!(opts && typeof opts === 'object' && opts.committed === true)
-    committedVersionRef.current = committedLoadRef.current && Number.isInteger(opts.version) && opts.version > 0 ? opts.version : null
+    const projectVersion = opts?.project === true && saveTargetRef.current?.kind === 'project'
+      && typeof opts.version === 'string' && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(opts.version)
+    committedVersionRef.current = committedLoadRef.current && (projectVersion || Number.isInteger(opts.version) && opts.version > 0) ? opts.version : null
     patch({ busy: true, documentId: name, documentOrigin: null, errorKind: null, status: `Opening ${name}...` })
     const boundary = ensureBoundary()
     // W4f slice F: the opened bytes are the floor of the undo history.
@@ -1564,6 +1566,24 @@ export default function useEngineSession({
       })
       return
     }
+    const projectTarget = saveTargetRef.current
+    if (projectTarget?.kind === 'project') {
+      const generation = generationRef.current
+      const scopeKey = projectTarget.scopeKey
+      patch({ busy: true, errorKind: null, status: `Adding ${file.name} to the project...` })
+      try {
+        if (typeof projectTarget.openFile !== 'function') throw new Error('Project drawing import is unavailable.')
+        const receipt = await projectTarget.openFile(file)
+        if (generation !== generationRef.current || saveTargetRef.current?.scopeKey !== scopeKey) return null
+        patch({ busy: false, errorKind: null, status: 'Project drawing imported. Opening its saved version...' })
+        onSavedRef.current?.(receipt)
+        return receipt
+      } catch (error) {
+        if (generation !== generationRef.current || saveTargetRef.current?.scopeKey !== scopeKey) return null
+        patch({ busy: false, errorKind: SESSION_ERROR.READ, status: cadMessage(error?.message || error, 'open') })
+        return null
+      }
+    }
     const generation = generationRef.current
     const { documentId, documentOrigin } = sessionRef.current
     patch({ busy: true, documentId: file.name, documentOrigin: null, errorKind: null, status: `Reading ${file.name}...` })
@@ -1580,6 +1600,28 @@ export default function useEngineSession({
     if (generation !== generationRef.current) return
     openBytes(bytes, file.name)
   }, [openBytes, patch])
+
+  const openProjectVersion = useCallback(async (versionId) => {
+    const target = saveTargetRef.current
+    if (target?.kind !== 'project' || typeof target.readVersion !== 'function' || !versionId || savingRef.current) return null
+    const generation = generationRef.current
+    const scopeKey = target.scopeKey
+    patch({ busy: true, errorKind: null, status: 'Opening the saved project drawing...' })
+    try {
+      const result = await target.readVersion(versionId)
+      if (generation !== generationRef.current || saveTargetRef.current?.scopeKey !== scopeKey) return null
+      if (result?.versionId !== versionId) throw new Error('The project drawing version could not be verified.')
+      // Two saved versions may share a filename. Retire the previous worker so
+      // its delayed same-name parse cannot seat over this immutable selection.
+      teardown()
+      openBytes(result.bytes, result.documentId || 'project.dxf', { committed: true, project: true, version: versionId })
+      return result
+    } catch (error) {
+      if (generation !== generationRef.current || saveTargetRef.current?.scopeKey !== scopeKey) return null
+      patch({ busy: false, errorKind: SESSION_ERROR.READ, status: cadMessage(error?.message || error, 'open') })
+      return null
+    }
+  }, [openBytes, patch, teardown])
 
   const updateSelection = useCallback((resolve) => {
     setSession((current) => {
@@ -1838,7 +1880,7 @@ export default function useEngineSession({
     // other refusal (an opaque kind, curved geometry, a definition change,
     // the operation cap) keeps today's sidecar-leg inheritance below.
     const diff = committedEntities ? diffPlan(committedEntities, entities) : null
-    if (diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour' || diff.cause === 'group-singleton' || diff.cause === 'block-def-unmatched')) {
+    if (target.kind !== 'project' && diff && !diff.mutations && (diff.cause === 'moved-reference' || diff.cause === 'true-colour' || diff.cause === 'group-singleton' || diff.cause === 'block-def-unmatched')) {
       patch({ errorKind: SESSION_ERROR.REFUSED, status: diff.cause === 'block-def-unmatched'
         ? cadMessage(`Save refused: ${diff.reason}.`)
         : diff.cause === 'group-singleton' ? cadMessage(`Save refused: ${diff.reason}.`, 'save')
@@ -1870,6 +1912,16 @@ export default function useEngineSession({
       // A save that outlived its document must not report a version onto a
       // session that has since switched drawings.
       if (generation !== generationRef.current) return null
+      if (target.kind === 'project') {
+        if (saveTargetRef.current?.scopeKey !== target.scopeKey || !receipt?.drawing_version?.version_id) return null
+        const version = receipt.drawing_version
+        patch({ busy: false, receipt, savedVersion: version.version_id,
+          committedBytes: bytes, committedEntities: sessionRef.current.entities,
+          committedVersion: version.version_id, errorKind: null,
+          status: `Saved project drawing version ${version.seq}.` })
+        onSavedRef.current?.(receipt)
+        return receipt
+      }
       const nv = receipt?.new_version?.version ?? receipt?.head
       const live = receipt?.live === true
       const readBackPending = live && receipt.new_version_readable === false
@@ -1901,6 +1953,28 @@ export default function useEngineSession({
           ? `Save refused: ${message}`
           : `Save failed: ${message}`,
       })
+      return null
+    } finally {
+      if (generation === generationRef.current) savingRef.current = false
+    }
+  }, [patch])
+
+  const restoreProjectVersion = useCallback(async (versionId) => {
+    const target = saveTargetRef.current
+    if (target?.kind !== 'project' || typeof target.restoreVersion !== 'function' || !versionId || savingRef.current) return null
+    const generation = generationRef.current
+    const scopeKey = target.scopeKey
+    savingRef.current = true
+    patch({ busy: true, errorKind: null, status: 'Restoring the saved project drawing...' })
+    try {
+      const receipt = await target.restoreVersion(versionId)
+      if (generation !== generationRef.current || saveTargetRef.current?.scopeKey !== scopeKey) return null
+      patch({ busy: false, receipt, errorKind: null, status: 'Project drawing restored. Opening its saved version...' })
+      onSavedRef.current?.(receipt)
+      return receipt
+    } catch (error) {
+      if (generation !== generationRef.current || saveTargetRef.current?.scopeKey !== scopeKey) return null
+      patch({ busy: false, errorKind: SESSION_ERROR.SAVE, status: cadMessage(error?.message || error, 'restore') })
       return null
     } finally {
       if (generation === generationRef.current) savingRef.current = false
@@ -1951,12 +2025,17 @@ export default function useEngineSession({
   // from one document can bleed into another. The FIRST observation is the
   // session learning which drawing it is on, not a switch.
   const previousDrawingRef = useRef(undefined)
-  useEffect(() => {
+  const projectScopeKey = saveTarget?.kind === 'project' ? saveTarget.scopeKey : null
+  const previousProjectScopeRef = useRef(undefined)
+  useLayoutEffect(() => {
     const previous = previousDrawingRef.current
+    const previousScope = previousProjectScopeRef.current
     previousDrawingRef.current = drawingId
-    if (previous === undefined || previous === drawingId) return
+    previousProjectScopeRef.current = projectScopeKey
+    if (previous === undefined && previousScope === undefined) return
+    if (previous === drawingId && previousScope === projectScopeKey) return
     reset()
-  }, [drawingId, reset])
+  }, [drawingId, projectScopeKey, reset])
 
   useEffect(() => () => { teardown() }, [teardown])
 
@@ -2001,9 +2080,9 @@ export default function useEngineSession({
   }, [create, patch])
 
   const actions = useMemo(() => ({
-    open, openBytes, select, selectAdd, selectToggle, selectReplace, selectClear, applyEdit, create, save, reset, undo, redo,
+    open, openBytes, openProjectVersion, restoreProjectVersion, select, selectAdd, selectToggle, selectReplace, selectClear, applyEdit, create, save, reset, undo, redo,
     copyToClipboard, pasteFromClipboard,
-  }), [applyEdit, copyToClipboard, create, open, openBytes, pasteFromClipboard, redo, reset, save, select, selectAdd, selectToggle, selectReplace, selectClear, undo])
+  }), [applyEdit, copyToClipboard, create, open, openBytes, openProjectVersion, restoreProjectVersion, pasteFromClipboard, redo, reset, save, select, selectAdd, selectToggle, selectReplace, selectClear, undo])
 
   const selected = useMemo(
     () => session.entities.find((entity) => entity.id === session.selectedId) || null,
@@ -2012,6 +2091,7 @@ export default function useEngineSession({
 
   return {
     ...session,
+    projectMode: saveTarget?.kind === 'project',
     selected,
     // A crash is the one error a retry can clear on its own: the next open
     // spawns a fresh worker.

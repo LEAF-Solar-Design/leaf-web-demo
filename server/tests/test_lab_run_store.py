@@ -44,6 +44,82 @@ def create(tenant, run_id="run", doc_id="doc"):
     return store.create(tenant, doc_id, run_id, 1, "a" * 64, "ops:1", "b" * 64, "adapter-1", "build_1")
 
 
+def intent_id():
+    return f"v1.{int(store._now().timestamp() * 1000)}.{uuid.uuid4().hex}"
+
+
+def submit_intent(tenant, submission, **overrides):
+    args = dict(tenant=tenant, doc_id="doc", run_id=uuid.uuid4().hex,
+                graph_revision=1, graph_sha256="a" * 64, ops_revision="ops:1",
+                input_digest="b" * 64, adapter_revision="adapter-1", build_revision="build_1",
+                submission_id=submission, authority="member")
+    args.update(overrides)
+    return store.create(**args)
+
+
+def test_submission_atomic_queue_full_and_one_worker_claim(authority, monkeypatch):
+    submission = intent_id()
+    barrier = threading.Barrier(8)
+    monkeypatch.setattr(store, "MAX_QUEUED_PER_TENANT", 1)
+    def submit(_):
+        barrier.wait(timeout=10)
+        return submit_intent(authority, submission)["run_id"]
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        ids = list(pool.map(submit, range(8)))
+    assert len(set(ids)) == 1
+    assert submit_intent(authority, submission, reconcile_only=True)["run_id"] == ids[0]
+    with pytest.raises(store.TooLarge):
+        submit_intent(authority, intent_id())
+    with ThreadPoolExecutor(max_workers=8) as pool:
+        claims = list(pool.map(lambda index: store.claim(authority, ids[0], f"worker{index}", 30,
+                          build_revision="build_1", color="active"), range(8)))
+    assert sum(bool(claim) for claim in claims) == 1
+
+
+@pytest.mark.parametrize("field,value", [
+    ("doc_id", "other"), ("graph_revision", 2), ("graph_sha256", "c" * 64),
+    ("ops_revision", "ops:2"), ("input_digest", "d" * 64),
+    ("adapter_revision", "adapter-2"), ("build_revision", "build_2"),
+])
+def test_submission_all_execution_pins_conflict(authority, field, value):
+    submission = intent_id()
+    submit_intent(authority, submission)
+    with pytest.raises(store.SubmissionConflict, match="lab_submission_mismatch"):
+        submit_intent(authority, submission, **{field: value})
+
+
+def test_submission_registry_pin_conflict(authority, monkeypatch):
+    submission = intent_id()
+    submit_intent(authority, submission)
+    monkeypatch.setattr(store, "registry_digest", lambda: "e" * 64)
+    with pytest.raises(store.SubmissionConflict, match="lab_submission_mismatch"):
+        submit_intent(authority, submission, reconcile_only=True)
+
+
+def test_submission_missing_expired_authority_and_retention(authority, monkeypatch):
+    submission = intent_id()
+    with pytest.raises(store.SubmissionConflict, match="lab_submission_missing"):
+        submit_intent(authority, submission, reconcile_only=True)
+    row = submit_intent(authority, submission)
+    with pytest.raises(store.SubmissionConflict, match="lab_submission_missing"):
+        submit_intent(authority + "-other", submission, reconcile_only=True)
+    with pytest.raises(store.SubmissionConflict, match="lab_submission_missing"):
+        submit_intent(authority, submission, reconcile_only=True, authority="other-member")
+    # Retention must not remove an intent and permit another execution in its window.
+    store._run(authority, lambda sql: sql.execute(
+        "UPDATE lab_runs SET state='finished' WHERE tenant_id=?", (authority,)), write=True)
+    for index in range(51):
+        create(authority, f"fresh{index}")
+        store._run(authority, lambda sql: sql.execute(
+            "UPDATE lab_runs SET state='finished' WHERE tenant_id=?", (authority,)), write=True)
+    store.sweep(store._now())
+    assert submit_intent(authority, submission, reconcile_only=True)["run_id"] == row["run_id"]
+    now = store._now()
+    monkeypatch.setattr(store, "_now", lambda: now + timedelta(hours=25))
+    with pytest.raises(store.SubmissionConflict, match="lab_submission_expired"):
+        submit_intent(authority, submission)
+
+
 def test_stream_cap_is_atomic_across_connections_and_tenants(authority):
     barrier = threading.Barrier(8)
 

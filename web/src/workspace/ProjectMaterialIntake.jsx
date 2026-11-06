@@ -1,4 +1,5 @@
 import DrawingUploadControl from '../components/DrawingUploadControl.jsx'
+import ReferenceMaterialIntake from './ReferenceMaterialIntake.jsx'
 import { humanizeError } from '../errorHumanize.js'
 
 export function materialError(error) {
@@ -26,6 +27,7 @@ export default function ProjectMaterialIntake({ project, upload = {}, intake = {
   return (
     <section className="ground-pane" data-pane="material-intake">
       {photos}
+      {project?.project_id && <ReferenceMaterialIntake projectId={project.project_id} />}
       {photos && <h3>Drawings</h3>}
       <DrawingUploadControl {...upload} error={null} phase={upload.phase === 'ready' ? 'idle' : upload.phase}
         disabled={!project} onUpload={onStartUpload} onCancel={upload.actions?.cancel} onEngineChange={upload.actions?.setEngine} />

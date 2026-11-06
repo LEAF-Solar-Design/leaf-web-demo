@@ -53,7 +53,15 @@ def _server_graph_tools():
 def test_launcher_project_worker_selection(monkeypatch):
     configured = {"DATABASE_URL": "postgresql://local/leaf"}
     tools = _server_graph_tools()
-    assert _launcher_module().project_worker_tools() == tools and len(tools) == 15
+    assert tools == frozenset((
+        "solar-settings", "solar-panels-from-drawing", "solar-size-strings",
+        "solar-design-presets", "solar-trackers-to-panel-groups",
+        "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
+        "solar-string-add", "solar-assign-equipment", "solar-string-multi-add",
+        "solar-string-conductors", "solar-panel-groups", "solar-correct-string",
+        "solar-solve-proposal", "solar-commit-solve", "solar-solaredge-accept",
+    ))
+    assert _launcher_module().project_worker_tools() == tools
     for tool in sorted(tools):
         with monkeypatch.context() as patch:
             launcher, spawned = _fake_launcher(patch, ["--canonical-worker-tool", tool], configured)

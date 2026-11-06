@@ -1,4 +1,4 @@
-import { entityToPolyline, hexHandle } from '../cadedit/engineIntake.js'
+import { entityToPolyline, hexHandle, projectServerBlocks } from '../cadedit/engineIntake.js'
 
 const list = (value) => Array.isArray(value) ? value : []
 const handleOf = (value) => String(value ?? '').replace(/^0x/i, '').toUpperCase()
@@ -10,6 +10,11 @@ const union = (a, b) => !b ? a : !a ? { ...b } : ({ minX: Math.min(a.minX, b.min
 /** Pure, drawing-scoped navigation data. Definitions never become placed objects. */
 export function buildDrawingObjectIndex({ drawingKey, entities, intake, solarGraph } = {}) {
   const records = [], byId = new Map(), byHandle = new Map(), graphIds = new Map(), counts = new Map(), layers = new Map()
+  const blocks = projectServerBlocks(intake)
+  const normalizedInserts = new Map(blocks.inserts.map((row) => [handleOf(row.handle), row]))
+  const serverBlocks = intake?.source !== 'engine' && intake?.source !== 'bridge'
+  // A placed block owns all its child geometry, but each child keeps its rendered layer.
+  const blockLayers = new Map()
   const issue = (code) => counts.set(code, (counts.get(code) || 0) + 1)
   const add = (id, kind, name) => {
     const record = { id, kind, name: String(name), aliases: [], path: '', bounds: null, physicalParentId: null,
@@ -66,16 +71,30 @@ export function buildDrawingObjectIndex({ drawingKey, entities, intake, solarGra
     record.bounds = entity.bounds != null || invalid ? rawBounds : geometry ? boundsOf(geometry) : rawBounds
   }
   for (const [key, kind] of [['polylines', 'LWPOLYLINE'], ['inserts', 'INSERT'], ['faces3d', '3DFACE'], ['circles', 'CIRCLE'], ['arcs', 'ARC']]) {
-    for (const object of list(intake?.[key])) {
-      if (!object) continue
+    for (const source of list(intake?.[key])) {
+      if (!source) continue
+      const object = key === 'inserts' && serverBlocks
+        ? normalizedInserts.get(handleOf(source.handle)) ?? source : source
       const record = entityRecord(handleOf(object.sourceHandle ?? object.handle), kind, object.layer)
       if (!record) continue
-      let bounds = boundsOf(object)
+      let bounds = key === 'inserts' && serverBlocks && object.incomplete === false ? null : boundsOf(object)
+      if (key === 'inserts' && serverBlocks) {
+        blockLayers.set(record, new Map([[String(object.layer ?? '0'), bounds]]))
+      }
       if (object.c && Number.isFinite(object.r) && object.r > 0) {
         bounds = boundsOf({ pts: [[object.c[0] - object.r, object.c[1] - object.r], [object.c[0] + object.r, object.c[1] + object.r]] })
       }
       record.bounds = union(record.bounds, bounds)
     }
+  }
+  for (const pl of blocks.polylines) {
+    const record = byHandle.get(handleOf(pl.sourceHandle ?? pl.handle))
+    if (!record) continue
+    const bounds = boundsOf(pl), layer = String(pl.layer ?? '0')
+    record.bounds = union(record.bounds, bounds)
+    const placed = blockLayers.get(record)
+    if (placed) placed.set(layer, union(placed.get(layer), bounds))
+    layerFor(layer)
   }
   let graph = solarGraph?.graph
   if (solarGraph && solarGraph.drawingKey !== drawingKey) { issue('drawing-key-mismatch'); graph = null }
@@ -172,11 +191,19 @@ export function buildDrawingObjectIndex({ drawingKey, entities, intake, solarGra
   }
   for (let i = ordered.length - 1; i >= 0; i--) {
     const record = ordered[i], parent = byId.get(record.physicalParentId)
-    if (parent) parent.bounds = union(parent.bounds, record.bounds)
+    if (parent && !(parent.kind === 'layer' && blockLayers.has(record))) parent.bounds = union(parent.bounds, record.bounds)
   }
   for (const [record, layer] of layers) {
-    const group = byId.get(layer)
-    group.bounds = union(group.bounds, record.bounds)
+    const placed = blockLayers.get(record)
+    if (placed) {
+      for (const [name, bounds] of placed) {
+        const group = byId.get(`layer:${name}`)
+        if (group) group.bounds = union(group.bounds, bounds)
+      }
+    } else {
+      const group = byId.get(layer)
+      group.bounds = union(group.bounds, record.bounds)
+    }
   }
   for (const record of records) {
     if (record.bounds) {

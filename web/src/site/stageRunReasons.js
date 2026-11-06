@@ -67,13 +67,14 @@ export function stageHelpPaletteRow() {
 export function stageRunDisabledReason({
   sessionActive = false,
   hasDrawing = false,
+  projectConversation = false,
   busy = false,
   jobRunning = false,
   routing = false,
   loading = false,
 } = {}) {
   if (!sessionActive) return STAGE_RUN_REASONS.session
-  if (!hasDrawing) return STAGE_RUN_REASONS.drawing
+  if (!hasDrawing && projectConversation !== true) return STAGE_RUN_REASONS.drawing
   if (busy) return STAGE_RUN_REASONS.busy
   if (jobRunning) return STAGE_RUN_REASONS.job
   if (routing) return STAGE_RUN_REASONS.routing

@@ -2,6 +2,21 @@ import { humanizeError } from '../../errorHumanize.js'
 
 export const WORKSPACE_ORG_KEY = 'leaf.org_id'
 
+const projectStorageKey = (orgId) => `leaf.project_id:${orgId}`
+
+function readStoredProjectId(orgId, storage) {
+  if (!orgId) return null
+  try { return storage?.getItem(projectStorageKey(orgId)) || null } catch { return null }
+}
+
+function writeStoredProjectId(orgId, projectId, storage) {
+  if (!orgId) return
+  try {
+    if (projectId) storage?.setItem(projectStorageKey(orgId), projectId)
+    else storage?.removeItem(projectStorageKey(orgId))
+  } catch { /* workspace persistence is best effort */ }
+}
+
 function browserStorage() {
   try { return globalThis.localStorage } catch { return null }
 }
@@ -65,6 +80,7 @@ export function createWorkspaceController({
   let readsPaused = false // a known guest: loadProjects publishes the empty, error-free snapshot and reads nothing
   const generations = { projects: 0, workspace: 0, org: 0, project: 0 }
   let inFlightOpen = null
+  let resumeAttempted = false
   let state = {
     mock: !!mock,
     orgId: readStoredOrgId(storage),
@@ -124,6 +140,7 @@ export function createWorkspaceController({
   async function loadProjects() {
     const request = nextGeneration('projects')
     const orgId = state.orgId
+    const workspaceRequest = generations.workspace
     if (state.mock || readsPaused || (!authLive && !orgId)) {
       publish({ projects: [], projectsError: null, projectsLoading: false, projectsLoaded: false, bootstrapState: orgId ? 'bound' : 'unbound', bootstrapMessage: null })
       return []
@@ -135,6 +152,16 @@ export function createWorkspaceController({
       const projects = Array.isArray(response) ? response : response?.projects || []
       publish({ projects, projectsLoading: false, projectsLoaded: true, bootstrapState: 'bound',
         bootstrapMessage: null, orgConflict: false, orgDraftError: null })
+      // Publication can synchronously trigger a manual selection or another list.
+      if (isCurrent('projects', request) && state.orgId === orgId
+        && generations.workspace === workspaceRequest && !state.mock
+        && !state.openProjectId && !state.projectBusy && !resumeAttempted) {
+        const projectId = readStoredProjectId(orgId, storage)
+        if (projectId && projects.some((project) => projectIdOf(project) === projectId)) {
+          resumeAttempted = true
+          await openProject(projectId)
+        }
+      }
       return projects || []
     } catch (error) {
       if (!isCurrent('projects', request) || state.orgId !== orgId) return null
@@ -157,6 +184,7 @@ export function createWorkspaceController({
 
   function openProject(projectId) {
     if (!projectId) return Promise.resolve(null)
+    resumeAttempted = true
     const request = nextGeneration('workspace')
     const orgId = state.orgId
     let resolveOpen
@@ -189,6 +217,7 @@ export function createWorkspaceController({
         const workspace = await services.openProject(projectId, orgId)
         if (!isCurrentWorkspace(request, projectId, orgId) || !acceptWorkspaceOrg(workspace, orgId)) return null
         const settledOrgId = state.orgId
+        if (!state.mock) writeStoredProjectId(settledOrgId, projectId, storage)
         publish({ workspace, workspaceLoading: false })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId: settledOrgId, workspace })
         return workspace
@@ -213,6 +242,7 @@ export function createWorkspaceController({
       const workspace = await services.openProject(projectId, orgId)
       if (!isCurrentWorkspace(request, projectId, orgId) || !acceptWorkspaceOrg(workspace, orgId)) return null
       const settledOrgId = state.orgId
+      if (!state.mock) writeStoredProjectId(settledOrgId, projectId, storage)
       publish({ workspace, workspaceLoading: false })
       invoke(callbacks.onWorkspaceRehydrated, { projectId, orgId: settledOrgId, workspace })
       return workspace
@@ -226,6 +256,8 @@ export function createWorkspaceController({
 
   function closeProject() {
     nextGeneration('workspace')
+    resumeAttempted = true
+    if (!state.mock) writeStoredProjectId(state.orgId, null, storage)
     const projectId = state.openProjectId
     publish({
       openProjectId: null,
@@ -240,6 +272,7 @@ export function createWorkspaceController({
     const orgId = String(givenOrgId || '').trim()
     if (!orgId) return false
     if (state.orgId === orgId) return true
+    resumeAttempted = false
     const adopting = state.orgId === null
     if (adopting) {
       nextGeneration('projects')
@@ -281,6 +314,7 @@ export function createWorkspaceController({
       generations.projects += 1
       nextGeneration('workspace')
       generations.project += 1
+      resumeAttempted = false
       // Preserve App ordering: persistence first, then the in-memory org and list.
       writeStoredOrgId(orgId, storage)
       publish({
@@ -316,6 +350,7 @@ export function createWorkspaceController({
     const name = String(givenName).trim()
     const request = nextGeneration('project')
     const orgId = state.orgId
+    const workspaceRequest = generations.workspace
     publish({ projectBusy: true, projectsError: null, projectDraftError: null })
     try {
       const project = await services.createProject(name, orgId)
@@ -329,7 +364,14 @@ export function createWorkspaceController({
       publish({ projects: nextProjects, projectsError: null, projectDraftError: null })
       invoke(callbacks.onProjectCreated, project)
 
+      if (!isCurrent('project', request) || state.orgId !== orgId
+        || generations.workspace !== workspaceRequest) {
+        if (isCurrent('project', request)) publish({ projectBusy: false })
+        return project
+      }
+
       const openRequest = nextGeneration('workspace')
+      resumeAttempted = true
       publish({
         openProjectId: projectId,
         workspace: null,
@@ -340,6 +382,7 @@ export function createWorkspaceController({
       try {
         const workspace = await services.openProject(projectId, orgId)
         if (!isCurrent('workspace', openRequest) || state.openProjectId !== projectId || state.orgId !== orgId) return project
+        if (!state.mock) writeStoredProjectId(orgId, projectId, storage)
         publish({ workspace, workspaceLoading: false })
         invoke(callbacks.onWorkspaceOpened, { projectId, orgId, workspace })
       } catch {
@@ -367,6 +410,7 @@ export function createWorkspaceController({
     const value = !!nextMock
     if (state.mock === value) return
     invalidateAll()
+    resumeAttempted = false
     publish({
       mock: value,
       bootstrapState: 'unknown',

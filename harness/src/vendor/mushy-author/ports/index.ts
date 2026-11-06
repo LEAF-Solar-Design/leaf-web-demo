@@ -819,6 +819,13 @@ export interface InstantExecutorClient {
   ): Promise<Record<string, unknown>>;
 }
 
+/** Exact graph input for one canonical Solar proposal, separate from tool params. */
+export interface SolarSolveContext {
+  frame_ref: string;
+  expected_rev: number;
+  phase: "initial" | "background";
+}
+
 export interface SubmitRunRequest {
   tenantId: string;
   /** App-owned turn authority. The app resolves subject and tier from this
@@ -837,6 +844,8 @@ export interface SubmitRunRequest {
   catalogCommit?: string;
   effectiveCatalogDigest?: string;
   toolManifestSha256?: string;
+  /** Graph revision and frame covered by this solve's approval. */
+  solveContext?: SolarSolveContext;
   /** Fast-tool read path: hold the request open (?wait=1) up to waitTimeoutS. */
   wait?: boolean;
   waitTimeoutS?: number;
@@ -848,6 +857,13 @@ export interface SubmitRunResponse {
   status: string;
   result?: ResultEnvelope;
   [k: string]: unknown;
+}
+
+/** One bounded page of an immutable platform source file. */
+export interface PlatformSourceRange {
+  startLine: number;
+  maxLines: number;
+  expectedCommit: string;
 }
 
 export interface AppRunClient {
@@ -937,7 +953,11 @@ export interface AppRunClient {
   customizeList(tenantId: string, limit: number): Promise<Record<string, unknown>>;
   /** GET /api/platform/source?path= — ONE platform source file at the review
    * base (R7 read side). Size-capped server-side; binary reported, not returned. */
-  customizeReadSource(tenantId: string, path: string): Promise<Record<string, unknown>>;
+  customizeReadSource(
+    tenantId: string,
+    path: string,
+    range?: PlatformSourceRange,
+  ): Promise<Record<string, unknown>>;
   /** GET /api/platform/source/tree?dir= — ONE directory level at the review
    * base. Empty dir lists the repo root. */
   customizeListSource(tenantId: string, dir: string): Promise<Record<string, unknown>>;

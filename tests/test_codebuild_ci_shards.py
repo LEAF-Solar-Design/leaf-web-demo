@@ -66,8 +66,11 @@ def test_gate_call_gets_shard_flags_only_when_unfiltered():
     assert script.index(guard) < script.index(call)
     assert ('if [[ "${CI_SHARD_MODE:-all}" == all || ${#only_args[@]} == 0 '
             '|| "$CI_SHARD_INDEX_N" == 0 ]]; then') in script
-    assert (call + '\nelse\n  echo "gate: selected mode runs on shard 0 only"'
-            '\n  gate_status=0\nfi') in script
+    skip_branch = ('else\n  echo "gate: selected mode runs on shard 0 only"'
+                   '\n  gate_status=0\nfi')
+    assert skip_branch in script
+    # Failure-log capture belongs to the invoked branch, before shard skipping.
+    assert script.index(call) < script.index(skip_branch)
 
 
 def test_gate_proof_skipped_when_sharded():

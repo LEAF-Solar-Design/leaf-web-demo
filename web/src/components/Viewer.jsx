@@ -6,7 +6,7 @@ import { vertexZ, vertexSegments } from './viewerVertexZ.js'
 import { createCameraChannel } from './cameraChannel.js'
 import { viewportFromCamera } from './viewerMath.js'
 import { validObjectBounds } from '../lib/drawingObjectIndex.js'
-import { expandBulgedPolylines, intakeRoundPolylines } from '../cadedit/engineIntake.js'
+import { expandBulgedPolylines, intakeRoundPolylines, projectServerBlocks } from '../cadedit/engineIntake.js'
 import { snapMarkerSegments } from '../cadedit/snapMarker.js'
 import { formatElementId } from '../lib/elementIdentity.js'
 import { marqueeMode, worldRect, marqueeHandles } from '../lib/marqueeSelection.js'
@@ -364,10 +364,11 @@ const Viewer = forwardRef(function Viewer(
     const roundPolylines = intakeRoundPolylines(activeIntake)
     const validPolyline = pl => Array.isArray(pl?.pts) && pl.pts.length >= 2 && Array.from(pl.pts).every(finiteXY)
     const intakePolylines = expandBulgedPolylines((activeIntake.polylines || []).filter(validPolyline))
-    const polylines = (roundPolylines.length
-      ? [...intakePolylines, ...roundPolylines]
+    const blocks = projectServerBlocks(activeIntake)
+    const polylines = (roundPolylines.length || blocks.polylines.length
+      ? [...intakePolylines, ...roundPolylines, ...blocks.polylines]
       : intakePolylines).filter(validPolyline)
-    const inserts = (activeIntake.inserts || []).filter(ins => finiteXY(ins?.pt))
+    const inserts = blocks.inserts.filter(ins => finiteXY(ins?.pt))
     const faces3d = (activeIntake.faces3d || []).filter(f => f && [f.p1, f.p2, f.p3].every(finiteXY)
       && (f.p4 == null || finiteXY(f.p4)))
     const origin = drawingOrigin(polylines, inserts, faces3d)
@@ -557,7 +558,8 @@ const Viewer = forwardRef(function Viewer(
     for (const ins of inserts) {
       if (!ins.pt) continue
       const definition = definitions.get(String(ins.name).toUpperCase())
-      if (definition?.complete === true && definition.baseUnknown !== true && ins.incomplete !== true) continue
+      if (ins.incomplete === false || ((activeIntake.source === 'engine' || activeIntake.source === 'bridge')
+        && definition?.complete === true && definition.baseUnknown !== true && ins.incomplete !== true)) continue
       const geom = new THREE.PlaneGeometry(hs * 2, hs * 2)
       const mat = new THREE.MeshBasicMaterial({
         color: insertColor, transparent: true, opacity: 0.18, depthWrite: false,
@@ -949,6 +951,13 @@ const Viewer = forwardRef(function Viewer(
 
     const sceneState = {
       intake: activeIntake, drawingKey: sceneDrawingKey,
+      renderStats: {
+        paths: polylines.length,
+        layers: Array.isArray(activeIntake.layers) ? activeIntake.layers.length
+          : new Set([...layerGroups.keys(), ...insertLayerGroups.keys(), ...faceLayerGroups.keys()]).size,
+        markerReferences: nInserts,
+        omitted: blocks.truncated + (activeIntake.truncated || 0),
+      },
       scene, root, origin, camera, renderer, controls, layerGroups, insertLayerGroups, faceLayerGroups, pickIndex,
       highlightGroup, markerGroup, overlayGroup, selectionGroup, pendingGroup,
       stringGroup, rubberGroup, snapGroup, stringAnim: null,
@@ -1095,7 +1104,8 @@ const Viewer = forwardRef(function Viewer(
 
   useImperativeHandle(ref, () => ({
     subscribeCamera: (listener) => channel().subscribe(listener),
-    getDrawingScene: () => ({ ...desiredSceneRef.current, ready: sceneReady() }),
+    getDrawingScene: () => ({ ...desiredSceneRef.current, ready: sceneReady(),
+      renderStats: sceneReady() ? stateRef.current.renderStats : null }),
     canSetFocusMarker: (bounds) => sceneReady() && validObjectBounds(bounds),
     setFocusMarker,
     fit: () => stateRef.current?.fitToBounds(),

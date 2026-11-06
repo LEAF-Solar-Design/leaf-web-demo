@@ -1364,8 +1364,22 @@ it('R13D-03 selection refuses catalog overflow before filtering', () => {
   expect(r13dDisplay(selection).items.every((item) => !item.ready && !item.enabled)).toBe(true)
 })
 
-it('R13D-04 all ten ordinary rows permit review only', () => {
-  expect(PROJECT_SOLAR_REVIEW_TOOLS).toEqual(R13D_NAMES.slice(0, 10))
+it('project SolarEdge flow exposes its complete import form and historical read through actual catalog rows', () => {
+  const accept = r13dRow('solar-solaredge-accept'), read = r13dRow('solar-solaredge-tracking-read')
+  const selection = projectSolarFlowSelect([{ capabilities: [read, accept] }], 'solaredge-import')
+  expect(selection.available).toBe(true)
+  expect(selection.positions.map(({ name, stage, formUnavailable }) => ({ name, stage, formUnavailable }))).toEqual([
+    { name: accept.name, stage: 'import', formUnavailable: false },
+    { name: read.name, stage: 'review', formUnavailable: false },
+  ])
+  expect(r13dDisplay(selection).items.map(({ enabled, ready }) => ({ enabled, ready })))
+    .toEqual([{ enabled: true, ready: false }, { enabled: true, ready: false }])
+  expect(projectSolarFlowSelect([{ capabilities: [accept] }], 'solaredge-import').available).toBe(false)
+})
+
+it('R13D-04 ordinary project rows permit review only', () => {
+  expect(PROJECT_SOLAR_REVIEW_TOOLS).toEqual([...R13D_NAMES.slice(0, 10),
+    'solar-solaredge-accept', 'solar-solaredge-tracking-read'])
   expect(Object.isFrozen(PROJECT_SOLAR_REVIEW_TOOLS)).toBe(true)
   for (const name of PROJECT_SOLAR_REVIEW_TOOLS) {
     const candidate = r13dRow(name)

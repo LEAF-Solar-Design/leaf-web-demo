@@ -4,6 +4,7 @@ import { useEngineSessionOptional } from '../cadedit/EngineSessionProvider.jsx'
 import { useSurfaceFrame } from './SurfaceFrame.jsx'
 import { useStudioGround } from './studioGround.js'
 import './drawingNavigation.css'
+import { projectServerBlocks } from '../cadedit/engineIntake.js'
 import useEscapeOwner from '../lib/useEscapeOwner.js'
 import { isCompositionKey } from '../lib/keyComposition.js'
 import { humanizeError } from '../errorHumanize.js'
@@ -33,8 +34,15 @@ function objectLayers(index, entities) {
     if (record.kind === 'layer') add(record, record.name)
     for (const id of record.engineIds) byEngineId.set(id, record)
   }
-  for (const entity of entities || []) add(byEngineId.get(String(entity.id)), entity.layer)
-  for (const kind of ['polylines', 'inserts', 'faces3d', 'circles', 'arcs']) {
+  // INSERT visibility comes from placed paths and an incomplete marker, not its
+  // declaration layer: complete children can draw on explicit different layers.
+  for (const entity of entities || []) if (entity.type !== 'INSERT') add(byEngineId.get(String(entity.id)), entity.layer)
+  const blocks = projectServerBlocks(index?.intake)
+  for (const entity of blocks.polylines) add(index.byHandle.get(String(entity.sourceHandle ?? entity.handle).replace(/^0x/i, '').toUpperCase()), entity.layer)
+  for (const entity of blocks.inserts) {
+    if (entity.incomplete !== false) add(index.byHandle.get(String(entity.handle).replace(/^0x/i, '').toUpperCase()), entity.layer)
+  }
+  for (const kind of ['polylines', 'faces3d', 'circles', 'arcs']) {
     for (const entity of index?.intake?.[kind] || []) {
       const handle = String(entity.sourceHandle ?? entity.handle ?? '').replace(/^0x/i, '').toUpperCase()
       add(index.byHandle.get(handle), entity.layer)

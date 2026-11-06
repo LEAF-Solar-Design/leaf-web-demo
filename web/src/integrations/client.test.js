@@ -5,6 +5,8 @@ import { createIntegrationsClient, integrationOrigin, validateDatasetRegistratio
 
 vi.mock('../api.js', () => ({ authHeaders: vi.fn(), noteUnauthorized: vi.fn() }))
 import { authHeaders, noteUnauthorized } from '../api.js'
+const invalidResponseMessage = 'The integration response or request was invalid.'
+const oversizedResponseMessage = 'Integration data is too large to display. The original and last valid dataset are retained.'
 const projectId = '11111111-1111-4111-8111-111111111111'
 const scope = { tenantId: projectId, projectId, platformUserId: projectId, bindingId: projectId,
   projectRole: 'owner', externalAuthority: 'auth0', externalSubject: 'auth0|user' }
@@ -217,9 +219,10 @@ describe('stored webhook admission receipt HTTP contract', () => {
   })
   it('uses bounded parsing and honors cancellation', async () => {
     const { client, fetchImpl, options } = setup()
-    for (const extra of [{ raw: 'null' }, { raw: '{' }, { length: '262145' }, { raw: ' '.repeat(262145) }, { type: 'text/plain' }]) {
+    for (const [extra, message] of [[{ raw: 'null' }, invalidResponseMessage], [{ raw: '{' }, invalidResponseMessage],
+      [{ length: '262145' }, oversizedResponseMessage], [{ raw: ' '.repeat(262145) }, oversizedResponseMessage], [{ type: 'text/plain' }, invalidResponseMessage]]) {
       fetchImpl.mockResolvedValueOnce(response(result, extra))
-      await expect(client.getWebhookReceipt(projectId, input.registrationId, input.deliveryId, options)).rejects.toThrow('invalid')
+      await expect(client.getWebhookReceipt(projectId, input.registrationId, input.deliveryId, options)).rejects.toThrow(message)
     }
     const controller = new AbortController(); controller.abort()
     const calls = fetchImpl.mock.calls.length
@@ -270,9 +273,10 @@ describe('daily schedule preview HTTP contract', () => {
   })
   it('keeps response limits, fixed failures, authorization and abort handling without retry', async () => {
     const { client, fetchImpl, options } = setup(result)
-    for (const settings of [{ raw: 'private' }, { type: 'text/html' }, { length: '262145' }, { raw: 'x'.repeat(262145) }]) {
+    for (const [settings, message] of [[{ raw: 'private' }, invalidResponseMessage], [{ type: 'text/html' }, invalidResponseMessage],
+      [{ length: '262145' }, oversizedResponseMessage], [{ raw: 'x'.repeat(262145) }, oversizedResponseMessage]]) {
       fetchImpl.mockResolvedValueOnce(response(result, settings))
-      await expect(client.previewWorkflowSchedule(projectId, input, options)).rejects.toThrow('invalid')
+      await expect(client.previewWorkflowSchedule(projectId, input, options)).rejects.toThrow(message)
     }
     for (const status of [401, 403, 404, 503]) {
       fetchImpl.mockResolvedValueOnce(response({ private: 'secret' }, { status }))
@@ -660,7 +664,7 @@ describe('manual workflow history HTTP contract', () => {
     const fetchImpl = vi.fn().mockImplementation(async () => response({}, { raw: ' '.repeat(262145) }))
     const client = createIntegrationsClient({ origin: 'https://ops.example', fetchImpl })
     const controller = new AbortController()
-    await expect(client.listManualWorkflowRuns(projectId, { signal: controller.signal })).rejects.toThrow('invalid')
+    await expect(client.listManualWorkflowRuns(projectId, { signal: controller.signal })).rejects.toThrow(oversizedResponseMessage)
     controller.abort()
     await expect(client.listManualWorkflowRuns(projectId, { signal: controller.signal })).rejects.toMatchObject({ name: 'AbortError' })
     authHeaders.mockReturnValue({})
@@ -855,10 +859,11 @@ describe('existing manual workflow HTTP contract', () => {
     const { client, fetchImpl, options } = setup()
     const call = () => operation === 'get' ? client.getManualWorkflowRun(projectId, projectId, options) : operation === 'resume'
       ? client.resumeManualWorkflowRun(projectId, projectId, {}, options) : client.reconcileManualWorkflowStep(projectId, projectId, 'send', {}, options)
-    for (const result of [response({ secret: 'private' }), response(null, { raw: '{' }), response(null, { raw: 'x'.repeat(262145) }),
-      response(null, { length: '262145' }), response(workflow, { type: 'text/html' })]) {
+    for (const [result, message] of [[response({ secret: 'private' }), invalidResponseMessage], [response(null, { raw: '{' }), invalidResponseMessage],
+      [response(null, { raw: 'x'.repeat(262145) }), oversizedResponseMessage], [response(null, { length: '262145' }), oversizedResponseMessage],
+      [response(workflow, { type: 'text/html' }), invalidResponseMessage]]) {
       fetchImpl.mockResolvedValueOnce(result)
-      await expect(call()).rejects.toMatchObject({ message: 'The integration response or request was invalid.', dispatched: operation !== 'get' })
+      await expect(call()).rejects.toMatchObject({ message, dispatched: operation !== 'get' })
     }
     for (const status of [401, 403, 409, 500]) {
       fetchImpl.mockResolvedValueOnce(response({ secret: 'private' }, { status }))
@@ -896,10 +901,11 @@ describe('fixed integration destination and bounded authenticated transport', ()
     const { client, options } = setup(value)
     await expect(client.getScope(projectId, options)).rejects.toThrow('invalid')
   })
-  it.each([{ type: 'text/html' }, { raw: 'secret not json' }, { raw: 'x'.repeat(262145) }, { length: '262145' }])('bounds and validates JSON without reflecting bodies', async (settings) => {
+  it.each([[{ type: 'text/html' }, invalidResponseMessage], [{ raw: 'secret not json' }, invalidResponseMessage],
+    [{ raw: 'x'.repeat(262145) }, oversizedResponseMessage], [{ length: '262145' }, oversizedResponseMessage]])('bounds and validates JSON without reflecting bodies', async (settings, message) => {
     const { client, fetchImpl, options } = setup()
     fetchImpl.mockResolvedValue(response(scope, settings))
-    await expect(client.getScope(projectId, options)).rejects.toThrow('invalid')
+    await expect(client.getScope(projectId, options)).rejects.toThrow(message)
   })
   it('keeps service 401 nonfatal and errors sanitized', async () => {
     const { client, fetchImpl, options } = setup()
