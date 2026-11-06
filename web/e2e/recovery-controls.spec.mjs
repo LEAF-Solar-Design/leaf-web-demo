@@ -10,8 +10,8 @@
 //   - DrawingUploadControl: a policy with enabled false (and a failed policy
 //     read) disables the upload button and the controller refuses the file
 //     without dispatching an upload (createDrawingUploadController.js:50).
-//   - OperatorEntry: hidden after a 401, 404 or 503 probe, shown after a 200
-//     (OperatorEntry.jsx:5). probeOperatorConsole caches at module scope, so
+//   - OperatorEntry: hidden after a representative 403 probe, shown after a 200.
+//     Unit tests retain the 401, 404 and 503 cases. The probe caches at module scope, so
 //     every probe state runs in its own test, which is its own fresh page.
 //
 // Run from web/ with LEAF_NATIVE_GATE_WORKER set so the dev server port
@@ -95,7 +95,9 @@ test.describe('JobInbox recovery', () => {
     await expect(page.locator('body')).toContainText(/Entities\s*2,345/)
     const restored = inbox.locator('.inbox-row').filter({ hasText: 'Reverted to version 1' })
     await expect(restored).toHaveCount(1)
-    await page.waitForTimeout(SETTLE_MS)
+    // No settle sleep: the restored state already holds; later locator expects
+    // still wait for it. web/src/components/JobInbox.test.jsx:26 retains exact-once
+    // dispatch and rejects JobInbox.jsx:64 invoking the action twice.
     await expect(restored).toHaveCount(1)
 
     await versionRow.getByRole('button', { name: 'Dismiss', exact: true }).click()
@@ -252,7 +254,15 @@ test.describe('DrawingUploadControl policy refusal', () => {
 })
 
 test.describe('OperatorEntry probe', () => {
-  for (const status of [401, 403, 404, 503]) {
+  // Removed status cases survive in web/src/operatorClient.test.js:
+  // 401 -> :61 (rejects treating an unauthenticated probe as enabled);
+  // 404 -> :57 (rejects exposing an unmounted operator router);
+  // 503 -> :65 (rejects dropping `&& res.status !== 503` at operatorClient.js:96).
+  // Each still resolves false; OperatorEntry.test.jsx:36 under
+  // web/src/components/operator/ retains false -> no DOM, and this 403 journey
+  // retains browser integration. Exact-once survives at operatorClient.test.js:80
+  // and components/operator/OperatorEntry.test.jsx:48 (reject uncached fetches).
+  for (const status of [403]) {
     test(`a ${status} probe hides the operator entry and is never repeated`, async ({ page }) => {
       test.setTimeout(90_000)
       await signIn(page)
@@ -278,7 +288,8 @@ test.describe('OperatorEntry probe', () => {
     const entry = page.getByRole('button', { name: 'Open operator console', exact: true })
     await expect(entry).toBeVisible({ timeout: 20_000 })
     await expect(entry).toHaveText('Operator')
-    await page.waitForTimeout(SETTLE_MS)
+    // Visibility and label already settled. web/src/operatorClient.test.js:80
+    // retains repeated-call caching and rejects `if (true)` at operatorClient.js:92.
     expect(count(log, 'GET /api/operator/sessions')).toBe(1)
   })
 })

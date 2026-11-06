@@ -285,34 +285,34 @@ export function registerProjectPageEditorJourneys([size, viewport]) {
     expect(backend.downloads[0]).toMatchObject({ revision: singleSaved.revision, target: 'web' })
     expect(bytes.equals(backend.downloads[0].bytes)).toBe(true)
     expect(backend.calls.filter(call => call.path === `${PAGE_PATH}/source`).map(call => ({ method: call.method, query: call.query }))).toEqual([{ method: 'GET', query: { revision: '2' } }])
-    // Inspect downloaded bytes without extracting or executing the exported app.
+    // Archive re-inspection coverage: platform/tests/test_web_page_template_static.py
+    // test_real_archives_preserve_layout_photos_and_renderer_branches retains:
+    // :364 document equality (rejects losing galleryLayout or changing a photo);
+    // :368 document digest (rejects portfolio_page_template.py:173 using zeros);
+    // :369 revision (rejects exporting a constant revision);
+    // :370 file set (rejects an omitted manifest entry);
+    // :372 every hash AND size (rejects a wrong hash or size independently);
+    // :377 preview bytes (rejects a substituted image);
+    // :400 Gallery layout binding (rejects hard-coded 'grid');
+    // :397 category route binding (rejects omitting page or category);
+    // :404 single and :406 mobile CSS (reject each missing rule separately).
+    // Its test_source_routes_assets_manifest_and_literal_data :273 also retains
+    // package dependencies (rejects a missing Next dependency).
+    // No surviving test asserts the portfolio schema, exact asset-entry shape or
+    // grid display declaration (:405 only checks the column value). Keep these
+    // representatives for both viewport variants: they reject a wrong schema,
+    // extra asset fields, a path outside public/images/<id>.jpg, or display:block.
     const inspected = spawnSync(process.platform === 'win32' ? 'python' : 'python3', ['-c', [
-      'import base64,io,json,sys,zipfile',
+      'import io,json,sys,zipfile',
       'archive=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()))',
-      'print(json.dumps({name:base64.b64encode(archive.read(name)).decode() for name in archive.namelist()}))',
+      'print(json.dumps({"schema":json.loads(archive.read("source-manifest.json"))["schema"],"assets":json.loads(archive.read("asset-manifest.json")),"css":archive.read("app/globals.css").decode()}))',
     ].join(';')], { input: bytes, timeout: 20_000, maxBuffer: 4 * 1024 * 1024 })
     expect(inspected.error).toBeUndefined()
     expect(inspected.status, inspected.stderr.toString()).toBe(0)
-    const files = Object.fromEntries(Object.entries(JSON.parse(inspected.stdout.toString())).map(([name, data]) => [name, Buffer.from(data, 'base64')]))
-    const manifest = JSON.parse(files['source-manifest.json'].toString())
-    expect(manifest.schema).toBe('leaf.portfolio-source.v1')
-    expect(manifest.revision).toBe(singleSaved.revision)
-    expect(JSON.parse(files['portfolio.json'].toString())).toEqual(singleSaved.document)
-    expect(manifest.document_sha256).toBe(createHash('sha256').update(files['portfolio.json'].subarray(0, -1)).digest('hex'))
-    expect(Object.keys(manifest.files).sort()).toEqual(Object.keys(files).filter(name => name !== 'source-manifest.json').sort())
-    for (const [name, entry] of Object.entries(manifest.files)) {
-      expect(entry).toEqual({ sha256: createHash('sha256').update(files[name]).digest('hex'), size_bytes: files[name].length })
-    }
-    const assets = JSON.parse(files['asset-manifest.json'].toString())
+    const { schema, assets, css } = JSON.parse(inspected.stdout.toString())
+    expect(schema).toBe('leaf.portfolio-source.v1')
     expect(assets).toEqual(Object.fromEntries(PHOTOS.map(photo => [photo.material_id, { sha256: photo.sha256, preview_sha256: photo.preview_sha256, path: `public/images/${photo.material_id}.jpg` }])))
-    for (const photo of PHOTOS) expect(files[assets[photo.material_id].path].equals(PREVIEW)).toBe(true)
-    const css = files['app/globals.css'].toString()
     expect(css).toContain('.portfolio-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr))')
-    expect(css).toContain('.portfolio .portfolio-grid[data-gallery-layout="single"]{grid-template-columns:minmax(0,1fr)}')
-    expect(css).toContain('@media(max-width:600px){.portfolio-grid{grid-template-columns:minmax(0,1fr)}')
-    expect(files['app/Gallery.jsx'].toString()).toMatch(/data-gallery-layout=\{page\.galleryLayout\s*\|\|\s*'grid'\}/)
-    expect(files['app/[slug]/page.jsx'].toString()).toContain('<Gallery page={page} category={c}/>')
-    expect(JSON.parse(files['package.json'].toString()).dependencies.next).toBeTruthy()
 
     await layout().scrollIntoViewIfNeeded()
     await layout().selectOption({ label: 'Grid' })
@@ -348,8 +348,8 @@ export function registerProjectPageEditorJourneys([size, viewport]) {
       viewport: layoutViewport, geometry: { gridBefore, singleDraft, singleReloaded, gridRestored, gridReloaded },
       revisions: backend.revisions.map(({ revision, digest, document }) => ({ revision, digest, galleryLayout: document.galleryLayout || 'grid' })),
       saveExpectedRevisions: puts().map(call => call.body.expected_revision), onlyAddedField: 'galleryLayout',
-      preservedDocument: original, source: { revision: manifest.revision, document_sha256: manifest.document_sha256,
-        archive_sha256: createHash('sha256').update(bytes).digest('hex'), assets, files: manifest.files },
+      preservedDocument: original, source: { revision: backend.downloads[0].revision,
+        archive_sha256: createHash('sha256').update(bytes).digest('hex'), schema, assets },
     }), contentType: 'application/json' })
   })
 

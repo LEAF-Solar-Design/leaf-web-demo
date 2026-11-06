@@ -281,22 +281,7 @@ test.describe('campaign panel states', () => {
     expectTraffic(backend, { writes: [], reads: LIST_READ })
   })
 
-  test('draft creation records one campaign and selects it', async ({ page }) => {
-    const backend = await installBackend(page)
-    const panel = await openCampaignPanel(page, backend)
-
-    await fillDraft(panel)
-    await panel.getByRole('button', { name: 'Submit campaign', exact: true }).click()
-    await expectCampaignShown(panel)
-    await expect(panel.getByRole('alert')).toHaveCount(0)
-    // The new-request form moves behind its disclosure once a campaign exists.
-    await expect(panel.locator('details', { has: page.locator('summary', { hasText: 'Start a new request' }) })).toHaveCount(1)
-
-    expectTraffic(backend, { writes: [SUBMIT], reads: SELECTED_READS })
-    expectSubmitted(backend.sent(SUBMIT)[0])
-  })
-
-  test('question answering records one answer and moves it to the history', async ({ page }) => {
+  test('draft creation selects one campaign, then question answering moves one answer to the history', async ({ page }) => {
     const backend = await installBackend(page)
     backend.withQuestion = true
     const panel = await openCampaignPanel(page, backend)
@@ -304,6 +289,23 @@ test.describe('campaign panel states', () => {
     await fillDraft(panel)
     await panel.getByRole('button', { name: 'Submit campaign', exact: true }).click()
     await expectCampaignShown(panel)
+    await expect(panel.getByRole('alert')).toHaveCount(0)
+    // Retain the standalone draft journey's disclosure, traffic and payload checks
+    // before answering, so the answer refresh cannot hide a submission defect.
+    await expect(panel.locator('details', { has: page.locator('summary', { hasText: 'Start a new request' }) })).toHaveCount(1)
+    expectTraffic(backend, { writes: [SUBMIT], reads: SELECTED_READS })
+    expectSubmitted(backend.sent(SUBMIT)[0])
+    // Folded draft-case coverage in web/e2e/campaign-panel.spec.mjs:
+    // :206 accepted state, :207 title, :208 honest status, :209 fleet message,
+    // :211 selection, :212 unavailable delivery reject, respectively, a wrong
+    // state/title, a false running claim, a missing fleet warning, an unselected
+    // campaign, or a false output claim. Selection also rejects useCampaigns.js:238
+    // replacing the preferred-ID callback with () => null.
+    // :292 rejects a success alert; :295 rejects a missing/duplicate disclosure.
+    // :186 rejects duplicate writes; :190 rejects an unrelated read; :191 rejects
+    // wrong project scope; :193/:194 reject missing bearer/tenant; :196 rejects
+    // off-host traffic. :200 rejects a changed submission body; :201 rejects an
+    // empty, whitespace-containing or over-128-character idempotency key.
     const open = panel.locator('.campaign-questions li[data-state="open"]')
     await expect(open).toHaveCount(1)
     await expect(open).toContainText(QUESTION_PROMPT)
