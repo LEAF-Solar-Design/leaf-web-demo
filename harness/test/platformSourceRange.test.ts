@@ -82,7 +82,7 @@ describe("commit-bound platform source HTTP transport", () => {
     { ...source, range: undefined }, // Older app ignored the range query.
     { ...source, commit: "b".repeat(40) },
     { ...source, path: "web/src/other.jsx" },
-    { ...source, content: "é".repeat(16385) },
+    { ...source, content: "\u00e9".repeat(16385) },
     { ...source, range: { ...source.range, next_line: 999 } },
     { ...source, range: { ...source.range, eof: true } },
   ])("refuses mixed-deployment or invalid range responses: %j", async response => {

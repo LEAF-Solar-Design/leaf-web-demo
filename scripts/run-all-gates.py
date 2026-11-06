@@ -1307,7 +1307,7 @@ def build_suites() -> List[Suite]:
         Suite("server-platform-source-snapshot", "server tests/test_platform_source_snapshot.py",
               "pytest", SERVER, _py_pytest("tests/test_platform_source_snapshot.py"), 19),
         Suite("server-platform-source-ranges", "server commit-bound platform source ranges",
-              "pytest", SERVER, _py_pytest("tests/test_platform_source_ranges.py"), 26),
+              "pytest", SERVER, _py_pytest("tests/test_platform_source_ranges.py"), 18),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
               # Four section-18 tests are intentionally parked because the
               # section-2.1 lane replaced that surface. Pin the complete reason
