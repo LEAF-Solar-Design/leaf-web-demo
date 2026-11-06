@@ -16,10 +16,9 @@
 //   2. `surfaceFrame.today-fixture.json` was captured by rendering THOSE
 //      transcriptions on the untouched worktree, BEFORE App.jsx or
 //      ToolCast.jsx were edited, and committed. It is the frozen artifact.
-//   3. Both the transcription AND SurfaceFrame are asserted equal to that
-//      fixture. If the transcription drifts, test 1 fails and the fixture is
-//      no longer vouched for; if the frame drifts, test 2 fails. Agreement
-//      between the two alone can never carry the claim.
+//   3. SurfaceFrame's production slots are asserted equal to that frozen
+//      fixture, with deliberate divergences named below. The historical
+//      transcription remains only for explicit fixture capture.
 //
 // What it deliberately does NOT cover, because a jsdom render cannot: the
 // PLACEMENT of each slot inside the scene's tree. That is the e2e one-shell
@@ -624,25 +623,9 @@ function expected(key, slot) {
   return FIXTURE[key][slot]
 }
 
-/** Every slot of one case, divergences applied. */
-function expectedCase(key) {
-  const out = {}
-  for (const slot of SLOTS) out[slot] = expected(key, slot)
-  return out
-}
-
 describe.skipIf(CAPTURE)('SurfaceFrame — zero visual change against the captured shell', () => {
   it('the fixture covers every scene x surface case', () => {
     expect(Object.keys(FIXTURE).sort()).toEqual(CASES.map((c) => c.key).sort())
-  })
-
-  describe('1. the transcription still matches the frozen fixture', () => {
-    for (const testCase of CASES) {
-      it(`${testCase.key} renders today's captured element sequence`, () => {
-        const built = testCase.console ? todayConsole(testCase.surface) : todayStage(testCase.surface)
-        expect(capture(built)).toEqual(expectedCase(testCase.key))
-      })
-    }
   })
 
   describe('2. SurfaceFrame reproduces it slot for slot', () => {

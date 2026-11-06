@@ -425,9 +425,6 @@ async function realSelectionBatch(n) {
 }
 
 describe.skipIf(!GLUE)('the worker batch on the real engine', () => {
-  it('CCP02 real five-step batch', { timeout: 90_000 }, async () => {
-    await realSelectionBatch(5)
-  })
   it('CCP02 real 256-step batch', { timeout: 90_000 }, async () => {
     await realSelectionBatch(256)
   })

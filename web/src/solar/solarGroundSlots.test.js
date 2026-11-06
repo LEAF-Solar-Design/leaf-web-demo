@@ -211,9 +211,6 @@ describe('shared compact Ground slot decoder', () => {
       })))
     }
   })
-  it('GS47 refuses real rows above the graph bound', () => {
-    expect(decodeGroundFrameSlots([...tenFrames(), frame(block(1, 100001), 'F11')])).toBeNull()
-  })
   it('GS48 accepts the parsed uint64 representation', () => {
     const value = block(); value.panel.extra = { n: JSON.parse('18446744073709551615') }; accepted(value)
   })

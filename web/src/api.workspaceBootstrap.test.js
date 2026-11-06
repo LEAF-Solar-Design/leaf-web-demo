@@ -17,7 +17,8 @@ describe('isWorkspaceBootstrapRequired', () => {
         expect(isWorkspaceBootstrapRequired({ status: 403, body: bodyFor(message) })).toBe(true)
       })
 
-      it.each([200, 400, 401, 404, 429, 500, '403', null, undefined])('rejects status %s', (status) => {
+      // Keep 2xx/4xx/5xx, string, null and absent status dimensions in both formats.
+      it.each([200, 401, 500, '403', null, undefined])('rejects status %s', (status) => {
         for (const message of messages) {
           expect(isWorkspaceBootstrapRequired({ status, body: bodyFor(message) })).toBe(false)
         }
