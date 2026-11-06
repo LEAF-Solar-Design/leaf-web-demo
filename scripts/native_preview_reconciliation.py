@@ -33,6 +33,10 @@ REVIEWED_WORKER_SHA256 = frozenset({'acc9c1219ee4246f6b39da6a3c439add24f6573c0e5
 PRE_EXECUTION_JOURNAL_SOURCE_SHA256 = 'a8f668f0f84866ebf342229c7b707f6b985a66ad256d71f71e0431fde1a5a599'
 # Same ordering, with writable-descriptor receipt replay for Windows fsync.
 PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256 = '3375d56dcc1609b6b160e5af39365a8afc1b60d9d05c4360a88971931aea6ac0'
+# 93f793 adds only the closed Native identity branch to the Journal's source
+# validator. Journal ordering, atomic writes and event validation are unchanged.
+CONNECTED_WORKER_SHA256 = 'acc9c1219ee4246f6b39da6a3c439add24f6573c0e54626eca8b3752b790ee37'
+PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256 = 'bbe093352331d40d53fbb0536b0e3968c0e93183c1c21612cdc6639720cf9f89'
 
 
 class Unavailable(Exception):
@@ -478,9 +482,14 @@ def pre_execution_source(revision):
     original = [runtime_source(revision, path) for path in paths]
     current = [read(root / path, 262144) for path in paths]
     for producer, journal in (original, current):
-        need(sha(producer) in REVIEWED_WORKER_SHA256)
-        need(journal_source_sha(journal) in (PRE_EXECUTION_JOURNAL_SOURCE_SHA256,
-                                        PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256))
+        producer_sha = sha(producer)
+        need(producer_sha in REVIEWED_WORKER_SHA256)
+        journal_sha = journal_source_sha(journal)
+        if journal_sha == PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256:
+            need(producer_sha == CONNECTED_WORKER_SHA256)
+        else:
+            need(journal_sha in (PRE_EXECUTION_JOURNAL_SOURCE_SHA256,
+                                PRE_EXECUTION_CORRECTED_JOURNAL_SOURCE_SHA256))
     return journal_source_sha(original[1])
 
 
