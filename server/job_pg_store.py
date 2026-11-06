@@ -4,6 +4,7 @@ from __future__ import annotations
 import json
 import math
 import time
+import uuid
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -86,18 +87,26 @@ def _record(row: Dict[str, Any]) -> Dict[str, Any]:
     native = native_record_context(_json(row.get("execution_json")) or {}, rec)
     if native is not None:
         rec["native_preview"] = native
+    from lab_corpus_executor import record_context as corpus_record_context
+    corpus = corpus_record_context(_json(row.get("execution_json")) or {}, rec)
+    if corpus is not None:
+        rec["lab_corpus"] = corpus
     return rec
 
 
 class PostgresJobStore:
     def linked_capability_job(self, canonical_id: str, tenant_id: str):
         """Resolve mirror linkage from stored rows, never a client spine selector."""
+        try:
+            job_uuid = uuid.UUID(str(canonical_id))
+        except (ValueError, TypeError, AttributeError):
+            return None
         with _db().cursor() as cur:
             cur.execute(
                 "SELECT a.* FROM jobs j JOIN async_jobs a ON a.job_id = j.spine_ref "
-                "WHERE j.job_id::text = %s AND a.tenant_id = %s "
+                "WHERE j.job_id = %s AND a.tenant_id = %s "
                 "AND (a.execution_json ? 'capability_provenance' OR a.execution_json ? 'completion_provenance')",
-                (canonical_id, tenant_id),
+                (job_uuid, tenant_id),
             )
             row = cur.fetchone()
         return _record(row) if row is not None else None

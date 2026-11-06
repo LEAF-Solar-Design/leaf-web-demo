@@ -1,6 +1,7 @@
 // @vitest-environment node
 import { readFileSync } from 'node:fs'
 import esbuild from 'esbuild'
+import { parse } from '@babel/parser'
 import { describe, expect, it, vi } from 'vitest'
 import createDrawingUploadController from './controllers/upload/createDrawingUploadController.js'
 import { identityFromUploadReceipt, seedDrawingIdentity } from './drawing/drawingIdentity.js'
@@ -383,7 +384,11 @@ describe('console standalone upload', () => {
     const events = [], onAttached = vi.fn()
     const upload = { actions: { upload: (value) => events.push(['upload', value]) } }
     const intake = { begin: (value) => { events.push(['begin', value]); return true }, retry: vi.fn() }
-    const code = compile(source.slice(source.indexOf('function LiveProjectMaterialIntake('), source.indexOf('function promoteStandaloneUpload(')))
+    // Adjacent canonical editor exports are separate adapters. Execute only
+    // this production intake declaration, keeping its real begin/upload path.
+    const declaration = parse(source, { sourceType: 'module', plugins: ['jsx'] }).program.body
+      .find((node) => node.type === 'FunctionDeclaration' && node.id.name === 'LiveProjectMaterialIntake')
+    const code = compile(source.slice(declaration.start, declaration.end))
     const live = new Function('React', 'ProjectMaterialIntake', 'PhotoMaterialIntake', 'useDrawingUploadController', 'useMaterialIntake', code + '\nreturn LiveProjectMaterialIntake')(
       React, 'ProjectMaterialIntake', 'PhotoMaterialIntake', () => upload, (options) => { expect(options).toEqual({ upload, onAttached }); return intake },
     )({ project: { project_id: 'P', name: 'Project P' }, artifacts: [], onAttached })

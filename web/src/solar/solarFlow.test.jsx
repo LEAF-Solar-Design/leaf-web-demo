@@ -1454,8 +1454,10 @@ it('R13D-31 other project flows retain visible unavailable stages', async () => 
   expect(document.getElementById(r13dRailButton('solar-feeders').getAttribute('aria-describedby')).textContent).toBe(PROJECT_SOLAR_RAIL_REASONS.stage_missing)
   for (const id of ['ground-physical', 'solaredge-import', 'pvcase-tutorial']) {
     changeFlow(id)
-    const stages = SOLAR_FLOWS.find((flow) => flow.id === id).stages
-    expect(items().map((item) => item.querySelector('.solar-flow-label').textContent)).toEqual(stages.map((stage) => stage.label))
+    const labels = id === 'solaredge-import'
+      ? ['Upload, match and accept tracking', 'Review accepted tracking']
+      : SOLAR_FLOWS.find((flow) => flow.id === id).stages.map((stage) => stage.label)
+    expect(items().map((item) => item.querySelector('.solar-flow-label').textContent)).toEqual(labels)
     expect(items().every((item) => item.querySelector('button').disabled)).toBe(true)
     for (const item of items()) {
       const open = item.querySelector('button')

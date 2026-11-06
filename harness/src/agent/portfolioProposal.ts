@@ -10,7 +10,7 @@ export interface PortfolioProposalRequest {
   tenant_id: string;
   source: { project_id: string; revision: number; digest64hex: string };
   instruction: string;
-  fields: Array<{ id: string; value: string; max_length: number }>;
+  fields: Array<{ id: string; value: string; max_length: number; role?: string }>;
 }
 
 /** Text remains data, including HTML-looking strings. No mutation is performed. */
@@ -82,12 +82,15 @@ function validate(raw: unknown): PortfolioProposalRequest {
       !bounded(raw.tenant_id, 128) || !bounded(raw.instruction, 4000) ||
       !closed(raw.source, ["project_id", "revision", "digest64hex"]) ||
       !bounded(raw.source.project_id, 128) || !Number.isSafeInteger(raw.source.revision) ||
-      (raw.source.revision as number) < 1 || typeof raw.source.digest64hex !== "string" ||
+      ((raw.source.revision as number) < 1 && !(raw.source.revision === 0 && raw.source.digest64hex === "0".repeat(64))) ||
+      typeof raw.source.digest64hex !== "string" ||
       !/^[a-fA-F0-9]{64}$/.test(raw.source.digest64hex) ||
       !Array.isArray(raw.fields) || raw.fields.length < 1 || raw.fields.length > 1024) return fail("invalid_request");
   const ids = new Set<string>();
   for (const f of raw.fields) {
-    if (!closed(f, ["id", "value", "max_length"]) || !bounded(f.id, 128) || forbidden.has(f.id) || ids.has(f.id) ||
+    if ((!closed(f, ["id", "value", "max_length"]) && !closed(f, ["id", "value", "max_length", "role"])) ||
+        (Object.hasOwn(f, "role") && (typeof f.role !== "string" || f.role.length < 1 || f.role.length > 80 || /[\x00-\x1f\x7f-\x9f]/.test(f.role))) ||
+        !bounded(f.id, 128) || forbidden.has(f.id) || ids.has(f.id) ||
         !Number.isSafeInteger(f.max_length) || (f.max_length as number) < 1 || (f.max_length as number) > 8000 ||
         typeof f.value !== "string" || f.value.length > (f.max_length as number)) return fail("invalid_request");
     ids.add(f.id);
@@ -192,7 +195,8 @@ export class PortfolioProposalService {
       if (stripSecrets(JSON.stringify(request.source), secrets) !== JSON.stringify(request.source) ||
           stripSecrets(request.source.project_id, secrets) !== request.source.project_id ||
           stripSecrets(this.model, secrets) !== this.model) return fail("invalid_request");
-      const prompt = stripSecrets(`${RUBRIC}\n${JSON.stringify({
+      const rubric = request.fields.some(f => f.role !== undefined) ? `${RUBRIC} A field with an empty value and a role belongs to a new page: write it from the instruction. Leave a contact link empty unless the instruction states that exact email address or https URL.` : RUBRIC;
+      const prompt = stripSecrets(`${rubric}\n${JSON.stringify({
         instruction: stripSecrets(request.instruction, secrets),
         fields: request.fields.map(f => ({ ...f, id: stripSecrets(f.id, secrets), value: stripSecrets(f.value, secrets) })),
       })}`, secrets);

@@ -16,9 +16,16 @@ async function request(path, { fetchImpl = globalThis.fetch, body, signal, onUna
     return response.ok ? { ...data, ok: true } : { ok: false, status: response.status, detail: data.detail }
   } catch { return { ok: false, status: 0, detail: 'Run service unavailable' } }
 }
-export async function submitRun({ docId, graphRevision, fetchImpl }) {
-  const result = await request('runs', { fetchImpl, body: { doc_id: docId, graph_revision: graphRevision } })
-  return result.ok ? { ok: true, runId: result.run_id, state: result.state } : result
+export function newSubmissionId() {
+  return `v1.${Date.now()}.${crypto.randomUUID().replaceAll('-', '')}`
+}
+export async function submitRun({ docId, graphRevision, submissionId, reconcileOnly = false, fetchImpl }) {
+  const result = await request('runs', { fetchImpl, body: { doc_id: docId, graph_revision: graphRevision,
+    ...(submissionId === undefined ? {} : { submission_id: submissionId, reconcile_only: reconcileOnly }) } })
+  if (result.ok && typeof result.run_id === 'string' && typeof result.state === 'string') {
+    return { ok: true, runId: result.run_id, state: result.state }
+  }
+  return { ...result, ok: false, outcomeUnknown: result.ok || result.status === 0 || result.status >= 500 }
 }
 export const cancelRun = ({ runId, fetchImpl }) => request(`runs/${encodeURIComponent(runId)}/cancel`, { fetchImpl, body: {} })
 

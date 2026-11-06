@@ -241,7 +241,7 @@ export default function LinkDeviceDrawer({
                 {!activity[device.device_id].length && <p className="ca-copy">No activity yet. Device actions appear here.</p>}
                 {activity[device.device_id].map((event, index) => <p className="ca-copy" key={index}><time>{event.at}</time> {event.actor} {event.op} {event.target} <span className="state sub">{event.status}</span></p>)}
               </section>}
-              {isHealthy && open && <HomeAssistantSetup deviceId={device.device_id} mock={mock} active={open} disabled={busy || working} onCommand={onCommand} onGetCommand={onGetCommand} onRelayToken={onRelayToken} />}
+              {isHealthy && open && <HomeAssistantSetup deviceId={device.device_id} projectId={device.project_id} mock={mock} active={open} disabled={busy || working} onCommand={onCommand} onGetCommand={onGetCommand} onRelayToken={onRelayToken} />}
             </div>
           })}
         </div>

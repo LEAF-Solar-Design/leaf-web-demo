@@ -672,3 +672,88 @@ def test_discovery_rejects_malformed_or_reflected_provider_data(rig, change):
 def test_strict_json(raw):
     with pytest.raises(ValueError):
         service.strict_json(raw)
+
+
+def material_context(count=28, pointer="/rows"):
+    return {"schema": "leaf.project-material-context.v1",
+            "source": {"kind": "project_material", "material_id": "aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee",
+                       "sha256": "b" * 64, "byte_length": 39013},
+            "selection": {"records_pointer": pointer}, "row_count": count,
+            "envelope": {"schema": "synthetic-original.v1", "scope": {"orderedRepos": [f"repo-{i}" for i in range(9)]},
+                         "captured_at": "2026-11-02T07:02:46.556Z",
+                         "limitations": ["Interval observation, not a continuing live feed"],
+                         "observations": [{"repo": f"repo-{i % 9}", "started": "2026-11-02T11:21:44Z",
+                                           "finished": "2026-11-02T11:24:25Z", "complete": True, "rows": []}
+                                          for i in range(18)],
+                         pointer[1:]: {"schema": "leaf.selected-records-reference.v1", "records_pointer": pointer,
+                                       "row_count": count}}}
+
+
+@pytest.mark.parametrize("pointer,count", [("/pr_records", 15689), ("/samples", 164), ("/rows", 28)])
+def test_material_context_discovery_preserves_complete_original_provenance(rig, pointer, count):
+    context = material_context(count, pointer)
+    rig.response = {"records": [{"reference": REF, "revision": 1, "title": "Original", "fields": [FIELD],
+                                "lastAttempt": {"outcome": "success", "row_count": count},
+                                "freshness": read()["freshness"], "material_context": context}], "nextCursor": None}
+    result = rig.svc.execute("datasets", {}, rig.auth.tenant_id, rig.auth.session_id, rig.auth.turn_id)
+    assert result["result"]["datasets"][0]["material_context"] == context
+    assert result["result"]["datasets"][0]["status"] == "ready"
+    assert len(result["result"]["datasets"][0]["material_context"]["envelope"]["observations"]) == 18
+    assert rig.requests[0].method == "GET" and len(rig.gates) == 1
+
+
+@pytest.mark.parametrize("change", ["forged_source", "bad_hash", "oversize_source", "bad_pointer", "unsafe_pointer",
+                                    "bad_escape", "missing_marker", "wrong_marker_count", "boolean_count", "extra_context",
+                                    "count_mismatch", "reflected_data"])
+def test_material_context_discovery_refuses_invalid_context_without_data_leak(rig, change):
+    context = material_context()
+    record = {"reference": REF, "revision": 1, "title": "Original", "fields": [FIELD],
+              "lastAttempt": {"outcome": "success", "row_count": 28}, "freshness": read()["freshness"],
+              "material_context": context}
+    if change == "forged_source":
+        context["source"]["authority"] = "forged"
+    elif change == "bad_hash":
+        context["source"]["sha256"] = "bad"
+    elif change == "oversize_source":
+        context["source"]["byte_length"] = 8 * 1024 * 1024 + 1
+    elif change == "bad_pointer":
+        context["selection"]["records_pointer"] = "rows"
+    elif change == "unsafe_pointer":
+        context["selection"]["records_pointer"] = "/__proto__"
+    elif change == "bad_escape":
+        context["selection"]["records_pointer"] = "/~2"
+    elif change == "missing_marker":
+        context["envelope"]["rows"] = []
+    elif change == "wrong_marker_count":
+        context["envelope"]["rows"]["row_count"] = 27
+    elif change == "boolean_count":
+        context["row_count"] = True
+    elif change == "extra_context":
+        context["authority"] = "forged"
+    elif change == "count_mismatch":
+        record["lastAttempt"]["row_count"] = 27
+    else:
+        context["envelope"]["untrusted"] = TOKEN.decode()
+    rig.response = {"records": [record], "nextCursor": None}
+    result = rig.svc.execute("datasets", {}, rig.auth.tenant_id, rig.auth.session_id, rig.auth.turn_id)
+    assert result["error"]["code"] == "invalid_response"
+    assert TOKEN.decode() not in json.dumps(result)
+
+
+def test_material_context_discovery_aggregate_budget_and_gate_remain_enforced(rig):
+    context = material_context()
+    context["envelope"]["provenance"] = "x" * (service.RESPONSE_CAP // 2)
+    record = {"reference": REF, "revision": 1, "title": "Original", "fields": [FIELD],
+              "lastAttempt": {"outcome": "success", "row_count": 28}, "freshness": read()["freshness"],
+              "material_context": context}
+    second = deepcopy(record)
+    second["reference"]["id"] = "other"
+    with pytest.raises(service.ReadFailure, match="response_too_large"):
+        service.project_discovery({"records": [record, second], "nextCursor": None}, 2)
+    rig.response = {"records": [record], "nextCursor": None}
+    rig.decision = "deny"
+    result = rig.svc.execute("datasets", {}, rig.auth.tenant_id, rig.auth.session_id, rig.auth.turn_id)
+    assert result["gate"]["decision"] == "deny" and not rig.requests
+    # There is still no model material import operation or caller context authority.
+    with pytest.raises(service.ReadFailure):
+        service.normalize("dataset_import", {"material_context": context})

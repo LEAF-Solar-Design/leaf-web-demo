@@ -302,7 +302,7 @@ function ReleaseOutputs({ campaign, completion, available, urlApi, sourceOnly = 
 }
 
 function RevisionForm({ campaign, release, action, busy }) {
-  const [workflow, setWorkflow] = useState(release.contract?.workflow || '')
+  const [workflow, setWorkflow] = useState(release.contract?.requested_workflow ?? release.contract?.workflow ?? '')
   const [reason, setReason] = useState('')
   const [expanded, setExpanded] = useState(false)
   const id = useId()
@@ -360,6 +360,11 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     <span role="status">{action.outcome}</span>
   </section>
   const contract = release.contract || {}
+  const scope = contract.scope_classification
+  const existingDelivery = !contract.web_recipe && !contract.transform_recipe && !contract.cad_recipe
+    && ((scope?.version === 1 && scope.capability === 'existing_artifact_delivery')
+      || (!scope && !!contract.selected_artifact))
+  const exactRequest = typeof contract.requested_workflow === 'string'
   const stages = releaseStages.map(stage => {
     const rows = (completion.stages || []).filter(row => row.stage === stage
       && (row.contract_version == null || row.contract_version === release.contract_version))
@@ -386,11 +391,22 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
   return <section className="panel-sub campaign-completion" aria-label="Project delivery">
     <p role={currentFailure ? 'alert' : 'status'}>{currentFailure && historicalFinish
       ? `Previously completed release. Current verification ${currentFailure.status}.`
-      : finished ? 'Completed release' : historicalFinish ? 'Release completion evidence unavailable.' : `Release ${executionWords(release.status)}`}</p>
+      : finished ? (existingDelivery ? 'Existing file delivered' : 'Completed release')
+        : historicalFinish ? 'Release completion evidence unavailable.' : `Release ${executionWords(release.status)}`}</p>
     <ReleaseOutputs key={`${release.release_id}:${release.contract_version}:${finished}`} campaign={campaign}
       completion={completion} available={finished} urlApi={artifactUrlApi} />
     {!finished && <p>Output unavailable until the release has current, complete verification.</p>}
     <p>{textOf(release.scope_summary) || textOf(contract.release_boundary) || 'Release boundary unavailable.'}</p>
+    {existingDelivery && <section aria-label="Requested workflow scope">
+      <h4>Requested workflow (unverified)</h4>
+      <p>File-delivery checks verify the existing artifact only. Fulfillment of the requested workflow remains unverified; no design or transform execution is claimed.</p>
+      <p>{coverage.filter(row => row.status === 'passed').length} of {coverage.length} file-delivery checks passed.</p>
+      {exactRequest ? <p style={{ whiteSpace: 'pre-wrap' }}>{contract.requested_workflow}</p> : <>
+        <p>Legacy release: the exact requested workflow is unknown. The original goal and deferred evidence below are historical context, not an exact request.</p>
+        <p>Legacy original goal: {contract.original_goal || 'Unknown'}</p>
+        <EvidenceList items={release.deferred_items ?? contract.deferred_items} fallback="Legacy deferred evidence unavailable." />
+      </>}
+    </section>}
     {itemsOf(completion.next_action).length > 0 && <>
       <h4>What requires you</h4>
       <EvidenceList items={itemsOf(completion.next_action).map(nextActionText)} />
@@ -404,14 +420,16 @@ function CompletionPanel({ campaign, artifactUrlApi }) {
     <details className="campaign-disclosure">
     <summary>Release details</summary>
     <p>A completed release covers this boundary. It does not mean the entire original ambition is done.</p>
-    <h4>What works</h4>
+    <h4>{existingDelivery ? 'Passed file-delivery checks' : 'What works'}</h4>
     <EvidenceList items={coverage.filter(row => row.status === 'passed')} fallback="Verified checks unavailable." />
     <h4>What remains</h4>
     <EvidenceList items={[...coverage.filter(row => row.status !== 'passed')
       .map(row => `${row.description || row.check_id}: ${row.status}`),
     ...stages.filter(item => evidenceStatus(item.row?.status) !== 'passed').map(item => `${stageLabel(item.stage)}: ${evidenceStatus(item.row?.status)}`)]}
-    fallback={coverage.length ? 'No remaining required checks reported for this release.' : 'Required check evidence unavailable.'} />
-    <h4>Release stages</h4>
+    fallback={coverage.length ? (existingDelivery
+      ? 'No remaining file-delivery checks. Requested workflow fulfillment remains unverified.'
+      : 'No remaining required checks reported for this release.') : 'Required check evidence unavailable.'} />
+    <h4>{existingDelivery ? 'File-delivery stages' : 'Release stages'}</h4>
     <ul className="campaign-release-stages">{stages.map(({ stage, row }) => <li key={stage}>
       <strong>{stageLabel(stage)}</strong><span>{evidenceStatus(row?.status)}</span>
     </li>)}</ul>

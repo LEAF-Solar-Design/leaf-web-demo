@@ -283,8 +283,19 @@ class LabWorker:
             if lab_tool_nodes.enabled():
                 effects = ({"effects": ("compute", "read", "simulate")}
                            if row["adapter_revision"] == "lab-activation.v1" else {})
+                corpus_options = {}
+                if row.get('corpus_authority_json') is not None:
+                    corpus_options = {
+                        'corpus_authority': self.store.corpus_authority(row),
+                        'corpus_owned': lambda: (not run.lost and not run.suspended and not self._stop.is_set()
+                            and self.store.owns_corpus_run(*self._args(run))),
+                        'corpus_requested': lambda: (self._cancelled(run) and run.cancel),
+                        'corpus_cancel': lambda block, job, deadline: self.store.cancel_corpus_job(
+                            *self._args(run), block, job, deadline=deadline),
+                    }
                 tool_options["tool_adapter"] = lab_tool_nodes.ToolNodeAdapter(
-                    row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run), **effects)
+                    row["tenant_id"], row["run_id"], cancelled=lambda: self._cancelled(run),
+                    **effects, **corpus_options)
             evaluate_graph(artifact["graph"], lab_tool_manifests.registry_for(str(row["tenant_id"])), budget=Budget(run_wall_s=600 - elapsed),
                            clock=self.clock, cancelled=lambda: self._cancelled(run), on_block=on_block,
                            trusted_lookup=functools.partial(lab_tool_manifests.trusted_for, str(row["tenant_id"])),

@@ -189,39 +189,45 @@ def test_main_cli_exits_zero_over_the_full_corpus_with_identity_adapter(capsys):
     assert "ALL FIXTURES OK" in captured.out
 
 
-# T1 through T8: source bytes, polyline count, insert count, real and unkeyed handles.
+# T1 through T9: source bytes, polyline/insert/text counts, real and unkeyed handles.
 _TRACKED_CASES = (
-    ("web/public/sample.dxf", 448706, 2345, 0, 2345, 0),
-    ("web/e2e/fixtures/block-fixture.dxf", 280, 0, 1, 1, 0),
-    ("web/e2e/fixtures/distinctive-panel.dxf", 146, 1, 0, 1, 0),
-    ("vendor/acadrust-worker/fixtures/one_line.dxf", 140, 1, 0, 0, 1),
-    ("engine/corpus/01_closed_lwpolyline_single_layer.dxf", 132, 1, 0, 1, 0),
-    ("engine/corpus/02_open_lwpolyline_two_layers.dxf", 215, 2, 0, 2, 0),
-    ("engine/corpus/03_classic_polyline_vertex_seqend.dxf", 170, 1, 0, 1, 0),
-    ("engine/corpus/04_empty_entities_section.dxf", 36, 0, 0, 0, 0),
+    ("web/public/sample.dxf", 448706, 2345, 0, 0, 2345, 0),
+    ("web/e2e/fixtures/block-fixture.dxf", 280, 0, 1, 0, 1, 0),
+    ("web/e2e/fixtures/distinctive-panel.dxf", 146, 1, 0, 0, 1, 0),
+    ("vendor/acadrust-worker/fixtures/one_line.dxf", 140, 1, 0, 0, 0, 1),
+    ("engine/corpus/01_closed_lwpolyline_single_layer.dxf", 132, 1, 0, 0, 1, 0),
+    ("engine/corpus/02_open_lwpolyline_two_layers.dxf", 215, 2, 0, 0, 2, 0),
+    ("engine/corpus/03_classic_polyline_vertex_seqend.dxf", 170, 1, 0, 0, 1, 0),
+    ("engine/corpus/04_empty_entities_section.dxf", 36, 0, 0, 0, 0, 0),
+    ("vendor/acadrust-worker/fixtures/bsp6-rooftop.dxf", 13936, 74, 0, 6, 80, 0),
 )
 
 
-def _tracked_counts(polylines=0, inserts=0):
+def _tracked_counts(polylines=0, inserts=0, texts=0):
     return {
-        "polylines": polylines, "circles": 0, "arcs": 0, "texts": 0,
+        "polylines": polylines, "circles": 0, "arcs": 0, "texts": texts,
         "dimensions": 0, "inserts": inserts, "mleaders": 0,
     }
 
 
 def _tracked_expected(case, adapter="identity", **changes):
-    drawing, size, polylines, inserts, handles, unkeyed = case
+    drawing, size, polylines, inserts, texts, handles, unkeyed = case
+    block_records = {
+        "web/public/sample.dxf": 4,
+        "web/e2e/fixtures/block-fixture.dxf": 3,
+        "vendor/acadrust-worker/fixtures/bsp6-rooftop.dxf": 4,
+    }.get(drawing, 0)
     expected = {
         "drawing": drawing, "adapter": adapter, "ok": True,
         "bytes_before": size, "bytes_after": size, "byte_identical": True,
-        "entities_before": _tracked_counts(polylines, inserts),
-        "entities_after": _tracked_counts(polylines, inserts),
+        "entities_before": _tracked_counts(polylines, inserts, texts),
+        "entities_after": _tracked_counts(polylines, inserts, texts),
         "source_handles": handles, "handles_preserved": handles,
         "handles_missing": [], "handles_changed": [],
         "unkeyed_before": unkeyed, "unkeyed_matched": unkeyed,
         "blocks_match": True,
-        "block_records": 4 if drawing == "web/public/sample.dxf" else 3 if drawing == "web/e2e/fixtures/block-fixture.dxf" else 0,
-        "block_records_preserved": 4 if drawing == "web/public/sample.dxf" else 3 if drawing == "web/e2e/fixtures/block-fixture.dxf" else 0,
+        "block_records": block_records,
+        "block_records_preserved": block_records,
         "block_records_missing": [], "block_records_changed": [], "layers_match": True,
         "source_untouched": True, "error": None,
     }
@@ -251,7 +257,7 @@ def _assert_tracked_transform(case, old, new, **changes):
 def test_tracked_drawings_cover_every_dxf_in_the_tracked_dirs():
     assert fidelity.untracked_drawings() == []
     assert all(path.is_file() for path in fidelity.tracked_paths())
-    assert len(fidelity.TRACKED_DRAWINGS) == 8
+    assert len(fidelity.TRACKED_DRAWINGS) == 9
 
 
 def test_identity_no_change_round_trip_preserves_every_tracked_drawing():
@@ -328,7 +334,7 @@ def test_a_tracked_adapter_failure_folds_into_the_receipt():
 
 def test_export_fidelity_cli_exits_zero_with_identity_adapter(capsys):
     assert fidelity.main(["--adapter=identity"]) == 0
-    assert "# RESULT: ALL DRAWINGS OK (8 drawings, adapter='identity')" in capsys.readouterr().out
+    assert "# RESULT: ALL DRAWINGS OK (9 drawings, adapter='identity')" in capsys.readouterr().out
 
 
 def test_a_block_child_coordinate_change_fails_the_block_fixture():

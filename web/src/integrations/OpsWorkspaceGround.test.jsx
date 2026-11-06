@@ -1,12 +1,15 @@
 import { afterEach, beforeEach, expect, it, vi } from 'vitest'
-import { act, cleanup, fireEvent, render, screen, waitFor } from '@testing-library/react'
+import { act, cleanup, fireEvent, render, screen, waitFor, within } from '@testing-library/react'
 import { ReadableStream } from 'node:stream/web'
 import { TextDecoder, TextEncoder } from 'node:util'
-import { randomUUID } from 'node:crypto'
+import { randomUUID, webcrypto } from 'node:crypto'
+import { Blob } from 'node:buffer'
 import { OpsWorkspaceGround, scopeCacheIdentity } from './OpsWorkspaceGround.jsx'
 import { createIntegrationsClient } from './client.js'
+import { listProjectReferences, readProjectReferenceOriginal } from '../projects/api.js'
 
 vi.mock('../api.js', () => ({ authHeaders: () => ({ Authorization: 'Bearer current' }), noteUnauthorized: vi.fn() }))
+vi.mock('../projects/api.js', () => ({ listProjectReferences: vi.fn(), readProjectReferenceOriginal: vi.fn() }))
 // Keep the real dataset chart, formatter, and table. Only supply layout dimensions.
 vi.mock('recharts', async (original) => {
   const actual = await original()
@@ -126,6 +129,232 @@ async function observeUncertainAction() {
 beforeEach(() => { vi.stubGlobal('TextDecoder', TextDecoder); vi.stubGlobal('TextEncoder', TextEncoder) })
 afterEach(() => { cleanup(); vi.unstubAllGlobals() })
 async function loaded() { await screen.findByRole('option', { name: 'Authorized orders · version 3' }) }
+
+async function materialHarness(original, pointer = '/rows') {
+  vi.stubGlobal('crypto', webcrypto)
+  const harness = setup()
+  const blob = new Blob([JSON.stringify(original)], { type: 'application/json' })
+  const sha256 = Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', await blob.arrayBuffer())), (byte) => byte.toString(16).padStart(2, '0')).join('')
+  const material = { material_id: otherProject, project_id: projectId, org_id: projectId, actor_binding_id: projectId,
+    name: '<img src=x onerror=alert(1)>.json', media_type: 'application/json', byte_size: blob.size, sha256,
+    created_at: '2026-10-20T15:00:00Z', storage_status: 'uploaded' }
+  listProjectReferences.mockResolvedValue({ materials: [material], next_cursor: null })
+  readProjectReferenceOriginal.mockResolvedValue(blob)
+  const importedRef = { id: 'original-records', version: 1, digest: 'e'.repeat(64) }
+  const lineage = { kind: 'project_material', material_id: material.material_id, sha256, byte_length: blob.size }
+  const resultMetadata = { ...metadata, reference: importedRef, title: 'Imported original' }
+  let rowCount = 0
+  if (pointer) {
+    const envelope = JSON.parse(JSON.stringify(original))
+    const segments = pointer.slice(1).split('/').map((key) => key.replace(/~1/g, '/').replace(/~0/g, '~'))
+    let parent = envelope
+    for (const key of segments.slice(0, -1)) parent = parent[key]
+    rowCount = parent[segments.at(-1)].length
+    parent[segments.at(-1)] = { schema: 'leaf.selected-records-reference.v1', records_pointer: pointer, row_count: rowCount }
+    resultMetadata.material_context = { schema: 'leaf.project-material-context.v1', source: lineage,
+      selection: { records_pointer: pointer }, row_count: rowCount, envelope }
+  } else rowCount = original.length
+  const originalFetch = harness.fetchImpl.getMockImplementation()
+  let imported = false
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/dataset-imports')) { imported = true; return Promise.resolve(response({ reference: importedRef, revision: 1, rowCount, status: 'complete' })) }
+    if (url.includes('/datasets?') && imported) return Promise.resolve(response(page([metadata, resultMetadata])))
+    return originalFetch(url, options)
+  })
+  return { ...harness, material, blob, lineage, resultMetadata, rowCount }
+}
+const importPosts = (fetchImpl) => fetchImpl.mock.calls.filter(([url, options]) => url.endsWith('/dataset-imports') && options.method === 'POST')
+async function openOriginal() {
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: '<img src=x onerror=alert(1)>.json' })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: otherProject } })
+  await screen.findByLabelText('Original provenance')
+}
+function mapOriginal(pointer) {
+  fireEvent.change(screen.getByLabelText('Records array'), { target: { value: pointer } })
+  fireEvent.change(screen.getByLabelText('Import dataset ID'), { target: { value: 'original-records' } })
+  fireEvent.change(screen.getByLabelText('Import dataset title'), { target: { value: 'Imported original' } })
+}
+it.each([
+  ['/pr_records', 15689, (rows) => ({ schema: 'history', scope: { repos: ['a', 'b'] }, captured_at: '2026-09-01', pr_records: rows })],
+  ['/samples', 164, (rows) => ({ samples: rows, limitations: ['snapshot only'], ingested_at: '2026-09-02' })],
+  ['/rows', 28, (rows) => ({ rows, scope: { repos: ['first', 'second'] }, captured_at: '2026-09-03',
+    ingested_at: '2026-09-04', limitations: ['snapshot'], observations: Array.from({ length: 18 }, (_, index) => ({ index, text: '<script>hostile()</script>' })) })],
+  ['/nested/a~1b/~0rows', 28, (rows) => ({ nested: { 'a/b': { '~rows': rows, sibling: { clock: '2026-09-03' } } },
+    observations: Array.from({ length: 18 }, (_, index) => ({ index, text: '<script>hostile()</script>' })), capture: { at: '2026-09-04' } })],
+])('imports a complete generic envelope at %s with %i rows and retained context', async (pointer, count, wrap) => {
+  const original = wrap(Array.from({ length: count }, (_, index) => ({ record_id: `record-${index}`, amount: index })))
+  const harness = await materialHarness(original, pointer)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal()
+  expect(screen.getByRole('option', { name: `${pointer} · ${count} records` })).toBeTruthy()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+  mapOriginal(pointer)
+  fireEvent.change(screen.getByLabelText('Field 2 type'), { target: { value: 'number' } })
+  fireEvent.change(screen.getByLabelText('Field 2 pointer'), { target: { value: '/amount' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByRole('option', { name: 'Imported original · version 1' })
+  const [[url, options]] = importPosts(harness.fetchImpl)
+  expect(url).toBe(`https://ops.example/api/v1/projects/${projectId}/integrations/dataset-imports`)
+  const body = JSON.parse(options.body)
+  expect(Object.keys(body).sort()).toEqual(['definition', 'mapping', 'selection'])
+  expect(body.selection).toEqual({ records_pointer: pointer })
+  expect(body.definition.lineage).toEqual(harness.lineage)
+  expect(body.definition.fields[1].type).toEqual({ kind: 'number' })
+  expect(body.mapping.fields[1]).toEqual({ field_id: 'amount', pointer: '/amount', conversion: 'identity' })
+  expect(options.headers.Authorization).toBe('Bearer current')
+  expect(options.credentials).toBe('omit')
+  expect(screen.getByLabelText('Material context for Imported original').textContent).toBe(JSON.stringify(harness.resultMetadata.material_context, null, 2))
+  expect(screen.getByLabelText('Original provenance').textContent).toContain(harness.material.sha256)
+  expect(document.querySelector('script')).toBeNull()
+  expect(document.querySelector('img')).toBeNull()
+  expect(within(screen.getByRole('region', { name: 'Import project original' })).queryAllByRole('textbox', { name: /\b(?:origin|endpoint)\b/i })).toHaveLength(0)
+  expect(harness.fetchImpl.mock.calls.filter(([route]) => route.includes('/datasets?'))).toHaveLength(2)
+  expect(listProjectReferences).toHaveBeenLastCalledWith(projectId, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+  expect(readProjectReferenceOriginal).toHaveBeenLastCalledWith(projectId, otherProject, expect.objectContaining({ signal: expect.any(AbortSignal) }))
+})
+it('omits root selection for ordinary full-array imports', async () => {
+  const harness = await materialHarness([{ record_id: 'one' }, { record_id: 'two' }], '')
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByText('Imported 2 records. Original bytes and source clocks are retained.')
+  expect(JSON.parse(importPosts(harness.fetchImpl)[0][1].body)).not.toHaveProperty('selection')
+})
+it.each(['/bad~2escape', '/constructor/rows', '/__proto__/rows', '/missing', '/label'])('refuses unsafe or non-array selection %s through the connected import path', async (pointer) => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }], label: 'not records' })
+  const realImport = harness.props.client.importProjectMaterial
+  harness.props.client.importProjectMaterial = (id, body, options) => realImport(id, { ...body, selection: { records_pointer: pointer } }, options)
+  // Missing/non-array paths cannot be chosen in the actual picker. Malformed and
+  // prototype paths are additionally refused by the real client before fetch.
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal()
+  expect(screen.queryByRole('option', { name: new RegExp(`^${pointer.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} ·`) })).toBeNull()
+  if (['/missing', '/label'].includes(pointer)) return
+  mapOriginal('/rows'); fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByRole('alert')
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+  expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
+})
+it('retains the existing dataset and mapping draft when import fails', async () => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }] })
+  const originalFetch = harness.fetchImpl.getMockImplementation()
+  harness.fetchImpl.mockImplementation((url, options) => url.endsWith('/dataset-imports') ? Promise.resolve(response({}, 409)) : originalFetch(url, options))
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/rows')
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByRole('alert')
+  expect(screen.getByLabelText('Import dataset ID').value).toBe('original-records')
+  expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
+  expect(screen.queryByRole('option', { name: 'Imported original · version 1' })).toBeNull()
+})
+it.each(['project', 'logout', 'original'])('ignores and aborts a stale original read after %s changes', async (change) => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }] })
+  let finish
+  readProjectReferenceOriginal.mockImplementation(() => new Promise((resolve) => { finish = resolve }))
+  const view = render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: harness.material.name })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: otherProject } })
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = readProjectReferenceOriginal.mock.calls.at(-1)[2].signal
+  if (change === 'project') view.rerender(<OpsWorkspaceGround {...harness.props} projectId={otherProject} />)
+  else if (change === 'logout') act(() => harness.sessionController.change({ status: 'signed_out', generation: 2 }))
+  else fireEvent.change(screen.getByLabelText('Project original'), { target: { value: '' } })
+  await act(async () => { finish(harness.blob) })
+  expect(signal.aborted).toBe(true)
+  expect(screen.queryByLabelText('Original provenance')).toBeNull()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+})
+it.each(['project', 'logout', 'original', 'role'])('keeps a stale import completion from refreshing the catalog after %s changes', async (change) => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }] })
+  const originalFetch = harness.fetchImpl.getMockImplementation()
+  let finish
+  let role = 'owner'
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/scope')) return Promise.resolve(response({ ...scope, projectRole: role, projectId: url.split('/projects/')[1].split('/')[0] }))
+    if (url.endsWith('/dataset-imports')) return new Promise((resolve) => { finish = resolve })
+    return originalFetch(url, options)
+  })
+  const view = render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/rows')
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await waitFor(() => expect(finish).toBeTypeOf('function'))
+  const signal = importPosts(harness.fetchImpl)[0][1].signal
+  if (change === 'project') view.rerender(<OpsWorkspaceGround {...harness.props} projectId={otherProject} />)
+  else if (change === 'logout') act(() => harness.sessionController.change({ status: 'signed_out', generation: 2 }))
+  else if (change === 'role') role = 'read_only'
+  else fireEvent.change(screen.getByLabelText('Project original'), { target: { value: '' } })
+  await act(async () => { finish(response({ reference: harness.resultMetadata.reference, revision: 1, rowCount: 1, status: 'complete' })) })
+  expect(screen.queryByRole('option', { name: 'Imported original · version 1' })).toBeNull()
+  if (change !== 'role') expect(signal.aborted).toBe(true)
+  if (change === 'role') await screen.findByText('You do not have permission to view these integrations.')
+})
+it.each(['digest', 'size', 'json'])('refuses an original with invalid %s evidence', async (failure) => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }] })
+  if (failure === 'digest') readProjectReferenceOriginal.mockResolvedValue(new Blob([' '.repeat(harness.blob.size)]))
+  if (failure === 'size') readProjectReferenceOriginal.mockResolvedValue(new Blob(['[]']))
+  if (failure === 'json') {
+    const blob = new Blob(['{broken json'])
+    const sha256 = Array.from(new Uint8Array(await webcrypto.subtle.digest('SHA-256', await blob.arrayBuffer())), (byte) => byte.toString(16).padStart(2, '0')).join('')
+    listProjectReferences.mockResolvedValue({ materials: [{ ...harness.material, byte_size: blob.size, sha256 }], next_cursor: null })
+    readProjectReferenceOriginal.mockResolvedValue(blob)
+  }
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded()
+  fireEvent.click(screen.getByRole('button', { name: 'List JSON originals' }))
+  await screen.findByRole('option', { name: harness.material.name })
+  fireEvent.change(screen.getByLabelText('Project original'), { target: { value: otherProject } })
+  await screen.findByRole('alert')
+  expect(screen.queryByLabelText('Original provenance')).toBeNull()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+  expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
+})
+it('refuses complete oversized context without truncating the original or importing', async () => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }], observations: ['x'.repeat(262144)] })
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/rows')
+  await screen.findByText('Complete material context is too large to display. The original and last valid dataset are retained.')
+  expect(screen.getByRole('button', { name: 'Import selected records' })).toBeDisabled()
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+  expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
+})
+it('normalizes an explicit empty root selection to the legacy request body', async () => {
+  const harness = await materialHarness([{ record_id: 'one' }], '')
+  const realImport = harness.props.client.importProjectMaterial
+  harness.props.client.importProjectMaterial = (id, body, options) => realImport(id, { ...body, selection: { records_pointer: '' } }, options)
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('')
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByText('Imported 1 records. Original bytes and source clocks are retained.')
+  expect(Object.keys(JSON.parse(importPosts(harness.fetchImpl)[0][1].body)).sort()).toEqual(['definition', 'mapping'])
+})
+it.each(['nullable-key', 'number-key', 'bad-mapping', 'extra-authority', 'caller-context'])('keeps public definition and mapping restrictions for %s', async (invalid) => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }] })
+  const realImport = harness.props.client.importProjectMaterial
+  harness.props.client.importProjectMaterial = (id, body, options) => {
+    if (invalid === 'extra-authority') body.definition.lineage.connection_id = 'forbidden'
+    if (invalid === 'caller-context') body.material_context = harness.resultMetadata.material_context
+    return realImport(id, body, options)
+  }
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/rows')
+  if (invalid === 'nullable-key') fireEvent.click(screen.getByLabelText('Field 1 nullable'))
+  if (invalid === 'number-key') fireEvent.change(screen.getByLabelText('Field 1 type'), { target: { value: 'number' } })
+  if (invalid === 'bad-mapping') fireEvent.change(screen.getByLabelText('Field 1 pointer'), { target: { value: '/constructor' } })
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByRole('alert')
+  expect(importPosts(harness.fetchImpl)).toHaveLength(0)
+  expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
+})
+it('reports an oversized aggregate catalog instead of stripping context or replacing the last catalog', async () => {
+  const harness = await materialHarness({ rows: [{ record_id: 'one' }], observations: ['x'.repeat(140000)] })
+  const originalFetch = harness.fetchImpl.getMockImplementation()
+  let imported = false
+  harness.fetchImpl.mockImplementation((url, options) => {
+    if (url.endsWith('/dataset-imports')) imported = true
+    else if (imported && url.includes('/datasets?')) return Promise.resolve(response(page([
+      harness.resultMetadata, { ...harness.resultMetadata, reference: { ...harness.resultMetadata.reference, id: 'second' } },
+    ])))
+    return originalFetch(url, options)
+  })
+  render(<OpsWorkspaceGround {...harness.props} />); await loaded(); await openOriginal(); mapOriginal('/rows')
+  fireEvent.click(screen.getByRole('button', { name: 'Import selected records' }))
+  await screen.findByText('Integration data is too large to display. The original and last valid dataset are retained.')
+  expect(screen.getByRole('option', { name: 'Authorized orders · version 3' })).toBeTruthy()
+  expect(screen.queryByRole('option', { name: 'Imported original · version 1' })).toBeNull()
+})
 const browsedDraftRef = { id: 'schedule-draft-existing', version: 2, digest: 'd'.repeat(64) }
 const browsedDraft = { schema_version: 1, id: browsedDraftRef.id, version: browsedDraftRef.version, title: 'Previously saved draft',
   workflow_ref: reference, state: 'draft', schedule: { kind: 'daily', timezone: 'US/Eastern', hour: 9, minute: 5,

@@ -121,16 +121,19 @@ def submit(org, project, actor, body, key):
     ready()
     binding = binding_for(org, project)
     lifecycle.require_project_role(org, project, binding['actor_id'], write=True)
-    if type(body) is not dict or set(body) != {'revision'}:
+    if type(body) is not dict or set(body) not in ({'revision'}, {'source_request_id'}):
         invalid()
-    revision = native.source._revision(body['revision'])
+    native_request = 'source_request_id' in body
+    revision = None if native_request else native.source._revision(body['revision'])
+    request_id = native.source._uuid(body['source_request_id']) if native_request else None
     if (type(key) is not str or not 1 <= len(key) <= 200
             or any(ord(c) < 33 or ord(c) > 126 for c in key)):
         invalid()
     budget = jobs.job_max_s()
     if not math.isfinite(budget) or not 0 < budget <= 3600:
         raise ProtocolError(503, 'Native preview budget is unavailable.')
-    descriptor = native.source.prepare_source(org, project, actor, revision=revision)
+    descriptor = (native.source.prepare_native_source(org, project, actor, source_request_id=request_id)
+                  if native_request else native.source.prepare_source(org, project, actor, revision=revision))
     # Publication can block: check current authority and configuration again.
     authorize(org, project, actor, write=True)
     if binding_for(org, project) != binding:
@@ -247,7 +250,10 @@ def heartbeat(org, project, actor, jid, body):
     org, project, actor = authorize(org, project, actor, write=True)
     owner, attempt = identity(body)
     rec, context = live(org, project, actor, jid, owner, attempt)
-    native.read_source(context)
+    if context['source']['schema'] == native.source.NATIVE_SCHEMA:
+        native.source.recheck_native_source(context['org_id'], context['project_id'], context['actor_id'], context['source'])
+    else:
+        native.read_source(context)
     rec, context = live(org, project, actor, jid, owner, attempt)
     now = time.time()
     if not jobs._pg_store.heartbeat(jid, owner, now,
@@ -281,6 +287,11 @@ def receipt(value, jid, owner, attempt, context):
                 'build_exit_code': 0, 'install_exit_code': 0, 'launch_exit_code': 0,
                 'cleanup_complete': True, 'allocator_release_confirmed': True}
     extra = {'simulator_udid', 'simulator_runtime', 'bundle_id', 'allocator_ticket', 'screenshot_sha256'}
+    if context['source']['schema'] == native.source.NATIVE_SCHEMA:
+        extra.add('build_artifact')
+        native.source.validate_native_artifact(value.get('build_artifact') if type(value) is dict else None, context['source'])
+        extra.remove('bundle_id')
+        expected['bundle_id'] = 'private.leaf.project.p'+context['source']['project_id'].replace('-', '')
     if (type(value) is not dict or set(value) != set(expected) | extra
             or any(type(value[k]) is not type(v) or value[k] != v for k, v in expected.items())):
         invalid()
@@ -417,8 +428,7 @@ def _failure_disposition(rec, context, jid):
         'job_id': jid, 'attempt': attempt, 'org_id': context['org_id'],
         'project_id': context['project_id'], 'status': 'failed',
         'reason': 'execution_budget_expired',
-        'source': {key: context['source'][key] for key in
-                   ('revision', 'document_sha256', 'archive_sha256')},
+        'source': native.source.native_identity(context['source']),
         'started_at': start, 'finished_at': finish, 'lease_cleared': True}
     projection['disposition_sha256'] = hashlib.sha256(canonical(projection)).hexdigest()
     return projection
@@ -428,9 +438,7 @@ def status(org, project, actor, jid):
     org, project, actor = authorize(org, project, actor, write=False)
     rec, context = record(org, project, jid)
     public = {'job_id': jid, 'status': 'queued' if rec['status'] == 'submitted' else rec['status'],
-              'revision': context['source']['revision'],
-              'document_sha256': context['source']['document_sha256'],
-              'archive_sha256': context['source']['archive_sha256']}
+              **native.source.native_identity(context['source'])}
     if rec.get('progress') == 'closed':
         public['status'] = 'cancelled'
     if public['status'] == 'complete':

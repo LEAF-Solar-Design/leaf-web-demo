@@ -22,6 +22,7 @@ from test_sip_r1_context import memory, O1, O2, P1, P2, D1, D2, V1, V2
 import re
 import sqlite3
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 
 platform_link._ensure_platform_package()
@@ -52,6 +53,7 @@ class SqlMemory:
     def __init__(self):
         self.db = sqlite3.connect(":memory:", check_same_thread=False)
         self.db.row_factory = sqlite3.Row
+        self.db.create_function("clock_timestamp", 0, lambda: datetime.now(timezone.utc).isoformat())
 
     def table(self, name, columns):
         self.db.execute(f"CREATE TABLE {name} ({columns})")
@@ -86,7 +88,8 @@ class SqlMemory:
                 cursor.execute(
                     sql,
                     {
-                        k: str(v) if isinstance(v, UUID) else v
+                        k: str(v) if isinstance(v, UUID) else
+                        json.dumps(v.obj) if hasattr(v, "obj") else v
                         for k, v in (args or {}).items()
                     },
                 )
@@ -102,8 +105,12 @@ class SqlMemory:
                 ):
                     if row.get(key) is not None:
                         row[key] = UUID(row[key])
-                if isinstance(row.get("provenance"), str):
-                    row["provenance"] = json.loads(row["provenance"])
+                for key in ("provenance", "params", "result", "error", "execution_context"):
+                    if isinstance(row.get(key), str):
+                        row[key] = json.loads(row[key])
+                for key in ("created_at", "updated_at", "started_at", "finished_at"):
+                    if isinstance(row.get(key), str):
+                        row[key] = datetime.fromisoformat(row[key])
                 return row
 
             def fetchall(self):
@@ -118,7 +125,8 @@ class SqlMemory:
             cursor.close()
 
     def transaction(self, operation, **kwargs):
-        return operation(self)
+        with self.db:
+            return operation(self)
 
 
 @pytest.fixture
@@ -327,6 +335,235 @@ def layers(lane, version):
     intake = json.loads(lane.memory.blobs[lane.memory.versions[version].intake_ref])
     return sorted({entity["layer"] for kind in ("polylines", "inserts", "faces3d")
                    for entity in intake.get(kind, [])})
+
+
+@pytest.fixture
+def read_job_store(lane, real_rules, monkeypatch):
+    """Run the production job INSERT/UPDATE and real board reader on one isolated SQL store."""
+    db = real_rules()
+    db.db.execute("ALTER TABLE orgs ADD COLUMN tier")
+    db.db.execute("ALTER TABLE orgs ADD COLUMN account_class")
+    db.db.execute("UPDATE orgs SET tier='hosted_pro', account_class='standard'")
+    db.table("jobs", canonical_jobs._job_columns() +
+             ", deleted_at, idempotency_key, submission_fingerprint, spine_ref, cost_usd, "
+             "purge_requested_at, purge_completed_at")
+    db.db.execute("CREATE UNIQUE INDEX read_job_key ON jobs(org_id,project_id,idempotency_key) "
+                  "WHERE idempotency_key IS NOT NULL")
+    db.db.commit()
+    monkeypatch.setattr(platform_link, "platform_db", lambda: SimpleNamespace(run_transaction=db.transaction))
+    monkeypatch.setattr(platform_link, "_canonical_jobs_module", lambda: canonical_jobs)
+    monkeypatch.setattr(lane.stored, "stored_job_entitlement_verdict",
+                        lambda *_: (None, SimpleNamespace(tier="hosted_pro", account_class="standard")))
+    from leaf_platform import store
+    monkeypatch.setattr(store, "cursor", db.cursor)
+    return db
+
+
+def _real_read_job(lane, *, version=V2, key="read-once", params=None, calls=None,
+                   callback=None, context=None, tool=None):
+    context = context or service.resolve_context(lane.memory.tenant, P1, version)
+    tool = tool or deps.find_tool("instant-list-layers", str(lane.memory.tenant))
+    params = params or {}
+
+    def execute():
+        if calls is not None:
+            calls.append(context.binding.input_version_id)
+        return tool_loader.run_tool_dynamic(
+            tool, context.intake, params, aps_live=False, da=None, tenant_id=str(O1))
+
+    return platform_link.run_project_read_job(
+        lane.memory.tenant, context, tool, params, key, callback or execute)
+
+
+def _selected_turn(lane, monkeypatch, version=V1, *, selected=True):
+    import time
+    import session_store
+    import project_execution_context
+
+    session = {"session_id": "selected-session", "tenant_id": str(O1),
+               "org_id": str(O1), "project_id": str(P1), "drawing_id": "rooftop_demo",
+               "active_turn_id": "selected-turn", "turn_started_at": time.time()}
+    frozen = project_execution_context.freeze(
+        lane.memory.tenant, session,
+        {"project_id": str(P1), "input_version_id": str(version)})
+    monkeypatch.setattr(session_store, "get_session", lambda sid: session if sid == "selected-session" else None)
+    monkeypatch.setattr(session_store, "turn_started_data", lambda sid, tid, tenant: (
+        {project_execution_context.KEY: frozen} if selected else {})
+        if (sid, tid, tenant) == ("selected-session", "selected-turn", str(O1)) else None)
+    return {"X-Authority-Session-Id": "selected-session",
+            "X-Authority-Turn-Id": "selected-turn", "Idempotency-Key": "selected-once"}
+
+
+@pytest.mark.parametrize("version", [V1, V2])
+def test_c02_api_persists_exact_stored_selection_and_matching_retry(lane, read_job_store, monkeypatch, version):
+    from leaf_platform import store
+    headers = _selected_turn(lane, monkeypatch, version)
+    calls = []
+    actual_run = tool_loader.run_tool_dynamic
+
+    def execute(*args, **kwargs):
+        calls.append(True)
+        return actual_run(*args, **kwargs)
+
+    monkeypatch.setattr(tool_loader, "run_tool_dynamic", execute)
+    first = request(lane, headers=headers, dwg=str(D1), dwg_version=999)
+    second = request(lane, headers=headers, dwg=str(D1), dwg_version=999)
+    assert first.status_code == second.status_code == 202, first.text
+    job = first.json()
+    assert job["job_id"] == second.json()["job_id"] and calls == [True]
+    assert job["result"]["result"]["layers"] == layers(lane, version)
+    board = [row.to_dict() for row in store.list_jobs(O1, P1)]
+    assert len(board) == 1 and board[0]["job_id"] == job["job_id"]
+    assert board[0]["input_version_id"] == str(version)
+    assert board[0]["result"]["project_context"]["drawing_id"] == str(D1)
+
+
+@pytest.mark.parametrize("conflict", ["drawing", "project", "organization", "missing", "store"])
+def test_c02_api_cannot_fall_back_from_selected_project(lane, read_job_store, monkeypatch, conflict):
+    import session_store
+    headers = _selected_turn(lane, monkeypatch, selected=conflict != "missing")
+    changes = {"dwg": str(D2 if conflict == "drawing" else D1)}
+    if conflict == "project":
+        headers["X-Project-Id"] = str(P2)
+    elif conflict == "organization":
+        headers["X-Org-Id"] = str(O2)
+    elif conflict == "store":
+        monkeypatch.setattr(session_store, "get_session", lambda _sid: None)
+    response = request(lane, headers=headers, **changes)
+    assert response.status_code == (403 if conflict == "store" else 409), response.text
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_c02_selected_turn_preserves_entity_scope_boundary(lane, read_job_store, monkeypatch):
+    headers = _selected_turn(lane, monkeypatch)
+    monkeypatch.setattr(route.entity_scope, "resolve_turn_binding", lambda *_: {"entity_scope": "stored"})
+    response = request(lane, headers=headers, dwg=str(D1))
+    assert response.status_code == 403
+    assert response.json()["reason_code"] == route.entity_scope.SCOPED_MUTATION_REASON
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("version", [V1, V2], ids=["historical", "selected-head"])
+def test_c02_real_persisted_read_and_project_board_tuple(lane, read_job_store, version):
+    from leaf_platform import store
+    calls = []
+    job = _real_read_job(lane, version=version, calls=calls)
+    UUID(job["job_id"])
+    assert job["status"] == "complete" and calls == [version]
+    assert job["tenant_id"] == str(O1) and job["project_id"] == str(P1)
+    assert job["input_version_id"] == str(version)
+    assert job["result"]["result"] == {"count": len(layers(lane, version)),
+                                        "layers": layers(lane, version)}
+    expected = {"organization_id": str(O1), "project_id": str(P1), "drawing_id": str(D1),
+                "input_version_id": str(version), "intake_sha256": hashlib.sha256(
+                    lane.memory.blobs[lane.memory.versions[version].intake_ref]).hexdigest()}
+    assert job["result"]["project_context"] == expected
+    # The exact board SQL and Job.from_row/to_dict run, not a fake board response.
+    board = [row.to_dict() for row in store.list_jobs(O1, P1)]
+    assert len(board) == 1 and board[0]["job_id"] == job["job_id"]
+    assert board[0]["input_version_id"] == str(version)
+    assert board[0]["result"]["project_context"] == expected
+    assert store.list_jobs(O2, P1) == [] and store.list_jobs(O1, P2) == []
+    row = read_job_store.db.execute("SELECT status,kind,attempt,max_attempts,execution_context "
+                                   "FROM jobs").fetchone()
+    assert tuple(row[:4]) == ("succeeded", "run", 1, 1)
+    assert json.loads(row["execution_context"])["catalog_digest"] == deps.catalog_tool_digest(
+        deps.find_tool("instant-list-layers", str(lane.memory.tenant)))
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs WHERE status IN ('queued','running')").fetchone()[0] == 0
+    assert all(not write for write in lane.memory.accesses)
+
+
+def test_c02_matching_retry_reads_same_real_job_without_execution(lane, read_job_store):
+    calls = []
+    first = _real_read_job(lane, calls=calls)
+    second = _real_read_job(lane, calls=calls)
+    assert second["job_id"] == first["job_id"] and second["result"] == first["result"]
+    assert calls == [V2]
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+
+@pytest.mark.parametrize("change", ["version", "params", "catalog"])
+def test_c02_changed_input_cannot_retarget_accepted_key(lane, read_job_store, change):
+    calls = []
+    _real_read_job(lane, calls=calls)
+    changes = {"version": V1} if change == "version" else {"params": {"prefix": "OLD"}}
+    if change == "catalog":
+        tool = dict(deps.find_tool("instant-list-layers", str(lane.memory.tenant)))
+        tool["version"] = "99.0.0"
+        changes = {"tool": tool}
+    with pytest.raises(ValueError, match="idempotency"):
+        _real_read_job(lane, calls=calls, **changes)
+    assert calls == [V2]
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 1
+
+
+def test_c02_callback_failure_is_a_real_replayable_failed_job(lane, read_job_store):
+    calls = []
+
+    def failed():
+        calls.append(True)
+        raise RuntimeError("private callback detail must not escape")
+
+    job = _real_read_job(lane, callback=failed)
+    replay = _real_read_job(lane, callback=failed)
+    assert calls == [True] and replay["job_id"] == job["job_id"]
+    assert job["status"] == "failed" and job["result"]["ok"] is False
+    assert job["error"]["error_code"] == ErrorCode.INTERNAL
+    assert job["result"]["project_context"]["input_version_id"] == str(V2)
+    assert "private callback" not in json.dumps(job)
+    assert read_job_store.db.execute("SELECT status FROM jobs").fetchone()[0] == "failed"
+
+
+def test_c02_actual_failed_tool_envelope_keeps_its_error(lane, read_job_store):
+    error = err_envelope(ErrorCode.BAD_PARAMS, "actual tool refusal", retryable=False)
+    job = _real_read_job(lane, callback=lambda: error)
+    assert job["status"] == "failed" and job["error"] == error["error"]
+
+
+def test_c02_reserved_job_does_not_survive_commit_failure(lane, read_job_store, monkeypatch):
+    calls = []
+
+    def fail_commit(operation, **kwargs):
+        assert kwargs == {"max_attempts": 1}
+        with read_job_store.db:
+            operation(read_job_store)
+            raise OSError("synthetic commit failure")
+
+    monkeypatch.setattr(read_job_store, "transaction", fail_commit)
+    with pytest.raises(OSError, match="commit failure"):
+        _real_read_job(lane, calls=calls)
+    assert calls == [V2]
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("change", ["drawing", "organization", "intake", "membership", "tier"])
+def test_c02_refuses_stale_or_foreign_binding_without_job(lane, read_job_store, change):
+    from dataclasses import replace
+    context = service.resolve_context(lane.memory.tenant, P1, V2)
+    if change in {"drawing", "organization"}:
+        field = "drawing_id" if change == "drawing" else "organization_id"
+        value = D2 if change == "drawing" else O2
+        context = replace(context, binding=replace(context.binding, **{field: value}))
+    elif change == "intake":
+        lane.memory.blobs[context.intake_ref] = b'{"changed":true}'
+    elif change == "membership":
+        read_job_store.db.execute("UPDATE project_member_bindings SET status='revoked'")
+        read_job_store.db.commit()
+    else:
+        read_job_store.db.execute("UPDATE orgs SET tier='hosted_free'")
+        read_job_store.db.commit()
+    with pytest.raises((service.ProjectContextError, platform_link.CanonicalEntitlementDenied)):
+        _real_read_job(lane, context=context, callback=forbidden)
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
+
+
+def test_c02_stored_extract_entitlement_cannot_be_bypassed(lane, read_job_store, monkeypatch):
+    denial = JSONResponse({"error": "denied"}, status_code=403)
+    monkeypatch.setattr(lane.stored, "stored_job_entitlement_verdict", lambda *_: (denial, None))
+    with pytest.raises(platform_link.CanonicalEntitlementDenied) as exc:
+        _real_read_job(lane, callback=forbidden)
+    assert exc.value.response is denial
+    assert read_job_store.db.execute("SELECT count(*) FROM jobs").fetchone()[0] == 0
 
 
 def success(lane, response, version=V2):
@@ -856,3 +1093,207 @@ def test_c1a_real_tool_exception(lane, monkeypatch):
     assert body["project_context"]["organization_id"] == str(O1)
     assert body["project_context"]["input_version_id"] == str(V2)
     assert response.headers["cache-control"] == "no-store"
+
+
+@pytest.fixture
+def job_list_binding_lane(monkeypatch):
+    """Real deps/list/membership helpers with counted synthetic storage edges."""
+    import auth
+    import tenancy
+    from starlette.requests import Request
+    from test_campaign_capability_job import context as capability_context
+
+    calls = {"binding": [], "membership": [], "mirror": [], "lists": []}
+    state = SimpleNamespace(
+        binding=SimpleNamespace(platform_tenant_id=O1, binding_id=UUID(int=3)),
+        error=None, denied=set(), records=[], legacy=[], linked={})
+    subject = "auth0|job-list-synthetic-reader"
+    def resolve(provider, value):
+        assert (provider, value) == ("auth0", subject)
+        calls["binding"].append(value)
+        if state.error:
+            raise state.error
+        return state.binding
+    store = SimpleNamespace(resolve_active_identity_binding=resolve,
+                            get_org=lambda org: SimpleNamespace(status="active", tier="hosted_pro"))
+    monkeypatch.setattr(platform_link, "platform_store", lambda: store)
+    monkeypatch.setattr(platform_link, "_load_platform", lambda: (store, None, None))
+    monkeypatch.setattr(deps, "auth_live", lambda: True)
+    monkeypatch.setattr(auth, "verify_platform_token", lambda authorization: {"sub": subject, "roles": []})
+    monkeypatch.setattr(auth, "extract_tenant_claims", lambda payload:
+                        {"tenant_id": str(state.binding.platform_tenant_id), "tier": "hosted_pro"})
+    monkeypatch.setattr(deps, "admin_elevated_tier", lambda claimed, actor, tier: tier)
+    monkeypatch.setattr(tenancy, "get_store", lambda: SimpleNamespace(resolve_workspace=lambda org: None))
+    def caller():
+        request = Request({"type": "http", "method": "GET", "path": "/api/jobs",
+                           "headers": [(b"authorization", b"Bearer REDACTED-project-read-fixture")]})
+        tenant = deps.require_tenant(request, x_tenant_id=None,
+            authorization="Bearer REDACTED-project-read-fixture", x_dispatch_secret=None,
+            x_guest_session=None, x_demo_session=None)
+        assert tenant.authority_resolved and len(calls["binding"]) == 1
+        calls["binding"].clear()
+        return tenant
+    def role(org, project, binding_id, *, write):
+        assert org == state.binding.platform_tenant_id and binding_id == state.binding.binding_id
+        calls["membership"].append((str(project), write))
+        if str(project) in state.denied:
+            raise project_lifecycle.LifecycleForbidden("synthetic revoked membership")
+    monkeypatch.setattr(project_lifecycle, "require_project_role", role)
+    monkeypatch.setattr(platform_link, "require_project_access", _REAL_ACCESS)
+    def seed(count, kind):
+        state.records, state.linked = [], {}
+        for index in range(count):
+            org = str(state.binding.platform_tenant_id)
+            rec = {"job_id": str(UUID(int=10000 + index)), "tenant_id": org,
+                   "org_id": org, "project_id": str(UUID(int=1000 + index)),
+                   "tool": "count-by-layer", "status": "running", "progress": "running",
+                   "result": None, "error": None, "elapsed_ms": 0}
+            if kind == "graph":
+                rec["execution_context"] = {"schema": "leaf.solar-project-graph-job.v1"}
+            else:
+                context = capability_context()
+                context.update(tenant_id=org, org_id=org, project_id=rec["project_id"])
+                rec.update(tool=context["tool_name"], capability_provenance=context)
+            state.linked[rec["job_id"]] = rec
+            state.records.append({key: deepcopy(value) for key, value in rec.items()
+                                  if key != "capability_provenance"})
+    def canonical(tenant, *, limit, **kwargs):
+        calls["lists"].append(("canonical", tenant, limit, kwargs))
+        return deepcopy(state.records)
+    def legacy(tenant, limit):
+        calls["lists"].append(("legacy", tenant, limit, {}))
+        return deepcopy(state.legacy)
+    def mirror(job, tenant):
+        calls["mirror"].append((job, tenant))
+        return deepcopy(state.linked[job])
+    monkeypatch.setattr(route.jobs.platform_link, "list_canonical_jobs", canonical)
+    monkeypatch.setattr(route.jobs, "list_jobs", legacy)
+    monkeypatch.setattr(route.jobs, "job_store_mode", lambda: "postgres")
+    monkeypatch.setattr(route.jobs, "_pg_store", SimpleNamespace(linked_capability_job=mirror))
+    return SimpleNamespace(state=state, calls=calls, caller=caller, seed=seed, subject=subject)
+
+
+@pytest.mark.parametrize("count", [0, 1, 20])
+@pytest.mark.parametrize("kind", ["graph", "capability"])
+def test_job_list_reuses_one_fresh_binding_with_actual_membership(job_list_binding_lane, count, kind):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(count, kind)
+    result = route.list_jobs(20, tenant)
+    assert len(result["jobs"]) == count
+    assert len(lane.calls["binding"]) == 1
+    assert len(lane.calls["membership"]) == len(lane.calls["mirror"]) == count
+    assert all(not write for project, write in lane.calls["membership"])
+    assert all(tenant_id == str(O1) for _source, tenant_id, _limit, _kwargs in lane.calls["lists"])
+    print("BSP34_COUNT=" + json.dumps({"kind": kind, "records": count,
+          "handlerBindingCalls": len(lane.calls["binding"]),
+          "membershipCalls": len(lane.calls["membership"]), "returned": len(result["jobs"])}))
+
+
+@pytest.mark.parametrize("kind", ["graph", "capability"])
+def test_job_list_retains_per_record_membership_denial(job_list_binding_lane, kind):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(20, kind)
+    lane.state.denied.add(str(UUID(int=1007)))
+    result = route.list_jobs(20, tenant)
+    assert len(result["jobs"]) == 19
+    assert str(UUID(int=10007)) not in {row["job_id"] for row in result["jobs"]}
+    assert len(lane.calls["binding"]) == 1 and len(lane.calls["membership"]) == 20
+
+
+def test_job_list_binding_does_not_survive_a_request(job_list_binding_lane):
+    lane = job_list_binding_lane
+    first = lane.caller()
+    lane.seed(1, "graph")
+    assert len(route.list_jobs(20, first)["jobs"]) == 1
+    assert len(lane.calls["binding"]) == 1
+    lane.calls["binding"].clear()
+    lane.state.binding = SimpleNamespace(platform_tenant_id=O2, binding_id=UUID(int=4))
+    second = lane.caller()
+    lane.seed(1, "capability")
+    assert str(second) == str(O2)
+    assert len(route.list_jobs(20, second)["jobs"]) == 1
+    assert len(lane.calls["binding"]) == 1
+    assert [tenant for _kind, tenant, _limit, _options in lane.calls["lists"]] == [str(O1)] * 2 + [str(O2)] * 2
+
+
+def test_job_list_forged_resolved_marker_keeps_server_namespace(job_list_binding_lane):
+    lane = job_list_binding_lane
+    forged = deps.TenantContext(str(O2), org_id=str(O2), tier="hosted_pro",
+                               subject=lane.subject, authority_resolved=True)
+    lane.seed(1, "graph")
+    assert route.list_jobs(20, forged)["jobs"] == []
+    assert len(lane.calls["binding"]) == 1
+    assert [tenant for _kind, tenant, _limit, _options in lane.calls["lists"]] == [str(O1)] * 2
+    assert lane.calls["membership"] == []
+
+
+@pytest.mark.parametrize("failure", ["revoked", "unavailable"])
+def test_job_list_refuses_missing_binding_or_store_failure(job_list_binding_lane, failure):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    if failure == "revoked":
+        lane.state.binding = None
+        assert route.list_jobs(20, tenant)["jobs"] == []
+        assert [value for _kind, value, _limit, _options in lane.calls["lists"]] == [str(tenant)] * 2
+    else:
+        lane.state.error = RuntimeError("synthetic binding store unavailable")
+        with pytest.raises(RuntimeError, match="synthetic binding store unavailable"):
+            route.list_jobs(20, tenant)
+        assert lane.calls["lists"] == []
+    assert len(lane.calls["binding"]) == 1
+
+
+@pytest.mark.parametrize("kind", ["graph", "capability"])
+def test_job_list_keeps_foreign_org_and_provenance_fences(job_list_binding_lane, kind):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(1, kind)
+    rec = next(iter(lane.state.linked.values()))
+    rec["org_id"] = str(O2)
+    if kind == "capability":
+        rec["capability_provenance"]["org_id"] = str(O2)
+    assert route.list_jobs(20, tenant)["jobs"] == []
+    assert len(lane.calls["binding"]) == 1
+    rec["tenant_id"] = str(O2)
+    assert route.list_jobs(20, tenant)["jobs"] == []
+    assert len(lane.calls["binding"]) == 2
+
+
+def test_job_list_keeps_duplicates_and_limit(job_list_binding_lane):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(20, "graph")
+    lane.state.legacy = [deepcopy(next(iter(lane.state.linked.values())))]
+    result = route.list_jobs(1, tenant)
+    assert len(result["jobs"]) == 1
+    assert len(lane.calls["binding"]) == 1 and len(lane.calls["membership"]) == 21
+    assert all(limit == 1 for _source, _tenant, limit, _kwargs in lane.calls["lists"])
+
+
+def test_single_job_observation_defaults_still_resolve_fresh(job_list_binding_lane):
+    lane = job_list_binding_lane
+    tenant = lane.caller()
+    lane.seed(1, "capability")
+    rec = next(iter(lane.state.linked.values()))
+    assert route._access_error(rec, tenant, rec["job_id"]) is None
+    assert len(lane.calls["binding"]) == 2 and len(lane.calls["membership"]) == 1
+    lane.state.binding = None
+    assert route._access_error(rec, tenant, rec["job_id"]).status_code == 404
+    assert len(lane.calls["binding"]) == 4 and len(lane.calls["membership"]) == 1
+
+
+def test_job_list_keeps_auth_off_and_demo_paths(job_list_binding_lane, monkeypatch):
+    lane = job_list_binding_lane
+    monkeypatch.setattr(deps, "auth_live", lambda: False)
+    lane.state.legacy = [{"job_id": "legacy", "tenant_id": "standalone", "status": "running"}]
+    assert route.list_jobs(20, "standalone")["jobs"][0]["job_id"] == "legacy"
+    assert lane.calls["binding"] == []
+    actor = SimpleNamespace(server_tenant="demo-owned", org_id=O1, project_id=P1)
+    monkeypatch.setattr(route, "is_demo_context", lambda tenant: tenant == "demo")
+    monkeypatch.setattr(route, "resolve_demo_actor", lambda tenant: actor)
+    lane.state.legacy = [{"job_id": "demo-job", "tenant_id": "demo-owned", "status": "running",
+                          "org_id": str(O1), "project_id": str(P1)}]
+    assert route.list_jobs(20, "demo")["jobs"][0]["job_id"] == "demo-job"
+    assert lane.calls["binding"] == lane.calls["membership"] == []

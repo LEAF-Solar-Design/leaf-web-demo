@@ -117,7 +117,7 @@ def _trusted(tool):
 def project_tool_admission(tool, tenant, *, org_header, project_header, authorization,
                            input_version_id, drawing_id, params, catalog_digest,
                            idempotency_key, checkout_capability, preview, solve_context=None,
-                           proposal_job_id=None):
+                           proposal_job_id=None, expected_intake_sha256=None):
     if not project_runs_enabled():
         return _refusal("project_execution_disabled")
     try:
@@ -146,10 +146,42 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         if catalog_digest != manifest:
             return _refusal("SIP_R3_TOOL_MANIFEST_MISMATCH", message=
                 "tool manifest changed after approval; refresh tools and confirm again")
+        delegated = False
+        if checkout_capability is not None and not isinstance(checkout_capability, str):
+            from project_checkout_custody import DelegatedCheckout
+            delegated = isinstance(checkout_capability, DelegatedCheckout)
         try:
-            context = platform_link.resolve_submission_context(
-                org_header, project_header, authorization,
-                **({"tenant_context": tenant} if is_demo_context(tenant) else {}))
+            if delegated:
+                # Backedges retain the verified subject, never a borrowed bearer.
+                bound = checkout_capability.input_binding
+                if drawing_id is None:
+                    drawing_id = bound["drawing_id"]
+                if (str(tenant) != bound["organization_id"]
+                        or org_header != bound["organization_id"]
+                        or project_header != bound["project_id"]
+                        or str(input_version_id) != bound["input_version_id"]
+                        or str(drawing_id) != bound["drawing_id"]
+                        or expected_intake_sha256 != bound["intake_sha256"]
+                        or idempotency_key != checkout_capability.idempotency_key):
+                    project.refuse("CHECKOUT_DENIED")
+                org = platform_link.require_project_access(
+                    tenant, UUID(bound["project_id"]), write=True)
+                if str(org) != bound["organization_id"]:
+                    project.refuse("PROJECT_FORBIDDEN")
+                context = platform_link.resolve_project_authority(
+                    UUID(bound["organization_id"]), UUID(bound["project_id"]))
+            else:
+                context = platform_link.resolve_submission_context(
+                    org_header, project_header, authorization,
+                    **({"tenant_context": tenant} if is_demo_context(tenant) else {}))
+        except project.ProjectContextError:
+            raise
+        except platform_link.ProjectSessionForbidden:
+            project.refuse("PROJECT_FORBIDDEN")
+        except platform_link.ProjectAuthorityRequired:
+            project.refuse("CANONICAL_AUTHORITY_REQUIRED")
+        except (platform_link.ProjectAuthorityNotFound, LookupError):
+            project.refuse("CONTEXT_NOT_FOUND")
         except DemoActorUnavailable:
             return _refusal("SIP_R1_STORE_UNAVAILABLE", status=503, retryable=True)
         except ValueError as exc:
@@ -193,6 +225,8 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
         args = (tenant, UUID(str(context["project_id"])), drawing, parent, trusted["name"], normalized)
         kwargs = {"tool_manifest_sha256": manifest, "checkout_capability": checkout_capability,
                   "idempotency_key": idempotency_key}
+        if delegated:
+            kwargs["expected_intake_sha256"] = expected_intake_sha256
         if trusted["name"] == "solar-solve-proposal":
             kwargs["solve_context"] = solve_context
         if trusted["name"] == "solar-commit-solve":
@@ -201,7 +235,7 @@ def project_tool_admission(tool, tenant, *, org_header, project_header, authoriz
             row = service.submit_project_graph_job(*args, **kwargs, preview=True)
             return {"status_code": 200, "content": with_envelope_fields(
                 {"admissible": True, "replay": "job_id" in row})}
-        if trusted["name"] in ("solar-solve-proposal", "solar-commit-solve"):
+        if delegated or trusted["name"] in ("solar-solve-proposal", "solar-commit-solve"):
             job_id = str(service.submit_project_graph_job(*args, **kwargs)["job_id"])
         else:
             job_id = platform_link.submit_canonical_graph(*args, **kwargs)

@@ -522,3 +522,56 @@ it('hides Find off the drawing surface and unregisters the source on unmount', (
   h.unmount()
   expect(source.current).toBeNull()
 })
+
+// Same stored server producer shape as the block projection regression.
+const serverBlockSource = () => ({
+  polylines: [],
+  blocks: { Fixture: { base: [10, 20, 0], count: 1, complete: true,
+    children: [{ kind: 'LINE', layer: 'Detail', pts: [[10, 20, 0], [14, 22, 0]] }] } },
+  inserts: [{ handle: 'A100', name: 'Fixture', layer: 'Panels', x: 100, y: 200, z: 0,
+    rot: Math.PI / 2, scale: [-2, 3, 1], nrm: [0, 0, 1] }],
+})
+
+it.each([[true, 'A100'], [false, 'A100'], [false, '0xA100']])('server block Find follows projected child visibility when Detail is %s for %s', (visible, handle) => {
+  const h = setup(), intake = serverBlockSource()
+  intake.inserts[0].handle = handle
+  const index = buildDrawingObjectIndex({ drawingKey: 'console:server', intake })
+  act(() => {
+    h.probe.objects.retract('engine')
+    h.probe.objects.publish('console', { index })
+    h.probe.objects.publishSelection('console', ['A100'])
+    Object.assign(h.scene, { ready: true, drawingKey: index.drawingKey, intake })
+    h.probe.setVisibleLayers({ Panels: false, Detail: visible })
+  })
+  const before = structuredClone(h.viewer.getPose())
+  find('A100')
+  if (visible) {
+    expect(h.viewer.frame).toHaveBeenCalledWith({ minX: 94, minY: 192, maxX: 100, maxY: 200 })
+    expect(h.probe.objects.focusId).toBe('h:A100')
+    expect(h.history.size()).toBe(1)
+  } else {
+    expect(screen.getByText('This object is hidden by its layers.')).toBeTruthy()
+    expect(h.viewer.frame).not.toHaveBeenCalled()
+    expect(h.probe.objects.focusId).toBeNull()
+    expect(h.history.size()).toBe(0)
+    expect(h.viewer.getPose()).toEqual(before)
+  }
+  expect(h.probe.objects.selectedHandles).toEqual(['A100'])
+  expect(h.probe.objects.index.intake).toBe(intake)
+})
+
+it('server block Find ignores visible layers named only by unsupported children', () => {
+  const h = setup(), intake = serverBlockSource()
+  intake.blocks.Fixture.children = [{ kind: 'INSERT', name: 'Unknown', layer: 'Detail' }]
+  const index = buildDrawingObjectIndex({ drawingKey: 'console:server', intake })
+  act(() => {
+    h.probe.objects.retract('engine')
+    h.probe.objects.publish('console', { index })
+    Object.assign(h.scene, { ready: true, drawingKey: index.drawingKey, intake })
+    h.probe.setVisibleLayers({ Panels: false, Detail: true })
+  })
+  find('A100')
+  expect(screen.getByText('This object is hidden by its layers.')).toBeTruthy()
+  expect(h.viewer.frame).not.toHaveBeenCalled()
+  expect(h.history.size()).toBe(0)
+})

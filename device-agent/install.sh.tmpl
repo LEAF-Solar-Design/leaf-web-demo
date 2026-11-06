@@ -45,7 +45,7 @@ PY
 temp_dir=$(mktemp -d)
 trap 'rm -rf "$temp_dir"' EXIT HUP INT TERM
 curl --fail --silent --show-error --proto '=https' --connect-timeout 15 --max-time 180 \
-  "$origin/api/devices/agent/package.tar.gz" -o "$temp_dir/package.tar.gz"
+  "$origin/api/devices/agent/package.tar.gz?sha256=@SHA256@" -o "$temp_dir/package.tar.gz"
 "$python_bin" - "$temp_dir/package.tar.gz" <<'PY'
 import hashlib
 import sys

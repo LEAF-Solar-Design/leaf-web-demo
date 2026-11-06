@@ -38,7 +38,7 @@ def test_two_builds_are_byte_identical_and_metadata_is_fixed(tmp_path):
                    and entry.uname == entry.gname == "" for entry in entries)
     installer = (first / "install.sh").read_text(encoding="utf-8")
     assert digest in installer and "@SHA256@" not in installer and "@VERSION@" not in installer
-    assert "Leaf device agent 0.1.0" in installer
+    assert "Leaf device agent 0.1.1" in installer
 
 
 def test_installer_and_lock_preserve_release_guards():

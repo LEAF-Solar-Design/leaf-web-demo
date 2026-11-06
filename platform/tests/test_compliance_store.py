@@ -69,9 +69,9 @@ def test_compliance_run_is_pinned_idempotent_and_immutable(make_org):
 def test_waiver_state_machine_is_tenant_and_role_bound(make_org):
     org, project, solve_id = _completed_solve(make_org, "waiver")
     run = compliance_store.record_run(org.org_id, project.project_id, solve_id, PACK, INPUTS)
-    owner = store.create_identity_binding(org.org_id, "auth0", "waiver-owner", role="owner")
-    editor = store.create_identity_binding(org.org_id, "auth0", "waiver-editor", role="editor")
-    reviewer = store.create_identity_binding(org.org_id, "auth0", "waiver-reviewer", role="reviewer")
+    owner = store.create_identity_binding(org.org_id, "auth0", f"waiver-owner-{org.org_id}", role="owner")
+    editor = store.create_identity_binding(org.org_id, "auth0", f"waiver-editor-{org.org_id}", role="editor")
+    reviewer = store.create_identity_binding(org.org_id, "auth0", f"waiver-reviewer-{org.org_id}", role="reviewer")
     finding_id = uuid.UUID(run["findings"][0]["finding_id"])
     proposed = compliance_store.propose_waiver(
         org.org_id, project.project_id, finding_id, editor.binding_id, "field condition")
@@ -94,7 +94,7 @@ def test_waiver_state_machine_is_tenant_and_role_bound(make_org):
 
 def test_compliance_and_waiver_api_use_pinned_pack_and_binding(client, make_org):
     org, project, solve_id = _completed_solve(make_org, "compliance-api")
-    owner = store.create_identity_binding(org.org_id, "auth0", "compliance-api-owner", role="owner")
+    owner = store.create_identity_binding(org.org_id, "auth0", f"compliance-api-owner-{org.org_id}", role="owner")
     headers = {"X-Org-Id": str(org.org_id), "X-Actor-Binding-Id": str(owner.binding_id)}
     run = client.post(
         f"/api/projects/{project.project_id}/solves/{solve_id}/compliance",

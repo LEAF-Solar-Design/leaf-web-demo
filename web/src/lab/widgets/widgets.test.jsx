@@ -242,12 +242,14 @@ describe('scoped widget designer', () => {
   })
   it('limits each format to 32 elements and permits adding after removal', () => {
     render(<WidgetsView scopeKey="a/p" />)
-    for (let n = 0; n < 32; n += 1) add()
+    const addText = screen.getByRole('button', { name: 'Add text' })
+    for (let n = 0; n < 32; n += 1) fireEvent.click(addText)
     const elements = preview().querySelectorAll('[data-element-id]')
     expect(new Set([...elements].map((e) => e.dataset.elementId)).size).toBe(32)
-    expect(screen.getByRole('button', { name: 'Add text' })).toBeDisabled()
+    expect(screen.getByRole('button', { name: 'Add text' })).toBe(addText)
+    expect(addText).toBeDisabled()
     fireEvent.click(screen.getByRole('button', { name: 'Remove', exact: true }))
-    expect(screen.getByRole('button', { name: 'Add text' })).toBeEnabled()
+    expect(addText).toBeEnabled()
   })
 })
 

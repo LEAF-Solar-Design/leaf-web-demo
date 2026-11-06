@@ -2070,14 +2070,50 @@ button.bar-add, button.bar-scope { appearance: none; -webkit-appearance: none; }
 }
 .converse-msg.assistant { color: var(--foreground); }
 .converse-tool-chip {
-  display: inline-flex; align-items: center; gap: 7px;
+  display: inline-flex; flex-wrap: wrap; align-items: center; gap: 7px;
   align-self: flex-start;
   font: 500 var(--leaf-size-caption) var(--font-mono);
-  color: var(--muted);
-  background: var(--bar-chip);
+  color: var(--foreground);
+  background: var(--card);
   border-radius: var(--leaf-radius-key);
   padding: 3px 9px;
+  box-sizing: border-box;
+  min-width: 0;
   max-width: 100%;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+.converse-tool-chip > * {
+  box-sizing: border-box; min-width: 0; max-width: 100%;
+}
+.converse-tool-chip > .dot,
+.converse-tool-chip > .converse-step-state {
+  flex: none; white-space: nowrap;
+}
+.converse-tool-chip > .converse-tool-toggle,
+.converse-tool-chip > .converse-step-verb,
+.converse-tool-chip > .dim,
+.converse-tool-chip > .converse-tool-detail {
+  flex: 0 1 100%;
+}
+.converse-tool-chip .route-tool,
+.converse-tool-chip .dim,
+.converse-tool-chip .converse-tool-toggle {
+  color: inherit;
+}
+.converse-tool-chip .converse-tool-toggle {
+  font: inherit; text-align: left;
+  background: transparent; border: 0; padding: 2px 0;
+  white-space: normal; overflow-wrap: anywhere; cursor: pointer;
+}
+.converse-tool-chip .converse-step-object { display: block; }
+.converse-tool-chip .converse-tool-toggle:focus-visible {
+  outline: 2px solid currentColor; outline-offset: 2px;
+}
+.converse-tool-chip .converse-tool-detail pre {
+  box-sizing: border-box; min-width: 0; max-width: 100%;
+  margin: 0; white-space: pre-wrap; overflow-wrap: anywhere;
+  color: inherit; background: transparent;
 }
 .converse-tool-chip .dim { font-family: var(--sans); }
 .converse-jobrow {

@@ -17,6 +17,7 @@ import sys
 
 
 ADMISSIBLE_CLASSES = ("python-installation", "os-image")
+NODE_MODULES_RUNTIME_DIRS = frozenset({".leaf-ci", ".vite", ".vite-temp"})
 LIMITS = {"max_files": 300000, "max_bytes": 2 * 1024 ** 3}  # per root [guessed]
 DEFAULT_ROOTS = {
     "/usr/lib/python3.11": {"class": "python-installation", "origin_category": "python-installation"},
@@ -217,6 +218,9 @@ def digest_root(root, limits=None, admissible=()):
             row.update(files=1, bytes=size)
         elif stat.S_ISDIR(info.st_mode):
             for directory, dirnames, filenames in os.walk(real, followlinks=False):
+                if directory == real and os.path.basename(real) == "node_modules":
+                    # Runtime caches written during the run are not installed bytes.
+                    dirnames[:] = [d for d in dirnames if d not in NODE_MODULES_RUNTIME_DIRS]
                 dirnames[:] = sorted(d for d in dirnames if d != "__pycache__")
                 names = [(d, True) for d in dirnames] + [(f, False) for f in sorted(filenames)]
                 keep = []

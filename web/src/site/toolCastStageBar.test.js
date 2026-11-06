@@ -59,7 +59,7 @@ describe('slice 5a: the stage mounts PromptBox where its .tc-bar rows stood', ()
   })
 
   it('hands PromptBox the OLD Run ladder as one sentence, rung for rung', () => {
-    expect(promptBox).toMatch(/disabledReason=\{stageRunDisabledReason\(\{\s*sessionActive: platformSession\.status === 'active',\s*hasDrawing,\s*busy,\s*jobRunning,\s*routing,\s*loading: phase === 'loading',\s*\}\)\}/)
+    expect(promptBox).toMatch(/disabledReason=\{stageRunDisabledReason\(\{\s*sessionActive: platformSession\.status === 'active',\s*hasDrawing,\s*projectConversation: isProjectConversation\(prompt\),\s*busy,\s*jobRunning,\s*routing,\s*loading: phase === 'loading',\s*\}\)\}/)
   })
 
   it('RoutePanel stays the resolver: Enter is a no-op in the well while a route shows', () => {

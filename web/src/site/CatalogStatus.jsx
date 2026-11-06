@@ -23,7 +23,7 @@ export default function CatalogStatus({ state, query, onRetry, onClear }) {
   if (state === 'failed') {
     return (
       <div role="alert" className="catalog-status">
-        <p>The tool list did not load. Your saved tools are still available below.</p>
+        <p>The tool list did not load. Try again.</p>
         <button type="button" className="chip-act dp-focus" onClick={onRetry}>Retry</button>
       </div>
     )

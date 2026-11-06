@@ -849,4 +849,26 @@ describe('widget store client and states', () => {
     expect(screen.getByText('Output type: scalar<number>')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()
   })
+  it.each([['total', '$1,010.00'], ['symbols', '3 open positions'], ['pnl', '+10 (+1%) today']])('edits and saves explicit literal text for an unbound %s preset', async (preset, literal) => {
+    let savedDoc
+    vi.stubGlobal('fetch', vi.fn(async (_url, options) => {
+      const body = options?.body ? JSON.parse(options.body) : {}
+      if (body.graph) { savedDoc = body.graph; return response({ revision: 1 }) }
+      return response({ values: [] })
+    }))
+    render(<WidgetsView />); edit('Document ID', 'sample-widget'); click('New')
+    fireEvent.click(within(screen.getByRole('list', { name: 'Text elements' })).getByRole('button', { name: `${PRESETS[preset].n} ${preset}`, exact: true }))
+    expect(screen.queryByLabelText('Text')).not.toBeInTheDocument()
+    edit('Binding source', 'none'); edit('Text', literal)
+    expect(within(screen.getByRole('region', { name: 'Preview' })).getByText(literal)).toBeInTheDocument()
+    click('Undo')
+    expect(within(screen.getByRole('region', { name: 'Preview' })).queryByText(literal)).not.toBeInTheDocument()
+    click('Redo')
+    expect(within(screen.getByRole('region', { name: 'Preview' })).getByText(literal)).toBeInTheDocument()
+    click('Save')
+    await waitFor(() => expect(savedDoc).toBeDefined())
+    const element = validateWidgetDoc(savedDoc).formats.la.els.find((item) => item.id === preset)
+    expect(element.text).toBe(literal)
+    expect(element.binding).toBeUndefined()
+  })
 })

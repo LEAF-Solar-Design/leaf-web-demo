@@ -98,3 +98,43 @@ describe('approval resume hold across the record wait', () => {
       }))
   })
 })
+
+
+describe('asynchronous approval resume guard', () => {
+  it.each([false, true])('waits for the guard before resuming when it settles to %s', async (allowed) => {
+    const guard = deferredResponse()
+    const message = { turn_id: 'turn-2', status: 'started' }
+    const fetch = vi.fn()
+      .mockResolvedValueOnce(response(200, { resolved: true, approved: true }))
+      .mockResolvedValue(response(202, message))
+    vi.stubGlobal('fetch', fetch)
+    const beforeResume = vi.fn(() => guard.promise)
+    const resolution = resolveApproval('c1', 's1', true, false, { beforeResume })
+
+    await vi.waitFor(() => expect(beforeResume).toHaveBeenCalledTimes(1))
+    expect(fetch).toHaveBeenCalledTimes(1)
+    expect(fetch).toHaveBeenCalledWith(expect.stringMatching(/\/api\/agent\/approvals\/c1$/),
+      expect.objectContaining({ body: JSON.stringify({ approved: true }) }))
+    guard.resolve(allowed)
+
+    await expect(resolution).resolves.toEqual(allowed ? message : { held: true, recorded: true })
+    expect(fetch).toHaveBeenCalledTimes(allowed ? 2 : 1)
+    if (allowed) expect(fetch).toHaveBeenNthCalledWith(2,
+      expect.stringMatching(/\/api\/sessions\/s1\/messages$/), expect.objectContaining({
+        method: 'POST', body: JSON.stringify({ confirm: { confirmationId: 'c1', approved: true } }),
+      }))
+  })
+
+  it.each(['throw', 'reject'])('never resumes when the recorded approval guard fails by %s', async (failure) => {
+    const fetch = vi.fn().mockResolvedValue(response(202, { turn_id: 'unexpected' }))
+    vi.stubGlobal('fetch', fetch)
+    const error = new Error('Checkout custody unavailable')
+    const beforeResume = vi.fn(() => {
+      if (failure === 'throw') throw error
+      return Promise.reject(error)
+    })
+    await expect(resolveApproval('c1', 's1', true, true, { beforeResume })).rejects.toBe(error)
+    expect(beforeResume).toHaveBeenCalledTimes(1)
+    expect(fetch).not.toHaveBeenCalled()
+  })
+})

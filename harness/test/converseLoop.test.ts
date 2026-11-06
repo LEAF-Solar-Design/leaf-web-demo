@@ -38,6 +38,66 @@ const PACKET = {
 /** A confirmation id only the (fake) app gate can produce. */
 const APP_MINTED_CID = "app-minted-confirmation-1";
 
+describe("private project photo inspection", () => {
+  const org = "11111111-1111-4111-8111-111111111111";
+  const project = "22222222-2222-4222-8222-222222222222";
+  const material = "33333333-3333-4333-8333-333333333333";
+  const bytes = Buffer.from([255, 216, 255, ...Buffer.from("DISTINCTIVE_PRIVATE_PIXELS"), 255, 217]);
+  const hash = createHash("sha256").update(bytes).digest("hex");
+  const common = { org_id: org, project_id: project, session_id: "app-session", turn_id: "app-turn",
+    source: { project_id: project, revision: 0, digest: null }, assignment_basis: "no_saved_page" };
+  const previewArgs = { op: "preview", material_id: material, expected_preview_sha256: hash,
+    expected_revision: 0, expected_digest: null };
+
+  it.each(["success", "deny", "throw", "foreign", "alias", "authority"])(
+    "keeps pixels and raw errors out of durable evidence (%s)", async mode => {
+      const { projectPhotoResult, PHOTO_FAILURE } = await import("../src/agent/projectPhotoInspection.js");
+      const appRun = new FakeAppRunClient();
+      const callback = vi.spyOn(appRun, "inspectProjectPhoto").mockImplementation(async (_tenant, _session, body) => {
+        if (mode === "throw") throw new Error(`RAW_BACKEND_ERROR ${bytes.toString("base64")}`);
+        return body.op === "catalog" ? { ...common, schema: "leaf.project-material-catalog.v1", next_cursor: null, page_count: 1,
+          materials: [{ material_id: material, name: "cake.jpg", media_type: "image/jpeg", byte_size: 100,
+            sha256: "b".repeat(64), preview_sha256: hash, width: 10, height: 10,
+            created_at: "2026-11-01T00:00:00Z", assignments: [] }] }
+          : { ...common, project_id: mode === "foreign" ? org : project, schema: "leaf.project-material-image.v1",
+            material_id: material, original_sha256: "b".repeat(64), preview_sha256: hash, sha256: hash,
+            media_type: "image/jpeg", byte_size: bytes.length, data: bytes.toString("base64"), assignments: [] };
+      });
+      const gate = new FakeGateClient();
+      const check = vi.spyOn(gate, "check").mockResolvedValue({ decision: mode === "deny" ? "deny" : "allow",
+        reason: "RAW_BACKEND_ERROR" });
+      const store = new FakeSessionStore();
+      const results: SpineToolResult[] = [];
+      const runner: SpineConverseRunner = { async *run(input) {
+        expect(await input.canUseTool("mcp__services__inspect_project_photo", {})).toMatchObject({ behavior: "deny" });
+        results.push(await input.tools.execute(mode === "alias" ? "mcp__services__inspect_project_photo" : "inspect_project_photo", { op: "catalog" }));
+        results.push(await input.tools.execute("inspect_project_photo", previewArgs));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+      } };
+      const loop = new ConverseLoop({ runner, appRun, gate, store });
+      const session = await loop.createOrGetSession(org, "photos");
+      const emitted: ConverseEvent[] = [];
+      const turn = await loop.handleMessage({ sessionId: session.session_id, tenantId: org, text: "Inspect my photo",
+        contextPacket: {}, ...(mode === "authority" ? {} : { authoritySessionId: "app-session", authorityTurnId: "app-turn" }),
+        onEvent: event => emitted.push(event) });
+      await turn.done;
+      const durable = JSON.stringify([emitted, await store.eventsAfter(session.session_id, 0), results]);
+      expect(durable).not.toContain(bytes.toString("base64"));
+      expect(durable).not.toContain("RAW_BACKEND_ERROR");
+      const projected = projectPhotoResult(results[1]!);
+      if (mode === "success") {
+        expect(projected.content.some(block => block.type === "image")).toBe(true);
+        expect(check).toHaveBeenCalledWith("inspect_project_photo", previewArgs, expect.objectContaining({
+          authoritySessionId: "app-session", authorityTurnId: "app-turn" }));
+        expect(callback).toHaveBeenCalledTimes(2);
+      } else {
+        expect(projected).toEqual({ content: [{ type: "text", text: PHOTO_FAILURE }], isError: true });
+        if (["deny", "alias", "authority"].includes(mode)) expect(callback).not.toHaveBeenCalled();
+      }
+    },
+  );
+});
+
 describe("private portfolio proposal projection", () => {
   const org = "11111111-1111-4111-8111-111111111111";
   const project = "22222222-2222-4222-8222-222222222222";
@@ -695,6 +755,55 @@ describe("ConverseLoop — read auto-dispatch", () => {
     expect(appRun.submitCalls).toHaveLength(0);
   });
 
+  it.each(["success", "commit", "manifest", "effective", "digest", "session", "turn", "script"])(
+    "authored_view carries pinned structured identity without execution (%s)", async mode => {
+      const appRun = new FakeAppRunClient();
+      const digest = `sha256:${"a".repeat(64)}`;
+      appRun.catalog = [{ name: "arbitrary-view", kind: mode === "script" ? "script" : "view",
+        description: "An authored view", capabilities: ["drawing.read"],
+        execution_class: mode === "script" ? "batch" : "instant", batch_fallback: true,
+        catalog_digest: mode === "digest" ? `sha256:${"b".repeat(64)}` : digest,
+        catalog_commit: mode === "commit" ? undefined : "c".repeat(40),
+        tool_manifest_sha256: mode === "manifest" ? "a".repeat(64) : digest,
+        effective_catalog_digest: mode === "effective" ? `sha256:${"d".repeat(64)}` : "d".repeat(64) }];
+      const results: SpineToolResult[] = [];
+      const runner: SpineConverseRunner = { async *run(input) {
+        results.push(await input.tools.execute("run_capability", { tool: "arbitrary-view", params: {} }));
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: null };
+      } };
+      const store = new FakeSessionStore(), gate = new FakeGateClient();
+      const loop = new ConverseLoop({ runner, appRun, store, gate });
+      const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+      const turn = await loop.handleMessage({ sessionId: session.session_id, tenantId: session.tenant_id,
+        text: "Open my authored view", contextPacket: PACKET,
+        ...(mode === "session" ? {} : { authoritySessionId: "app-view-session" }),
+        ...(mode === "turn" ? {} : { authorityTurnId: "app-view-turn" }) });
+      await turn.done;
+      const events = await store.eventsAfter(session.session_id, 0);
+      const result = ofType(events, "tool_result")[0]!.data;
+      if (mode === "script") {
+        expect(appRun.submitCalls).toHaveLength(1);
+        expect(ofType(events, "job_linked")).toHaveLength(1);
+        expect(result.result).toBeUndefined();
+        return;
+      }
+      expect(appRun.submitCalls).toHaveLength(0);
+      expect(ofType(events, "job_linked")).toHaveLength(0);
+      if (mode !== "success") {
+        expect(result.ok).toBe(false);
+        expect(result.result).toBeUndefined();
+        expect(results[0]!.isError).toBe(true);
+      } else {
+        const descriptor = { contract: "leaf.authored-view.v1", kind: "view", route: "view",
+          tool: "arbitrary-view", tenant_id: "demo-tenant", session_id: "app-view-session", turn_id: "app-view-turn",
+          catalog_commit: "c".repeat(40), effective_catalog_digest: "d".repeat(64),
+          tool_manifest_sha256: digest, catalog_digest: digest };
+        expect(result).toMatchObject({ tool: "run_capability", ok: true, result: descriptor });
+        expect(JSON.parse(results[0]!.content)).toEqual(descriptor);
+        expect(gate.checks.some(check => check.action === "run_read_tool")).toBe(true);
+      }
+    });
+
   it("run_capability on a READ tool dispatches inline via the wait path", async () => {
     const { loop, appRun, gate, store } = makeLoop();
     appRun.drawingHead = 1;
@@ -915,6 +1024,33 @@ describe("ConverseLoop — read auto-dispatch", () => {
       drawingVersion: 3,
       wait: false,
     });
+  });
+
+  it("drops a model integer pin for a private canonical read without consulting legacy versions", async () => {
+    const appRun = new FakeAppRunClient();
+    const gate = new FakeGateClient();
+    const store = new FakeSessionStore();
+    const runner: SpineConverseRunner = {
+      async *run(input: ConverseRunInput) {
+        await input.tools.execute("run_capability", {
+          tool: "count-by-layer", params: {}, dwg: "rooftop_demo", drawing_version: 123,
+        });
+        yield { type: "done", stopReason: "end_turn", sdkSessionId: "canonical-read-session" };
+      },
+    };
+    const loop = new ConverseLoop({ runner, appRun, gate, store });
+    const session = await loop.createOrGetSession("demo-tenant", "rooftop_demo");
+    const turn = await loop.handleMessage({
+      sessionId: session.session_id, tenantId: session.tenant_id,
+      text: "Count the selected version", contextPacket: PACKET,
+      projectExecution: "canonical-read", authoritySessionId: "app-session", authorityTurnId: "app-turn",
+    });
+    await turn.done;
+    expect(appRun.methodLog).not.toContain("getDrawingState");
+    expect(appRun.submitCalls).toHaveLength(1);
+    expect(appRun.submitCalls[0]).not.toHaveProperty("drawingVersion");
+    expect(appRun.submitCalls[0]).toMatchObject({ authoritySessionId: "app-session", authorityTurnId: "app-turn" });
+    expect(gate.checks.find(c => c.action === "run_read_tool")?.args).not.toHaveProperty("drawing_version");
   });
 
   it("uses the current drawing head instead of a model-supplied read pin", async () => {

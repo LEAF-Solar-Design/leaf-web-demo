@@ -183,6 +183,7 @@ class Suite:
     database_skip_reasons: tuple[str, ...] = ()
     opt_in_env: str = ""           # SKIP unless this env flag is truthy (opt-in suite)
     timeout_s: int = 900           # per-attempt subprocess timeout
+    requires_linux: bool = False  # unavailable, never a passing skip, elsewhere
 
 
 @dataclass
@@ -202,6 +203,14 @@ class Result:
 def _py_pytest(target: str) -> List[str]:
     return [sys.executable, "-m", "pytest", target, "-q", "--color=no",
             "-r", "s", "-p", "no:cacheprovider"]
+
+
+def _unprivileged_pytest(target: str) -> List[str]:
+    if not sys.platform.startswith("linux"):
+        return _py_pytest(target)
+    # Keep the literal pytest token for reporting_command's plugin injection.
+    return [sys.executable, "-I", str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py"),
+            *_py_pytest(target)[2:]]
 
 
 def _npm() -> str:
@@ -388,7 +397,7 @@ def build_suites() -> List[Suite]:
               "pytest", SERVER, _py_pytest("tests/test_solar_ground_string_decode_memo.py"), 30),
         # sf-w3-conversion-graph piece 2: the physical head's trackers as compact Ground frames; 87 cases.
         Suite("server-solar-ground-conversion", "server tests/test_solar_ground_conversion.py", "pytest",
-              SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 87),
+              SERVER, _py_pytest("tests/test_solar_ground_conversion.py"), 94),
         # sf-units-ground-conversion: converted Ground frame geometry is metres in both drawing units; 12 cases.
         Suite("server-solar-ground-conversion-units", "server tests/test_solar_ground_conversion_units.py", "pytest",
               SERVER, _py_pytest("tests/test_solar_ground_conversion_units.py"), 12),
@@ -988,7 +997,7 @@ def build_suites() -> List[Suite]:
         # report whether the stored frame elevations and piles still match the current grid. Hermetic and
         # nothing skips: the floor is the exact count, 106.
         Suite("server-solar-frames-piles", "server tests/test_solar_frames_piles.py",
-              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 106),
+              "pytest", SERVER, _py_pytest("tests/test_solar_frames_piles.py"), 111),
         # sf-w3-tracker-rows-domain: explicit manual tracker rows created once on the drawing's physical
         # head (server/solar_tracker_rows.py), converted end to end by the Ground conversion kernel.
         # Hermetic and nothing skips: the floor is the exact count, 38.
@@ -1115,7 +1124,7 @@ def build_suites() -> List[Suite]:
                 _py_pytest("tests/test_native_preview_job.py"), 41, uses_database=True,
                 database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
           Suite("server-native-preview-remote", "server tests/test_native_preview_remote.py", "pytest", SERVER,
-                _py_pytest("tests/test_native_preview_remote.py"), 20, uses_database=True,
+              _py_pytest("tests/test_native_preview_remote.py"), 137, uses_database=True,
                 database_skip_reasons=(r"DATABASE_URL is required for PostgreSQL job tests",)),
           Suite("server-campaign-transform-admission", "server tests/test_campaign_transform_admission.py", "pytest", SERVER,
                 _py_pytest("tests/test_campaign_transform_admission.py"), 12),
@@ -1295,6 +1304,10 @@ def build_suites() -> List[Suite]:
         # real git repos and toggles the R7 rollout env.
         Suite("server-platform-customize", "server tests/test_platform_customize.py",
               "pytest", SERVER, _py_pytest("tests/test_platform_customize.py"), 95),
+        Suite("server-platform-source-snapshot", "server tests/test_platform_source_snapshot.py",
+              "pytest", SERVER, _py_pytest("tests/test_platform_source_snapshot.py"), 19),
+        Suite("server-platform-source-ranges", "server commit-bound platform source ranges",
+              "pytest", SERVER, _py_pytest("tests/test_platform_source_ranges.py"), 18),
         Suite("server-agent-router", "server tests/test_agent_router.py", "pytest", SERVER,
               # Four section-18 tests are intentionally parked because the
               # section-2.1 lane replaced that surface. Pin the complete reason
@@ -1354,7 +1367,7 @@ def build_suites() -> List[Suite]:
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
         Suite("server-lab-runs", "server tests/test_lab_runs.py", "pytest", SERVER,
-              _py_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
+              _unprivileged_pytest("tests/test_lab_runs.py"), 24, uses_database=True,
               database_skip_reasons=(r"platform DB unreachable: .+",)),
         Suite("server-lab-stream", "server tests/test_lab_stream.py", "pytest", SERVER,
               _py_pytest("tests/test_lab_stream.py"), 30, uses_database=True,
@@ -1593,6 +1606,8 @@ def build_suites() -> List[Suite]:
               SERVER, _py_pytest("tests/test_hardening_quota.py"), 11),
         Suite("server-quota-shape", "server tests/test_quota_shape.py", "pytest", SERVER,
               _py_pytest("tests/test_quota_shape.py"), 12),
+        Suite("server-session-event-cas", "server conditional session event append", "pytest", SERVER,
+              _py_pytest("tests/test_session_event_cas.py"), 60),
         Suite("server-session-store", "server tests/test_session_store.py", "pytest", SERVER,
               _py_pytest("tests/test_session_store.py"), 24),
         Suite("server-sessions-routes", "server tests/test_sessions_routes.py", "pytest",
@@ -2043,7 +2058,9 @@ def build_suites() -> List[Suite]:
         Suite("server-sip-r3a-graph", "server canonical Solar graph adapter", "pytest", SERVER,
               _py_pytest("tests/test_sip_r3a_graph.py"), 24),
         Suite("server-sip-r3b-tools", "server canonical Solar tool chain", "pytest", SERVER,
-      _py_pytest("tests/test_sip_r3b_tools.py"), 24),
+              _py_pytest("tests/test_sip_r3b_tools.py"), 26,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"PostgreSQL integration test requires DATABASE_URL",)),
         Suite("platform-sip-r3b-tools", "platform canonical Solar tool publication", "pytest",
               REPO / "platform", _py_pytest("tests/test_sip_r3b_tools.py"), 7,
               uses_database=True, db_gated=True, database_skip_reasons=(
@@ -2138,6 +2155,13 @@ def build_suites() -> List[Suite]:
               REPO / "platform", _py_pytest("tests/test_sip_r2_publication.py"), 17,
         uses_database=True, db_gated=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
+        Suite("platform-project-editor-publication", "platform project editor canonical publication", "pytest",
+              REPO / "platform", _py_pytest("tests/test_project_editor_publication.py"), 14,
+              uses_database=True),
+        Suite("server-project-drawing-editor", "server project editor custody and disposable PG authority", "pytest",
+              SERVER, _py_pytest("tests/test_project_drawing_editor.py"), 25, uses_database=True),
+        Suite("server-project-editor-upload-source", "server original DXF custody before ready", "pytest",
+              SERVER, _py_pytest("tests/test_project_editor_upload_source.py"), 3, uses_database=True),
         Suite("server-sip-r2-publication", "server canonical publication readback", "pytest",
               SERVER, _py_pytest("tests/test_sip_r2_publication.py"), 10),
         Suite("server-sip-r1-context", "server canonical project context", "pytest",
@@ -2335,6 +2359,8 @@ def build_suites() -> List[Suite]:
         # status). Was never registered, so none of it ran in CI.
         Suite("server-customization-async-stage", "server customization async stage", "pytest",
               SERVER, _py_pytest("tests/test_customization_async_stage.py"), 82),
+        Suite("server-author-stage-status", "server author stage status", "pytest",
+              SERVER, _py_pytest("tests/test_author_stage_status.py"), 41),
         Suite("server-customization-stage-recovery",
               "server customization stage recovery", "pytest",
               SERVER, _py_pytest("tests/test_customization_stage_recovery.py"), 27),
@@ -2586,7 +2612,7 @@ def build_suites() -> List[Suite]:
         Suite("scripts-native-release-producer", "scripts test_native_release_producer.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_native_release_producer.py"), 32),
         Suite("scripts-native-preview-worker", "scripts tests/test_native_preview_worker.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_worker.py"), 56),
+              SCRIPTS_DIR, _py_pytest("tests/test_native_preview_worker.py"), 184),
         Suite("scripts-native-preview-service", "scripts tests/test_native_preview_service.py", "pytest",
               SCRIPTS_DIR, _py_pytest("tests/test_native_preview_service.py"), 48),
         Suite("scripts-native-preview-session", "scripts tests/test_native_preview_session.py", "pytest",
@@ -3279,7 +3305,7 @@ def build_suites() -> List[Suite]:
               SCRIPTS_DIR, _py_pytest("test_migration_expand_contract_gate.py"), 12),
         # --- harness (cwd=harness) --- #
         Suite("harness-vitest", "harness npm test (vitest)", "vitest", HARNESS,
-              [_npm(), "test"], 317,
+              [_npm(), "test", "--", "--exclude", "test/projectPhotoAssignmentCaller.test.ts"], 317,
               allowed_vitest_skips=(
                   # Actual producer: project-lifecycle-postgres.yml,
                   # Run canonical project source PostgreSQL tests. These
@@ -3293,6 +3319,8 @@ def build_suites() -> List[Suite]:
                   # DATABASE_URL / PG_SESSION_STORE_TEST_URL), one test.
                   ("test/conversation.test.ts", 1),
               )),
+        Suite("harness-project-photo-assignment-caller", "harness trusted photo assignment caller", "vitest", HARNESS,
+              [_npm(), "test", "--", "test/projectPhotoAssignmentCaller.test.ts"], 104),
         # --- web unit (cwd=web) --- #
         # The web workspace had NO unit runner until the T1 overlay card; its
         # only specs were Playwright e2e, which this gate runs separately. A
@@ -3395,8 +3423,17 @@ def build_suites() -> List[Suite]:
         # The historical 752-test floor above covered the whole suite. Vitest
         # shards files, not test counts; require nonempty execution until CI
         # supplies measured per-shard floors (752 / 3 is not a safe floor).
+        # Includes src/solar/solarProjectMaterializationClient.test.js through
+        # the normal src/**/*.test.{js,jsx} discovery, including initial publication.
+        # These existing source-only contracts need installed Vitest dependencies,
+        # not browser or build output. Run them once in the cheap phase.
+        Suite("web-stage-source-contracts", "web stage and surface source contracts", "vitest", WEB,
+              [_npm(), "run", "test:unit", "--", "src/site/surfaceGates.test.js",
+               "src/site/toolCastStageBar.test.js", "--maxWorkers=1"], 1),
         *(Suite(f"web-vitest-{shard}", f"web npm run test:unit (vitest {shard}/3)", "vitest", WEB,
-              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3", "--maxWorkers=2"], 1,
+              [_npm(), "run", "test:unit", "--", f"--shard={shard}/3",
+               "--exclude=src/site/surfaceGates.test.js",
+               "--exclude=src/site/toolCastStageBar.test.js", "--maxWorkers=2"], 1,
               allowed_vitest_skips=(
                   # Day-3 CAD engine real-build round trip: needs a compiled
                   # wasm artifact, which needs a Rust toolchain, so it exists
@@ -3410,15 +3447,11 @@ def build_suites() -> List[Suite]:
                   # cases, the three W4d Draw-group cases, and the lossless
                   # u64-handle collision regression.
                   ("src/cadedit/cadEditSurface.test.jsx", 16),
-                  # W4g-6: the worker's `batch` op on the REAL compiled engine
-                  # (a three-step fillet in one reply, an atomic refusal, the
-                  # bounds, a refused create keeping the document), gated on the
-                  # same machine-local pkg-node build. Four describes (the W4g-6 batch,
-                  # W4g-7b-01c blocks, W4g-7c-2c Create Block and MLEADER
-                  # rows: eight tests) require the rebuilt engine;
-                  # numbers on PRs #1036, #1107 and #1140; W4g-7c-2d adds the
-                  # handle-retention row (nine tests).
+                  # The optional real-engine batch suite has 12 baseline cases.
+                  # BSP2 adds the layer/save/reopen/undo case, verified on the
+                  # compiled engine. Keep both exact counts while older PRs finish.
                   ("src/cad/engineBatchAtomic.test.js", 12),
+                  ("src/cad/engineBatchAtomic.test.js", 13),
               )) for shard in range(1, 4)),
         Suite("harness-tsc-noemit", "harness npx tsc --noEmit", "tsc", HARNESS,
               [_npx(), "tsc", "--noEmit"], None),
@@ -3586,6 +3619,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_device_relay.py"), 56),
         Suite("server-devices-router", "server tests/test_devices_router.py", "pytest", SERVER,
               _py_pytest("tests/test_devices_router.py"), 60),
+        Suite("server-device-tools", "server tests/test_device_tools.py", "pytest", SERVER,
+              _py_pytest("tests/test_device_tools.py"), 52),
         Suite("device-agent-tests", "device-agent tests", "pytest", REPO / "device-agent",
               _py_pytest("tests"), 71),
         # 48 collected: 24 SQLite cases and 24 PostgreSQL twins.
@@ -3674,8 +3709,45 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_image_turns.py"), 15),
         Suite("server-project-material-images", "server tests/test_project_material_images.py", "pytest", SERVER,
               _py_pytest("tests/test_project_material_images.py"), 13),
+        Suite("server-project-material-inspection", "server tests/test_project_material_inspection.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_material_inspection.py"), 134),
+        Suite("server-project-reference-materials", "server tests/test_project_reference_materials.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_reference_materials.py"), 40,
+              uses_database=True, db_gated=True, database_skip_reasons=(
+                  r"requires managed or verified canonical disposable PostgreSQL producer",)),
+        Suite("server-lab-corpus-executor", "server pinned corpus evaluator and durable job custody", "pytest", SERVER,
+              _unprivileged_pytest("tests/test_lab_corpus_executor.py"), 14,
+              uses_database=True, db_gated=True),
+        # BSP43 accepted focused floors; run through the normal server CI rail.
+        Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
+              _py_pytest("tests/test_project_solar_materialization.py"), 30, uses_database=True),
+        Suite("server-solar-native-layout-dxf", "server native Solar layout serialization", "pytest", SERVER,
+              _py_pytest("tests/test_solar_native_layout_dxf.py"), 35,
+              allowed_skip_reasons=(r"could not import 'ezdxf\.recover': .*",)),
+        Suite("server-project-checkout-custody", "server private project checkout custody", "pytest", SERVER,
+              _py_pytest("tests/test_project_checkout_custody.py"), 35),
+        Suite("server-conversational-project-write", "server canonical conversational project write", "pytest", SERVER,
+              _py_pytest("tests/test_conversational_project_write.py"), 31),
+        Suite("server-canonical-solve-approval", "server canonical solve approval policy", "pytest", SERVER,
+              _py_pytest("tests/test_canonical_solve_approval.py"), 6),
+        Suite("server-conversational-project-solve", "server canonical conversational project solve", "pytest", SERVER,
+              _py_pytest("tests/test_conversational_project_solve.py"), 15),
+        Suite("server-native-project-authoring", "server fixed Native source authoring", "pytest", SERVER,
+              _py_pytest("tests/test_native_project_authoring.py"), 31),
+        Suite("server-native-project-routes", "server authenticated Native source routes", "pytest", SERVER,
+              _py_pytest("tests/test_native_project_routes.py"), 55),
+        Suite("server-browser-project-flow", "server shared Browser source flow", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_flow.py"), 35),
+        Suite("server-browser-project-routes", "server public Browser source routes", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_routes.py"), 18),
+        Suite("server-browser-project-authoring", "server tests/test_browser_project_authoring.py", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_authoring.py"), 30),
+        Suite("server-browser-project-source-export", "server verified Browser source export", "pytest", SERVER,
+              _py_pytest("tests/test_browser_project_source_export.py"), 31),
+        Suite("server-project-solaredge", "server tests/test_project_solaredge.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_solaredge.py"), 23),
         Suite("server-project-preview-source", "server tests/test_project_preview_source.py", "pytest", SERVER,
-              _py_pytest("tests/test_project_preview_source.py"), 10),
+              _py_pytest("tests/test_project_preview_source.py"), 87),
         Suite("server-instant-artifact-registry", "server tests/test_instant_artifact_registry.py", "pytest", SERVER,
               _py_pytest("tests/test_instant_artifact_registry.py"), 5),
         Suite("server-instant-session-wiring", "server tests/test_instant_session_wiring.py", "pytest", SERVER,
@@ -3756,6 +3828,8 @@ def build_suites() -> List[Suite]:
               _py_pytest("tests/test_reconcile_authority_source_schema.py"), 7),
         Suite("server-request-journal", "server tests/test_request_journal.py", "pytest", SERVER,
               _py_pytest("tests/test_request_journal.py"), 22),
+        Suite("server-project-execution-context", "server tests/test_project_execution_context.py", "pytest", SERVER,
+              _py_pytest("tests/test_project_execution_context.py"), 26),
         Suite("server-roles", "server tests/test_roles.py", "pytest", SERVER,
               _py_pytest("tests/test_roles.py"), 22),
         Suite("server-sample-dxf-asset", "server tests/test_sample_dxf_asset.py", "pytest", SERVER,
@@ -3846,6 +3920,10 @@ def build_suites() -> List[Suite]:
               "script", WEB,
               [_npx(), "--no-install", "playwright", "test", "--config", "playwright.ios.config.mjs",
                "e2e/ios-ship-surface.spec.mjs", "--workers=1"], None),
+        Suite("web-page-service-smoke", "page editor real HTTP and PostgreSQL", "script", WEB,
+              [_npx(), "--no-install", "playwright", "test", "--config",
+               "playwright.page-service.config.mjs", "--workers=1"], None,
+              uses_database=True, db_gated=True, requires_linux=True, timeout_s=600),
         Suite("web-build", "web production build", "script", WEB,
               [_npm(), "run", "build"], None),
         # --- containerized harness smoke (census #13) — OPT-IN --- #
@@ -4077,7 +4155,8 @@ def reporting_command(suite: Suite, argv: List[str], trace_env: dict) -> List[st
     # S8c (measured 2026-09-25, proofs E3 and 148574c1): the shadow plugin's per-test outcome path costs about 150 ms per
     # test in CI (a 356-test suite 0.5 s -> 54 s), so pytest loads it only on tracing builds, where the parent carries
     # LEAF_READSET_DIR. PR and merge-group suites run plain pytest; their attempt records stay reporting-incomplete.
-    if suite.kind == "pytest" and "pytest" in argv and "-I" not in argv and (os.environ.get("LEAF_READSET_DIR") or capturing):
+    corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
+    if suite.kind == "pytest" and "pytest" in argv and ("-I" not in argv or corpus_launcher) and (os.environ.get("LEAF_READSET_DIR") or capturing):
         if capturing and not trusted:
             trace_env["PYTHONPATH"] = str(directory) + (os.pathsep + os.environ["PYTHONPATH"]
                                                        if os.environ.get("PYTHONPATH") else "")
@@ -4837,6 +4916,10 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
               reporting_disabled: bool = False) -> Result:
     log_path = log_dir / (f"{suite.id}.log" if attempt == 1
                           else f"{suite.id}.retry{attempt - 1}.log")
+    if suite.requires_linux and sys.platform != "linux":
+        note = "linux-only service smoke: Linux required"
+        log_path.write_text(note + "\n", encoding="utf-8")
+        return Result(suite, "UNAVAILABLE", "unavailable", 0.0, note=note, log_path=log_path)
 
     # DB-gated suites: probe first, SKIP-with-reason when unreachable. On
     # REACHABLE, inject the resolved DSN as DATABASE_URL for the child: the
@@ -4946,6 +5029,15 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             timeout_s += PROCESS_CAPTURE_DECODE_BUDGET_S
     except Exception as exc:
         capture_evidence = {"process_capture_errors": [f"capture_setup_failed:{type(exc).__name__}"]}
+    service_env = {}
+    service_log = None
+    if suite.id in _SERVICE_SMOKE_SUITES:
+        import uuid
+        service_dir = (log_dir / f"page-service-{uuid.uuid4().hex}").resolve()
+        service_dir.mkdir(parents=True)
+        service_log = service_dir / "server.log"
+        service_env = {"LEAF_PAGE_SMOKE_DIR": str(service_dir),
+                       "LEAF_PAGE_SMOKE_PYTHON": sys.executable}
     spawn_err = ""
     with open(log_path, "w", encoding="utf-8", errors="replace") as logf:
         logf.write(f"$ (cwd={suite.cwd})\n$ {' '.join(argv)}\n"
@@ -4954,10 +5046,11 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             logf.write("WARNING: " + report_failure["test_report_incomplete_reasons"][0] + "\n")
         logf.flush()
         try:
-            spawn = run_capture_command if capture_output is not None else subprocess.run
+            corpus_launcher = str(SCRIPTS_DIR / "ci/run_unprivileged_pytest.py") in argv
+            spawn = run_capture_command if capture_output is not None or corpus_launcher else subprocess.run
             proc = spawn(
                 spawn_command,
-                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env},
+                cwd=str(suite.cwd), env={**clean_env(), **db_env, **trace_env, **service_env},
                 capture_output=True, text=True, timeout=timeout_s,
                 shell=use_shell, executable=shell_executable,
                 # text=True without an explicit encoding decodes with the system
@@ -4981,6 +5074,15 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
             spawn_err = f"{type(exc).__name__}: {str(exc)[:160]}"
             out = f"[SPAWN FAILURE] {spawn_err}"
             rc = 127
+        if service_log is not None:
+            try:
+                with service_log.open("rb") as diagnostic:
+                    diagnostic.seek(0, os.SEEK_END)
+                    diagnostic.seek(max(0, diagnostic.tell() - 64000))
+                    detail = diagnostic.read().decode("utf-8", errors="replace")
+            except OSError as exc:
+                detail = f"producer log unavailable: {type(exc).__name__}"
+            out = scrub_evidence(out + "\nPAGE_SMOKE producer diagnostics\n" + detail)
         logf.write(out)
     if capture_output is not None:
         capture_evidence, rc = capture_attempt_evidence(capture_output, rc)
@@ -5053,10 +5155,12 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         if c.get("skipped"):
             note = (note + " " if note else "") + f"{c['skipped']} skipped"
             actual = dict(c["skipped_files"])
-            allowed = dict(suite.allowed_vitest_skips)
+            allowed = {}
+            for path, count in suite.allowed_vitest_skips:
+                allowed.setdefault(path, set()).add(count)
             reported = sum(actual.values())
             unexpected = {path: count for path, count in actual.items()
-                          if allowed.get(path) != count}
+                          if count not in allowed.get(path, set())}
             if reported != c["skipped"]:
                 passed = False
                 note += (f"; skip details incomplete: vitest reported {c['skipped']} "
@@ -5497,12 +5601,41 @@ _SERIAL_SUITE_REASONS = {
         "server-operator-stage-release",
     ), "shared PostgreSQL schema"),
     "server-sessions-e2e": "rebuilds shared harness/dist with npm",
-    "web-elk-rank": "node --test shares web/node_modules and build outputs in its cwd",
-    "web-project-proof-contract": "Vitest shares web/node_modules and build outputs in its cwd",
     "web-demo-gate": "nested runner rebuilds web/dist and may unpack node_modules",
     "studio-walk-regressions": "nested stack boots services and rebuilds shared production bundle",
     "harness-container-smoke": "fixed compose project and container ports 8130/8150",
 }
+
+
+# Read-only: no server, port, build, install or write under web/ or ../artifacts/.
+# Eight green runs: jobs=3 wall p50 1402-1561s vs ~2900 suite-seconds;
+# the web-tree chain alone cost ~1100s. Only audited source readers bypass it.
+_WEB_SOURCE_READERS = frozenset({
+    "web-customization-check",
+    "web-customize-panel-check",
+    "web-checkout-identity-check",
+    "web-deployed-acceptance-contract",
+    "web-deployed-surface-synthetic-acceptance",
+    "web-deployed-auth0-spa-origin-acceptance",
+    "web-deployed-auth0-production-spa-origin-acceptance",
+    "web-collect-staging-auth0-principal-b",
+    "web-proof-receipt-contract",
+    "web-author-quota-live-proof",
+    "web-workbench-id-contract",
+    "web-app-wiring",
+    "web-project-proof-contract",
+    "web-elk-rank",
+    "web-honesty-ladder",
+    "web-tour-anchors",
+    "web-composer-contract",
+    "web-project-session-binding",
+    "web-markdown-contract",
+    "web-panel-fold-contract",
+    "web-pending-approvals-contract",
+    "web-route-scene-contract",
+    "web-usage-contract",
+    "web-error-classify-contract",
+})
 
 
 def serial_suite_reason(suite: Suite) -> str:
@@ -5511,6 +5644,8 @@ def serial_suite_reason(suite: Suite) -> str:
         return "resets shared authored_tools.json"
     if suite.db_gated or suite.uses_database:
         return "shared PostgreSQL through DATABASE_URL"
+    if suite.id in _WEB_SOURCE_READERS:
+        return ""
     executable = str(suite.argv[0]).replace("\\", "/").rsplit("/", 1)[-1].lower()
     if executable in ("npm", "npm.cmd", "npm.exe", "npx", "npx.cmd", "npx.exe"):
         return "npm/npx shares node_modules and build outputs in its cwd"
@@ -5539,6 +5674,35 @@ _PRELUDE_WRITERS = frozenset({
     "web-link-service-flow",
     "studio-walk-regressions",
 })
+
+
+# These checks consume source/runtime dependencies, not the build outputs
+# produced by _PRELUDE_WRITERS. Their observed failures cost seconds while
+# browser/native suites cost minutes. Unknown suites remain in the full phase.
+_EARLY_FEEDBACK_SUITES = frozenset({
+    # Existing inert framework/registration checks run once, before expensive
+    # prerequisites, so stale catalog contracts cannot consume a full run.
+    "gate-runner-selftest", "web-stage-source-contracts",
+    "harness-tsc-noemit", "server-campaign-dxf-inventory",
+    "server-campaign-release-service", "server-entity-scope-admission",
+    "server-entity-scope-transport", "server-sip-r5-routes", "web-app-wiring",
+    # Existing deterministic Solar authority/registry contracts use patched
+    # in-memory graph/blob/transaction fixtures; launcher processes are doubles.
+    # They require installed Python dependencies, not writer/build/browser output.
+    "server-sip-r3b-chain", "server-sip-r4-jobs", "server-sip-r5-policy",
+    "server-sip-r6-routes", "server-sip-r3c-multi-add",
+    "server-sip-r3d-conductors", "server-sip-r3e-groups",
+    "server-start-leaf-harness-config",
+})
+
+
+_SERVICE_SMOKE_SUITES = frozenset({"web-page-service-smoke"})
+
+
+class HeavyPrerequisitesFailed(Exception):
+    def __init__(self, status, completed):
+        self.status, self.completed = status, completed
+        super().__init__(f"heavy prerequisites failed with exit {status}")
 
 
 def conflict_resources(suite: Suite) -> frozenset[str]:
@@ -5649,7 +5813,8 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
     Results land in `completed` (id -> (Result, attempts)) and the first
     fail-fast red in state["stopped_after"]. Admission and that publication
     share the condition, so after the first red no new suite starts; suites
-    already admitted finish, including retries. Only the caller prints.
+    already admitted finish, including retries. Early-feedback mode streams
+    scrubbed completion blocks; the caller keeps final rows in catalog order.
     Each claim costs O(resources x queue length), never a scan of the catalog.
     """
     if not suites:
@@ -5725,6 +5890,16 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
                 with ready:
                     if res is not None:
                         completed[suite.id] = (res, attempts)
+                        if state.get("stream_results"):
+                            # Stream one atomic, scrubbed completion block while
+                            # other lanes continue; catalog-order rows stay below.
+                            print(f"GATE_RESULT id={suite.id} status={res.status} "
+                                  f"seconds={res.seconds:.1f} attempts={attempts} "
+                                  f"note={scrub_evidence(res.note)}", flush=True)
+                            if res.status == "FAIL":
+                                for line in failed_suite_evidence([res], max_suites=1,
+                                                                  tail_lines=6, max_chars=1400):
+                                    print(line, flush=True)
                         if (fail_fast and res.status == "FAIL"
                                 and state["stopped_after"] is None):
                             state["stopped_after"] = suite.id
@@ -5746,17 +5921,58 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
 
 
 def run_suites_parallel(suites: List[Suite], log_dir: Path, jobs: int,
-                        retry: int, fail_fast: bool) -> tuple[List[Result], dict]:
+                        retry: int, fail_fast: bool, *, early_feedback: bool = False,
+                        before_heavy_command=None) -> tuple[List[Result], dict]:
     completed = {}
-    state = {"stopped_after": None}
-    prelude, rest = plan_parallel_phases(suites)
-    run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
-    # A fail-fast red in the prelude must not start any other suite.
-    if state["stopped_after"] is None:
-        run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
+    state = {"stopped_after": None, "stream_results": True}
+    early = [s for s in suites if early_feedback and s.id in _EARLY_FEEDBACK_SUITES]
+    remaining = [s for s in suites if s not in early]
+    # Collect all cheap failures, never retry them or let fail-fast hide one.
+    run_lanes(early, log_dir, jobs, 0, False, completed, state)
+    early_red = next((s.id for s in early if completed[s.id][0].status != "PASS"), None)
+    if early_red is not None:
+        state["stopped_after"] = early_red
+        for suite in early:
+            result = completed[suite.id][0]
+            if result.status != "PASS" and result.status != "FAIL":
+                result.note = f"early check not proven ({result.status}): {result.note}"
+                result.status = "FAIL"
+        print(f"EARLY_FEEDBACK RED after={early_red} heavy_started=0", flush=True)
+    else:
+        if early_feedback:
+            print(f"EARLY_FEEDBACK GREEN checks={len(early)}", flush=True)
+        if before_heavy_command:
+            prerequisite_started = time.perf_counter()
+            try:
+                status = subprocess.run(before_heavy_command, cwd=REPO, check=False).returncode
+            except OSError as exc:
+                print(f"heavy prerequisites could not start: {type(exc).__name__}", flush=True)
+                status = 127
+            if any(s.id in _SERVICE_SMOKE_SUITES for s in remaining):
+                print(f"SERVICE_SMOKE prerequisites_exit={status} "
+                      f"prerequisites_s={time.perf_counter() - prerequisite_started:.3f}", flush=True)
+            if status:
+                raise HeavyPrerequisitesFailed(status, completed)
+        smoke = [s for s in remaining if s.id in _SERVICE_SMOKE_SUITES]
+        remaining = [s for s in remaining if s.id not in _SERVICE_SMOKE_SUITES]
+        run_lanes(smoke, log_dir, jobs, 0, False, completed, state)
+        smoke_red = next((s.id for s in smoke if completed[s.id][0].status != "PASS"), None)
+        if smoke_red is not None:
+            state["stopped_after"] = smoke_red
+            result = completed[smoke_red][0]
+            if result.status == "SKIP":
+                result.note = f"service smoke not proven (SKIP): {result.note}"
+                result.status = "FAIL"
+            print(f"SERVICE_SMOKE RED after={smoke_red} heavy_started=0", flush=True)
+        prelude, rest = plan_parallel_phases(remaining)
+        if state["stopped_after"] is None:
+            run_lanes(prelude, log_dir, jobs, retry, fail_fast, completed, state)
+        # A fail-fast red in the prelude must not start any other suite.
+        if state["stopped_after"] is None:
+            run_lanes(rest, log_dir, jobs, retry, fail_fast, completed, state)
     stopped_after = state["stopped_after"]
 
-    # Only this thread prints. Completion order must never reorder the rows or
+    # Final rows stay catalog ordered. Streamed completion blocks above never reorder
     # their FLAKED/skip/audit callouts (or the machine-readable result file).
     results = []
     attempts_by_id = {}
@@ -5873,6 +6089,7 @@ def catalog_fingerprint(suites: List[Suite]) -> str:
         "allowed_vitest_skips": [list(pair) for pair in s.allowed_vitest_skips],
         "reset_authored": s.reset_authored, "db_gated": s.db_gated,
         "uses_database": s.uses_database,
+        "requires_linux": s.requires_linux,
         "database_skip_reasons": list(s.database_skip_reasons),
         "opt_in_env": s.opt_in_env, "timeout_s": s.timeout_s,
     } for s in suites]
@@ -6220,7 +6437,8 @@ def executed_count(res: Result) -> Optional[int]:
 def write_result_json(path: str, *, fingerprint: str, total: int,
                       shard_count: int, shard_index: int, selection: str,
                       suites: List[Suite], results: List[Result],
-                      attempts_by_id: dict, wall: float) -> None:
+                      attempts_by_id: dict, wall: float,
+                      execution_failure: bool = False) -> None:
     """One shard's machine-readable outcome, written even when suites failed
     so the fan-in can name the failure instead of reporting a missing shard."""
     entries = []
@@ -6246,7 +6464,8 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
         "suite_ids": [s.id for s in suites],
         "results": entries,
         "executed_total": sum(e["executed"] or 0 for e in entries),
-        "any_fail": any(r.status == "FAIL" for r in results),
+        "any_fail": execution_failure or any(r.status == "FAIL" or
+            (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results),
         "wall_seconds": round(wall, 1),
     }
     out = Path(path)
@@ -6626,11 +6845,23 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
             block = [heading, "  log is unavailable"]
         else:
             header = re.compile(r"^\$ (?:attempt \d+ @ |\(cwd=)")
+            # Dev-server progress/warnings can bury the browser failure. Keep
+            # genuine server errors, but exclude ordinary WebServer chatter.
+            server_error = re.compile(
+                r"(?i)(?:error:|exception:|traceback|fatal\b|failed to|could not|unhandled)")
             lines = [line for line in scrub_evidence(text).splitlines()
-                     if not header.match(line)]
-            first = next((line for line in strip_ansi(text).splitlines() if re.search(
+                     if not header.match(line) and not (
+                         line.lstrip().startswith('[WebServer]')
+                         and not server_error.search(line))]
+            playwright_failure = re.compile(r"^\s*(?:[\u2718\u00d7x]\s+\d+\b|\d+\)\s+)")
+            spec_path = re.compile(r"\S+\.spec\.[cm]?[jt]sx?(?::\d+){1,2}\b")
+            # Passing titles can contain words such as 'failed' or 'refused'.
+            # Prefer an actual Playwright failure marker with its source path.
+            first = next((line for line in lines if playwright_failure.search(line)
+                          and spec_path.search(line)), None)
+            first = first or next((line for line in lines if re.search(
                 r"(?i)\b(error|exception|traceback|failed|fatal|panic|cannot|refused|timed out)\b",
-                line) and not header.match(line)), "none matched")
+                line) and not re.match(r"^\s*[\u2713\u2714]\s+\d+\b", line)), "none matched")
             nonempty = [line for line in lines if line.strip()]
             tail = nonempty[-tail_lines:] if tail_lines > 0 else []
             block = [heading, f"  first error: {scrub_evidence(first)[:400]}", "  tail:"]
@@ -6753,6 +6984,7 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
 # --jobs auto sizing. Measured 2026-09-23 on leaf-ci-leaf-web-demo (428 suites):
 # 8 vCPU / 15 GB ran jobs 4 = 1048 s, jobs 6 = 982 s, jobs 8 = 975 s.
 # At 8 workers pool suite-seconds inflate x1.57 (browser suites x1.8-1.96), so a worker needs ~2 vCPU.
+# Round CPU workers half up: job 12613's 3 CPU / 12 GiB ran serially into the deadline.
 _AUTO_CPUS_PER_WORKER = 2
 # Heavy browser suites plus their servers peak near 3 GiB per worker on that same 15 GB box.
 _AUTO_GIB_PER_WORKER = 3
@@ -6765,8 +6997,11 @@ _AUTO_READ_LIMIT = 8192
 
 
 def resolve_auto_jobs(cpus: float, mem_bytes: int | None) -> int:
-    """Pure: workers = min(cpus / 2, mem_gib / 3, 16), floored, never below 1."""
-    bounds = [int(cpus // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
+    """Pure: min(cpus / 2 rounded half up, mem_gib / 3 floored, 16), at least 1.
+
+    Job 12613's 3 CPU / 12 GiB ran serially into the deadline with CPU flooring.
+    """
+    bounds = [int((cpus + _AUTO_CPUS_PER_WORKER / 2) // _AUTO_CPUS_PER_WORKER), _AUTO_MAX_JOBS]
     if mem_bytes is not None:
         bounds.append(int(mem_bytes // (_AUTO_GIB_PER_WORKER * 2 ** 30)))
     return max(1, min(bounds))
@@ -6867,6 +7102,10 @@ def _jobs_count(value: str) -> int | str:
 def main() -> int:
     ap = argparse.ArgumentParser(description="Leaf web demo full gate runner")
     ap.add_argument("--list", action="store_true", help="print the suite catalog; execute nothing")
+    ap.add_argument("--early-feedback", action="store_true",
+                    help="collect source-only cheap checks before heavy suites; no cheap retries")
+    ap.add_argument("--before-heavy-command", nargs=argparse.REMAINDER,
+                    help="trusted caller argv for heavy prerequisites, after early GREEN")
     ap.add_argument("--catalog-root", default=None, metavar="DIR",
                     help="checkout root used to normalize --list declarations")
     ap.add_argument("--fail-fast", action="store_true",
@@ -6934,6 +7173,11 @@ def main() -> int:
                     help="the 40-hex git tree id --verify-gate-proof must find in "
                          "the proof document.")
     args = ap.parse_args()
+
+    if args.before_heavy_command is not None and not args.early_feedback:
+        ap.error("--before-heavy-command requires --early-feedback")
+    if args.before_heavy_command == []:
+        ap.error("--before-heavy-command requires nonempty argv")
 
     if args.list:
         try:
@@ -7077,11 +7321,15 @@ def main() -> int:
     results: List[Result] = []
     attempts_by_id: dict = {}
     wall0 = time.perf_counter()
+    prerequisite_failure = 0
+    phased = args.jobs > 1 or args.early_feedback or any(s.id in _SERVICE_SMOKE_SUITES for s in suites)
     try:
-      if args.jobs > 1:
+      if phased:
         results, attempts_by_id = run_suites_parallel(
-            suites, log_dir, args.jobs, args.retry, args.fail_fast)
-      for suite in suites if args.jobs == 1 else ():
+            suites, log_dir, args.jobs, args.retry, args.fail_fast,
+            early_feedback=args.early_feedback,
+            before_heavy_command=args.before_heavy_command)
+      for suite in suites if not phased else ():
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         record_attempt(res, log_dir, 1)
@@ -7117,6 +7365,11 @@ def main() -> int:
         if res.status == "FAIL" and args.fail_fast:
             print(f"  --fail-fast: stopping after {suite.id}")
             break
+    except HeavyPrerequisitesFailed as exc:
+        prerequisite_failure = exc.status
+        results = [exc.completed[s.id][0] for s in suites if s.id in exc.completed]
+        attempts_by_id = {sid: item[1] for sid, item in exc.completed.items()}
+        print(f"FAIL: {exc}; required suites remain unexecuted", flush=True)
     finally:
         # Restore authored_tools.json to the operator's pre-run content (or remove
         # it if it did not exist before) so the gate run leaves no side effect.
@@ -7134,11 +7387,13 @@ def main() -> int:
             shard_count=args.shard_count,
             shard_index=args.shard_index if args.shard_index is not None else 0,
             selection=selection, suites=suites, results=results,
-            attempts_by_id=attempts_by_id, wall=wall)
+            attempts_by_id=attempts_by_id, wall=wall,
+            execution_failure=bool(prerequisite_failure))
 
     # EXIT 0 iff every non-skipped gate passed.
-    any_fail = any(r.status == "FAIL" for r in results)
-    return 1 if any_fail else 0
+    any_fail = any(r.status == "FAIL" or
+                   (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results)
+    return 1 if any_fail or prerequisite_failure else 0
 
 
 if __name__ == "__main__":

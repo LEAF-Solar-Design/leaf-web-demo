@@ -20,6 +20,7 @@ import sys
 import threading
 import time
 
+import native_preview_worker as source_policy
 from native_preview_worker import WorkerError, require, canonical_uuid, parse, validate_png
 
 CLIENT_DIR = Path('C:/Users/ehaug/.claude/scripts/mac-mini')
@@ -123,7 +124,9 @@ def permit_clock():
     return time.clock_gettime(time.CLOCK_MONOTONIC)
 
 def checked(argv, timeout=30, cwd=None):
-    capture = (argv[0].endswith('leaf-storage') or
+    capture = (argv in (['/usr/bin/xcodebuild','-version'], ['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version'],
+                         ['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version']) or
+               argv[0].endswith('leaf-storage') or
                (argv[:2]==['/usr/bin/xcrun','simctl'] and argv[2] in ('list','listapps')))
     if not capture:
         r=subprocess.run(argv,cwd=cwd,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,timeout=timeout)
@@ -375,6 +378,8 @@ def effect(argv, timeout=120, cwd=None):
 permitted(source)
 raw=base64.b64decode(p['archive'],validate=True)
 assert len(raw)==p['byte_size'] and hashlib.sha256(raw).hexdigest()==p['sha256']
+native = p.get('descriptor',{}).get('schema') == 'leaf.project-repository-preview-source.v1'
+if native: verify_native_archive(raw,p['descriptor'])
 project=source/'source'
 project.mkdir(mode=0o700)
 with zipfile.ZipFile(io.BytesIO(raw)) as z:
@@ -391,18 +396,23 @@ with zipfile.ZipFile(io.BytesIO(raw)) as z:
 permitted(source)
 derived.mkdir(mode=0o700,exist_ok=False)
 (derived/'owner').write_text(p['name'])
-effect(['/usr/bin/xcodebuild','-project','Portfolio.xcodeproj','-scheme','Portfolio',
+project_name='LeafProject' if native else 'Portfolio'
+expected_bundle=('private.leaf.project.p'+p['descriptor']['project_id'].replace('-','')) if native else 'com.example.portfolio'
+if native:
+    # Fixed executable on the managed Mac; never resolve a tenant path or PATH shim.
+    effect(['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','generate','--spec','project.yml'],60,project)
+effect(['/usr/bin/xcodebuild','-project',project_name+'.xcodeproj','-scheme',project_name,
         '-sdk','iphonesimulator','-destination','generic/platform=iOS Simulator','-configuration','Debug',
         '-derivedDataPath',str(derived),'-disableAutomaticPackageResolution',
         '-onlyUsePackageVersionsFromResolvedFile','CODE_SIGNING_ALLOWED=NO','build'],
        max(1,min(1200,p['budget'])),project)
-app=derived/'Build/Products/Debug-iphonesimulator/Portfolio.app'
+app=derived/('Build/Products/Debug-iphonesimulator/'+project_name+'.app')
 bundle=plistlib.loads((app/'Info.plist').read_bytes())['CFBundleIdentifier']
-assert bundle=='com.example.portfolio'
+assert bundle==expected_bundle
 permitted(source)
 internal.mkdir(mode=0o700,exist_ok=False)
 (internal/'owner').write_text(p['name'])
-copy=internal/'Portfolio.app'
+copy=internal/(project_name+'.app')
 effect(['/usr/bin/ditto',str(app),str(copy)],60)
 def manifest(folder):
     result={}
@@ -410,8 +420,21 @@ def manifest(folder):
         assert not path.is_symlink()
         if path.is_file(): result[str(path.relative_to(folder))]=hashlib.sha256(path.read_bytes()).hexdigest()
     return result
-assert manifest(app)==manifest(copy)
+app_manifest=manifest(app)
+assert app_manifest==manifest(copy)
 assert plistlib.loads((copy/'Info.plist').read_bytes())['CFBundleIdentifier']==bundle
+if native:
+    def tool(argv):
+        raw=effect(argv,30)
+        assert type(raw) is bytes and 0<len(raw)<=256
+        return raw.decode('ascii').strip()
+    build_artifact={'source':native_identity(p['descriptor']),'bundle_id':bundle,
+        'sdk':'iphonesimulator','app_tree_sha256':hashlib.sha256(_native_json(app_manifest)).hexdigest(),
+        'file_count':len(app_manifest),'xcodegen_exit_code':0,
+        'xcode_version':tool(['/usr/bin/xcodebuild','-version']),
+        'xcodegen_version':tool(['/Users/evanhaug/xcodegen/xcodegen/bin/xcodegen','--version']),
+        'sdk_version':tool(['/usr/bin/xcrun','--sdk','iphonesimulator','--show-sdk-version'])}
+    (source/'sdk-build.json').write_text(json.dumps(build_artifact,sort_keys=True,separators=(',',':')))
 udid=p['udid']
 def sim(*args): return effect(['/usr/bin/xcrun','simctl',*args])
 devices=json.loads(sim('list','devices','--json'))['devices']
@@ -432,9 +455,11 @@ sim('io',udid,'screenshot','--type=png',str(shot))
 assert 33<=shot.stat().st_size<=16*1024*1024
 raw=shot.read_bytes()
 permitted(source)
-print(json.dumps({'simulator_udid':udid,'simulator_runtime':runtime,'bundle_id':bundle,
+result={'simulator_udid':udid,'simulator_runtime':runtime,'bundle_id':bundle,
     'allocator_ticket':p['ticket'],'build_exit_code':0,'install_exit_code':0,'launch_exit_code':0,
-    'screenshot_sha256':hashlib.sha256(raw).hexdigest(),'screenshot_base64':base64.b64encode(raw).decode()}))
+    'screenshot_sha256':hashlib.sha256(raw).hexdigest(),'screenshot_base64':base64.b64encode(raw).decode()}
+if native: result['build_artifact']=build_artifact
+print(json.dumps(result))
 '''
 
 SUPERVISOR_END = r'''
@@ -455,6 +480,17 @@ with (source/'supervisor.lock').open('a') as lock:
         if str(error)=='extinction-unconfirmed': sys.exit(73)
         raise
     sys.stdout.buffer.write(result)
+'''
+
+SDK_BUILD_READ = r'''
+p=json.load(sys.stdin)
+source,derived,internal=roots(p)
+assert source.is_dir() and not source.is_symlink() and (source/'owner').read_text()==p['name']
+path=source/'sdk-build.json'
+if not path.exists(): print('{"build_artifact":null}')
+else:
+    assert not path.is_symlink() and path.is_file() and path.stat().st_size<=8192
+    print(json.dumps({'build_artifact':json.loads(path.read_bytes())}))
 '''
 
 CLEANUP = r'''
@@ -490,6 +526,9 @@ if source.exists():
 def sim(*args):
     return subprocess.run(['/usr/bin/xcrun','simctl',*args],capture_output=True,timeout=30)
 udid=p['udid']; bundle='com.example.portfolio'
+if 'native_project_id' in p:
+    assert type(p['native_project_id']) is str and re.fullmatch(r'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}',p['native_project_id'])
+    bundle='private.leaf.project.p'+p['native_project_id'].replace('-','')
 devices=json.loads(checked(['/usr/bin/xcrun','simctl','list','devices','--json']))['devices']
 rows=[row for items in devices.values() for row in items if row['udid'].lower()==udid]
 assert len(rows)==1
@@ -708,6 +747,9 @@ class MacAdapter:
         return allocator_witness(parse(result.stdout), job_id, attempt)
 
     def __call__(self, archive, job, guard):
+        native_source = job.get('descriptor', {}).get('schema') == source_policy.NATIVE_SCHEMA
+        if native_source:
+            source_policy.verify_source(archive, job['descriptor'])
         guard.stage('mac-bootstrap')
         guard.check()
         allocator = self.allocator or canonical_allocator()
@@ -771,6 +813,9 @@ class MacAdapter:
                            'sha256': job['descriptor']['archive_sha256'], 'byte_size': len(archive),
                            'budget': max(1, guard.end - guard.monotonic()),
                            'driver': REMOTE_COMMON + DRIVER}
+                if native_source:
+                    payload['descriptor'] = job['descriptor']
+                    payload['driver'] = REMOTE_COMMON + native_remote_policy() + DRIVER
                 code = inspect.getsource(supervise) + SUPERVISOR_END
                 facts = call(code, payload, limit=MAX_TRANSFER, producer_call=True,
                              timeout=max(1, min(1300, guard.end - guard.monotonic())))
@@ -781,12 +826,21 @@ class MacAdapter:
                 require(hashlib.sha256(image).hexdigest() == facts['screenshot_sha256'], 'screenshot-integrity')
                 guard.check()
             finally:
+                if native_source:
+                    try:
+                        sdk = call(SDK_BUILD_READ, p, cleanup_call=True, timeout=10)
+                        if sdk.get('build_artifact') is not None:
+                            source_policy.validate_native_artifact(sdk['build_artifact'], job['descriptor'])
+                            self.report['build_artifact'] = sdk['build_artifact']
+                    except BaseException:
+                        pass  # Missing/uncertain evidence never becomes SDK success.
                 # Synchronize with the refresher before deleting its owned permit directory.
                 with guard.lock:
                     guard.refresh = None
                 stream_closed = stream is None or stream.close()
                 try:
-                    cleanup = (call(CLEANUP, p, cleanup_call=True, timeout=180) == {'cleanup_complete': True}
+                    cleanup_payload = dict(p, native_project_id=job['descriptor']['project_id']) if native_source else p
+                    cleanup = (call(CLEANUP, cleanup_payload, cleanup_call=True, timeout=180) == {'cleanup_complete': True}
                                and stream_closed)
                 except BaseException:
                     cleanup = False
@@ -798,3 +852,13 @@ class MacAdapter:
         guard.check()
         facts.update(cleanup_complete=cleanup, allocator_release_confirmed=released)
         return facts, image
+
+
+def native_remote_policy():
+    """Ship only the captured pure package validator, never source-owned code."""
+    names = ('NATIVE_SCHEMA', 'NATIVE_PROFILE', 'NATIVE_LIMIT', 'NATIVE_MANIFEST',
+             'NATIVE_FIELDS', 'NATIVE_APP_SOURCE', 'NATIVE_PROJECT_SPEC')
+    constants = '\nimport stat, re\n' + '\n'.join(name+' = '+repr(getattr(source_policy, name)) for name in names)+'\n'
+    functions = ('_native_need', '_native_json', 'native_identity', 'native_descriptor',
+        '_native_path', 'native_tree', 'native_files_policy', 'native_archive', 'verify_native_archive')
+    return constants + '\n'.join(inspect.getsource(getattr(source_policy, name)) for name in functions)+'\n'

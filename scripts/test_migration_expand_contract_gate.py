@@ -204,7 +204,7 @@ def test_grandfathered_numbers_are_exempt_and_frozen(tmp_path):
     assert gate.GRANDFATHERED == frozenset(range(1, 23))
 
 
-def test_bad_filenames_and_duplicates_fail(tmp_path):
+def test_bad_filenames_fail(tmp_path):
     root = _dir(tmp_path, {
         "23_short.sql": "CREATE TABLE a (id INT);\n",
         "0024_Upper.sql": "CREATE TABLE b (id INT);\n",
@@ -212,11 +212,22 @@ def test_bad_filenames_and_duplicates_fail(tmp_path):
     violations = gate.check_migrations(root)
     assert len(violations) == 2
 
-    dup = _dir(tmp_path / "dup", {
+
+@pytest.mark.parametrize("destructive", [None, "0023_one.sql", "0023_two.sql"])
+def test_same_prefix_migrations_validate_each_body(tmp_path, destructive):
+    files = {
         "0023_one.sql": "CREATE TABLE a (id INT);\n",
         "0023_two.sql": "CREATE TABLE b (id INT);\n",
-    })
-    assert any("duplicate" in v for v in gate.check_migrations(dup))
+    }
+    if destructive is not None:
+        files[destructive] = "DROP TABLE existing;\n"
+    violations = gate.check_migrations(_dir(tmp_path, files))
+    if destructive is None:
+        assert violations == []
+    else:
+        assert len(violations) == 1
+        assert violations[0].startswith(destructive + ":")
+        assert "[DROP]" in violations[0] and "without an" in violations[0]
 
 
 def test_cli_exit_codes(tmp_path, capsys):

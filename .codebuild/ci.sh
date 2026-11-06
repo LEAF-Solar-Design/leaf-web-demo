@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
 set -euo pipefail
+LEAF_CI_SCRIPT_PATH="$(realpath "${BASH_SOURCE[0]}")"
 # BEGIN SHARD ENV
 CI_SHARD_TOTAL_N=1
 CI_SHARD_INDEX_N=0
@@ -23,6 +24,63 @@ if [[ "$shard_env_valid" != 1 ]]; then
 fi
 echo "LEAF_EVENT shard mode=$CI_SHARD_MODE index=$CI_SHARD_INDEX_N total=$CI_SHARD_TOTAL_N"
 # END SHARD ENV
+# A post-cheap-phase callback re-enters this exact trusted script, not a
+# candidate helper. Only dependency-backed heavy prerequisites run here.
+if [[ "${1:-}" == --heavy-prerequisites ]]; then
+if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
+echo "LEAF_T start webbundle $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 2/4 Build web bundle"
+npm run build
+echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
+echo "LEAF_T start license-fence $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 3/4 License fence self-test"
+python scripts/check_license_fence.py --self-test
+cd "$CODEBUILD_SRC_DIR"
+echo "--- 4/4 License fence scan"
+python scripts/check_license_fence.py .
+echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
+else
+  echo "license fence: runs on shard 0"
+fi
+
+echo "LEAF_T start chromium $(date +%s%3N)"
+cd "$CODEBUILD_SRC_DIR/web"
+echo "--- 5/6 Install Chromium for browser proofs"
+# LEAF_CI_BROWSER_INSTALL_BEGIN
+# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
+# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
+# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
+# consecutive builds right here, on main and on every merge-queue group, with
+# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
+# all six mirror IPs, before a single suite ran, and every queued PR ejected
+# behind it. A fallback is honest rather than a papered-over failure because in
+# that same log every library Chromium needs read "is already the newest
+# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
+# libxrandr2, libatk*); the only packages the mirror could not serve were
+# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
+# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
+# rendered page and nothing any suite in this repo asserts. Try the OS setup
+# once, then the distinct browser-only stage; repeating the same apt failure
+# adds no evidence. A missing BROWSER BINARY is
+# still a hard failure: the last call is unguarded, so set -e fails the build.
+install_ci_browser() {
+  if "$@" install --with-deps chromium; then
+    return 0
+  fi
+  echo "WARNING: $* dependency install failed; trying the distinct browser-only stage. Browser proofs still check OS runtime usability." >&2
+  "$@" install chromium
+}
+
+install_ci_browser npx playwright
+# Install the Python producer's pinned browser with the gate interpreter too.
+install_ci_browser python -m playwright
+echo "LEAF_T end chromium $(date +%s%3N) rc=0"
+# LEAF_CI_BROWSER_INSTALL_END
+  exit 0
+fi
+
 # Freeze policy before any candidate installation, import, or test collection.
 TRUSTED_SHA=""
 HEAD_SHA=""
@@ -144,6 +202,18 @@ try:
                      provider_bound=manifest_status == "verified", relay_manifest=manifest_status,
                      evidence_ref={"build": e.get("CODEBUILD_BUILD_ARN") or e.get("CODEBUILD_BUILD_ID", ""),
                                    "manifest_sha256": manifest_sha256, "operation": operation})
+    elif (re.fullmatch(r"device:dv-[0-9a-f]{16}", event["build_id"]) and
+            event["event"] in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") and
+            relay_head and re.fullmatch(r"refs/heads/[A-Za-z0-9._/-]+", relay_base) and
+            ".." not in relay_base and
+            re.fullmatch(r"[0-9A-Fa-f]{40}", head) and re.fullmatch(r"[0-9A-Fa-f]{40}", trusted) and
+            e.get("CODEBUILD_RESOLVED_SOURCE_VERSION") == head and
+            operation == "ci-" + hashlib.sha256(
+                ("LEAF-Solar-Design/leaf-web-demo|pull_request|" + relay_head[1] + "|" + head)
+                .encode("utf-8")).hexdigest()[:40]):
+        event.update(provider="forge-device", initiator="leaf-ci-device", provider_bound=True,
+                     source_version="", pr_number=int(relay_head[1]), head_sha=head, target_sha=trusted,
+                     evidence_ref={"build": event["build_id"], "operation": operation})
 except Exception:
     pass
 # No queue/filter/revocation claim is manufactured from webhook presence.
@@ -153,7 +223,7 @@ LEAF_SELECTION_INPUTS
         then
           pr_number="${CODEBUILD_SOURCE_VERSION:-}"
           pr_number="${pr_number#pr/}"
-          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
+          if [[ ! "${CODEBUILD_SOURCE_VERSION:-}" =~ ^pr/([1-9][0-9]*)$ && ( "${CODEBUILD_INITIATOR:-}" == "states/leaf-forge-ci-relay" || "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ) && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" =~ ^refs/pull/([1-9][0-9]*)/head$ ]]; then
             pr_number="${BASH_REMATCH[1]}"
           fi
           if python -I -B "$selection_dir/select_tests.py" decide \
@@ -304,7 +374,8 @@ ref = e.get("CODEBUILD_WEBHOOK_HEAD_REF", "")
 raw = e.get("CODEBUILD_WEBHOOK_EVENT", "")
 event = ("merge_group" if "gh-readonly-queue/" in ref else
          "pr" if source.startswith("pr/") and raw.startswith("PULL_REQUEST_") else
-         "pr" if e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" and
+         "pr" if (e.get("CODEBUILD_INITIATOR") == "states/leaf-forge-ci-relay" or
+                  re.fullmatch(r"device:dv-[0-9a-f]{16}", e.get("CODEBUILD_BUILD_ID", ""))) and
          raw.startswith("PULL_REQUEST_") and re.fullmatch(r"refs/pull/[1-9][0-9]*/head", ref) else
          "main" if ref == "refs/heads/main" and raw == "PUSH" else
          "manual" if not raw and e.get("CODEBUILD_INITIATOR") else "unknown")
@@ -505,23 +576,6 @@ cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 1/4 Install web dependencies"
 npm ci
 echo "LEAF_T end webdeps $(date +%s%3N) rc=0"
-if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
-echo "LEAF_T start webbundle $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 2/4 Build web bundle"
-npm run build
-echo "LEAF_T end webbundle $(date +%s%3N) rc=0"
-echo "LEAF_T start license-fence $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 3/4 License fence self-test"
-python scripts/check_license_fence.py --self-test
-cd "$CODEBUILD_SRC_DIR"
-echo "--- 4/4 License fence scan"
-python scripts/check_license_fence.py .
-echo "LEAF_T end license-fence $(date +%s%3N) rc=0"
-else
-  echo "license fence: runs on shard 0"
-fi
 
 echo "=== job test-gate ==="
 echo "LEAF_T start pydeps $(date +%s%3N)"
@@ -548,46 +602,7 @@ cd "$CODEBUILD_SRC_DIR/web"
 echo "--- 4/6 Reuse web dependencies"
 # The license-fence job installed a clean web tree in this same build.
 # No intervening step changes its dependencies, so reuse that npm ci.
-echo "LEAF_T start chromium $(date +%s%3N)"
-cd "$CODEBUILD_SRC_DIR/web"
-echo "--- 5/6 Install Chromium for browser proofs"
-# LEAF_CI_BROWSER_INSTALL_BEGIN
-# standard:7.0 needs OS libraries, and --with-deps shells out to apt, so this
-# step used to inherit archive.ubuntu.com's availability. Measured 2026-09-11
-# between 06:37Z and 07:30Z: leaf-ci-leaf-web-demo failed SIX of seven
-# consecutive builds right here, on main and on every merge-queue group, with
-# "Could not connect to archive.ubuntu.com:80 ... connection timed out" against
-# all six mirror IPs, before a single suite ran, and every queued PR ejected
-# behind it. A fallback is honest rather than a papered-over failure because in
-# that same log every library Chromium needs read "is already the newest
-# version" (libasound2, libcairo2, libcups2, libdbus-1-3, libdrm2, libxkbcommon0,
-# libxrandr2, libatk*); the only packages the mirror could not serve were
-# optional FONT packages (fonts-ipafont-gothic, fonts-freefont-ttf,
-# fonts-unifont, fonts-wqy-zenhei, xfonts-*), which change glyph coverage in a
-# rendered page and nothing any suite in this repo asserts. Two attempts, not
-# more: each failed --with-deps costs a full apt timeout against six unreachable
-# IPs, and the fallback is what saves the build. A missing BROWSER BINARY is
-# still a hard failure: the last call is unguarded, so set -e fails the build.
-install_ci_browser() {
-  local attempt
-  for attempt in 1 2; do
-    if "$@" install --with-deps chromium; then
-      return 0
-    fi
-    if [[ "$attempt" == 1 ]]; then
-      echo "WARNING: $* dependency install failed; retrying in 5 seconds (attempt 2/2)." >&2
-      sleep 5
-    fi
-  done
-  echo "WARNING: $* dependency install failed after 2 attempts; falling back to browser-only install. OS libraries may be missing; browser proofs will check runtime usability." >&2
-  "$@" install chromium
-}
 
-install_ci_browser npx playwright
-# Install the Python producer's pinned browser with the gate interpreter too.
-install_ci_browser python -m playwright
-echo "LEAF_T end chromium $(date +%s%3N) rc=0"
-# LEAF_CI_BROWSER_INSTALL_END
 echo "LEAF_T start gate $(date +%s%3N)"
 cd "$CODEBUILD_SRC_DIR"
 echo "--- 6/6 Run unsharded test gate and print scoreboard"
@@ -957,19 +972,28 @@ LEAF_DIAGNOSTIC_EXACT
   fi
   printf 'LEAF_DIAGNOSTIC diagnostic-only/no-full-verdict suite=%s status=%s postgres_status=%s\n' \
     "$LEAF_GATE_ONLY" "$diagnostic_status" "$postgres_status" | tee /tmp/gate-results/diagnostic.txt || true
-  # Reuse the runner's result and suite log, bounding each text excerpt to 16 KiB.
-  tail -c 16384 /tmp/gate-results/gate-result.json 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
-  tail -c 16384 "/tmp/gate-logs/$LEAF_GATE_ONLY.log" 2>/dev/null | tee -a /tmp/gate-results/diagnostic.txt || true
+  # NO_SOURCE builds have no artifact download. Publish only sanitized retained evidence.
+  python -I -B scripts/ci/retain_failed_gate_logs.py \
+    --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/diagnostic-failed-gate-logs \
+    --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
+    || echo 'WARNING: failed diagnostic log publication unavailable' >&2
   exit "$diagnostic_status"
 fi
 # LEAF_DIAGNOSTIC_END
 gate_status=0
+gate_fail_fast_args=(--fail-fast)
+if [[ "${process_capture_active:-0}" == 1 ]]; then
+  # Capture records every suite's reads; a failure still fails the job below.
+  gate_fail_fast_args=()
+fi
+echo "LEAF_EVENT gate fail_fast=${#gate_fail_fast_args[@]}" >&2
 unset PYTHONSAFEPATH
 # Ensure gate rows reach the log even when the job is killed at its deadline.
 export PYTHONUNBUFFERED=1
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 1 --fail-fast --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" || gate_status=$?
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback "${gate_fail_fast_args[@]}" --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
 python -I -B scripts/ci/retain_failed_gate_logs.py \
   --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs \
+  --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
   || echo 'WARNING: failed gate log retention unavailable' >&2
 if [[ "$postgres_status" != 0 && "$gate_status" == 0 ]]; then
   echo "FATAL: the gate passed without its PostgreSQL proofs; failing the build" >&2
@@ -1001,63 +1025,8 @@ if [[ -n "${CODEBUILD_BUILD_ID:-}" && "${CODEBUILD_WEBHOOK_HEAD_REF:-}" == refs/
     --content-type application/json --if-none-match '*' >/dev/null \
     || echo 'WARNING: pointer_write_failed; this shard is not a reuse donor' >&2
 fi
-if [[ -f /tmp/gate-results/gate-result.json ]]; then
-  tail -n 200 /tmp/gate-results/gate-result.json || true
-  # BEGIN GATE FAIL NAMES
-  {
-    python3 - <<'PY'
-import json
-import re
-from pathlib import Path
-
-try:
-    result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text())
-except Exception as exc:
-    print(f"gate fail names: result JSON unreadable ({type(exc).__name__})")
-    raise SystemExit(0)
-
-output_lines = 0
-
-def emit(text):
-    global output_lines
-    for line in str(text).splitlines() or [""]:
-        print(line)
-        output_lines += 1
-        if output_lines == 400:
-            print("gate fail names: output capped at 400 lines")
-            raise SystemExit(0)
-
-log_dir = Path("/tmp/gate-logs")
-markers = re.compile(r"\bFAIL\b|FAILED|\u00d7|\u2717|AssertionError|Error:|Timeout")
-for suite in result.get("results", []):
-    if suite.get("status") != "FAIL":
-        continue
-    suite_id = suite.get("id", "")
-    emit(f"GATE FAIL {suite_id}: {suite.get('note', '')}")
-    failed_ids = suite.get("test_report", {}).get("failed_test_ids", [])
-    for test_id in failed_ids[:20]:
-        emit(f"  failed test: {test_id}")
-    if len(failed_ids) > 20:
-        emit(f"  ... and {len(failed_ids) - 20} more failed tests")
-    log_path = log_dir / f"{suite_id}.log"
-    retry_pattern = re.compile(re.escape(suite_id) + r"\.retry(\d+)\.log")
-    try:
-        retries = [(int(match.group(1)), path)
-                   for path in log_dir.iterdir()
-                   if (match := retry_pattern.fullmatch(path.name))]
-        if retries:
-            log_path = max(retries, key=lambda retry: retry[0])[1]
-        lines = log_path.read_text(errors="replace").splitlines()
-    except OSError:
-        emit(f"  (no suite log at {log_path})")
-        continue
-    matching = [line for line in lines if markers.search(line)]
-    for line in matching[:40] if matching else lines[-20:]:
-        emit("  log: " + line[:300])
-PY
-  } || true
-  # END GATE FAIL NAMES
-else
+# Sanitized retained-log frames above replace raw result/log tails and note dumps.
+if [[ ! -f /tmp/gate-results/gate-result.json ]]; then
   echo "No gate result JSON was written (runner exit $gate_status)"
 fi
 if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
@@ -1342,6 +1311,26 @@ LEAF_CAPTURE_REFERENCES
     readsets_bytes="${readsets_bytes//[[:space:]]/}"
     digest="$(sha256sum "$archive")" || return 1
     readsets_sha256="${digest%% *}"
+    if [[ "${process_capture_active:-0}" == 1 && "${CODEBUILD_BUILD_ID:-}" =~ ^device:dv-[0-9a-f]{16}$ ]]; then
+      if mkdir -p /tmp/process-capture \
+        && cp "$archive" /tmp/process-capture/readsets.tar.gz \
+        && python -I -B - /tmp/process-capture/readsets.json "$CODEBUILD_BUILD_ID" "$HEAD_SHA" \
+          "$readsets_bytes" "$readsets_sha256" "$readsets_archive_members" <<'LEAF_DEVICE_CAPTURE_ARCHIVE'
+import json
+from pathlib import Path
+import sys
+
+receipt = {"schema": "leaf.ci.device-capture-archive.v1", "build_id": sys.argv[2],
+           "head_sha": sys.argv[3], "bytes": int(sys.argv[4]), "sha256": sys.argv[5],
+           "members": sys.argv[6].split()}
+Path(sys.argv[1]).write_text(json.dumps(receipt, sort_keys=True) + "\n", encoding="utf-8")
+LEAF_DEVICE_CAPTURE_ARCHIVE
+      then
+        echo "LEAF_CAPTURE device_archive $readsets_bytes $readsets_sha256"
+      else
+        echo 'LEAF_CAPTURE device_archive_copy_failed'
+      fi
+    fi
     local archive_cap=209715200
     if [[ "${process_capture_active:-0}" == 1 ]]; then
       archive_cap=1073741824

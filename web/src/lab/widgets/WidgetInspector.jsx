@@ -108,7 +108,7 @@ export default function WidgetInspector({ doc, selectedId, dispatch, local, onOu
       {element.count !== undefined && <NumberField label="Entries" value={element.count} min={1} max={['history', 'historyList'].includes(element.preset) ? 4 : 10} onChange={(count) => edit({ count: Math.round(count) })} />}
       {element.opacity !== undefined && <NumberField label="Opacity" type="range" value={element.opacity} min={0} max={1} step={0.05} onChange={(opacity) => edit({ opacity })} />}
       {element.tracking !== undefined && <NumberField label="Spacing" value={element.tracking} min={0} max={20} onChange={(tracking) => edit({ tracking })} />}
-      {element.kind === 'text' && (!element.preset || element.preset === 'text') && <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
+      {element.kind === 'text' && (!element.preset || element.preset === 'text' || (element.preset !== 'brand' && !element.binding)) && <label>Text<input value={element.text ?? ''} maxLength={40} onChange={(e) => edit({ text: e.target.value.slice(0, 40) })} /></label>}
       {check('Visible', element.visible, (visible) => edit({ visible }))}
       <BindingPicker key={element.id} element={element} edit={edit} local={local} onOutputs={onOutputs} graphOutputs={graphOutputs} />
       <div className="widget-toolbar"><button type="button" disabled={surface.els.length >= 32} onClick={() => dispatch({ type: 'duplicate' })}>Duplicate</button><button type="button" onClick={() => dispatch({ type: 'delete' })}>Remove</button></div>
