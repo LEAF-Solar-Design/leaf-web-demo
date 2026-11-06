@@ -383,7 +383,7 @@ describe('canvas authoring', () => {
     render(<GraphView client={artifactsClient} initialDocument={initial} onRun={onRun} />)
     await screen.findByRole('region', { name: 'Dependency canvas' }, { timeout: 15000 })
     const readiness = within(screen.getByRole('region', { name: 'Graph readiness' }))
-    expect(readiness.getByRole('status')).toHaveTextContent('Ready')
+    await waitFor(() => expect(readiness.getByRole('status')).toHaveTextContent('Ready'))
     expect(readiness.queryByRole('list')).not.toBeInTheDocument()
     const run = readiness.getByRole('button', { name: 'Run graph' })
     expect(run).toBeEnabled()
