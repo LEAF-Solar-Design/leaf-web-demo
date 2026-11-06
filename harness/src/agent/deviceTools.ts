@@ -6,7 +6,8 @@ export const DEVICE_TOOL_INPUTS = {
   device_install_package: z.strictObject({ device_id: z.string(), package: z.string() }),
   device_ha_step: z.strictObject({
     device_id: z.string(),
-    op: z.enum(["ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list"]),
+    op: z.enum(["ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list", "pkg.health"])
+      .describe("Home Assistant onboarding and configuration flows, or pkg.health with args {package} to read package health and lan_access."),
     args: z.record(z.string(), z.unknown()),
   }),
   device_light: z.strictObject({
@@ -51,9 +52,12 @@ export function deviceToolError(code: "invalid_input" | "unavailable"): DeviceTo
 
 export const DEVICE_TOOL_GUIDANCE = `
 For home devices, lights, Home Assistant, Hue or WiZ, use the device tools.
-1. Call device_list first. With no device, tell the user to open Ops, then Devices, then Link a device, and run the one-line command on the computer that stays home. Never ask for or show tokens.
-2. With no Home Assistant installed, call device_install_package with package homeassistant.
-3. Use device_ha_step for onboarding and for Hue, WiZ and group configuration flows. Hue needs the user to press the bridge button when the flow asks.
+1. Call device_list first. With no device, guide the user through linking the computer that stays home, using the physical-step rule below. Never ask for or show tokens.
+2. With no Home Assistant installed, call device_install_package with package homeassistant. After installation completes, read package health with device_ha_step op pkg.health and args {package: "homeassistant"}, polling device_command_status. If lan_access is denied or unknown, use ask_user to ask the user to click Allow for "Leaf Home Assistant" on the macOS Local Network prompt, or, if no prompt is visible, to turn it on in System Settings, Privacy and Security, Local Network. Wait for their answer, then re-check package health before continuing.
+3. Use device_ha_step for onboarding and for Hue, WiZ and group configuration flows.
 4. Use device_light and device_light_states to control and confirm. Always confirm by reading state after a change.
 5. Commands are asynchronous: call device_command_status to poll a command. After a change, request device_light_states and read its completed command status to confirm the state. Never claim success before confirmation.
+6. Physical steps use ask_user and wait. Whenever a person must do something with hardware or on a machine, call ask_user with one exact instruction and a done option, then end the turn until they answer. Never assume it was done, and never batch two physical steps in one question. Ask separately to plug in the computer that stays home, to power it on if needed, to open Ops, then Devices, then Link a device (one navigation action per question), and to run the one-line command on that computer. Also ask separately to click Allow on the macOS Local Network prompt, to power on the bulbs (one at a time), to power on the bridge, and to press the Hue bridge button right before the flow step that needs it. Example options: "Done, I pressed it", "Not yet".
+7. After each answer, verify with the relevant tools (device_list, device_command_status, device_light_states) before moving on. If a check fails, ask again with what you saw. A "Not yet" answer means wait; tool results do not replace the user's confirmation of a physical action.
+8. Room limits: if the user names rooms or bulbs to include or exclude (for example "not the bedroom, someone is sleeping"), switch only those exact bulbs or a group containing only those bulbs, one at a time if needed. Never call an All lights group or any group that includes an excluded bulb. Never blink bulbs to identify them unless the user asks.
 `;

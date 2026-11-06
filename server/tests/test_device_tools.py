@@ -47,6 +47,7 @@ def call(tools, operation, body, headers=None):
     ("ha_step", {"op": "ha.flow.start", "args": {"handler": "hue"}}, "ha.flow.start", {"handler": "hue"}),
     ("ha_step", {"op": "ha.flow.step", "args": {"flow_id": "flow", "data": {}}}, "ha.flow.step", {"flow_id": "flow", "data": {}}),
     ("ha_step", {"op": "ha.flow.list", "args": {}}, "ha.flow.list", {}),
+    ("ha_step", {"op": "pkg.health", "args": {"package": "homeassistant"}}, "pkg.health", {"package": "homeassistant"}),
     ("light", {"action": "turn_on", "entity_id": "light.desk", "color": "#1234ab", "brightness_pct": 75},
      "http.proxy", {"package": "homeassistant", "method": "POST", "path": "/api/services/light/turn_on",
                     "body_json": {"entity_id": "light.desk", "rgb_color": [18, 52, 171], "brightness_pct": 75}}),
@@ -166,9 +167,10 @@ def test_light_validation(tools, extra):
     assert store.lease_commands(device_id) == []
 
 
-def test_ha_operation_is_closed(tools):
+@pytest.mark.parametrize("op", ["agent.update", "pkg.install", "pkg.upgrade", "pkg.uninstall"])
+def test_ha_operation_is_closed(tools, op):
     device_id = device(tools)
-    response = call(tools, "ha_step", {"device_id": device_id, "op": "agent.update", "args": {}})
+    response = call(tools, "ha_step", {"device_id": device_id, "op": op, "args": {"package": "homeassistant"}})
     assert response.status_code == 400
     assert store.lease_commands(device_id) == []
 
@@ -206,6 +208,55 @@ def test_other_summary_has_only_safe_fields(tools):
                                                      "errors": {"base": "cannot_connect"}}
 
 
+@pytest.mark.parametrize("lan_access", ["ok", "denied", "unknown", "x"])
+def test_package_health_summary_limits_lan_access(tools, lan_access):
+    device_id = device(tools)
+    command_id = call(tools, "ha_step", {"device_id": device_id, "op": "pkg.health",
+        "args": {"package": "homeassistant"}}).json()["result"]["command_id"]
+    store.lease_commands(device_id)
+    store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok",
+        "finished_at": store._now().isoformat(), "data": {"lan_access": lan_access}})
+    response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
+    assert response.status_code == 200
+    expected = {"status": "ok"}
+    if lan_access != "x":
+        expected["lan_access"] = lan_access
+    assert response.json()["result"]["summary"] == expected
+
+
+def test_flow_schema_summary_is_reduced_filtered_and_bounded(tools):
+    device_id = device(tools)
+    command_id = call(tools, "ha_step", {"device_id": device_id, "op": "ha.flow.start",
+        "args": {"handler": "hue"}}).json()["result"]["command_id"]
+    store.lease_commands(device_id)
+    secret = "a" * 43
+    schema = [None, {"name": secret, "type": "string", "required": True},
+              {"name": "access_token", "type": "string"}]
+    schema += [{"name": "host", "type": "string", "required": True, "default": secret,
+                "options": [secret], "description": secret}]
+    schema += [{"name": f"field_{i}", "type": "string", "required": False} for i in range(40)]
+    store.complete_command(device_id, command_id, {"command_id": command_id, "status": "ok",
+        "finished_at": store._now().isoformat(), "data": {"type": "form", "data_schema": schema,
+            "reason": secret, "description_placeholders": {"host": secret}}})
+    response = call(tools, "command_status", {"device_id": device_id, "command_id": command_id})
+    assert response.status_code == 200
+    fields = [{"name": "host", "type": "string", "required": True}]
+    fields += [{"name": f"field_{i}", "type": "string", "required": False} for i in range(31)]
+    assert response.json()["result"]["summary"] == {"status": "ok", "type": "form", "data_schema": fields}
+    assert secret not in response.text and "access_token" not in response.text
+
+
+def test_flow_schema_summary_rejects_invalid_field_values():
+    summary = service._summary({"op": "ha.flow.start"}, {"data": {"data_schema": [
+        {"name": "host", "type": "Bearer fixture", "required": "true", "default": "hidden"},
+        {"name": "", "type": "string"}, {"name": 123},
+        {"name": "port", "type": {"options": ["hidden"]}, "required": True},
+    ]}})
+    assert summary == {"data_schema": [{"name": "host"}, {"name": "port", "required": True}]}
+    assert service._summary({"op": "ha.flow.start"}, {"data": {"data_schema": []}}) == {"data_schema": []}
+    assert service._summary({"op": "ha.flow.start"}, {"data": {"data_schema": {"name": "host"}}}) == {}
+
+
 @pytest.mark.parametrize("unsafe", [
     ".".join(("eyJ" + "a" * 4, "b" * 5, "c" * 6)),
     "Bearer " + "fixture",
@@ -221,10 +272,11 @@ def test_token_shapes_are_filtered_from_every_summary_field(unsafe):
     # Entity identifiers and error-map keys are also untrusted summary strings.
     result["data"]["body_json"][0]["entity_id"] = "light." + "a" * 32
     assert service._summary(command, result) == {"lights": []}
-    result = {"data": {key: unsafe for key in ("status", "flow_id", "step_id", "type", "title")},
+    result = {"data": {key: unsafe for key in ("status", "flow_id", "step_id", "type", "title", "lan_access")},
               "error": {"code": unsafe}}
     result["data"]["errors"] = {unsafe: "cannot_connect", "base": unsafe}
-    assert service._summary({"op": "ha.onboard"}, result) == {"errors": {}}
+    result["data"]["data_schema"] = [{"name": unsafe, "type": "string"}, {"name": "host", "type": unsafe}]
+    assert service._summary({"op": "ha.onboard"}, result) == {"errors": {}, "data_schema": [{"name": "host"}]}
 
 
 @pytest.mark.parametrize("fault,code", [("session", "denied"), ("turn", "conflict"), ("binding", "denied"), ("tenant", "denied")])
