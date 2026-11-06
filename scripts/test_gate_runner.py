@@ -25,6 +25,7 @@ import subprocess
 import sys
 import threading
 import time
+from collections import Counter
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -136,8 +137,8 @@ def test_sip_r1_gate_registration():
         assert suite.db_gated is gated
         assert suite_id in selection["mandatory_suite_ids"]
         assert suite.allowed_skip_reasons == ((r"platform DB unreachable(?:: .+)?",) if gated else ())
-    assert suites["platform-static"].expected == 268  # +3 import source kind contract.
-    assert suites["platform"].expected == 1205  # LD1b: +1 demo classification regression.
+    assert suites["platform-static"].expected == 267  # Source-catalog row has a dedicated owner.
+    assert suites["platform"].expected == 558  # B1 transfers 647 cases to their owners.
     assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
     assert suites["server-postgres-authority-inventory"].expected == 9
     assert suites["migration-expand-contract"].expected == 12
@@ -499,7 +500,7 @@ def test_postgres_proof_files_are_registered_with_exact_counts():
     # Added test_acceptance_schema_readiness_contract on 2026-10-19: 211 -> 212.
     # Added +26 SP2 invite-only org gate on 2026-10-19: 212 -> 238.
     # Added demo inventory/migration contract regression: 238 -> 239.
-    assert static.expected == 268  # +3 import source kind contract.
+    assert static.expected == 267  # Source-catalog row has a dedicated owner.
     assert any(
         str(arg).endswith("platform/tests/test_soft_delete_guard_static.py")
         for arg in static.argv
@@ -2694,12 +2695,241 @@ def test_every_platform_static_file_is_registered_in_platform_static():
     the gate because the platform-static target list is hand-written. Pin the
     list against the glob so the NEXT *_static.py cannot run nowhere."""
     g = _load_runner()
-    static = {s.id: s for s in g.build_suites()}["platform-static"]
+    suites = {s.id: s for s in g.build_suites()}
+    static = suites["platform-static"]
     registered = {Path(str(arg)).name for arg in static.argv if str(arg).endswith(".py")}
     on_disk = {p.name for p in (REPO / "platform" / "tests").glob("*_static.py")}
-    missing = sorted(on_disk - registered)
+    dedicated = {name for name, owner in g.PLATFORM_SINGLE_OWNER_FILES.items()
+                 if name.endswith("_static.py") and owner != static.id}
+    for name in dedicated:
+        owner = suites[g.PLATFORM_SINGLE_OWNER_FILES[name]]
+        assert (REPO / "platform/tests" / name).relative_to(owner.cwd).as_posix() in owner.argv
+    assert not registered & dedicated
+    missing = sorted(on_disk - registered - dedicated)
     assert missing == [], (
         f"platform/tests/*_static.py not registered in platform-static: {missing}")
+
+
+_PLATFORM_COLLECTION_MARKER = "CI10X_PLATFORM_COLLECTION="
+_PLATFORM_COLLECTION_DSN = "postgresql://ci10x:unused@127.0.0.1:1/collect_only"
+
+
+def _single_owner_named_plugins(names):
+    # Anonymous registrations use process-specific object ids as their names.
+    return sorted(name for name in names if not name.isdigit())
+
+
+def pytest_collection_finish(session):
+    """Collection-only observer, loaded explicitly with -p test_gate_runner.
+
+    Terminal verbosity (-q is already in suite.argv) can hide node IDs entirely.
+    Report actual items and pytest's resolved root/conftests rather than parsing
+    filenames or assuming how pytest chose its collection topology.
+    """
+    nodes = []
+    conftests = {}
+    for item in session.items:
+        # Resolve the file independently of rootdir before retaining its repo
+        # relative spelling; only the function/parameter suffix uses nodeid.
+        file = item.path.resolve().relative_to(REPO).as_posix()
+        suffix = item.nodeid.partition("::")[2]
+        nodes.append(file + "::" + suffix)
+        if file not in conftests:
+            conftests[file] = sorted(
+                str(Path(module.__file__).resolve()) for module in
+                session.config.pluginmanager._getconftestmodules(item.path))
+    config = session.config
+    manager = config.pluginmanager
+    payload = {"nodes": nodes, "conftests": conftests,
+               "rootdir": str(config.rootpath.resolve()),
+               "inifile": str(config.inipath.resolve()) if config.inipath else None,
+               "addopts": list(config.getini("addopts")),
+               "env_addopts": os.environ.get("PYTEST_ADDOPTS", ""),
+               "plugins": _single_owner_named_plugins(
+                   name for name, plugin in manager.list_name_plugin()
+                   if plugin is not None and plugin not in manager._conftest_plugins)}
+    session.config.pluginmanager.get_plugin("terminalreporter").write_line(
+        _PLATFORM_COLLECTION_MARKER + json.dumps(payload))
+
+
+def _platform_collection_env(g, suite):
+    # Same clean_env + gate-DSN/alias merge as run_suite, with a nonconnecting
+    # DSN instead of a live probe. DATABASE_URL is also required for the static
+    # owner: conftest otherwise ignores DB files and hides most of the catalog.
+    env = g.clean_env()
+    env["DATABASE_URL"] = _PLATFORM_COLLECTION_DSN
+    if suite.db_gated or suite.uses_database:
+        env.update(dict.fromkeys(suite.db_env_aliases, _PLATFORM_COLLECTION_DSN))
+    # Load only the observer above; suite targets, cwd, plugins and selection
+    # options are retained. This directory contains no platform shadow package.
+    env["PYTHONPATH"] = str(SCRIPTS) + (
+        os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    env["PYTHONDONTWRITEBYTECODE"] = "1"
+    return env
+
+
+def _collect_platform_suite(g, suite):
+    argv = [*suite.argv, "--collect-only", "-q", "-p", "test_gate_runner"]
+    proc = subprocess.run(
+        argv, cwd=suite.cwd, env=_platform_collection_env(g, suite),
+        capture_output=True, text=True, encoding="utf-8", errors="replace",
+        timeout=min(suite.timeout_s, 180))
+    output = proc.stdout + "\n" + proc.stderr
+    assert proc.returncode == 0, f"{suite.id} collection failed:\n{output}"
+    reports = [line.removeprefix(_PLATFORM_COLLECTION_MARKER)
+               for line in proc.stdout.splitlines()
+               if line.startswith(_PLATFORM_COLLECTION_MARKER)]
+    assert len(reports) == 1, f"{suite.id}: missing collection evidence\n{output}"
+    report = json.loads(reports[0])
+    assert report["nodes"], f"{suite.id}: empty collection"
+    assert len(report["nodes"]) == len(set(report["nodes"])), (
+        f"{suite.id}: repeated nodes within suite")
+    return report
+
+
+@pytest.fixture(scope="module")
+def platform_family_collection():
+    from dataclasses import replace
+
+    g = _load_runner()
+    family = [s for s in g.build_suites()
+              if s.cwd == REPO / "platform" or s.id.startswith("platform")]
+    # The simulator is a script, not a pytest suite; it has no pytest nodes.
+    assert {s.id for s in family if s.kind != "pytest"} == {"platform-simgate-self-test"}
+    suites = {s.id: s for s in family if s.kind == "pytest"}
+    inventories = {sid: _collect_platform_suite(g, suite) for sid, suite in suites.items()}
+    broad = suites["platform"]
+    original = replace(broad, argv=g._py_pytest(f"{REPO.name}/platform/tests"))
+    baseline = _collect_platform_suite(g, original)
+    # These two proofs disappear in an unconfigured directory collection.
+    for name in ("test_overlay_store_postgres.py", "test_annotation_store_postgres.py"):
+        assert f"platform/tests/{name}" in baseline["conftests"]
+    return g, suites, inventories, baseline
+
+
+def _assert_platform_single_owner(g, inventories):
+    owners = {}
+    for sid, report in inventories.items():
+        for node in report["nodes"]:
+            owners.setdefault(node, []).append(sid)
+    duplicates = {node: ids for node, ids in owners.items()
+                  if len(ids) > 1 and node.partition("::")[0] not in
+                  g.JUSTIFIED_DUPLICATE_NODES}
+    assert not duplicates, "platform nodes have multiple owners:\n" + "\n".join(
+        f"{node}: {', '.join(ids)}" for node, ids in sorted(duplicates.items()))
+    assert all(reason.strip() for reason in g.JUSTIFIED_DUPLICATE_NODES.values())
+
+
+def test_platform_files_have_single_owner(platform_family_collection):
+    _g, _suites, inventories, _baseline = platform_family_collection
+    # Use actual collected items, not argv filenames: a registered file may
+    # still collect nothing because of conftest or a narrowing selection flag.
+    owners = {}
+    for sid, report in inventories.items():
+        for file in {node.partition("::")[0] for node in report["nodes"]}:
+            owners.setdefault(file, []).append(sid)
+    files = {path.relative_to(REPO).as_posix()
+             for path in (REPO / "platform" / "tests").glob("test_*.py")}
+    invalid = {file: owners.get(file, []) for file in files
+               if len(owners.get(file, [])) != 1}
+    assert not invalid, "platform files must have exactly one collected owner:\n" + "\n".join(
+        f"{file}: {', '.join(ids) or 'unowned'}" for file, ids in sorted(invalid.items()))
+
+
+def _single_owner_node_counts(nodes):
+    """UUID-normalized equivalence DIAGNOSTIC, not stable-id certification."""
+    # Collection-time UUID ids are unstable; preserve every other node segment
+    # and multiplicity so normalization cannot hide missing or extra cases.
+    uuid_param = re.compile(
+        r"\[[^\[\]]*[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-"
+        r"[0-9a-f]{4}-[0-9a-f]{12}[^\[\]]*\]")
+    return Counter(uuid_param.sub("[<uuid-param>]", node) for node in nodes)
+
+
+def test_single_owner_normalizes_random_param_ids():
+    node = "platform/tests/test_example.py::test_receipt"
+    before = [
+        node + "[project_id-ba9bd722-1234-4567-89ab-0123456789ab]",
+        node + "[project_id-ba9bd722-1234-4567-89ab-0123456789ac]",
+        node + "[stable-id]",
+    ]
+    after = [
+        node + "[project_id-8133d4f0-abcd-4567-89ab-abcdef012345]",
+        node + "[project_id-8133d4f0-abcd-4567-89ab-abcdef012346]",
+        node + "[stable-id]",
+    ]
+    expected = _single_owner_node_counts(before)
+    assert expected == _single_owner_node_counts(reversed(after))
+    assert expected != _single_owner_node_counts(after[1:])
+    assert expected != _single_owner_node_counts([*after, after[0]])
+    assert expected != _single_owner_node_counts(after[:-1])
+    assert expected != _single_owner_node_counts([*after, node + "[extra-id]"])
+    assert expected != _single_owner_node_counts([*after[:-1], node + "[changed-id]"])
+
+
+def test_single_owner_normalizes_anonymous_plugin_names():
+    before = ["139850275137792", "anyio", "test_gate_runner"]
+    after = ["test_gate_runner", "140401082378496", "anyio"]
+    expected = _single_owner_named_plugins(before)
+    assert expected == ["anyio", "test_gate_runner"]
+    assert expected == _single_owner_named_plugins(after)
+    assert expected != _single_owner_named_plugins([*after, "different_plugin"])
+    assert expected != _single_owner_named_plugins(["140401082378496", "anyio"])
+
+
+def test_platform_family_nodes_have_single_owner(platform_family_collection):
+    """Check ownership and a UUID-normalized collection equivalence DIAGNOSTIC."""
+    g, suites, inventories, baseline = platform_family_collection
+    _assert_platform_single_owner(g, inventories)
+    before = _single_owner_node_counts(baseline["nodes"])
+    after = _single_owner_node_counts(
+        node for report in inventories.values() for node in report["nodes"]
+        if node.startswith("platform/tests/"))
+    assert before == after, (
+        f"platform collection equivalence DIAGNOSTIC changed: missing={sorted(before - after)}, "
+        f"added={sorted(after - before)}")
+    # Recheck the recorded alias grep over all platform modules, covering every
+    # excluded file's platform import closure, including conftest's imports.
+    alias_readers = {p.name for p in (REPO / "platform").rglob("*.py")
+                     if any(alias in p.read_text(encoding="utf-8")
+                            for alias in suites["platform"].db_env_aliases)}
+    assert alias_readers == {"test_overlay_store_postgres.py", "test_annotation_store_postgres.py"}
+    for filename, owner_id in g.PLATFORM_SINGLE_OWNER_FILES.items():
+        file = "platform/tests/" + filename
+        owner = suites[owner_id]
+        assert not owner.opt_in_env
+        assert not any(arg in ("-k", "-m", "--deselect") or
+                       arg.startswith(("--deselect=", "-k", "-m"))
+                       for arg in owner.argv[3:])
+        if not filename.endswith("_static.py") or filename == "test_db_primitives_static.py":
+            assert owner.db_gated or owner.uses_database, f"{file}: owner loses database"
+        original_nodes = _single_owner_node_counts(
+            node for node in baseline["nodes"] if node.partition("::")[0] == file)
+        owned_nodes = _single_owner_node_counts(
+            node for node in inventories[owner_id]["nodes"]
+            if node.partition("::")[0] == file)
+        assert original_nodes and original_nodes == owned_nodes, (
+            f"{file}: collection equivalence DIAGNOSTIC: owner drops nodes")
+        # Different rootdirs are equivalent only with the same configuration
+        # and plugins. Nodes above already use resolved file identities.
+        for setting in ("inifile", "addopts", "env_addopts", "plugins"):
+            assert inventories[owner_id][setting] == baseline[setting], (
+                f"{file}: {setting} differs: owner={inventories[owner_id][setting]!r}, "
+                f"baseline={baseline[setting]!r}")
+        assert inventories[owner_id]["conftests"][file] == baseline["conftests"][file], file
+
+
+def test_platform_single_owner_guard_rejects_restored_file(
+        platform_family_collection, monkeypatch):
+    g, suites, inventories, _baseline = platform_family_collection
+    filename = "test_ios_ship_source_catalog_static.py"
+    broad = suites["platform"]
+    target = f"{REPO.name}/platform/tests/{filename}"
+    assert target not in broad.argv
+    monkeypatch.setattr(broad, "argv", [*broad.argv, target])
+    changed = {**inventories, "platform": _collect_platform_suite(g, broad)}
+    with pytest.raises(AssertionError, match=filename + r".*platform, platform-ios-ship-source-catalog-static"):
+        _assert_platform_single_owner(g, changed)
 
 
 def _shard_stub_suites(g):
@@ -3025,6 +3255,10 @@ def test_fingerprint_ignores_toolchain_paths_but_not_targets():
 
 def test_catalog_fingerprint_does_not_depend_on_the_checkout_directory_name(tmp_path, monkeypatch):
     g = _load_runner()
+    for name in ("source", "relay-src.Ab12Cd"):
+        tests = tmp_path / name / "platform" / "tests"
+        tests.mkdir(parents=True)
+        (tests / "test_example.py").write_text("def test_example(): pass\n", encoding="utf-8")
     source = g.selection_catalog(tmp_path / "source")
     relay = g.selection_catalog(tmp_path / "relay-src.Ab12Cd")
     assert source["catalog_sha256"] == relay["catalog_sha256"]
@@ -3034,8 +3268,8 @@ def test_catalog_fingerprint_does_not_depend_on_the_checkout_directory_name(tmp_
     def changed_target():
         suites = build_suites()
         suite = next(s for s in suites if s.id == "platform")
-        target = suite.argv.index(f"{g.REPO.name}/platform/tests")
-        suite.argv[target] += "/test_changed.py"
+        target = suite.argv.index(f"{g.REPO.name}/platform/tests/test_example.py")
+        suite.argv[target] = f"{g.REPO.name}/platform/tests/test_changed.py"
         return suites
 
     monkeypatch.setattr(g, "build_suites", changed_target)
@@ -4598,8 +4832,8 @@ def test_sip_r3e_gate_registration():
         assert ordered[start:start + 4] == [
             "server-sip-r14-" + name for name in ("evidence", "admission", "worker", "proof")]
     assert selection["selection_enabled"] is False and selection["phase"] == "shadow"
-    # LD1b adds one demo classification regression to the 1178 platform rows.
-    assert suites["platform"].expected == 1205
+    # B1 transfers 647 cases from the previous 1205 platform floor to their owners.
+    assert suites["platform"].expected == 558
     assert suites["gate-runner-selftest"].expected == 272  # SEL-303b mirror registration.
 
 
