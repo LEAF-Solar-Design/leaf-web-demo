@@ -45,6 +45,10 @@ def resolve_current(tenant_id, session_id, turn_id, *, write=False):
     tenant, tier = deps.resolve_active_platform_tenant_authority(subject)
     if tenant != tenant_id:
         raise ReadFailure("denied")
+    # Follow routers/agent.py's verified active-turn tier snapshot precedent.
+    turn_tier = session_store.active_turn_tier(session_id, turn_id, session["tenant_id"])
+    if isinstance(turn_tier, str) and turn_tier:
+        tier = turn_tier
     context = deps.TenantContext(tenant_id, org_id=tenant_id, tier=tier,
                                subject=subject, authority_resolved=True)
     binding = platform_link.resolve_caller_binding(context)

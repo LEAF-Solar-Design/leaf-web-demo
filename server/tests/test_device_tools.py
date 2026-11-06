@@ -29,6 +29,7 @@ def tools(api, monkeypatch):
     monkeypatch.setattr(deps, "_dispatch_secret_ok", lambda value: value == "dispatch-fixture")
     monkeypatch.setattr(service.session_store, "get_session", lambda sid: api.session if sid == "session" else None)
     monkeypatch.setattr(service.session_store, "active_turn_subject", lambda *args: api.subject)
+    monkeypatch.setattr(service.session_store, "active_turn_tier", lambda *args: None)
     monkeypatch.setattr(deps, "resolve_active_platform_tenant_authority", lambda subject: (TENANT, api.tenant.tier))
     monkeypatch.setattr(platform_link, "resolve_caller_binding", lambda context: api.binding)
     monkeypatch.setattr(platform_link, "require_project_session_access", lambda *args, **kwargs: True)
@@ -268,3 +269,83 @@ def test_command_status_queued_expired_and_missing(tools, monkeypatch):
     assert call(tools, "command_status", body).json()["result"] == {"state": "expired"}
     monkeypatch.setattr(store, "get_command", lambda *args: None)
     assert call(tools, "command_status", body).status_code == 404
+
+
+@pytest.mark.parametrize("role,turn_tier,allowlisted,allowed", [
+    ("editor", "admin", True, True),
+    ("editor", "admin", False, False),
+    ("editor", "pro", True, False),
+    ("owner", "admin", False, True),
+    ("owner", "pro", False, True),
+    ("owner", "hosted_pro", False, True),
+])
+def test_light_write_uses_turn_tier_and_real_project_role(
+        tools, monkeypatch, role, turn_tier, allowlisted, allowed):
+    device_id = device(tools)
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+    tools.binding.binding_id = uuid4()
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", tools.subject if allowlisted else "")
+    monkeypatch.setattr(project_lifecycle, "require_project_role", lambda *args, **kwargs: role)
+    monkeypatch.setattr(devices, "_project_owner", _REAL_PROJECT_OWNER)
+    # Isolate project authorization from the entitlement policy's tier names.
+    monkeypatch.setattr(service.entitlements, "entitlements_for",
+                        lambda *args: {"converse": True, "link_service": True})
+
+    def snapshot(session_id, turn_id, tenant_id):
+        assert (session_id, turn_id, tenant_id) == ("session", "turn", TENANT)
+        return turn_tier
+
+    monkeypatch.setattr(service.session_store, "active_turn_tier", snapshot)
+    response = call(tools, "light", {
+        "device_id": device_id, "action": "turn_on", "entity_id": "light.desk"})
+    assert response.status_code == (200 if allowed else 403), response.text
+    commands = store.lease_commands(device_id)
+    assert bool(commands) is allowed
+    if allowed:
+        assert commands[0]["command_id"] == response.json()["result"]["command_id"]
+        assert commands[0]["args"]["path"] == "/api/services/light/turn_on"
+
+
+@pytest.mark.parametrize("turn_tier,expected_tier", [
+    (None, "hosted_pro"), ("", "hosted_pro"), (123, "hosted_pro"),
+    ("admin", "admin"), ("pro", "pro"),
+])
+def test_turn_tier_context_and_entitlement_lookup(tools, monkeypatch, turn_tier, expected_tier):
+    monkeypatch.setattr(service.session_store, "active_turn_tier", lambda *args: turn_tier)
+    entitlement_tiers = []
+
+    def entitlements_for(tier, roles, elevated):
+        entitlement_tiers.append(tier)
+        return {"converse": True, "link_service": True}
+
+    monkeypatch.setattr(service.entitlements, "entitlements_for", entitlements_for)
+    context, project = service.resolve_current(TENANT, "session", "turn", write=True)
+    assert context.tier == expected_tier
+    assert project == PROJECT
+    assert entitlement_tiers == [expected_tier]
+
+
+def test_admin_turn_tier_uses_session_tenant_when_different_from_org(tools, monkeypatch):
+    device_id = device(tools)
+    tools.session["tenant_id"] = str(uuid4())
+    assert tools.session["tenant_id"] != tools.session["org_id"]
+    platform_link._ensure_platform_package()
+    from leaf_platform import project_lifecycle
+    tools.binding.binding_id = uuid4()
+    monkeypatch.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", tools.subject)
+    monkeypatch.setattr(project_lifecycle, "require_project_role", lambda *args, **kwargs: "editor")
+    monkeypatch.setattr(devices, "_project_owner", _REAL_PROJECT_OWNER)
+
+    def snapshot(session_id, turn_id, tenant_id):
+        assert (session_id, turn_id, tenant_id) == ("session", "turn", tools.session["tenant_id"])
+        return "admin"
+
+    monkeypatch.setattr(service.session_store, "active_turn_tier", snapshot)
+    response = call(tools, "light", {
+        "device_id": device_id, "action": "turn_on", "entity_id": "light.desk"})
+    assert response.status_code == 200, response.text
+    commands = store.lease_commands(device_id)
+    assert len(commands) == 1
+    assert commands[0]["command_id"] == response.json()["result"]["command_id"]
+    assert commands[0]["args"]["path"] == "/api/services/light/turn_on"
