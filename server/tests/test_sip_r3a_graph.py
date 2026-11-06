@@ -460,13 +460,14 @@ def test_sip_r3a_legacy_bytes():
         "schema_version": 1, "source_intake_sha256": source_hash, "units": deepcopy(UNITS)}}) == "ec73fc8a161f512cf3b8c554f4227b6f7547727a80f238e38b4f989f56b6b52c"
 
 
-# SolarEdge acceptance joins the sixteen supported tools; four create entities.
+# SolarEdge acceptance joins the eighteen supported tools; four create entities.
 def test_sip_r3a_additive_entrypoints_no_activation(memory, monkeypatch):
     for name in ("run_project_graph_seed", "run_project_graph_commit", "project_graph_commit_provenance"):
         sentinel = object()
         monkeypatch.setattr(adapter, name, lambda *args, **kwargs: sentinel)
         assert getattr(local, name)("forwarded") is sentinel
     assert adapter.SUPPORTED_TOOLS == {"solar-settings", "solar-panels-from-drawing",
+        "solar-design-presets", "solar-trackers-to-panel-groups",
         "solar-size-strings", "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add", "solar-string-conductors", "solar-panel-groups", "solar-correct-string", "solar-solve-proposal", "solar-commit-solve",
         "solar-solaredge-accept"}
