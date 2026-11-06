@@ -3720,7 +3720,7 @@ def build_suites() -> List[Suite]:
               uses_database=True, db_gated=True),
         # BSP43 accepted focused floors; run through the normal server CI rail.
         Suite("server-project-solar-materialization", "server canonical physical layout publication", "pytest", SERVER,
-              _py_pytest("tests/test_project_solar_materialization.py"), 30),
+              _py_pytest("tests/test_project_solar_materialization.py"), 30, uses_database=True),
         Suite("server-solar-native-layout-dxf", "server native Solar layout serialization", "pytest", SERVER,
               _py_pytest("tests/test_solar_native_layout_dxf.py"), 35,
               allowed_skip_reasons=(r"could not import 'ezdxf\.recover': .*",)),
