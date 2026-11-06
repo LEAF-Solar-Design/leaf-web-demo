@@ -82,7 +82,7 @@ def normalize(operation, value):
         if type(value[key]) is not str or not 1 <= len(value[key]) <= 128:
             raise ReadFailure("invalid_input")
     if operation == "ha_step" and (value["op"] not in {
-            "ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list"} or type(value["args"]) is not dict):
+            "ha.onboard", "ha.flow.start", "ha.flow.step", "ha.flow.list", "pkg.health"} or type(value["args"]) is not dict):
         raise ReadFailure("invalid_input")
     if operation == "light":
         if value["action"] not in {"turn_on", "turn_off"} or ENTITY.fullmatch(value["entity_id"]) is None:
@@ -139,6 +139,24 @@ def _summary(command, result):
             summary[key] = value
         elif _text(value) is not None:
             summary[key] = value
+    lan_access = data.get("lan_access", result.get("lan_access"))
+    if _text(lan_access) in {"ok", "denied", "unknown"}:
+        summary["lan_access"] = lan_access
+    schema = data.get("data_schema")
+    if type(schema) is list:
+        fields = []
+        for item in schema:
+            if type(item) is not dict or not _text(item.get("name")):
+                continue
+            field = {"name": item["name"]}
+            if _text(item.get("type")) is not None:
+                field["type"] = item["type"]
+            if type(item.get("required")) is bool:
+                field["required"] = item["required"]
+            fields.append(field)
+            if len(fields) == 32:
+                break
+        summary["data_schema"] = fields
     error = result.get("error")
     if type(error) is dict and _text(error.get("code")) is not None:
         summary["error"] = {"code": error["code"]}

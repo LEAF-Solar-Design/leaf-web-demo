@@ -48,8 +48,17 @@ describe("device contract schemas", () => {
     expect(DEVICE_TOOL_INPUTS.device_ha_step.safeParse({ device_id: "home", op, args: {} }).success).toBe(true);
   });
 
+  it("accepts pkg.health with package arguments", () => {
+    const args = { device_id: "home", op: "pkg.health", args: { package: "homeassistant" } };
+    expect(DEVICE_TOOL_INPUTS.device_ha_step.parse(args)).toEqual(args);
+    expect(DEVICE_TOOL_INPUTS.device_ha_step.shape.op.description).toContain("pkg.health");
+  });
+
   it.each([
     { device_id: "home", op: "ha.restart", args: {} },
+    { device_id: "home", op: "pkg.install", args: { package: "homeassistant" } },
+    { device_id: "home", op: "pkg.upgrade", args: { package: "homeassistant" } },
+    { device_id: "home", op: "pkg.uninstall", args: { package: "homeassistant" } },
     { device_id: "home", op: "ha.onboard", args: [] },
     { device_id: "home", op: "ha.onboard", args: null },
     { device_id: "home", op: "ha.onboard" },
@@ -211,6 +220,26 @@ describe("device tools are host gated", () => {
     expect(state.runs[0].systemPrompt).toContain("Ops, then Devices, then Link a device");
     expect(state.runs[0].systemPrompt).toContain("Always confirm by reading state after a change");
     for (const { tool } of CASES) expect(state.runs[0].systemPrompt).toContain(tool);
+  });
+
+  it("requires separate physical prompts, waiting, verification and LAN permission checks", () => {
+    for (const rule of [
+      "Physical steps use ask_user and wait", "one exact instruction and a done option",
+      "end the turn until they answer", "never batch two physical steps",
+      "plug in the computer", "power it on", "run the one-line command",
+      "click Allow", "power on the bulbs", "power on the bridge",
+      "press the Hue bridge button right before", "After each answer, verify",
+      "If a check fails, ask again with what you saw", "pkg.health",
+      "lan_access is denied or unknown", "Privacy and Security, Local Network",
+    ]) expect(DEVICE_TOOL_GUIDANCE).toContain(rule);
+  });
+
+  it("honors included and excluded bulbs without blinking to identify them", () => {
+    for (const rule of [
+      "Room limits", "switch only those exact bulbs", "one at a time if needed",
+      "Never call an All lights group or any group that includes an excluded bulb",
+      "Never blink bulbs to identify them unless the user asks",
+    ]) expect(DEVICE_TOOL_GUIDANCE).toContain(rule);
   });
 });
 
