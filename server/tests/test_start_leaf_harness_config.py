@@ -55,6 +55,7 @@ def test_launcher_project_worker_selection(monkeypatch):
     tools = _server_graph_tools()
     assert tools == frozenset((
         "solar-settings", "solar-panels-from-drawing", "solar-size-strings",
+        "solar-design-presets", "solar-trackers-to-panel-groups",
         "solar-combiners", "solar-feeders", "solar-homeruns", "solar-schedule",
         "solar-string-add", "solar-assign-equipment", "solar-string-multi-add",
         "solar-string-conductors", "solar-panel-groups", "solar-correct-string",
