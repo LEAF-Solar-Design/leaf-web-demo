@@ -131,6 +131,8 @@ class ToolNodeAdapter:
             return {"error": "lab_tool_submit_unavailable"}
 
     def _call(self, block_id, trusted, manifest, inputs, settings, run_deadline):
+        if trusted is None:
+            return {"error": "lab_tool_effect_refused"}
         if trusted.kind == 'corpus-evaluator':
             return self._corpus(block_id, settings, run_deadline)
         def refuse(code):
