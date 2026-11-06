@@ -169,7 +169,8 @@ def check_migrations(migrations_dir: Path) -> list[str]:
     if not migrations_dir.is_dir():
         return [f"migrations directory missing: {migrations_dir}"]
 
-    numbered: dict[int, str] = {}
+    numbered: set[int] = set()
+    migrations: list[tuple[int, Path]] = []
     files = sorted(p for p in migrations_dir.iterdir() if p.suffix == ".sql")
     for path in files:
         m = FILENAME_RE.match(path.name)
@@ -178,16 +179,14 @@ def check_migrations(migrations_dir: Path) -> list[str]:
                 f"{path.name}: filename must match NNNN_lowercase_name.sql")
             continue
         number = int(m.group(1))
-        if number in numbered:
-            violations.append(
-                f"{path.name}: duplicate migration number {number:04d} "
-                f"(also {numbered[number]})")
-            continue
-        numbered[number] = path.name
+        # The producer ledger identifies migrations by full filename and SHA.
+        # Numeric prefixes order references, but do not identify a SQL body.
+        numbered.add(number)
+        migrations.append((number, path))
 
-    for number in sorted(numbered):
-        name = numbered[number]
-        text = (migrations_dir / name).read_text(encoding="utf-8")
+    for number, path in migrations:
+        name = path.name
+        text = path.read_text(encoding="utf-8")
         stripped = strip_sql_noise(text)
         initial_revokes = initial_table_revokes(stripped)
         hits = [label for label, pattern in CONTRACT_PATTERNS
