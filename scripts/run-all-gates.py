@@ -282,8 +282,79 @@ def normalize_spawn_command(
     return subprocess.list2cmdline(normalized), True, interpreter
 
 
+# B1 file-by-file ownership audit. All owners target the entire file, with no
+# -k/-m/--deselect or opt-in flag. Database cases retain the gate DATABASE_URL;
+# *_static cases need no migration, except db_primitives whose owner also gets
+# DATABASE_URL. SIP owners use platform/ as cwd; paths in their imports and DB
+# configuration are __file__-relative. The single_owner collection guard proves
+# identical nodes, rootdir and conftest chains under both registered setups.
+# Alias grep for EVERY exclusion below:
+#   rg -n 'OVERLAY_PG_URL|ANNOTATION_PG_URL' platform -g '*.py'
+# Only test_overlay_store_postgres.py and test_annotation_store_postgres.py
+# match. Neither is imported by these files or their imported platform modules;
+# both remain in platform. Thus the aliases absent from the owners are unread.
+PLATFORM_SINGLE_OWNER_FILES = {
+    "test_org_invitations.py": "platform-org-invitations",
+    "test_native_service_binding.py": "platform-native-service-binding",
+    "test_tenant_cost_store.py": "platform-tenant-cost-store",
+    "test_aps_cost_sync.py": "platform-aps-cost-sync",
+    "test_billing_statement.py": "platform-billing-statement",
+    "test_addon_settings_api.py": "platform-addon-settings-api",
+    "test_sip_r3b_tools.py": "platform-sip-r3b-tools",
+    "test_sip_r3b_chain.py": "platform-sip-r3b-chain",
+    "test_sip_r3a_graph.py": "platform-sip-r3a-graph",
+    "test_sip_r5_admission.py": "platform-sip-r5-admission",
+    "test_sip_r6_outputs.py": "platform-sip-r6-outputs",
+    "test_sip_w1c_exchange.py": "platform-sip-w1c-exchange",
+    "test_sip_r14_exchange.py": "platform-sip-r14-exchange",
+    "test_sip_r14_sizing.py": "platform-sip-r14-sizing",
+    "test_sip_r4_jobs.py": "platform-sip-r4-jobs",
+    "test_sip_r2_publication.py": "platform-sip-r2-publication",
+    "test_sip_r1_checkout.py": "platform-sip-r1-checkout",
+    "test_sip_r3c_multi_add.py": "platform-sip-r3c-multi-add",
+    "test_sip_r3e_groups.py": "platform-sip-r3e-groups",
+    "test_sip_r3d_conductors.py": "platform-sip-r3d-conductors",
+    "test_ios_ship_source_catalog.py": "platform-ios-ship-source-catalog",
+    "test_ios_ship_source_catalog_static.py": "platform-ios-ship-source-catalog-static",
+    "test_demo_session_deps.py": "platform-demo-session-deps",
+    "test_org_acceptance.py": "platform-org-acceptance",
+    "test_ledger_static.py": "platform-static",
+    "test_hashing_static.py": "platform-static",
+    "test_replay_static.py": "platform-static",
+    "test_evidence_freeze_static.py": "platform-static",
+    "test_db_primitives_static.py": "platform-static",
+    "test_db_readiness_static.py": "platform-static",
+    "test_demo_inventory_contract_static.py": "platform-static",
+    "test_db_schema_proof_static.py": "platform-static",
+    "test_overlay_store_static.py": "platform-static",
+    "test_ios_ship_schema_static.py": "platform-static",
+    "test_annotation_store_static.py": "platform-static",
+    "test_soft_delete_guard_static.py": "platform-static",
+    "test_identity_display_name_static.py": "platform-static",
+    "test_binding_grant_static.py": "platform-static",
+    "test_binding_grant_issuance_static.py": "platform-static",
+    "test_org_self_provision_gate_static.py": "platform-static",
+    "test_org_export_scope_static.py": "platform-static",
+    "test_campaign_plan_policy_static.py": "platform-static",
+    "test_web_page_template_static.py": "platform-static",
+    "test_drawing_import_contract_static.py": "platform-static",
+}
+
+# Keys are repository-relative files, never suite IDs or filename patterns.
+# An owner losing DATABASE_URL for a database case must retain the overlap here.
+JUSTIFIED_DUPLICATE_NODES: dict[str, str] = {}
+
+
 def build_suites() -> List[Suite]:
     repo_name = REPO.name  # "leaf-web-demo"
+    platform_argv = _py_pytest(f"{repo_name}/platform/tests")
+    # conftest's pytest_ignore_collect returns False and overrides --ignore.
+    # Explicit targets avoid that hook while discovering new files each build.
+    platform_argv[3:4] = [
+        f"{repo_name}/platform/tests/{path.name}"
+        for path in sorted((REPO / "platform" / "tests").glob("test_*.py"))
+        if path.name not in PLATFORM_SINGLE_OWNER_FILES
+    ]
     suites: List[Suite] = [
         # Executed-count floors: seventeen were re-baselined on 2026-07-25
         # because they sat BELOW their suite's real executed count. A low floor
@@ -2504,7 +2575,10 @@ def build_suites() -> List[Suite]:
               # 2026-10-11: sip-r3d adds six conductor PostgreSQL rows (322 -> 328).
               # 2026-10-13: R3e-2 adds six to the measured 1162-row PostgreSQL baseline.
               # 2026-10-13: R14-E adds ten sizing rows; measured 1178 passing on PostgreSQL.
-              _py_pytest(f"{repo_name}/platform/tests"), 1205, db_gated=True,
+              platform_argv, 558, db_gated=True,
+              # Transfer the old 1205 floor's 647 dedicated/static cases to
+              # their owners (648 summed floors minus the triple-owned row).
+              # This is a transferred lower bound, not a new measured baseline.
               # The overlay and annotation PostgreSQL proofs skipif-gate on
               # their own variables, so they get the gate DSN under those too.
               db_env_aliases=("OVERLAY_PG_URL", "ANNOTATION_PG_URL")),
@@ -2523,7 +2597,8 @@ def build_suites() -> List[Suite]:
         # Dependency-free *_static proofs must run even with NO Postgres: the
         # conftest's pytest_ignore_collect exempts them, so this un-gated suite
         # keeps them in the gate on a clean checkout.
-        # This list must name EVERY platform/tests/*_static.py. The db_primitives
+        # This list must name EVERY platform/tests/*_static.py except the source
+        # catalog row with its dedicated owner above. The db_primitives
         # and db_readiness files were missing, and because the `platform` suite
         # above is db_gated they ran NOWHERE on a clean checkout -- 26 tests
         # outside the gate entirely, 24 of them dependency-free and 2 DB-gated
@@ -2572,7 +2647,8 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_db_schema_proof_static.py",
                  f"{repo_name}/platform/tests/test_overlay_store_static.py",
                  f"{repo_name}/platform/tests/test_ios_ship_schema_static.py",
-                 f"{repo_name}/platform/tests/test_ios_ship_source_catalog_static.py",
+                 # Owned by platform-ios-ship-source-catalog-static; same
+                 # conftest chain, no DB/alias reads (see B1 audit above).
                  f"{repo_name}/platform/tests/test_annotation_store_static.py",
                  # The soft-delete guard (migration 0050). Registered in the
                  # SAME change that adds the file, because
@@ -2589,7 +2665,7 @@ def build_suites() -> List[Suite]:
                  f"{repo_name}/platform/tests/test_campaign_plan_policy_static.py",
                  f"{repo_name}/platform/tests/test_web_page_template_static.py",
                  f"{repo_name}/platform/tests/test_drawing_import_contract_static.py",  # UI import source kind contract
-                 ], 268,  # +3 import source kind contract
+                 ], 267,  # The source-catalog static row has its own owner.
               uses_database=True, database_skip_reasons=(
                   r"PostgreSQL integration test requires DATABASE_URL",)),
         # The committed replay fixture is dependency-free and catches hash or
