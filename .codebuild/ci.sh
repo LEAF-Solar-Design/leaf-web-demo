@@ -552,6 +552,42 @@ BASE_REF="${CODEBUILD_WEBHOOK_BASE_REF:-}"; BASE_REF="${BASE_REF##refs/heads/}";
 if git rev-parse --verify -q "origin/$BASE_REF" >/dev/null; then echo "origin/$BASE_REF"; elif git rev-parse --verify -q "$BASE_REF" >/dev/null; then echo "$BASE_REF"; else echo "FATAL: base ref $BASE_REF not in clone"; git branch -a | head -20; exit 1; fi > /tmp/base_ref
 echo "base=$(cat /tmp/base_ref) head=$(git rev-parse --short HEAD) event=${CODEBUILD_WEBHOOK_EVENT:-manual}"
 export BASE="$(cat /tmp/base_ref)"
+# LEAF_CI_CORPUS_CAGE_SUPPLY_BEGIN
+# The corpus executor requires this absolute path and seccomp capability.
+# Reuse the pinned device-image recipe only on incapable ephemeral CI images.
+echo "LEAF_T start corpus-cage-supply $(date +%s%3N)"
+if ! /usr/bin/setpriv --help 2>/dev/null | grep -Fq -- '--seccomp-filter'; then
+  if [[ "$(id -u)" != 0 ]]; then
+    echo 'corpus cage supply refused: root required to provision /usr/bin/setpriv' >&2
+    exit 1
+  fi
+  (
+    set -euo pipefail
+    supply_dir="$(mktemp -d /tmp/leaf-ci-setpriv.XXXXXX)"
+    trap 'rm -rf -- "$supply_dir"' EXIT
+    version=2.41.6
+    archive="$supply_dir/util-linux-${version}.tar.xz"
+    curl --proto '=https' --tlsv1.2 --fail --show-error --location \
+      --connect-timeout 15 --max-time 120 --output "$archive" \
+      "https://mirrors.edge.kernel.org/pub/linux/utils/util-linux/v2.41/util-linux-${version}.tar.xz"
+    echo "e596083744e746be7d2823b62b43f4418dd7bf56303b4dc09e6fe8112fe3d7ed  $archive" | sha256sum -c -
+    apt-get update
+    DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends libcap-ng-dev pkg-config
+    tar -xJf "$archive" -C "$supply_dir"
+    cd "$supply_dir/util-linux-${version}"
+    ./configure --disable-all-programs --enable-setpriv --disable-nls \
+      --without-python --without-systemd --without-udev --disable-bash-completion
+    make -j2 setpriv
+    dpkg-divert --local --rename --divert /usr/bin/setpriv.util-linux-2.37 --add /usr/bin/setpriv
+    install -m 0755 setpriv /usr/bin/setpriv
+  )
+fi
+/usr/bin/setpriv --help | grep -Fq -- '--seccomp-filter'
+/usr/bin/setpriv --version
+sha256sum /usr/bin/setpriv
+echo "corpus cage supply uid=$(id -u)"
+echo "LEAF_T end corpus-cage-supply $(date +%s%3N) rc=0"
+# LEAF_CI_CORPUS_CAGE_SUPPLY_END
 echo "LEAF_T end setup $(date +%s%3N) rc=0"
 
 if [[ "${CI_SHARD_MODE:-all}" == all || "$CI_SHARD_INDEX_N" == 0 ]]; then
