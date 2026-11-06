@@ -30,6 +30,7 @@ LAB_PATHS = [
     "/api/lab/docs/{doc_id}/restore",
     "/api/lab/docs/{doc_id}/publish",
     "/api/lab/widgets/{doc_id}/values",
+    "/api/lab/runs/corpus-options",
     "/api/lab/runs",
     "/api/lab/runs/{run_id}",
     "/api/lab/runs/{run_id}/events",
