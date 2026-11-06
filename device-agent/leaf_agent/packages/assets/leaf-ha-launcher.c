@@ -4,6 +4,7 @@
  * line 1 lan status path, line 2 log path, then argv, one per line.
  * Build: clang -O1 -arch arm64 -arch x86_64 -o leaf-ha-launcher leaf-ha-launcher.c */
 #include <arpa/inet.h>
+#include <errno.h>
 #include <fcntl.h>
 #include <ifaddrs.h>
 #include <limits.h>
@@ -20,9 +21,14 @@
 
 #define MAX_ARGS 32
 extern char **environ;
+static volatile sig_atomic_t stopping = 0;
 static volatile pid_t child = 0;
 
-static void forward(int sig) { if (child > 0) kill(child, sig); }
+/* A stop before the child exists sets the flag, so the launcher never spawns it. */
+static void forward(int sig) {
+    stopping = sig;
+    if (child > 0) kill(child, sig);
+}
 
 /* One UDP datagram to the subnet broadcast triggers the Local Network prompt. */
 static int lan_probe(void) {
@@ -45,9 +51,9 @@ static int lan_probe(void) {
     if (s < 0) return 0;
     setsockopt(s, SOL_SOCKET, SO_BROADCAST, &on, sizeof on);
     const char *m = "{\"method\":\"getPilot\",\"params\":{}}";
-    for (int i = 0; i < 24 && !ok; i++) { /* two minutes for the user to click Allow */
+    for (int i = 0; i < 24 && !ok && !stopping; i++) { /* two minutes for the user to click Allow */
         ok = sendto(s, m, strlen(m), 0, (struct sockaddr *)&to, sizeof to) >= 0;
-        if (!ok) sleep(5);
+        if (!ok && !stopping) sleep(5); /* a signal ends the sleep early */
     }
     close(s);
     return ok;
@@ -71,18 +77,39 @@ int main(void) {
     if (count < 3) return 78; /* fails closed on a malformed args file */
     lines[count] = NULL;
 
+    /* Handlers first: a stop can arrive during the two minute probe. */
+    signal(SIGTERM, forward);
+    signal(SIGINT, forward);
     int ok = lan_probe();
+    if (stopping) return 0;
     int st = open(lines[0], O_WRONLY | O_CREAT | O_TRUNC, 0600);
     if (st >= 0) { const char *v = ok ? "ok\n" : "denied\n"; write(st, v, strlen(v)); close(st); }
 
     int log = open(lines[1], O_WRONLY | O_CREAT | O_APPEND, 0600);
     if (log >= 0) { dup2(log, 1); dup2(log, 2); close(log); }
-    signal(SIGTERM, forward);
-    signal(SIGINT, forward);
+    /* Block the signals across the spawn so one cannot land between spawn and
+     * recording the pid; the child gets the default mask and handlers back. */
+    sigset_t block, previous, empty;
+    sigemptyset(&block);
+    sigaddset(&block, SIGTERM);
+    sigaddset(&block, SIGINT);
+    sigemptyset(&empty);
+    sigprocmask(SIG_BLOCK, &block, &previous);
+    if (stopping) return 0;
+    posix_spawnattr_t attr;
+    posix_spawnattr_init(&attr);
+    posix_spawnattr_setsigmask(&attr, &empty);
+    posix_spawnattr_setsigdefault(&attr, &block);
+    posix_spawnattr_setflags(&attr, POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF);
     pid_t pid;
-    if (posix_spawn(&pid, lines[2], NULL, NULL, &lines[2], environ) != 0) return 78;
+    int spawned = posix_spawn(&pid, lines[2], NULL, &attr, &lines[2], environ);
+    posix_spawnattr_destroy(&attr);
+    if (spawned != 0) return 78;
     child = pid;
+    sigprocmask(SIG_SETMASK, &previous, NULL);
     int status = 0;
-    while (waitpid(pid, &status, 0) < 0) {}
+    while (waitpid(pid, &status, 0) < 0) {
+        if (errno != EINTR) return 1; /* never spin on ECHILD */
+    }
     return WIFEXITED(status) ? WEXITSTATUS(status) : 1;
 }
