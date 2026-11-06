@@ -71,7 +71,7 @@ describe("device HTTP client", () => {
     const response = { ok: true, result: { command_id: "command" } };
     const request = vi.fn<typeof fetch>().mockResolvedValue(new Response(JSON.stringify(response), { headers: { "content-type": "application/json" } }));
     expect(await clientWith(request).deviceTool(TENANT, DEVICE_TOOL_OPERATIONS[tool], args, AUTHORITY)).toEqual(response);
-    expect(request).toHaveBeenCalledExactlyOnceWith(`https://studio.invalid/internal/devices/tools/${DEVICE_TOOL_OPERATIONS[tool]}`, {
+    expect(request).toHaveBeenCalledExactlyOnceWith(`https://studio.invalid/internal/integrations/devices/${DEVICE_TOOL_OPERATIONS[tool]}`, {
       method: "POST", redirect: "error", signal: expect.any(AbortSignal),
       headers: { "content-type": "application/json", "x-tenant-id": TENANT, "x-dispatch-secret": "private-dispatch-value",
         "x-authority-session-id": AUTHORITY.sessionId, "x-authority-turn-id": AUTHORITY.turnId },

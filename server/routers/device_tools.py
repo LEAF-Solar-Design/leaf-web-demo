@@ -46,7 +46,7 @@ async def _request(request: Request):
         return _response(service.failure("unavailable"))
 
 
-@router.post("/internal/devices/tools/{operation}")
+@router.post("/internal/integrations/devices/{operation}")
 def execute(operation: str, parsed=Depends(_request)):
     if isinstance(parsed, JSONResponse):
         return parsed
