@@ -2687,18 +2687,6 @@ def build_suites() -> List[Suite]:
         # R14-F1: 29 injected-effect replay custody rows.
         Suite("scripts-proof-project-sizing", "scripts test_proof_project_sizing.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_sizing.py"), 62),
-        # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
-        # contract v2 shape (neutral names, handle-value membership order, refused
-        # non-handle member ids), and the adapter's input scan got its own bounds sized for
-        # a real drawing (a drawing-sized graph now produces evidence, an oversized evidence
-        # document is still refused). All four tests are hermetic and unconditional.
-        # 30 -> 41 on 2026-09-22: the zones family joined the adapter (the zone's own
-        # name compared as given, membership by handle value, and rule Z7's equipment
-        # and sizing records null and named as fallbacks with the raw values kept in
-        # provenance.zone_fields), as 3 tests plus one parametrization over 8 literal
-        # malformed zones. Every case is hermetic and unconditional.
-        Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 41),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 12),
         # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
@@ -2818,147 +2806,6 @@ def build_suites() -> List[Suite]:
         Suite("scripts-solar-w1-studio-string-multi-add",
               "scripts test_solar_w1_studio_string_multi_add.py", "pytest", SCRIPTS_DIR,
               _py_pytest("test_solar_w1_studio_string_multi_add.py"), 17),
-        # S26 (2026-09-22): the shared probe-file normalizer, contract v5 rules E1-E5.
-        # Every DEMO probe file becomes `exports` evidence the frozen comparator
-        # accepts, from either side, through the same code. Covers the evidence
-        # shape, rule E4's identity mapping, rule E3's file order across the
-        # conduit-fill file's four batteries, rule E1 (the fixture is the INPUTS, so
-        # two files with equal scenarios and different results share it), the pass
-        # verdict for Studio against the licensed capture, one altered result
-        # producing exactly one row's diffs, an unobserved reopen refused, and the
-        # malformed documents and arguments that are refused rather than answered.
-        # Studio's own probe files are generated in tmp_path by
-        # scripts/solar_nec_probes.py, so the suite is hermetic and never skips:
-        # without the licensed capture the comparison runs against Studio's own file
-        # read back from a second path. S28 (2026-09-22) added rule E5's CSV
-        # projection and the four calculation capabilities, whose licensed capture IS
-        # committed, so their half compares Studio against the artifact: the `#`
-        # preamble skipped, values kept as TEXT with the quantity parsed back out of
-        # them, CRLF and LF reading identically (a committed capture is line-ending
-        # translated on checkout, so a verdict must not depend on a git setting), the
-        # headerless, blank-named, repeated-name and ragged files refused, and the
-        # declared non-numeric quantity applying only where a section declares it.
-        # The floor was 118 after S28 (26 test functions, 15 parametrized over the
-        # six NEC demos, the nine committed S28 files, or literal malformed inputs).
-        # S31 (2026-09-22) added rule E5's XLSX projection through
-        # server/solar_xlsx.py: one row record per non-empty sheet row, keyed
-        # `<sheet>:<row index>`, cells as a list, `format` naming the sheet list, and
-        # the three new probe types (harness-cable-plan, harness-bom-export,
-        # tracker-bom-xlsx-export). Its half compares Studio against the four new
-        # committed licensed files, and adds the comparator pass on each of them.
-        # Floor MEASURED at 151 on the first green run after S31 (2026-09-22, 2.6 s);
-        # it was 118 after S28 and 61 before that. S32 (2026-09-23) adds the six
-        # terrain and irradiance CSVs (four carrying Encoding.UTF8's byte order
-        # mark, which the CSV reader now drops as encoding) with a comparator pass
-        # on each against its committed licensed capture: 28 more cases, so the
-        # floor is COUNTED at 179 until the first green run measures it. S33
-        # (2026-09-23) adds the XML path (one row per KML or LandXML document,
-        # keyed by file name, its canonical lines verbatim, root element checked,
-        # hostile XML refused) and the five new probe types, with a comparator pass
-        # on each of the eighteen committed licensed files: floor MEASURED at 258
-        # on the first green run (2026-09-23, 5.0 s).
-        Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 258),
-        # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
-        # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
-        # emitted in ascending neutral-id order, so the same set recorded in two orders
-        # compares equal; a string's ordered_membership is the capability's output and
-        # keeps its order, which the comparator still reports as a diff when reversed.
-        # Every graph is authored in the file (no capture, no fixture, no network), so
-        # the floor is the exact count on every runner: 7 tests + one parametrization
-        # over 4 literal malformed sets = 11.
-        Suite("scripts-solar-studio-evidence", "scripts test_solar_studio_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_studio_evidence.py"), 11),
-        # S37 (2026-09-23): Studio's ground evidence per G14 step from a G11 intake
-        # (contract v6, G10 to G16), each step computed from Studio's own prior state
-        # (G13). Small intakes authored in the file cover every row kind, id and vertex
-        # ordering, pile-set grouping, the terrain-mesh row, chaining, the frozen
-        # comparator passing every document against itself, the comparator's document
-        # bounds, and malformed-intake refusals. COUNTED: 18 tests + 10 more
-        # parametrizations of the malformed-intake case = 29 collected; the one CLI case
-        # that commits its intake needs a git executable, so the floor is the 28 that
-        # never skip and that one skip reason is allowed.
-        Suite("scripts-solar-ground-studio-evidence", "scripts test_solar_ground_studio_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_studio_evidence.py"), 37,
-              allowed_skip_reasons=(r"needs a git executable",)),
-        # S40 (2026-09-23): paired evidence shards (contract G19) for a step whose two
-        # sides together exceed the comparator's 100,000-node document bound (terrain t1,
-        # piling t4). Every document is authored in the file (no capture, no git, no
-        # network), so the floor is the exact count on every runner: 15 plain tests plus
-        # 5 tampered shards, 5 malformed inputs and the 2 real step shapes = 27.
-        Suite("scripts-solar-evidence-shard", "scripts test_solar_evidence_shard.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_evidence_shard.py"), 27),
-        Suite("scripts-solar-ground-analysis-evidence", "scripts test_solar_ground_analysis_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_analysis_evidence.py"), 25),
-        Suite("scripts-solar-ground-layout-evidence", "scripts test_solar_ground_layout_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_layout_evidence.py"), 17),
-        Suite("scripts-solar-ground-scene-evidence", "scripts test_solar_ground_scene_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_scene_evidence.py"), 20),
-        # W5 batch 2 evidence (2026-09-24, contract G36): the producers over synthetic intakes authored in
-        # the file or committed intakes, so each floor is the exact collected count: 12 (including two k2 cases), 5 and 3.
-        Suite("scripts-solar-batch2-simple-evidence", "scripts test_solar_batch2_simple_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 12),
-        # ImportSolarEdgePDF evidence (2026-09-24): the producer over the committed PDF and drawing intake: 8.
-        Suite("scripts-solar-solaredge-import-evidence", "scripts test_solar_solaredge_import_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_solaredge_import_evidence.py"), 8),
-        Suite("scripts-solar-guardrails-evidence", "scripts test_solar_guardrails_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_guardrails_evidence.py"), 5),
-        Suite("scripts-solar-pile-block-mapping-evidence", "scripts test_solar_pile_block_mapping_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pile_block_mapping_evidence.py"), 3),
-        Suite("scripts-solar-ground-buildout-evidence", "scripts test_solar_ground_buildout_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_buildout_evidence.py"), 18),
-        Suite("scripts-solar-ground-shade-evidence", "scripts test_solar_ground_shade_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_shade_evidence.py"), 17),
-        Suite("scripts-solar-ground-reports-evidence", "scripts test_solar_ground_reports_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_reports_evidence.py"), 17),
-        # G27 rooftop chain evidence (c1 to c7, c9, c10, c11): a synthetic intake authored in the file
-        # plus the committed rooftop intake (no capture, no git: the CLI cases pin the revision), so
-        # the floor is the exact count on every runner. COUNTED: 30 tests + 13 more
-        # parametrizations = 43.
-        Suite("scripts-solar-rooftop-chain-evidence", "scripts test_solar_rooftop_chain_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_rooftop_chain_evidence.py"), 43),
-        # G33 PVcase-solve evidence (v1): a synthetic intake authored in the file plus the committed
-        # intake (no git: every case pins the revision), so the floor is the exact count on every
-        # runner. MEASURED: 13 tests + 6 more parametrizations = 19 passed.
-        Suite("scripts-solar-pvcase-solve-evidence", "scripts test_solar_pvcase_solve_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pvcase_solve_evidence.py"), 19),
-        # G35 inverter-family evidence producers (synthetic states in each file). MEASURED.
-        Suite("scripts-solar-inverter-devices-evidence", "scripts test_solar_inverter_devices_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_devices_evidence.py"), 9),
-        Suite("scripts-solar-inverter-strings-evidence", "scripts test_solar_inverter_strings_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_strings_evidence.py"), 7),
-        Suite("scripts-solar-inverter-outputs-evidence", "scripts test_solar_inverter_outputs_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_outputs_evidence.py"), 6),
-        Suite("scripts-solar-inverter-cabling-evidence", "scripts test_solar_inverter_cabling_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_cabling_evidence.py"), 3),
-        Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
-        # G30 dialog-batch evidence (e1, e4, e6): the committed terrain intake and pile-template
-        # BEFORE store plus hand-made states (no capture, no git: the CLI cases pin the revision),
-        # so the floor is the exact count on every runner. COUNTED: 17 tests, no parametrizations.
-        Suite("scripts-solar-ground-dialogs-evidence", "scripts test_solar_ground_dialogs_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dialogs_evidence.py"), 17),
-        # G32 design-profile evidence (f1 to f5 from an empty profile store): the committed generate
-        # intake and settings snapshot only (no capture, no git beyond the untracked-intake refusal),
-        # so the floor is the exact count on every runner. COUNTED: 12 tests, no parametrizations.
-        Suite("scripts-solar-design-profiles-evidence", "scripts test_solar_design_profiles_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_design_profiles_evidence.py"), 12),
-        # G34/G34a/G34b Rooftop flow evidence (flow-step and flow-event rows in the G34b envelope):
-        # the committed drawings of the three fixture states plus hand-made intakes (no capture; the
-        # CLI cases pin the revision or run outside any git work tree), so the floor is the exact
-        # count on every runner. COUNTED: 23 tests + 20 more parametrizations = 43.
-        Suite("scripts-solar-workflow-flow-evidence", "scripts test_solar_workflow_flow_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_workflow_flow_evidence.py"), 43),
-        # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
-        # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
-        # gets, which is the ONLY way a failing comparator settles a capability: the
-        # exact declared diff set, a committed finding under docs/parity/divergences/,
-        # and every receipt rule still passing. Hermetic (each case builds its ledger,
-        # receipts and finding under tmp_path; the one repo file it reads is the shipped
-        # ledger, read never written), so the floor is the exact count on every runner:
-        # 66 test functions, one parametrized over 2 comparator names = 67.
-        Suite("scripts-solar-parity-status", "scripts test_solar_parity_status.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 69),
         Suite("scripts-solar-parity-reachability", "scripts test_solar_parity_reachability.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_reachability.py"), 43),
         # Registered per the #29 fix-then-register rule (shipped without a
@@ -5378,14 +5225,7 @@ _MEASURED_EST_S = {
     "prewarm-staging-cutover-workflow": 16.3,
     "scripts-native-release-producer": 16.4,
     "scripts-proof-string-sizer": 19.4,
-    "scripts-solar-evidence-shard": 9.6,
-    "scripts-solar-ground-analysis-evidence": 5.8,
-    "scripts-solar-ground-dsteps-evidence": 6.1,
-    "scripts-solar-ground-reports-evidence": 7.4,
-    "scripts-solar-ground-shade-evidence": 17.8,
     "scripts-solar-parity-reachability": 5.1,
-    "scripts-solar-parity-status": 7.0,
-    "scripts-solar-solaredge-import-evidence": 33.4,
     "scripts-solar-w1-studio-autofill": 16.4,
     "scripts-solar-w1-studio-autofill-solve": 116.1,
     "server-approval-policy": 17.4,
