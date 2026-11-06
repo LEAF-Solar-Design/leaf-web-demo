@@ -9,7 +9,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createHarness } from "../src/server.js";
 import { authorProjectSource, PROJECT_SOURCE_SCAFFOLD } from "../src/agent/projectSourceAuthoring.js";
 import { nativeProjectSourceProfile } from "../src/agent/nativeProjectSourceProfile.js";
-import { ProjectRepositoryEditCoordinator, type StagedProjectRepositoryEdit } from "../src/agent/projectRepositoryEditCoordinator.js";
+import { ProjectRepositoryEditCoordinator, ProjectRepositoryEditError, type StagedProjectRepositoryEdit } from "../src/agent/projectRepositoryEditCoordinator.js";
 import { TenantRepoProviderImpl, type PgTenantRepoLeaseCoordinator } from "../src/ports/impl/tenantRepoProvider.js";
 import { TenantChangeRepo } from "../src/vendor/mushy-author/ports/impl/tenantChangeRepo.js";
 import type { RepoEditInput, RepoEditResult } from "../src/vendor/mushy-author/ports/impl/repoEditRunner.js";
@@ -156,7 +156,7 @@ describe("mounted first source author transaction with real private Git", () => 
   function nativeEditRequest() {
     return { ...body(), edit_id: nativeEditId, source_profile: nativeProfile.id, source_operation: "edit", material: [] as ReturnType<typeof material>[] };
   }
-  async function publishedNative() {
+  async function publishedNative(observeStageFailure = false) {
     // Keep unrelated Web/source files, including paths that Web edit preflight
     // would reject. They are immutable baseline data for a Native edit.
     seed({ ...PROJECT_SOURCE_SCAFFOLD, "app/page.tsx": page, "app/legacy.jsx": "legacy\n",
@@ -169,8 +169,24 @@ describe("mounted first source author transaction with real private Git", () => 
       writeFileSync(join(input.repoDir, "Sources/Old.swift"), "struct Old {}\n");
       return result;
     });
-    const response = await post({ ...body(), source_profile: nativeProfile.id });
-    expect(response.status).toBe(200);
+    const diagnostic = { stage: "stageEdit", code: "not-observed" };
+    const codes = new Set(["invalid_source_request", "source_base_conflict", "main_moved_during_stage",
+      "invalid_changed_paths", "invalid_diff_digest", "stage_record_mismatch", "invalid_lease_witness",
+      "invalid_authority", "invalid_edit_id", "invalid_actor", "invalid_operation", "invalid_source_edit",
+      "invalid_base_commit", "invalid_instruction_digest", "invalid_idempotency_key", "invalid_commit_message",
+      "invalid_apply", "invalid_change_evidence", "project_writer_lease_required"]);
+    const stageEdit = service.stageEdit.bind(service);
+    const observation = observeStageFailure ? vi.spyOn(service, "stageEdit").mockImplementation(async request => {
+      try { return await stageEdit(request); }
+      catch (error) {
+        diagnostic.code = error instanceof ProjectRepositoryEditError && codes.has(error.code) ? error.code : "unclassified";
+        throw error;
+      }
+    }) : undefined;
+    let response: Response;
+    try { response = await post({ ...body(), source_profile: nativeProfile.id }); }
+    finally { observation?.mockRestore(); }
+    expect(response.status, observeStageFailure ? JSON.stringify(diagnostic) : undefined).toBe(200);
     const initial = await response.json() as StagedProjectRepositoryEdit;
     expect((await post({ ...common, confirmation_id: actor, receipt_digest: initial.receiptDigest,
       expected_version: 1, transition_key: "publish-native" }, "publish")).status).toBe(200);
@@ -358,7 +374,7 @@ describe("mounted first source author transaction with real private Git", () => 
   it.each(["noop", "failure", "empty", "delete-product", "scaffold", "app-entry", "material", "web", "component", "source", "seed", "control",
     "delete-material", "unknown", "entitlements", "dependencies", "scripts", "output", "alias", "symlink", "executable",
     "file-limit", "count-limit", "total-limit"])("rejects Native edit %s output atomically and settles its grant", async mode => {
-    await publishedNative();
+    await publishedNative(mode === "count-limit");
     edit.mockImplementation(async input => {
       const dir = input.repoDir, product = "Sources/ContentView.swift";
       if (mode === "failure") throw new Error("private editor failure");
