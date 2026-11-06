@@ -1,3 +1,4 @@
+import { requireSolarFlags, installSpendGuard } from './solarProofGuard.mjs'
 import { expect, test } from '@playwright/test'
 import { writeFileSync } from 'node:fs'
 import { fileURLToPath } from 'node:url'
@@ -9,12 +10,10 @@ import { H_TITLE, H_FLAGS, EQUIPMENT, demand, isUuid, loopbackBase, executionPol
 const DRAWING = fileURLToPath(new URL('../fixtures/distinctive-panel.dxf', import.meta.url))
 
 test(H_TITLE, async ({ page }, testInfo) => {
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(600000)
   const policy = executionPolicy(process.env)
-  if (!policy.enabled) {
-    testInfo.annotations.push({ type: 'not-exercised', description: policy.reason })
-    return
-  }
   const apiBase = loopbackBase(process.env.LEAF_E2E_API_BASE || 'http://127.0.0.1:8230')
   loopbackBase(testInfo.project.use.baseURL)
   const traffic = observeProjectTraffic(page, apiBase)
@@ -297,4 +296,5 @@ test(H_TITLE, async ({ page }, testInfo) => {
     catch { if (!originalFailure) throw new Error('R13-H checkout cleanup failed') }
     finally { traffic.dispose() }
   }
+  assertNoSpend()
 })

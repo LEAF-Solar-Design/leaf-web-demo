@@ -1,8 +1,9 @@
+import { requireSolarFlags, installSpendGuard, assertRunRoot } from './solarProofGuard.mjs'
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { createHash } from 'node:crypto'
 import { inflateRawSync } from 'node:zlib'
-import { basename, dirname, join, resolve } from 'node:path'
+import { basename, join } from 'node:path'
 import { PRESET_LABELS } from '../../src/solar/solarPresetModel.js'
 import { writeProofReceipt } from '../proofReceipt.mjs'
 import { requireLocalReady } from './requireReady.mjs'
@@ -99,11 +100,6 @@ function groundPanelId(sourceHash, frameIndex, slotIndex) {
   return `leaf:panel:${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`
 }
 
-function flagsOn(testInfo) {
-  if (process.env.VITE_CAD_EDIT === '1' && process.env.VITE_SOLAR_SETTINGS_FORM === '1' && process.env.VITE_SOLAR_FLOW_RAIL === '1') return true
-  testInfo.annotations.push({ type: 'flag-gate', description: 'Requires VITE_CAD_EDIT=1, VITE_SOLAR_FLOW_RAIL=1 and VITE_SOLAR_SETTINGS_FORM=1.' })
-  return false
-}
 // A <select> wrapped by its <label> carries the option text in the label's text, so getByLabel(exact) never
 // matches it (measured with a probe page, 2026-10-03); every select here is found by its combobox role and name.
 async function reachable(control) {
@@ -147,20 +143,22 @@ async function ribbon(page, tab, target) {
 }
 
 test('G6 ground NEC outputs and downloads through the browser', async ({ page }, testInfo) => {
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(1200000)
   page.setDefaultTimeout(60000)
-  if (!flagsOn(testInfo)) return
   expect(process.env.LEAF_E2E_MANAGED).toBe('1')
   expect(process.env.LEAF_AUTH_LIVE).toBe('0')
   for (const key of ['LEAF_RUNTIME_ENV', 'LEAF_ENV']) {
     expect(['', 'local', 'test', 'development', 'dev']).toContain((process.env[key] || '').trim().toLowerCase())
   }
   expect(process.env.LEAF_STORE_DIR).toEqual(expect.any(String))
-  const runRoot = dirname(resolve(process.env.LEAF_STORE_DIR))
-  const runId = basename(runRoot).replace(/^leaf-unified-local-e2e-/, '')
-  expect(basename(runRoot)).toBe(`leaf-unified-local-e2e-${runId}`)
-  expect(runId).toMatch(/^\d{8}-\d{6}$/)
+  const runRoot = assertRunRoot(process.env.LEAF_STORE_DIR)
   const replayPath = join(runRoot, 'synthetic-sizing-receipt.json')
+  const runId = basename(runRoot) === '.e2e-run'
+    ? JSON.parse(readFileSync(replayPath, 'utf8')).run_id
+    : basename(runRoot).replace(/^leaf-unified-local-e2e-/, '')
+  expect(runId).toEqual(expect.any(String))
   const manifest = JSON.parse(readFileSync(join(process.cwd(), '..', 'scripts', 'fixtures', 'string_sizer_replay_manifest.json'), 'utf8'))
   const fixture = manifest.fixtures.find((entry) => entry.id === 'w1-string-length-recorded')
   expect(fixture.request_wire_sha256).toBe(REQUEST_SHA)
@@ -1107,4 +1105,5 @@ test('G6 ground NEC outputs and downloads through the browser', async ({ page },
     })
   })
   console.log('PASS G6-9 unchanged graph and proof receipt')
+  assertNoSpend()
 })

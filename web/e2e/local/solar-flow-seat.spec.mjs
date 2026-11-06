@@ -1,3 +1,4 @@
+import { requireSolarFlags, installSpendGuard } from './solarProofGuard.mjs'
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -9,10 +10,6 @@ const TENANT_HEADERS = { 'X-Tenant-Id': 'demo-tenant' }
 const DRAWING = join(process.cwd(), 'e2e', 'fixtures', 'distinctive-panel.dxf')
 const REQUEST_TIMEOUT = 15_000
 
-function flagsOn(testInfo) {
-  if (process.env.VITE_CAD_EDIT === '1' && process.env.VITE_SOLAR_FLOW_RAIL === '1' && process.env.VITE_SOLAR_SETTINGS_FORM === '1') return true
-  throw new Error('Seat proof requires VITE_CAD_EDIT=1, VITE_SOLAR_FLOW_RAIL=1 and VITE_SOLAR_SETTINGS_FORM=1; flag-off is not evidence.')
-}
 
 // Upload and extraction wait copied from solar-local-graph-commit.spec.mjs.
 async function openSolarDrawing(page) {
@@ -127,7 +124,8 @@ async function expandSeat(seat) {
 // camera movement, selected-id injection, or forced DOM clicks are used here.
 for (const op of ['move', 'rotate', 'arrayRect']) {
   test(`SEAT selection ${op} starts with an ordinary drawing click`, async ({ page }, testInfo) => {
-    flagsOn(testInfo)
+    requireSolarFlags()
+    const assertNoSpend = await installSpendGuard(page)
     test.setTimeout(120_000)
     await page.setViewportSize({ width: 1280, height: 800 })
     const seat = await openSolarDrawing(page)
@@ -206,6 +204,7 @@ for (const op of ['move', 'rotate', 'arrayRect']) {
       viewport: page.viewportSize(), op, point, initialPose,
       replay: 'Upload distinctive-panel.dxf; Solar CAD; expand and observe coverage; fold; click projected point; run the Solar modify verb.',
     }, null, 2) })
+    assertNoSpend()
   })
 }
 
@@ -214,7 +213,8 @@ for (const [row, width, height, seatWidth] of [
   ['S2', 1600, 1000, 360],
 ]) {
   test(`SEAT ${row} reachable Solar flow at ${width}x${height}`, async ({ page }, testInfo) => {
-    if (!flagsOn(testInfo)) return
+    requireSolarFlags()
+    const assertNoSpend = await installSpendGuard(page)
     test.setTimeout(120_000)
     await page.setViewportSize({ width, height })
     const seat = await openSolarDrawing(page)
@@ -248,11 +248,13 @@ for (const [row, width, height, seatWidth] of [
     await firstStep.click()
     await openLandxml(page, seat)
     await page.screenshot({ path: testInfo.outputPath(`seat-${width}x${height}.png`) })
+    assertNoSpend()
   })
 }
 
 test('SEAT S3 wheel scroll stays inside the bounded seat', async ({ page }, testInfo) => {
-  if (!flagsOn(testInfo)) return
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(120_000)
   await page.setViewportSize({ width: 1280, height: 640 })
   const seat = await openSolarDrawing(page)
@@ -275,10 +277,12 @@ test('SEAT S3 wheel scroll stays inside the bounded seat', async ({ page }, test
   const last = seat.getByRole('button').last()
   await last.scrollIntoViewIfNeeded()
   await ownsCentre(last)
+  assertNoSpend()
 })
 
 test('SEAT S4 Start preserves the mounted seat and its scroll position', async ({ page }, testInfo) => {
-  if (!flagsOn(testInfo)) return
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(120_000)
   await page.setViewportSize({ width: 1280, height: 800 })
   const seat = await openSolarDrawing(page)
@@ -312,10 +316,12 @@ test('SEAT S4 Start preserves the mounted seat and its scroll position', async (
   expect(await content.evaluate((element) => element.__seatContinuity)).toBe('seat-s4')
   expect(await content.evaluate((element) => element.scrollTop)).toBe(scrollTop)
   await expect(coordinateSystem).toHaveValue('EPSG:32617')
+  assertNoSpend()
 })
 
 test('SEAT S6 narrow layouts keep main\'s flow host styles', async ({ page }, testInfo) => {
-  if (!flagsOn(testInfo)) return
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(240_000)
   for (const { width, height } of [{ width: 390, height: 844 }, { width: 800, height: 768 }]) {
     await page.setViewportSize({ width, height })
@@ -336,10 +342,12 @@ test('SEAT S6 narrow layouts keep main\'s flow host styles', async ({ page }, te
     await expect(seat.getByRole('button', { name: 'Solar flow tools', exact: true })).toBeHidden()
     await page.screenshot({ path: testInfo.outputPath(`seat-narrow-${width}.png`) })
   }
+  assertNoSpend()
 })
 
 test('SEAT S5 the overview yields to the seat between 981 and 1199 px', async ({ page }, testInfo) => {
-  if (!flagsOn(testInfo)) return
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(120_000)
   await page.setViewportSize({ width: 1024, height: 768 })
   const seat = await openSolarDrawing(page)
@@ -365,4 +373,5 @@ test('SEAT S5 the overview yields to the seat between 981 and 1199 px', async ({
   const wideOverview = await overview.boundingBox()
   expect(wideSeat.x + wideSeat.width <= wideOverview.x || wideSeat.x >= wideOverview.x + wideOverview.width ||
     wideSeat.y + wideSeat.height <= wideOverview.y || wideSeat.y >= wideOverview.y + wideOverview.height).toBe(true)
+  assertNoSpend()
 })

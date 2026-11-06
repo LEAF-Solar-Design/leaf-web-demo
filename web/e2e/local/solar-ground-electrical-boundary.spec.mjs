@@ -1,3 +1,4 @@
+import { requireSolarFlags, installSpendGuard } from './solarProofGuard.mjs'
 import { expect, test } from '@playwright/test'
 import { readFileSync } from 'node:fs'
 import { join } from 'node:path'
@@ -30,11 +31,6 @@ const SIZING_TEXT = {
 }
 const SIZING_SELECT = { Scope: 'global', Bifacial: 'false', Racking: 'fixed_tilt', 'Open circuit rise': 'false' }
 
-function flagsOn(testInfo) {
-  if (process.env.VITE_CAD_EDIT === '1' && process.env.VITE_SOLAR_SETTINGS_FORM === '1' && process.env.VITE_SOLAR_FLOW_RAIL === '1') return true
-  testInfo.annotations.push({ type: 'flag-gate', description: 'Requires VITE_CAD_EDIT=1, VITE_SOLAR_FLOW_RAIL=1 and VITE_SOLAR_SETTINGS_FORM=1.' })
-  return false
-}
 // A <select> wrapped by its <label> carries the option text in the label's text, so getByLabel(exact) never
 // matches it (measured with a probe page, 2026-10-03); every select here is found by its combobox role and name.
 async function reachable(control) {
@@ -78,10 +74,12 @@ async function ribbon(page, tab, target) {
 }
 
 test('G1b ground electrical boundary through the browser', async ({ page }, testInfo) => {
+  requireSolarFlags()
+  const assertNoSpend = await installSpendGuard(page)
   test.setTimeout(600000)
-  if (!flagsOn(testInfo)) return
   if (process.env.LEAF_CLOUD_GRANTS_FILE !== undefined) {
     testInfo.annotations.push({ type: 'grant-gate', description: 'Requires LEAF_CLOUD_GRANTS_FILE to be unset; no-grant boundary was not executed.' })
+    assertNoSpend()
     return
   }
   await page.setViewportSize({ width: 1280, height: 800 })
@@ -415,4 +413,5 @@ test('G1b ground electrical boundary through the browser', async ({ page }, test
       'Unchanged state covers fresh UI version chain, displayed head and digest prefix, not an independent full storage audit.',
       'Account mode uses LEAF_AUTH_LIVE=0; APS is outside this proof.'],
   })
+  assertNoSpend()
 })
