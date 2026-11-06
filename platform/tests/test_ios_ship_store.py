@@ -288,7 +288,7 @@ def test_failed_provider_progress_requires_an_exact_controller_stage(make_org):
 @pytest.mark.parametrize("field,bad", [
     ("run_id", "run-other"),
     ("tenant_id", "tenant-other"),
-    ("project_id", str(uuid.uuid4())),
+    pytest.param("project_id", str(uuid.uuid4()), id="project_id-random-wrong-project"),
     ("source_revision", "other"),
     ("source_artifact_digest", "sha256:" + "d" * 64),
     ("bundle_id", "com.other.app"),
