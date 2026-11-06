@@ -353,12 +353,19 @@ def test_recoverable_queue_refuses_malformed_project_execution_binding():
 
 
 def test_migration_sequence_is_collision_free_and_manifest_ordered():
+    import hashlib
+    import platform_link
+
     migrations = sorted((REPO_ROOT / "platform" / "migrations").glob("[0-9][0-9][0-9][0-9]_*.sql"))
     names = [path.name for path in migrations]
     assert "0035_session_request_journal.sql" in names
-    assert len({name[:4] for name in names}) == len(names), "migration prefixes must be unique"
-    # Fixed position, not "last": unique sorted 4-digit prefixes put 0035 at
-    # index 34 permanently, so later migrations don't decay this assertion.
+    assert len(set(names)) == len(names), "migration filenames must be unique"
+    assert platform_link.platform_db().migration_manifest() == [
+        {"name": path.name, "sha256": hashlib.sha256(path.read_bytes()).hexdigest()}
+        for path in migrations
+    ]
+    # The journal keeps its fixed position in the filename-ordered manifest.
+    # Later migrations may share a numeric prefix without sharing an identity.
     assert names.index("0035_session_request_journal.sql") == 34
     sql = (REPO_ROOT / "platform" / "migrations" /
            "0035_session_request_journal.sql").read_text(encoding="utf-8")
