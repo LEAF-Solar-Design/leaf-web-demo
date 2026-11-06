@@ -1267,13 +1267,17 @@ def test_worker_source_allowlist_contains_only_the_two_reviewed_producers():
     assert r.sha(Path(service.worker.__file__).read_bytes()) in r.REVIEWED_WORKER_SHA256
     # Bind the new Journal dependency closure to its exact reviewed producer,
     # including both original-history and current-source checks.
-    connected = '93f79347257b8f84ea4a88ca3aaf69ec85907b81'
+    # The relay bundles main/head ancestry, not squash-merged feature commits.
+    # Bind the actual runtime bytes to the same exact reviewed source pins.
+    connected = r.runtime_commit('HEAD')
     worker = r.runtime_source(connected, 'scripts/native_preview_worker.py')
     journal = r.runtime_source(connected, 'scripts/native_preview_reconciliation.py')
     assert r.sha(worker) == r.CONNECTED_WORKER_SHA256
     assert r.journal_source_sha(journal) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
     assert r.pre_execution_source(connected) == r.PRE_EXECUTION_CONNECTED_JOURNAL_SOURCE_SHA256
     load, read = r.runtime_source, r.read
+    legacy_worker = load('e158ace5709231f9d9f37418d6b2c48d69228647', 'scripts/native_preview_worker.py')
+    assert r.sha(legacy_worker) == '6ad5eb2b343e3d9f749769805001d74282519d6ce41cdf7996999573fa306197'
     with pytest.MonkeyPatch.context() as patch:
         for original in (False, True):
             for target in ('worker', 'journal', 'legacy-worker-with-connected-journal'):
@@ -1282,7 +1286,7 @@ def test_worker_source_allowlist_contains_only_the_two_reviewed_producers():
                         if target == 'worker':
                             return raw.replace(b'guard.start()', b'guard.beat()')
                         if target == 'legacy-worker-with-connected-journal':
-                            return load('ea6666829719f014dd955f5d61db14f24836177d', path)
+                            return legacy_worker
                     if target == 'journal' and path.endswith('native_preview_reconciliation.py'):
                         return raw.replace(b'self.failed = True', b'self.failed = False')
                     return raw
