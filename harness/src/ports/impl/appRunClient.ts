@@ -324,7 +324,7 @@ export class HttpAppRunClient implements AppRunClient {
     });
     try {
       const work = async (): Promise<DeviceToolResult> => {
-        const response = await this.fetchImpl(`${this.baseUrl}/internal/devices/tools/${operation}`, {
+        const response = await this.fetchImpl(`${this.baseUrl}/internal/integrations/devices/${operation}`, {
           method: "POST", redirect: "error", signal: controller.signal,
           headers: { ...this.headers(tenantId),
             "x-authority-session-id": authority.sessionId,

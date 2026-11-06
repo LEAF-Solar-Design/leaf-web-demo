@@ -36,7 +36,7 @@ def tools(api, monkeypatch):
 
 
 def call(tools, operation, body, headers=None):
-    return tools.client.post("/internal/devices/tools/" + operation, json=body,
+    return tools.client.post("/internal/integrations/devices/" + operation, json=body,
                              headers=HEADERS if headers is None else headers)
 
 
@@ -96,7 +96,7 @@ def test_bad_dispatch_secret(tools):
 
 @pytest.mark.parametrize("raw", ['{"a":1,"a":2}', '[]', '{"x":NaN}', '{"x":1e999}', '{', '{"x":"' + 'x' * 16384 + '"}'])
 def test_strict_body_and_cap(tools, raw):
-    response = tools.client.post("/internal/devices/tools/list", content=raw, headers=HEADERS)
+    response = tools.client.post("/internal/integrations/devices/list", content=raw, headers=HEADERS)
     assert response.status_code == 400
     assert response.json()["error"]["code"] == "invalid_input"
 
