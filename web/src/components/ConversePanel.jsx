@@ -729,6 +729,10 @@ export default function ConversePanel({
             : null
         } else if (code === 'grant_required') grant = true
         else t.feed.push({ kind: 'error', code, message: humanizeError(STOP_NOTES[code] || data.error?.message || 'The assistant could not finish this reply. Try again.') })
+        if (typeof data.stop_reason === 'string' && data.stop_reason) {
+          if (!t.stopReason) t.stopReason = data.stop_reason
+          completed.add(t.turnId)
+        }
       }
     }
     // A stop can confirm completion before the terminal event is recovered.
