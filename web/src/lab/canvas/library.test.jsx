@@ -5,6 +5,7 @@ import Palette, { BLOCK_MIME } from './Palette.jsx'
 import LibraryDetails from './LibraryDetails.jsx'
 import LabCanvas from './LabCanvas.jsx'
 import { manifests, registry } from './registry.js'
+import { hasOperator } from '../runtime/ops.js'
 import { intentManifest, readManifest, transformManifests } from '../host/hostProvider.js'
 import { sentence } from '../honesty.js'
 import { colorLiteralsIn, replacedWordsIn } from '../standardsChecks.js'
@@ -41,6 +42,7 @@ const config = { ...base, id: 'kashbot2-config', title: 'Kashbot configuration',
 const group = title => screen.getByRole('region', { name: title })
 const entry = (root, id) => root.querySelector(`[data-library-entry="${id}"]`)
 const addButtons = root => [...root.querySelectorAll('button[draggable="true"]')]
+const isPureOperator = manifest => manifest.kind === 'builtin' && manifest.effect === 'pure' && hasOperator(manifest.id)
 const search = value => fireEvent.change(screen.getByRole('searchbox'), { target: { value } })
 const tap = (button, pointerType = 'touch') => {
   // jsdom may not provide PointerEvent; keep the real pointerdown dispatch.
@@ -68,7 +70,7 @@ describe('library categories and metadata', () => {
     expect(categoryOf({ ...count, id: 'kb2-example' })).toBe('kashbot-v2')
     Object.values(transforms).forEach(manifest => expect(categoryOf(manifest)).toBe('math'))
     ;[host, jobs, capabilities].forEach(manifest => expect(categoryOf(manifest)).toBe('sources'))
-    manifests.forEach(manifest => expect(categoryOf(manifest)).toBe('kashbot-policy'))
+    manifests.forEach(manifest => expect(categoryOf(manifest)).toBe(isPureOperator(manifest) ? 'math' : 'kashbot-policy'))
     expect(categoryOf(intentManifest())).toBe('other')
     expect(categoryOf({ ...base, id: 'third-party' })).toBe('other')
   })
@@ -80,13 +82,15 @@ describe('library categories and metadata', () => {
       'Recent', 'Kashbot v2', 'Math and data', 'Sources', 'Old Kashbot policy', 'Other',
     ])
     expect(within(group('Kashbot v2')).getByText('No Kashbot v2 blocks yet.')).toBeVisible()
-    expect(addButtons(group('Math and data'))).toHaveLength(11)
+    // Includes the trusted arithmetic builtins: constant, add, subtract, multiply, divide.
+    expect(addButtons(group('Math and data'))).toHaveLength(16)
     expect(addButtons(group('Sources'))).toHaveLength(3)
     expect(addButtons(group('Old Kashbot policy'))).toHaveLength(14)
     expect(addButtons(group('Other'))).toHaveLength(1)
     expect(screen.queryByLabelText('Tools')).not.toBeInTheDocument()
     fireEvent.change(screen.getByLabelText('Group blocks'), { target: { value: 'family' } })
-    expect(container.querySelectorAll('[data-element-family]')).toHaveLength(27)
+    // Includes the trusted arithmetic builtins: constant, add, subtract, multiply, divide.
+    expect(container.querySelectorAll('[data-element-family]')).toHaveLength(32)
     expect(group('Signals')).toBeVisible()
     expect(group('Rules')).toBeVisible()
     fireEvent.change(screen.getByLabelText('Group blocks'), { target: { value: 'lane' } })
@@ -128,7 +132,15 @@ describe('library categories and metadata', () => {
     for (const manifest of manifests) {
       const row = within(entry(container, manifest.id))
       expect(row.getByText(`${manifest.id}@1.0.0`)).toBeVisible()
-      for (const chip of ['Pure', 'Runs on the bot', 'Placeholder']) expect(row.getByText(chip)).toHaveClass('lab-effect-chip')
+      if (isPureOperator(manifest)) {
+        expect(entry(group('Math and data'), manifest.id)).not.toBeNull()
+        for (const chip of ['Pure', 'Runs here']) expect(row.getByText(chip)).toHaveClass('lab-effect-chip')
+        expect(row.queryByText('Runs on the bot')).not.toBeInTheDocument()
+        expect(row.queryByText('Placeholder')).not.toBeInTheDocument()
+      } else {
+        expect(entry(group('Old Kashbot policy'), manifest.id)).not.toBeNull()
+        for (const chip of ['Pure', 'Runs on the bot', 'Placeholder']) expect(row.getByText(chip)).toHaveClass('lab-effect-chip')
+      }
     }
     for (const manifest of Object.values(transforms)) {
       const row = within(entry(container, manifest.id))
@@ -167,7 +179,8 @@ describe('library categories and metadata', () => {
     search('VARIANCE')
     expect(addButtons(container).map(button => button.parentElement.dataset.libraryEntry)).toEqual(['variance-ew600', 'variance-mad'])
     search('Math')
-    expect(addButtons(container)).toHaveLength(11)
+    // Includes the trusted arithmetic builtins: constant, add, subtract, multiply, divide.
+    expect(addButtons(container)).toHaveLength(16)
     search('UNIQUE DESCRIPTION')
     expect(addButtons(container).map(button => button.textContent)).toEqual(['Kashbot configuration'])
     search('Observation')
@@ -269,7 +282,9 @@ describe('recent blocks and placement', () => {
     fireEvent.keyUp(button, { key: 'Enter' })
     fireEvent.click(button, { detail: 0 })
     expect(screen.getAllByTestId('placed-block')).toHaveLength(2)
-    for (const node of screen.getAllByTestId('placed-block')) expect(node).toHaveAttribute('data-position', JSON.stringify({ x: 390, y: 240 }))
+    // Project the pane centre into flow coordinates, then offset overlapping palette adds by 340 on x.
+    expect(screen.getAllByTestId('placed-block').map(node => JSON.parse(node.dataset.position)))
+      .toEqual([{ x: 390, y: 240 }, { x: 730, y: 240 }])
     expect(readRecent(localStorage)).toEqual(['count', 'adjust-none'])
     expect(addButtons(group('Recent')).map(button => button.parentElement.dataset.libraryEntry)).toEqual(['count', 'adjust-none'])
     expect(within(container).getAllByTestId(/^library-add-/)).toHaveLength(2)
