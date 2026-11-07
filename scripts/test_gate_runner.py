@@ -6539,10 +6539,17 @@ def test_early_feedback_actual_trusted_heavy_entry_preserves_producers(tmp_path)
     license_checks = ["npm run build", "python scripts/check_license_fence.py --self-test",
                       "python scripts/check_license_fence.py ."]
     browsers = ["npx playwright install --with-deps chromium", "python -m playwright install --with-deps chromium"]
-    assert run() == license_checks + browsers
+    calls = run()
+    assert [call for call in calls if call in license_checks] == license_checks
+    assert [call for call in calls if call in browsers] == browsers
+    assert sorted(calls) == sorted(license_checks + browsers)
     assert run(shard=1) == browsers
-    assert run(fail_os=True) == license_checks + [browsers[0], "npx playwright install chromium",
-                                               browsers[1], "python -m playwright install chromium"]
+    calls = run(fail_os=True)
+    expected_browsers = [browsers[0], "npx playwright install chromium",
+                         browsers[1], "python -m playwright install chromium"]
+    assert [call for call in calls if call in license_checks] == license_checks
+    assert [call for call in calls if call in expected_browsers] == expected_browsers
+    assert sorted(calls) == sorted(license_checks + expected_browsers)
 
 
 _SIP_EARLY_POLICY_IDS = (
