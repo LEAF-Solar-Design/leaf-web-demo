@@ -72,6 +72,8 @@
     "public-host-contract",
     "reconcile-staging-fleet",
     "reconcile-upload-authority",
+    "scripts-ci-read-audit",
+    "scripts-ci-suite-reads",
     "scripts-native-preview-entry",
     "scripts-native-preview-host",
     "scripts-native-preview-service",
@@ -335,8 +337,10 @@
     "server-lab-git-authority",
     "server-lab-git-cutover",
     "server-lab-git-write",
+    "server-lab-honesty",
     "server-lab-mirror-ops",
     "server-lab-ops",
+    "server-lab-placement",
     "server-lab-registry",
     "server-lab-run-store",
     "server-lab-runs",
@@ -750,7 +754,7 @@
   ],
   "enabled": true,
   "generated_from": {
-    "catalog_sha256": "705e5e08b544b78e4203b268410348560df32124e839622d7067272adaebe7a7",
+    "catalog_sha256": "4878b250f473ea241661084afc1b74f0146f49d8f05da5788f8f228405e5292f",
     "input_sha256s": {
       "fail30": "1d12f16a43d821eed38c6c411a1639d2e0af5241db8ae50e372bfa2c02443d4a",
       "proposal": "b7ee7af28e7da38b36ec81821a9ad977d7100b40a2047318603ac8c6b7929f87",

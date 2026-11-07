@@ -54,6 +54,163 @@ def _load_runner():
     return mod
 
 
+def test_read_audit_unset_preserves_every_catalog_command_and_environment(tmp_path, monkeypatch):
+    g = _load_runner()
+    monkeypatch.delenv("LEAF_TRUSTED_CI_DIR", raising=False)
+    monkeypatch.delenv("LEAF_READSET_DIR", raising=False)
+    monkeypatch.setenv("PYTHONPATH", "existing-python-path")
+    for suite in g.build_suites():
+        command = g.reporting_command(suite, list(suite.argv),
+                                      g.suite_trace_env(suite, tmp_path, 1))
+        trace_env = g.suite_trace_env(suite, tmp_path, 1)
+        before = {**g.clean_env(), **trace_env}
+        assert suite.read_audit_dir is None
+        assert g.read_audit_command(suite, command, trace_env, 1) is command
+        assert command == suite.argv
+        assert {**g.clean_env(), **trace_env} == before
+    assert not list(tmp_path.iterdir())
+
+
+def test_read_audit_flag_injects_pytest_environment_and_plugin(tmp_path, monkeypatch):
+    g = _load_runner()
+    suite = g.Suite("audit.stub", "audit stub", "pytest", tmp_path,
+                    g._py_pytest("test_stub.py"), 1)
+    captured = []
+
+    def child(command, **kwargs):
+        captured.append((command, kwargs["env"]))
+        return SimpleNamespace(returncode=0, stdout="1 passed in 0.01s\n", stderr="")
+
+    monkeypatch.setenv("PYTHONPATH", "existing-python-path")
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    monkeypatch.delenv("LEAF_TRUSTED_CI_DIR", raising=False)
+    monkeypatch.setattr(g, "build_suites", lambda: [suite])
+    monkeypatch.setattr(g, "migrate_gate_database", lambda _suites: None)
+    monkeypatch.setattr(g, "record_attempt", lambda *_args: None)
+    monkeypatch.setattr(g.subprocess, "run", child)
+    monkeypatch.setattr(sys, "argv", ["run-all-gates.py", "--read-audit", str(tmp_path / "audit"),
+                                    "--log-dir", str(tmp_path / "logs"), "--retry", "0"])
+    assert g.main() == 0
+    command, env = captured[0]
+    output = tmp_path / "audit" / "audit%2Estub" / "1"
+    assert output.is_dir()
+    assert command == suite.argv + ["-p", "read_audit"]
+    assert env["LEAF_READ_AUDIT_DIR"] == str(output)
+    assert env["LEAF_READ_AUDIT_ROOT"] == str(g.REPO)
+    assert env["PYTHONPATH"] == str(SCRIPTS / "ci") + os.pathsep + "existing-python-path"
+    assert "LEAF_READ_AUDIT_DIR" not in os.environ
+
+
+@pytest.mark.parametrize("kind,argv,reason", [
+    ("pytest", [sys.executable, "-I", "-m", "pytest", "test_stub.py"], "isolated launcher (-I)"),
+    ("pytest", [sys.executable, "opaque_launcher.py"], "pytest token missing"),
+    ("vitest", ["npx", "vitest", "run"], "not pytest"),
+])
+def test_read_audit_unsupported_suites_run_unchanged(tmp_path, monkeypatch, kind, argv, reason):
+    g = _load_runner()
+    suite = g.Suite("unsupported", "unsupported", kind, tmp_path, argv, 1,
+                    read_audit_dir=tmp_path / "audit")
+    captured = []
+    expected_env = g.clean_env()
+
+    def child(command, **kwargs):
+        captured.append((command, kwargs["env"]))
+        return SimpleNamespace(returncode=0, stdout="1 passed\nTests  1 passed (1)\n", stderr="")
+
+    monkeypatch.setattr(g.subprocess, "run", child)
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    for attempt in (1, 2):
+        result = g.run_suite(suite, tmp_path, attempt=attempt, reporting_disabled=True)
+        assert result.status == "PASS"
+    assert captured == [(argv, expected_env), (argv, expected_env)]
+    rows = [json.loads(line) for line in (tmp_path / "audit/unaudited.jsonl").read_text().splitlines()]
+    assert rows == [{"suite_id": suite.id, "reason": reason}]
+    assert not (tmp_path / "audit" / suite.id).exists()
+
+
+@pytest.mark.parametrize("deferred", [False, True])
+def test_read_audit_records_database_skips(tmp_path, monkeypatch, deferred):
+    g = _load_runner()
+    suite = g.Suite("database", "database", "pytest", tmp_path, g._py_pytest("test_db.py"), 1,
+                    db_gated=True, db_deferred="follow-up" if deferred else "",
+                    read_audit_dir=tmp_path / "audit")
+    monkeypatch.delenv("LEAF_GATE_REQUIRE_DATABASE", raising=False)
+    monkeypatch.setattr(g, "probe_platform_db", lambda: (False, "offline", ""))
+    monkeypatch.setattr(g.subprocess, "run", lambda *_a, **_k: pytest.fail("skipped suite spawned"))
+    assert g.run_suite(suite, tmp_path).status == "SKIP"
+    row = json.loads((tmp_path / "audit/unaudited.jsonl").read_text())
+    assert row["suite_id"] == suite.id
+    assert "DB unreachable" in row["reason"] or "database proof deferred" in row["reason"]
+
+
+def test_read_audit_attempt_paths_and_reporting_pythonpath(tmp_path):
+    g = _load_runner()
+    suite = g.Suite("suite/with.dot", "stub", "pytest", tmp_path, g._py_pytest("test_stub.py"), 1,
+                    read_audit_dir=tmp_path / "audit")
+    for attempt in (1, 2):
+        env = {"PYTHONPATH": "reporting-path", "LEAF_TEST_REPORT_DIR": "reporting-output"}
+        assert g.read_audit_command(suite, suite.argv, env, attempt) == suite.argv + ["-p", "read_audit"]
+        assert env["PYTHONPATH"] == str(SCRIPTS / "ci") + os.pathsep + "reporting-path"
+        assert env["LEAF_TEST_REPORT_DIR"] == "reporting-output"
+        output = tmp_path / "audit" / "suite%2Fwith%2Edot" / str(attempt)
+        assert env["LEAF_READ_AUDIT_DIR"] == str(output)
+        assert output.is_dir()
+
+
+@pytest.mark.parametrize("block_root", [False, True])
+def test_read_audit_setup_errors_never_fail_a_suite(tmp_path, monkeypatch, block_root):
+    g = _load_runner()
+    directory = tmp_path / "audit"
+    if block_root:
+        directory.write_text("not a directory")
+    else:
+        directory.mkdir()
+        (directory / "stub").write_text("not a directory")
+    suite = g.Suite("stub", "stub", "pytest", tmp_path, g._py_pytest("test_stub.py"), 1,
+                    read_audit_dir=directory)
+    captured = []
+
+    def child(command, **kwargs):
+        captured.append((command, kwargs["env"]))
+        return SimpleNamespace(returncode=0, stdout="1 passed\n", stderr="")
+
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    expected_env = g.clean_env()
+    monkeypatch.setattr(g.subprocess, "run", child)
+    assert g.run_suite(suite, tmp_path, reporting_disabled=True).status == "PASS"
+    assert captured == [(suite.argv, expected_env)]
+    if not block_root:
+        row = json.loads((directory / "unaudited.jsonl").read_text())
+        assert row["suite_id"] == suite.id
+        assert row["reason"].startswith("audit setup failed: ")
+
+
+def test_read_audit_real_pytest_records_opened_file(tmp_path, monkeypatch):
+    g = _load_runner()
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    (repo / "payload.txt").write_text("audit payload", encoding="utf-8")
+    (repo / "test_input.py").write_text(
+        "def test_input():\n"
+        "    with open('payload.txt') as stream:\n"
+        "        assert stream.read() == 'audit payload'\n", encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    suite = g.Suite("tiny", "tiny", "pytest", repo,
+                    [sys.executable, "-P", "-m", "pytest", "test_input.py", "-q", "-p", "no:cacheprovider"], 1,
+                    read_audit_dir=tmp_path / "audit")
+    monkeypatch.setattr(g, "REPO", repo)
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+    monkeypatch.setenv("PYTHONDONTWRITEBYTECODE", "1")
+    monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    monkeypatch.delenv("PYTEST_ADDOPTS", raising=False)
+    result = g.run_suite(suite, logs, reporting_disabled=True)
+    assert result.status == "PASS", result.log_path.read_text()
+    entries = [json.loads(line) for path in (tmp_path / "audit/tiny/1").glob("*.jsonl")
+               for line in path.read_text(encoding="utf-8").splitlines()]
+    assert {"k": "f", "p": "payload.txt"} in entries
+
+
 def _failed_log_retention_helper():
     spec = importlib.util.spec_from_file_location(
         "retain_failed_gate_logs", SCRIPTS / "ci/retain_failed_gate_logs.py")
