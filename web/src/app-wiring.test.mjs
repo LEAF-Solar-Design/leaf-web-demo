@@ -6063,15 +6063,53 @@ it('BSP3 Tool rail closes the actual Studio panel on phone and desktop', () => {
 
 it('BSP5 imported drawing labels and counts follow source objects', () => {
   const init = name => r13One(node => node.type === 'VariableDeclarator' && node.id.name === name).init
-  const label = env => r13Evaluate(init('activeDrawingName'), {
-    projectMode: false, projectDrawingName: 'project.dwg', activeIntake: null,
-    shown: { polylines: Array(2345), layers: ['Panels'] }, projectName: 'sample',
-    drawingPropertyName: (preferred, fallback) => preferred || fallback || '', ...env,
-  })
+  const openerImport = r13One(node => node.type === 'ImportDeclaration'
+    && node.source.value === './cadedit/EngineHeadOpener.jsx')
+  assert.ok(openerImport.specifiers.some(node => node.type === 'ImportSpecifier'
+    && node.imported.name === 'holdsHeadDocument' && node.local.name === 'holdsHeadDocument'))
+  // Node cannot import the JSX module; mirror its pure id-shape and origin rules.
+  const holdsHeadDocument = (session, drawingId, openedDocumentId) => {
+    const id = session?.documentId
+    if (typeof id !== 'string' || !/-v\d+\.dxf$/.test(id)) return false
+    if (typeof drawingId !== 'string' || drawingId === '') return false
+    const prefix = `${drawingId}-v`
+    if (!id.startsWith(prefix) || !/^\d+\.dxf$/.test(id.slice(prefix.length))) return false
+    return session.documentOrigin === 'head'
+      || (session.documentOrigin === null && id === openedDocumentId)
+  }
+  const label = env => {
+    const scope = {
+      projectMode: false, projectDrawingName: 'project.dwg', activeIntake: null,
+      shown: { polylines: Array(2345), layers: ['Panels'] }, projectName: 'sample',
+      drawingName: null, engineDocument: null, REQUESTED_DRAWING_ID: 'demo', holdsHeadDocument,
+      drawingPropertyName: (preferred, fallback) => preferred || fallback || '', ...env,
+    }
+    scope.mountedDrawingFile = r13Evaluate(init('mountedDrawingFile'), scope)
+    scope.activeDocumentIsHead = r13Evaluate(init('activeDocumentIsHead'), scope)
+    return r13Evaluate(init('activeDrawingName'), scope)
+  }
   assert.equal(label({ activeIntake: { documentId: 'rooftop.dxf' } }), 'rooftop.dxf')
   assert.equal(label({}), 'sample.dwg')
   assert.equal(label({ shown: null }), '')
   assert.equal(label({ projectMode: true, activeIntake: { documentId: 'rooftop.dxf' } }), 'project.dwg')
+  const head = (documentId, drawingId = 'demo', drawingName = 'rooftop_demo') => ({
+    activeIntake: { documentId }, engineDocument: { documentId, documentOrigin: 'head' },
+    REQUESTED_DRAWING_ID: drawingId, drawingName,
+  })
+  const uploadId = '5ecede53-1e27-49cf-9829-841b2939e635'
+  assert.equal(label(head(`${uploadId}-v1.dxf`, uploadId, 'walk.dxf')), 'walk.dxf')
+  assert.equal(label(head('demo-v1.dxf')), 'rooftop_demo.dwg')
+  assert.equal(label(head('demo-v7.dxf')), 'rooftop_demo.dwg')
+  assert.equal(label(head('demo-v1.dxf', 'demo', null)), 'demo-v1.dxf')
+  assert.equal(label({ ...head('rooftop.dxf', 'demo', 'old_drawing'),
+    engineDocument: { documentId: 'rooftop.dxf', documentOrigin: 'import' } }), 'rooftop.dxf')
+  assert.equal(label({ ...head('demo-v1.dxf', 'demo', 'old_drawing'),
+    engineDocument: { documentId: 'demo-v1.dxf', documentOrigin: 'import' } }), 'demo-v1.dxf')
+  assert.equal(label(head('other-v1.dxf', 'demo', 'old_drawing')), 'other-v1.dxf')
+  assert.equal(label({ ...head('a-v1.dxf', 'a', 'old_drawing'),
+    engineDocument: { documentId: 'b-v1.dxf', documentOrigin: 'head' } }), 'a-v1.dxf')
+  assert.equal(label({ activeIntake: null, drawingName: 'walk.dxf' }), 'walk.dxf')
+  assert.equal(label({ ...head('demo-v1.dxf'), projectMode: true }), 'project.dwg')
   const countsByLayer = Object.fromEntries(['Roof', 'Zones', 'Obstructions', 'Panels', 'Strings', 'Inverters', 'StringLabels', 'InverterLabels'].map(layer => [layer, 1]))
   const summary = { entityCount: 80, countsByType: { LWPOLYLINE: 74, TEXT: 6 }, countsByLayer }
   assert.equal(r13Evaluate(init('drawingMetadata'), { sourceDrawingSummary: summary, shown: null }), '80 entities · 8 layers')

@@ -124,7 +124,7 @@ import CommandLineArmer from './cadedit/CommandLineArmer.jsx'
 import CockpitEngineStatus from './site/CockpitEngineStatus.jsx'
 import StatusModesBridge from './cadedit/StatusModesBridge.jsx'
 import EngineDocumentView from './cadedit/EngineDocumentView.jsx'
-import EngineHeadOpener from './cadedit/EngineHeadOpener.jsx'
+import EngineHeadOpener, { holdsHeadDocument } from './cadedit/EngineHeadOpener.jsx'
 import { createProjectDrawingEditor, projectDrawingEditorScopeKey } from './cadedit/projectDrawingEditor.js'
 import { createProjectDrawingEditorTransport } from './api.js'
 import SolarStarterOpener, { SOLAR_STARTER_EMPTY_INTAKE } from './cadedit/SolarStarterOpener.jsx'
@@ -4832,8 +4832,13 @@ export default function App() {
   // Named apart from the version bootstrap's `drawingSummary`: a shadowing
   // name makes the build transform rename one of them and the App wiring
   // pins (src/app-wiring.test.mjs) then miss the bootstrap's pattern.
+  // A hand import's id is its filename; a head copy's id is internal. The mounted drawing names only this drawing's head.
+  const mountedDrawingFile = drawingName && (/\.dxf$/i.test(drawingName) ? drawingName : `${drawingName}.dwg`)
+  const activeDocumentIsHead = !!activeIntake && engineDocument?.documentId === activeIntake.documentId
+    && holdsHeadDocument(engineDocument, REQUESTED_DRAWING_ID)
   const activeDrawingName = projectMode ? projectDrawingName
-    : drawingPropertyName(activeIntake?.documentId, shown ? `${projectName}.dwg` : '')
+    : activeIntake ? drawingPropertyName(activeDocumentIsHead ? mountedDrawingFile : '', activeIntake.documentId)
+      : shown ? mountedDrawingFile || `${projectName}.dwg` : ''
   const sourceDrawingSummary = drawingIntake?.sourceSummary
   const drawingMetadata = sourceDrawingSummary
     ? `${sourceDrawingSummary.entityCount} entities · ${Object.keys(sourceDrawingSummary.countsByLayer).length} layers`
