@@ -461,7 +461,8 @@ def _lifecycle_response(operation):
 class SaveProjectPageBody(BaseModel):
     model_config = ConfigDict(extra='forbid')
     expected_revision: int = Field(strict=True, ge=0, lt=2147483647)
-    document: Dict[str, Any] = Field(max_length=9)
+    # The page validator owns the closed schema, including optional portfolio design fields.
+    document: Dict[str, Any]
 
 
 def _native_response(operation):
