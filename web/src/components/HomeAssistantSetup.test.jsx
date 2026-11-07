@@ -115,7 +115,7 @@ it('hue manual step asks for the bridge IP and submits host', async () => {
   fireEvent.click(screen.getByRole('button', { name: 'Use this bridge' }))
   expect(await screen.findByText('Press the round button on top of your Hue bridge, then click Continue')).toBeInTheDocument()
   expect(screen.getByRole('button', { name: 'Continue' })).toBeInTheDocument()
-  expect(screen.getByText('30 s remaining')).toBeInTheDocument()
+  expect(await screen.findByText('30 s remaining')).toBeInTheDocument()
   expect(screen.queryByLabelText('Hue bridge IP address')).not.toBeInTheDocument()
   expect(commands).toEqual([
     { op: 'ha.flow.start', args: { handler: 'hue' } },

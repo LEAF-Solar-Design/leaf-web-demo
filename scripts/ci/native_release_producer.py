@@ -751,6 +751,41 @@ def _print_build_logs(work: Path, services, *, retry=False) -> None:
         print(tail, flush=True)
 
 
+def _app_frontend_closed_before_build(path: Path) -> bool:
+    """Recognize only a complete, bounded app syntax-frontend failure log."""
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(BUILD_LOG_TAIL_BYTES + 1)
+        if len(raw) > BUILD_LOG_TAIL_BYTES:
+            return False
+        text = raw.decode("utf-8")
+    except (OSError, UnicodeError):
+        return False
+    lines = text.rstrip("\r\n").splitlines()
+    if not lines or not lines[0].startswith('#0 building with '):
+        return False
+    required = ("#1 [internal] load build definition from Dockerfile.app",
+                "#2 resolve image config for docker-image://docker.io/docker/dockerfile:1",
+                "Dockerfile.app:1", "   1 | >>> # syntax=docker/dockerfile:1",
+                "ERROR: failed to build: failed to solve: frontend grpc server closed unexpectedly")
+    if any(lines.count(line) != 1 for line in required) or lines[-1] != required[-1]:
+        return False
+    # A later build vertex, source step or another diagnostic cannot qualify.
+    progress = [re.match(r"^#(\d+) (.*)$", line) for line in lines if line.startswith('#')]
+    if any(match is None or int(match[1]) > 3 for match in progress):
+        return False
+    if any('[' in match[2] and match[0] != required[0] for match in progress):
+        return False
+    if any(line and not line.startswith('#') and line not in ("Dockerfile.app:1", required[-1])
+           and re.fullmatch(r"-+|\s+\d+ \|.*", line) is None for line in lines):
+        return False
+    frontend = r"#3 docker-image://docker.io/docker/dockerfile:1@sha256:[0-9a-f]{64}"
+    return (sum(re.fullmatch(frontend, line) is not None for line in lines) == 1
+            and any(re.fullmatch(r"#1 DONE [0-9.]+s", line) for line in lines)
+            and any(re.fullmatch(r"#2 DONE [0-9.]+s", line) for line in lines)
+            and any(re.fullmatch(r"#3 DONE [0-9.]+s", line) for line in lines))
+
+
 def _build_images(root: Path, services, source: str, build_number: int,
                   freshness: dict, work: Path, extras: dict | None = None) -> dict:
     """Build the selected images and return them keyed in SERVICES order."""
@@ -767,20 +802,26 @@ def _build_images(root: Path, services, source: str, build_number: int,
     _print_build_logs(work, ordered)
     errors = {service: futures[service].exception() for service in ordered}
     results = {service: futures[service].result() for service in ordered if errors[service] is None}
-    # Bounded, one retry only on the InRelease pin race, re-pinning to the newer current index.
+    # One retry per image across both classes; never retry a retry's failure.
     for service in ordered:
-        if service == "web" or not isinstance(errors[service], subprocess.CalledProcessError):
+        if not isinstance(errors[service], subprocess.CalledProcessError):
             continue
-        tail = _build_log_tail(work / f"{service}.log")
-        if tail is None or not all(marker in tail for marker in PIN_RACE_MARKERS):
-            continue
-        try:
-            fresh = refresh_debian_freshness(service)
-        except Exception:
-            continue
-        if fresh == freshness[service]:
-            continue
-        print(f"image {service}: package index pin moved during build; rebuilding once with refreshed pins", flush=True)
+        if service == "app" and _app_frontend_closed_before_build(work / "app.log"):
+            fresh = freshness[service]
+            print("image app: syntax frontend transport closed before build; rebuilding once with identical inputs", flush=True)
+        else:
+            if service == "web":
+                continue
+            tail = _build_log_tail(work / f"{service}.log")
+            if tail is None or not all(marker in tail for marker in PIN_RACE_MARKERS):
+                continue
+            try:
+                fresh = refresh_debian_freshness(service)
+            except Exception:
+                continue
+            if fresh == freshness[service]:
+                continue
+            print(f"image {service}: package index pin moved during build; rebuilding once with refreshed pins", flush=True)
         try:
             results[service] = build_image(root, service, source, build_number, fresh,
                                           work / f"{service}.retry1.json",
