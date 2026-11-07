@@ -1270,7 +1270,8 @@ def list_sessions(scope: Optional[str] = None, limit: int = LIST_DEFAULT_LIMIT,
 async def post_message_route(session_id: str, request: Request,
                              req: MessageRequest,
                              tenant=Depends(deps.require_active_tenant)):
-    return post_message(session_id, req, request, tenant)
+    # Keep blocking turn dispatch off the loop: the harness calls back into this app before its first event.
+    return await run_in_threadpool(post_message, session_id, req, request, tenant)
 
 
 def post_message(session_id: str, req: MessageRequest, request: Request,
