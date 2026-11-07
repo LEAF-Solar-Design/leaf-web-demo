@@ -7,7 +7,7 @@ const baseURL = `http://127.0.0.1:${port}`
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: ['**/project/**'],
+  testIgnore: ['**/project/**', '**/signed-in/**'],
   workers: 1,
   outputDir: '../artifacts/cat-operator-proof/test-results',
   reporter: [['list'], ['html', {

@@ -48,5 +48,14 @@ test('creating a project from this drawing attaches its first drawing version', 
   const workspace = await response.json()
   expect(Array.isArray(workspace.drawing_versions)).toBe(true)
   test.fail(true, 'finding 1: Create project from this drawing leaves the project with zero drawing versions')
-  expect(workspace.drawing_versions.length).toBeGreaterThanOrEqual(1)
+  await expect.poll(async () => {
+    try {
+      const response = await page.request.get(`/api/projects/${project.project_id}`, { headers: signedInUser.headers })
+      if (!response.ok()) return -1
+      const workspace = await response.json()
+      return workspace.drawing_versions.length
+    } catch {
+      return -1
+    }
+  }, { timeout: 15_000, message: 'finding 1: creation attaches the uploaded drawing version' }).toBeGreaterThanOrEqual(1)
 })
