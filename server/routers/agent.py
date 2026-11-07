@@ -430,7 +430,8 @@ class ProjectDrawingStateRequest(BaseModel):
     turn_id: str
 
 
-@router.post("/internal/agent/project-drawing-state")
+# This route must stay under a prefix the load balancer forwards.
+@router.post("/internal/integrations/project-drawing-state")
 def internal_project_drawing_state(req: ProjectDrawingStateRequest,
                                   x_dispatch_secret: Optional[str] = Header(default=None)):
     denied = _require_dispatch(x_dispatch_secret)
