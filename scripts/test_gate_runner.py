@@ -5599,10 +5599,24 @@ def test_studio_walk_nonzero_verdicts_fail_through_run_suite(code, tmp_path, mon
     g = _load_runner()
     suite = next(s for s in g.build_suites() if s.id == "studio-walk-regressions")
     monkeypatch.delenv("LEAF_GATE_FAULT_INJECT", raising=False)
+    if code == 75:
+        clock = {"now": 1000.0}
+        sleeps = []
+
+        def sleep(seconds):
+            sleeps.append(seconds)
+            clock["now"] += seconds
+
+        monkeypatch.setattr(g.time, "sleep", sleep)
+        monkeypatch.setattr(g.time, "perf_counter", lambda: clock["now"])
     monkeypatch.setattr(g.subprocess, "run", lambda *a, **k: SimpleNamespace(
         returncode=code, stdout=f"regression rejected: {code}\n", stderr=""))
     result = g.run_suite(suite, tmp_path, reporting_disabled=True)
     assert result.status == "FAIL"
+    if code == 75:
+        assert result.queued_exhausted is True
+        assert result.note.startswith("queued:")
+        assert result.note.endswith("over 600.0 s")
 
 
 @pytest.mark.parametrize("fault", ["spawn", "timeout"])
