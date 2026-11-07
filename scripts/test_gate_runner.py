@@ -2609,6 +2609,119 @@ def test_selected_script_environment_skip_is_a_failure(tmp_path):
     assert result.got == "err"
 
 
+@pytest.fixture
+def queued_launcher(tmp_path, monkeypatch):
+    """Real child exits, with a clock owned by the fixture rather than host uptime."""
+    g = _load_runner()
+    clock = {"now": 1000.0}
+    sleeps = []
+    counter = tmp_path / "launcher-attempts.txt"
+    launcher = tmp_path / "queued_launcher.py"
+    real_run = subprocess.run
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        clock["now"] += seconds
+
+    def timed_run(argv, **kwargs):
+        result = real_run(argv, **kwargs)
+        if str(launcher) in argv:
+            clock["now"] += 2.0
+        return result
+
+    monkeypatch.setattr(g, "time", SimpleNamespace(
+        perf_counter=lambda: clock["now"], sleep=sleep, strftime=time.strftime))
+    monkeypatch.setattr(g.subprocess, "run", timed_run)
+
+    def configure(queued_attempts, exit_code=0):
+        launcher.write_text(
+            "import sys\nfrom pathlib import Path\n"
+            f"counter = Path({str(counter)!r})\n"
+            "attempt = int(counter.read_text()) + 1 if counter.exists() else 1\n"
+            "counter.write_text(str(attempt))\n"
+            f"if attempt <= {queued_attempts}:\n"
+            "    print('Error: QUEUED: Less than 6 GiB free RAM', file=sys.stderr)\n"
+            "    sys.exit(75)\n"
+            f"sys.exit({exit_code})\n", encoding="utf-8")
+        suite = g.Suite("queued-walk", "queued walk", "script", SCRIPTS,
+                        [sys.executable, str(launcher)], None)
+        monkeypatch.setattr(g, "build_suites", lambda: [suite])
+        return SimpleNamespace(g=g, suite=suite, sleeps=sleeps, counter=counter)
+
+    return configure
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+@pytest.mark.parametrize("queued_attempts", [1, 2])
+def test_queued_launcher_recovers_without_spending_generic_retries(
+        queued_launcher, tmp_path, monkeypatch, capsys, jobs, queued_attempts):
+    case = queued_launcher(queued_attempts)
+    result_file = tmp_path / "result.json"
+    rc, output = _jobs_main(case.g, monkeypatch, capsys, tmp_path,
+        ["--jobs", str(jobs), "--retry", "0", "--result-json", str(result_file)])
+
+    row = json.loads(result_file.read_text(encoding="utf-8"))["results"][0]
+    assert rc == 0 and row["status"] == "PASS"
+    assert row["attempts"] == queued_attempts + 1
+    assert case.counter.read_text() == str(queued_attempts + 1)
+    assert case.sleeps == [15.0, 30.0][:queued_attempts]
+    assert row["queued_seconds"] == sum(case.sleeps)
+    assert row["seconds"] == 2.0 * (queued_attempts + 1), "exclude queue waits"
+    assert "flaked" not in row["note"]
+    attempts = [json.loads(line) for line in
+                (tmp_path / "attempts" / "queued-walk.jsonl").read_text().splitlines()]
+    assert [row["attempt"] for row in attempts] == list(range(1, queued_attempts + 2))
+    assert [row["status"] for row in attempts] == ["QUEUED"] * queued_attempts + ["PASS"]
+    assert [row["seconds"] for row in attempts] == [2.0] * (queued_attempts + 1)
+    assert all(row["note"] == "queued: Less than 6 GiB free RAM"
+               for row in attempts[:queued_attempts])
+    assert all((tmp_path / row["log_path"]).is_file() for row in attempts)
+    assert len([line for line in output.splitlines()
+                if line.startswith("GATE_QUEUED ")]) == queued_attempts
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_queued_launcher_budget_exhaustion_fails_without_generic_restart(
+        queued_launcher, tmp_path, monkeypatch, capsys, jobs):
+    case = queued_launcher(100)
+    result_file = tmp_path / "result.json"
+    rc, output = _jobs_main(case.g, monkeypatch, capsys, tmp_path,
+        ["--jobs", str(jobs), "--retry", "3", "--result-json", str(result_file)])
+
+    row = json.loads(result_file.read_text(encoding="utf-8"))["results"][0]
+    assert rc == 1 and row["status"] == "FAIL"
+    assert row["attempts"] == 11 and case.counter.read_text() == "11"
+    assert case.sleeps == [15.0, 30.0] + [60.0] * 8 + [53.0]
+    assert row["queued_seconds"] == 578.0 and row["seconds"] == 22.0
+    assert row["note"] == (
+        "queued: Less than 6 GiB free RAM after 11 attempts over 600.0 s")
+    assert "GATE_QUEUED id=queued-walk attempts=11 seconds=578.0" in output.splitlines()
+    assert "LEAF_EVENT" not in output
+    attempts = [json.loads(line) for line in
+                (tmp_path / "attempts" / "queued-walk.jsonl").read_text().splitlines()]
+    assert [row["attempt"] for row in attempts] == list(range(1, 12))
+    assert all(row["status"] == "QUEUED" and row["note"].startswith("queued:")
+               for row in attempts)
+
+
+@pytest.mark.parametrize("jobs", [1, 2])
+def test_nonqueued_exit_one_keeps_single_attempt_failure(
+        queued_launcher, tmp_path, monkeypatch, capsys, jobs):
+    case = queued_launcher(0, exit_code=1)
+    result_file = tmp_path / "result.json"
+    rc, output = _jobs_main(case.g, monkeypatch, capsys, tmp_path,
+        ["--jobs", str(jobs), "--retry", "0", "--result-json", str(result_file)])
+
+    row = json.loads(result_file.read_text(encoding="utf-8"))["results"][0]
+    assert rc == 1 and row["status"] == "FAIL"
+    assert row["attempts"] == 1
+    assert row["note"] == (
+        "no output (exit 1): child failed to start or was killed externally")
+    assert row["seconds"] == 2.0 and row["queued_seconds"] == 0.0
+    assert case.counter.read_text() == "1" and case.sleeps == []
+    assert "GATE_QUEUED" not in output
+
+
 # --------------------------------------------------------------------------- #
 # npm-audit: registry-outage-tolerant classification (harness-audit-high)
 #

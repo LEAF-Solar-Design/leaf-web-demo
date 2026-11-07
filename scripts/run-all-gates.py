@@ -198,6 +198,11 @@ class Result:
     test_report: dict = field(default_factory=dict)
     skipped_by_gate: str = ""
     process_capture: dict = field(default_factory=dict)
+    attempts: int = 1             # physical launcher calls, including QUEUED
+    queued_seconds: float = 0.0   # waits only; excluded from seconds
+    queued_exhausted: bool = False
+    attempt_seconds: Optional[float] = None
+    queued_budget_used: float = 0.0  # preserve the budget across generic retries
 
 
 def _py_pytest(target: str) -> List[str]:
@@ -4369,6 +4374,11 @@ def read_test_report(suite: Suite, log_dir: Path, attempt: int, status: str = ""
 
 def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
     """Append before retries replace Result or add cumulative durations."""
+    # Exhaustion has no new launcher outcome: its last QUEUED row is already
+    # durable. Other results name the final physical attempt of the call.
+    if result.queued_exhausted:
+        return
+    attempt += result.attempts - 1
     try:
         report = read_test_report(result.suite, log_dir, attempt, result.status)
         if result.test_report.get("test_report_incomplete_reasons"):
@@ -4380,7 +4390,10 @@ def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
                           test_ids=[], failed_test_ids=[], collection_ids_sha256=None, test_report_refs=[])
         result.test_report = report
         row = dict(report, suite_id=result.suite.id, attempt=attempt,
-                   status=result.status, seconds=result.seconds,
+                   status=result.status,
+                   seconds=(result.attempt_seconds if result.attempt_seconds is not None
+                            else result.seconds),
+                   note=result.note, queued_seconds=result.queued_seconds,
                    run_id=os.environ.get("LEAF_READSET_RUN", ""),
                    log_path=(os.path.relpath(result.log_path, log_dir).replace("\\", "/")
                              if result.log_path else None))
@@ -4977,6 +4990,11 @@ def run_npm_audit_suite(suite: Suite, log_path: Path) -> Result:
 # --------------------------------------------------------------------------- #
 # runner
 # --------------------------------------------------------------------------- #
+QUEUED_BUDGET_S = 600.0
+QUEUED_INITIAL_BACKOFF_S = 15.0
+QUEUED_MAX_BACKOFF_S = 60.0
+
+
 def reset_authored_tools(log_dir: Path) -> str:
     """Reset server/authored_tools.json to a clean {"tools": []}, backing up the
     prior content into the log dir first. Returns a human note."""
@@ -4991,7 +5009,59 @@ def reset_authored_tools(log_dir: Path) -> str:
 
 
 def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
-              reporting_disabled: bool = False) -> Result:
+              reporting_disabled: bool = False,
+              queued_budget_s: Optional[float] = None) -> Result:
+    """Exit 75 reserves the same attempt slot, with its own bounded backoff."""
+    budget = QUEUED_BUDGET_S if queued_budget_s is None else queued_budget_s
+    started = time.perf_counter()
+    backoff = QUEUED_INITIAL_BACKOFF_S
+    seconds = queued_seconds = 0.0
+    number = 0
+    while True:
+        number += 1
+        physical_attempt = attempt + number - 1
+        result = _run_suite_attempt(suite, log_dir, physical_attempt,
+                                   reporting_disabled=reporting_disabled)
+        seconds += result.seconds
+        if result.status != "QUEUED":
+            break
+        result.queued_seconds = queued_seconds
+        record_attempt(result, log_dir, physical_attempt)
+        remaining = budget - (time.perf_counter() - started)
+        if remaining > 0:
+            delay = min(backoff, remaining)
+            with result.log_path.open("a", encoding="utf-8") as stream:
+                stream.write(f"\n[QUEUED: {result.note}; retrying in {delay:g}s]\n")
+            print(f"\nGATE_QUEUED id={suite.id} attempts={physical_attempt} "
+                  f"seconds={queued_seconds:.1f} wait_seconds={delay:g}", flush=True)
+            waiting = time.perf_counter()
+            time.sleep(delay)
+            queued_seconds += time.perf_counter() - waiting
+            backoff = min(backoff * 2, QUEUED_MAX_BACKOFF_S)
+        elapsed = time.perf_counter() - started
+        if elapsed >= budget:
+            result.status = "FAIL"
+            result.got = "err"
+            total_elapsed = QUEUED_BUDGET_S - budget + elapsed
+            result.note = (f"{result.note} after {physical_attempt} attempts "
+                           f"over {total_elapsed:.1f} s")
+            result.queued_exhausted = True
+            with result.log_path.open("a", encoding="utf-8") as stream:
+                stream.write("\n" + result.note + "\n")
+            print(f"\nGATE_QUEUED id={suite.id} attempts={physical_attempt} "
+                  f"seconds={queued_seconds:.1f}", flush=True)
+            break
+    result.attempt_seconds = result.seconds
+    result.seconds = seconds
+    result.attempts = number
+    result.queued_seconds = queued_seconds
+    if number > 1 or result.queued_exhausted:
+        result.queued_budget_used = time.perf_counter() - started
+    return result
+
+
+def _run_suite_attempt(suite: Suite, log_dir: Path, attempt: int = 1,
+                       reporting_disabled: bool = False) -> Result:
     log_path = log_dir / (f"{suite.id}.log" if attempt == 1
                           else f"{suite.id}.retry{attempt - 1}.log")
     if suite.requires_linux and sys.platform != "linux":
@@ -5166,6 +5236,16 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
         capture_evidence, rc = capture_attempt_evidence(capture_output, rc)
     seconds = time.perf_counter() - t0
 
+    if rc == 75:
+        reason = next((line.split("QUEUED:", 1)[1].strip()
+                       for line in out.splitlines() if "QUEUED:" in line), "")
+        if not reason:
+            reason = next((line.strip() for line in reversed(out.splitlines())
+                           if line.strip()), "exit 75")
+        return Result(suite, "QUEUED", "-", seconds,
+                      note=f"queued: {scrub_evidence(reason)[:240]}", log_path=log_path,
+                      process_capture=capture_evidence)
+
     if reporting_injected and rc != 0:
         # Playwright's list reporter uses the same passed/failed count words.
         counts = parse_pytest(out) if suite.kind == "pytest" else parse_vitest(out)
@@ -5279,14 +5359,17 @@ def run_suite(suite: Suite, log_dir: Path, attempt: int = 1,
 
 
 def run_suite_guarded(suite: Suite, log_dir: Path, attempt: int,
-                      reporting_disabled: bool = False) -> Result:
+                      reporting_disabled: bool = False,
+                      queued_budget_s: Optional[float] = None) -> Result:
     """One suite must never take down the whole gate: any unexpected
     runner-side exception (parse bug, log-dir I/O, ...) becomes a FAIL row on
     the scoreboard instead of an uncaught crash that loses every remaining
     suite and the scoreboard itself."""
     try:
         return run_suite(suite, log_dir, attempt=attempt,
-                         **({"reporting_disabled": True} if reporting_disabled else {}))
+                         **({"reporting_disabled": True} if reporting_disabled else {}),
+                         **({"queued_budget_s": queued_budget_s}
+                            if queued_budget_s is not None else {}))
     except Exception as exc:  # noqa: BLE001 — the scoreboard is the contract
         return Result(suite, "FAIL", "err", 0.0,
                       note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
@@ -5844,30 +5927,41 @@ def plan_parallel_phases(suites: List[Suite]) -> tuple[List[Suite], List[Suite]]
 
 def _run_parallel_suite(suite: Suite, log_dir: Path, retry: int) -> tuple[Result, int]:
     # Mirror the serial retry contract without changing the default code path.
-    def attempt(number: int, reporting_disabled: bool = False) -> Result:
+    def attempt(number: int, reporting_disabled: bool = False,
+                queued_budget_s: Optional[float] = None) -> Result:
         try:
             return run_suite_guarded(suite, log_dir, attempt=number,
-                                    **({"reporting_disabled": True} if reporting_disabled else {}))
+                                    **({"reporting_disabled": True} if reporting_disabled else {}),
+                                    **({"queued_budget_s": queued_budget_s}
+                                       if queued_budget_s is not None else {}))
         except Exception as exc:
             return Result(suite, "FAIL", "err", 0.0,
                           note=f"runner error: {type(exc).__name__}: {str(exc)[:160]}")
 
     res = attempt(1)
     record_attempt(res, log_dir, 1)
-    attempts = 1
-    while res.status == "FAIL" and attempts <= retry:
-        attempts += 1
+    attempts = res.attempts
+    retries = 0
+    while res.status == "FAIL" and not res.queued_exhausted and retries < retry:
+        retries += 1
         prev_secs = res.seconds
         prev_note = res.note
-        res = attempt(attempts, reporting_disabled="reporter_startup_failure" in
-                      res.test_report.get("test_report_incomplete_reasons", []))
-        record_attempt(res, log_dir, attempts)
+        prev_queued = res.queued_seconds
+        prev_budget = res.queued_budget_used
+        res = attempt(attempts + 1, reporting_disabled="reporter_startup_failure" in
+                      res.test_report.get("test_report_incomplete_reasons", []),
+                      queued_budget_s=max(0.0, QUEUED_BUDGET_S - prev_budget)
+                      if prev_budget else None)
+        record_attempt(res, log_dir, attempts + 1)
+        attempts += res.attempts
         res.seconds += prev_secs
+        res.queued_seconds += prev_queued
+        res.queued_budget_used += prev_budget
         if res.status == "PASS":
-            res.note = (f"flaked; passed on attempt {attempts}/{retry + 1}"
+            res.note = (f"flaked; passed on attempt {retries + 1}/{retry + 1}"
                         + (f" (prev: {prev_note})" if prev_note else "")
                         + (f" ({res.note})" if res.note else ""))
-    if res.status == "FAIL" and attempts > 1:
+    if res.status == "FAIL" and retries > 0 and not res.queued_exhausted:
         res.note = (f"FAIL after {attempts} attempts"
                     + (f" ({res.note})" if res.note else ""))
     return res, attempts
@@ -5973,6 +6067,7 @@ def run_lanes(suites: List[Suite], log_dir: Path, jobs: int, retry: int,
                             # other lanes continue; catalog-order rows stay below.
                             print(f"GATE_RESULT id={suite.id} status={res.status} "
                                   f"seconds={res.seconds:.1f} attempts={attempts} "
+                                  f"queued_seconds={res.queued_seconds:.1f} "
                                   f"note={scrub_evidence(res.note)}", flush=True)
                             if res.status == "FAIL":
                                 for line in failed_suite_evidence([res], max_suites=1,
@@ -6529,6 +6624,7 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
             "expected": r.suite.expected,
             "attempts": attempts_by_id.get(r.suite.id, 1),
             "seconds": round(r.seconds, 1),
+            "queued_seconds": round(r.queued_seconds, 1),
             "note": r.note,
             "test_report": r.test_report,
         })
@@ -7411,24 +7507,32 @@ def main() -> int:
         print(f"  ... {suite.id:<22} ", end="", flush=True)
         res = run_suite_guarded(suite, log_dir, attempt=1)
         record_attempt(res, log_dir, 1)
-        attempts = 1
+        attempts = res.attempts
+        retries = 0
         # Retry a FAILED integration suite (these boot real servers -> load
         # flakes), including spawn failures — a child that never started is
         # retried exactly like a red one.
-        while (res.status == "FAIL" and attempts <= args.retry):
-            attempts += 1
+        while (res.status == "FAIL" and not res.queued_exhausted and retries < args.retry):
+            retries += 1
             prev_secs = res.seconds
             prev_note = res.note
+            prev_queued = res.queued_seconds
+            prev_budget = res.queued_budget_used
             retry_options = ({"reporting_disabled": True} if "reporter_startup_failure" in
                              res.test_report.get("test_report_incomplete_reasons", []) else {})
-            res = run_suite_guarded(suite, log_dir, attempt=attempts, **retry_options)
-            record_attempt(res, log_dir, attempts)
+            if prev_budget:
+                retry_options["queued_budget_s"] = max(0.0, QUEUED_BUDGET_S - prev_budget)
+            res = run_suite_guarded(suite, log_dir, attempt=attempts + 1, **retry_options)
+            record_attempt(res, log_dir, attempts + 1)
+            attempts += res.attempts
             res.seconds += prev_secs  # cumulative time spent on this row
+            res.queued_seconds += prev_queued
+            res.queued_budget_used += prev_budget
             if res.status == "PASS":
-                res.note = (f"flaked; passed on attempt {attempts}/{args.retry + 1}"
+                res.note = (f"flaked; passed on attempt {retries + 1}/{args.retry + 1}"
                             + (f" (prev: {prev_note})" if prev_note else "")
                             + (f" ({res.note})" if res.note else ""))
-        if res.status == "FAIL" and attempts > 1:
+        if res.status == "FAIL" and retries > 0 and not res.queued_exhausted:
             res.note = (f"FAIL after {attempts} attempts"
                         + (f" ({res.note})" if res.note else ""))
         attempts_by_id[suite.id] = attempts
