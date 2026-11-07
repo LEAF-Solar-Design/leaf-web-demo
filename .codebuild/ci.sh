@@ -427,7 +427,14 @@ fi
 if [[ -f "$selection_dir/execution-mode" ]]; then
   selection_mode="$(<"$selection_dir/execution-mode")"
 fi
+# LEAF_PR_TIER_ACTIVATION_BEGIN
+# Use the gate's policy loader once, before the startup event declares its mode.
+pr_tier_active="$(python3 -I -B scripts/ci/build_pr_tier.py --active scripts/ci/pr-tier.json)"
 export LEAF_SELECTION_EXECUTION_MODE="$selection_mode"
+if [[ "$pr_tier_active" == 1 ]]; then
+  export LEAF_SELECTION_EXECUTION_MODE=selected
+fi
+# LEAF_PR_TIER_ACTIVATION_END
 if [[ -n "${CODEBUILD_BUILD_ID:-}" ]]; then
   receipt_failed=0
   aws s3api put-object --bucket leaf-mq-transport-807034087062-us-east-1 \
@@ -1022,11 +1029,15 @@ if [[ "${process_capture_active:-0}" == 1 ]]; then
   # Capture records every suite's reads; a failure still fails the job below.
   gate_fail_fast_args=()
 fi
+gate_tier_args=()
+if [[ "$pr_tier_active" == 1 ]]; then
+  gate_tier_args=(--tier-file scripts/ci/pr-tier.json)
+fi
 echo "LEAF_EVENT gate fail_fast=${#gate_fail_fast_args[@]}" >&2
 unset PYTHONSAFEPATH
 # Ensure gate rows reach the log even when the job is killed at its deadline.
 export PYTHONUNBUFFERED=1
-python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback "${gate_fail_fast_args[@]}" --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
+python scripts/run-all-gates.py --jobs "${LEAF_GATE_JOBS:-auto}" --retry 0 --early-feedback "${gate_fail_fast_args[@]}" --result-json /tmp/gate-results/gate-result.json --log-dir /tmp/gate-logs "${only_args[@]}" "${gate_tier_args[@]}" --before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites || gate_status=$?
 python -I -B scripts/ci/retain_failed_gate_logs.py \
   --result /tmp/gate-results/gate-result.json --logs /tmp/gate-logs --output /tmp/gate-results/failed-gate-logs \
   --emit-stdout --source "$HEAD_SHA" --build-id "${CODEBUILD_BUILD_ID:-}" \
@@ -1099,6 +1110,15 @@ try:
 except (OSError, ValueError):
     detail = {"schema": "leaf.ci.selection.v1", "execution_mode": "full",
               "fallback_reason": "receipt_prepare_failed"}
+# LEAF_TIER_RESULT_BEGIN
+try:
+    gate_result = json.loads(Path("/tmp/gate-results/gate-result.json").read_text(encoding="utf-8"))
+except (OSError, ValueError):
+    gate_result = {}
+if gate_result.get("mode") == "tier":
+    detail.update(execution_mode="selected", selection_mode="selected", selection_source="pr-tier", apply_filter=False,
+                  executed_suite_ids=gate_result["suite_ids"], expanded_suite_ids=gate_result["suite_ids"])
+# LEAF_TIER_RESULT_END
 records = []
 raw = b""
 expected = set(detail.get("executed_suite_ids", []))
@@ -1238,7 +1258,7 @@ if detail.get("phase") == "shadow":
               "fallback_reason": detail.get("fallback_reason"),
               "assigned_arm": detail.get("assigned_arm"), "execution_mode": detail.get("execution_mode")}
     (out / "shadow.json").write_text(canonical(shadow) + "\n", encoding="utf-8")
-if sys.argv[3] == "1":
+if sys.argv[3] == "1" and detail.get("selection_source") != "pr-tier":
     helper = out / "full_run_manifest.py"
     if not helper.is_file() or not helper.stat().st_size:
         raise ValueError("manifest_helper_unavailable")
