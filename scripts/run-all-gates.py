@@ -7165,8 +7165,9 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
 # At 8 workers pool suite-seconds inflate x1.57 (browser suites x1.8-1.96), so a worker needs ~2 vCPU.
 # Round CPU workers half up: job 12613's 3 CPU / 12 GiB ran serially into the deadline.
 _AUTO_CPUS_PER_WORKER = 2
-# Heavy browser suites plus their servers peak near 3 GiB per worker on that same 15 GB box.
-_AUTO_GIB_PER_WORKER = 3
+# Browser suites peaked near 3 GiB per worker in 2026-09, but every web suite now holds the web-tree lock, so one browser suite runs at a time and the other workers run pytest.
+# 2 GiB per worker lets an 8 CPU / 8 GiB worker run 4 jobs instead of 2 (2026-11-07, unmeasured until the first full run).
+_AUTO_GIB_PER_WORKER = 2
 # Conflict lanes (#1400) and the graph memo (#1402) removed the old floor; on 36 vCPU XLARGE,
 # 2026-09-24, gate wall was 276 s at 8, 227 s at 12, 207 s at 16 workers, 0 FAIL/RETRY each.
 # 16 is also --jobs' own upper bound.
@@ -7176,7 +7177,7 @@ _AUTO_READ_LIMIT = 8192
 
 
 def resolve_auto_jobs(cpus: float, mem_bytes: int | None) -> int:
-    """Pure: min(cpus / 2 rounded half up, mem_gib / 3 floored, 16), at least 1.
+    """Pure: min(cpus / 2 rounded half up, mem_gib / 2 floored, 16), at least 1.
 
     Job 12613's 3 CPU / 12 GiB ran serially into the deadline with CPU flooring.
     """
