@@ -157,6 +157,8 @@ def test_platform_lane_fallback_literal_is_restricted():
 
 FROZEN_ROLES_CLAIM = "https://leafdesign.ai/roles"
 FROZEN_PLATFORM_ADMIN = "platform_admin"
+FROZEN_PRINCIPAL_TYPE_CLAIM = "https://leafdesign.ai/principal_type"
+FROZEN_SERVICE_ADMIN_TYPE = "service_admin"
 
 
 def test_roles_claim_minted_under_frozen_namespace_by_both_actions():
@@ -179,12 +181,22 @@ def test_leaf_admin_implies_platform_admin_role_in_action():
     assert "candidates.push(PLATFORM_ADMIN_ROLE);" in text
 
 
-def test_m2m_action_forbids_platform_admin():
-    # A staff identity requires a human login — the same posture that keeps
-    # `admin` out of the M2M VALID_TIERS keeps platform_admin out of M2M roles.
+def test_m2m_action_denies_admin_by_default_with_explicit_service_exception():
+    # §10 / §11.5 operator-ratified exception (2026-11-07): metadata alone
+    # still cannot mint admin authority. Existing tier/capability sets stay frozen.
     text = (SERVER_DIR / "auth0-actions" /
             "credentials-exchange-add-tenant-claim.js").read_text(encoding="utf-8")
     assert "M2M_FORBIDDEN_ROLES = new Set(['platform_admin'])" in text
+    assert ("const VALID_TIERS = new Set(['restricted', 'self_hosted', 'hosted_free', "
+            "'hosted_starter', 'hosted_pro']);") in text
+    assert "requestedTier === 'admin' && isServiceAdminClient(event)" in text
+    assert "event.secrets.LEAF_SERVICE_ADMIN_CLIENT_IDS" in text
+    assert "const MAX_SERVICE_ADMIN_CLIENT_IDS = 16;" in text
+    assert "ids.includes(event && event.client && event.client.client_id)" in text
+    assert "principal_type: 'service_admin'" in text
+    assert "setCustomClaim(CLAIM_NS + 'principal_type'" in text
+    assert FROZEN_PRINCIPAL_TYPE_CLAIM == FROZEN_NS + "principal_type"
+    assert FROZEN_SERVICE_ADMIN_TYPE == "service_admin"
 
 
 def test_role_grants_use_the_frozen_capability_vocabulary_only():

@@ -120,13 +120,15 @@ def _auth_env():
 
 def mint(*, key=_priv_pem, kid=KID, aud=AUD, iss=ISS, exp_delta=3600,
          include_tenant=True, tenant_id="org_acme_solar",
-         org_id=None) -> str:
+         org_id=None, extra_claims=None) -> str:
     now = int(time.time())
     payload = {"iss": iss, "aud": aud, "iat": now, "exp": now + exp_delta, "sub": "auth0|tester"}
     if include_tenant:
         payload[NS + "tenant_id"] = tenant_id
         payload[NS + "org_id"] = tenant_id if org_id is None else org_id
         payload[NS + "tier"] = "hosted_pro"
+    if extra_claims:
+        payload.update(extra_claims)
     return jwt.encode(payload, key, algorithm="RS256", headers={"kid": kid})
 
 
@@ -316,6 +318,128 @@ def test_missing_tenant_claim_rejected_403():
     assert ei.value.status_code == 403
 
 
+SERVICE_CLIENT_ID = "LeafService_1234"
+SERVICE_SUBJECT = SERVICE_CLIENT_ID + "@clients"
+
+
+def _service_admin_claims():
+    return {
+        "sub": SERVICE_SUBJECT,
+        "azp": SERVICE_CLIENT_ID,
+        NS + "tier": "admin",
+        NS + "roles": ["platform_admin"],
+        NS + "principal_type": "service_admin",
+    }
+
+
+def _assert_principal_rejected(claims):
+    # Both seams must enforce the check: platform uses the verifier directly,
+    # while server callers additionally extract claims from a verified payload.
+    with pytest.raises(HTTPException) as ei:
+        auth.verify_platform_token(bearer(mint(extra_claims=claims)))
+    assert ei.value.status_code == 403
+    with pytest.raises(HTTPException) as ei:
+        auth.extract_tenant_claims({NS + "tenant_id": "org_acme_solar", **claims})
+    assert ei.value.status_code == 403
+
+
+def test_elevated_machine_requires_exact_service_admin_marker():
+    for tier, roles in [
+        ("admin", []), ("hosted_pro", ["platform_admin"]),
+        ("restricted", [" Platform_Admin "]),
+    ]:
+        for marker in [None, "", "human", "Service_Admin", "service_admin "]:
+            claims = {
+                **_service_admin_claims(), NS + "tier": tier,
+                NS + "roles": roles, NS + "principal_type": marker,
+            }
+            _assert_principal_rejected(claims)
+        claims.pop(NS + "principal_type")
+        _assert_principal_rejected(claims)
+
+
+def test_service_admin_requires_exact_azp_even_without_admin_claims():
+    for tier, roles in [("admin", ["platform_admin"]), ("restricted", [])]:
+        for azp in [None, "", 42, [SERVICE_CLIENT_ID], SERVICE_SUBJECT,
+                    SERVICE_CLIENT_ID.lower(), "LeafServ1ce_1234",
+                    SERVICE_CLIENT_ID + " "]:
+            claims = {**_service_admin_claims(), "azp": azp,
+                      NS + "tier": tier, NS + "roles": roles}
+            _assert_principal_rejected(claims)
+        claims.pop("azp")
+        _assert_principal_rejected(claims)
+
+
+def test_service_admin_marker_requires_a_well_formed_machine_subject():
+    for tier in ["admin", "hosted_pro"]:
+        for subject in ["auth0|tester", "", "@clients", "short@clients",
+                        "bad.client@clients", "nonascii_é@clients",
+                        SERVICE_SUBJECT + "@clients", SERVICE_SUBJECT + " ",
+                        SERVICE_SUBJECT + "\n", SERVICE_CLIENT_ID + "@CLIENTS",
+                        "x" * 129 + "@clients"]:
+            # Matching azp alone cannot rescue a malformed service subject.
+            azp = subject[:-len("@clients")] if subject.endswith("@clients") else subject
+            _assert_principal_rejected({
+                **_service_admin_claims(), "sub": subject, "azp": azp,
+                NS + "tier": tier,
+            })
+    with pytest.raises(HTTPException) as ei:
+        auth.extract_tenant_claims({
+            NS + "tenant_id": "org_acme_solar",
+            NS + "principal_type": "service_admin", "azp": SERVICE_CLIENT_ID,
+        })
+    assert ei.value.status_code == 403
+
+
+def test_exact_service_admin_shape_is_accepted_without_implying_grants():
+    for tier, roles in [("admin", ["platform_admin"]), ("hosted_pro", [])]:
+        payload = auth.verify_platform_token(bearer(mint(extra_claims={
+            **_service_admin_claims(), NS + "tier": tier, NS + "roles": roles,
+        })))
+        assert payload["sub"] == SERVICE_SUBJECT
+        assert payload["azp"] == SERVICE_CLIENT_ID
+        assert auth.extract_tenant_claims(payload) == {
+            "tenant_id": "org_acme_solar", "org_id": "org_acme_solar",
+            "tier": tier, "roles": roles,
+        }
+    # The marker confers no second factor. Use the existing server seam, with
+    # its allowlist explicitly scoped here, to keep that distinction pinned.
+    with pytest.MonkeyPatch.context() as mp:
+        mp.delenv("LEAF_PLATFORM_ADMIN_SUBJECTS", raising=False)
+        assert deps.admin_elevated_tier("admin", SERVICE_SUBJECT, "hosted_pro") == "hosted_pro"
+        mp.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", SERVICE_SUBJECT + "x")
+        assert deps.admin_elevated_tier("admin", SERVICE_SUBJECT, "hosted_pro") == "hosted_pro"
+        mp.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", SERVICE_SUBJECT)
+        assert deps.admin_elevated_tier("admin", SERVICE_SUBJECT, "hosted_pro") == "admin"
+        assert deps.admin_elevated_tier("hosted_pro", SERVICE_SUBJECT, "hosted_pro") == "hosted_pro"
+
+
+def test_humans_and_ordinary_machines_keep_existing_claim_behavior():
+    for claims in [
+        {"sub": "auth0|tester", NS + "tier": "admin", NS + "roles": ["platform_admin"]},
+        {"sub": SERVICE_SUBJECT, NS + "roles": ["owner"]},
+        {"sub": SERVICE_SUBJECT, "azp": "unrelated", NS + "roles": []},
+        {"sub": SERVICE_SUBJECT, NS + "roles": "platform_admin"},
+    ]:
+        payload = auth.verify_platform_token(bearer(mint(extra_claims=claims)))
+        extracted = auth.extract_tenant_claims(payload)
+        assert extracted["tier"] == claims.get(NS + "tier", "hosted_pro")
+        assert extracted["roles"] == claims[NS + "roles"]
+
+
+def test_service_marker_does_not_bypass_ordinary_jwt_verification():
+    invalid_tokens = [
+        mint(extra_claims=_service_admin_claims(), key=_foreign_pem),
+        mint(extra_claims=_service_admin_claims(), aud="https://api.wrong.example"),
+        mint(extra_claims=_service_admin_claims(), iss="https://evil.example/"),
+        mint(extra_claims=_service_admin_claims(), exp_delta=-30),
+    ]
+    for token in invalid_tokens:
+        with pytest.raises(HTTPException) as ei:
+            auth.verify_platform_token(bearer(token))
+        assert ei.value.status_code == 401
+
+
 # --------------------------------------------------------------------------- #
 # HTTP matrix over /api/session (LEAF_AUTH_LIVE=1)
 # --------------------------------------------------------------------------- #
@@ -361,6 +485,33 @@ def _raw_tenant_client():
         return deps.tenant_echo({}, tenant_id)
 
     return TestClient(app, raise_server_exceptions=False)
+
+
+def test_service_admin_still_requires_current_canonical_tenant_authority():
+    def service_binding(subject):
+        assert subject == SERVICE_SUBJECT
+        return PLATFORM_TENANT_ID, "hosted_pro"
+
+    def no_binding(subject):
+        assert subject == SERVICE_SUBJECT
+        raise HTTPException(status_code=403, detail="no active platform identity binding")
+
+    token = mint(tenant_id=PLATFORM_TENANT_ID, extra_claims=_service_admin_claims())
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setenv("LEAF_PLATFORM_ADMIN_SUBJECTS", SERVICE_SUBJECT)
+        mp.setattr(deps, "resolve_active_platform_tenant_authority", service_binding)
+        client = _raw_tenant_client()
+        response = client.get("/tenant", headers={"Authorization": bearer(token)})
+        assert response.status_code == 200
+        assert response.json()["tenant_id"] == PLATFORM_TENANT_ID
+        assert response.json()["tier"] == "admin"
+        stale = client.get("/tenant", headers={
+            "Authorization": bearer(mint(extra_claims=_service_admin_claims())),
+        })
+        assert stale.status_code == 409
+        mp.setattr(deps, "resolve_active_platform_tenant_authority", no_binding)
+        unbound = client.get("/tenant", headers={"Authorization": bearer(token)})
+        assert unbound.status_code == 403
 
 
 def test_live_tenant_namespace_comes_from_the_active_binding():
