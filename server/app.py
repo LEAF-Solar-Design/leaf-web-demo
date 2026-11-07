@@ -679,6 +679,12 @@ def ready() -> JSONResponse:
     )
 
 
+from routers import service_browser_auth
+from service_browser_sessions import ServiceBrowserSessionMiddleware
+
+app.include_router(service_browser_auth.router)
+app.add_middleware(ServiceBrowserSessionMiddleware)
+
 # Last-added is outermost among the application's own middleware, including
 # project_drawings.no_store_responses and CORS. Keep this registration last.
 app.add_middleware(DemoSessionBoundaryMiddleware, router=app.router)

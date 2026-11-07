@@ -1,3 +1,5 @@
+import { serviceState, serviceScope, authorityStorage } from './serviceAuthSession.js'
+
 export const RECENT_PROJECTS_KEY = 'leaf.studio.recentProjects.v1'
 export const RECENT_PROJECTS_LIMIT = 5
 
@@ -15,8 +17,9 @@ export function recentProjectsKey(principal) {
 // Claims scope browser preferences only; the server still owns authentication.
 // Never use an opaque bearer as a key or persist the bearer itself.
 export function readProjectPrincipal(storage) {
+  if (serviceState(storage).mode) return serviceScope(storage)
   try {
-    const target = storage === undefined ? globalThis.localStorage : storage
+    const target = authorityStorage(storage)
     const token = target?.getItem('leaf.jwt')
     const payload = token?.split('.')[1]?.replace(/-/g, '+').replace(/_/g, '/')
     if (!payload) return null
@@ -30,7 +33,7 @@ export function readRecentProjects(principal, storage) {
   try {
     const key = recentProjectsKey(principal)
     if (!key) return normalize(null)
-    const target = storage === undefined ? globalThis.localStorage : storage
+    const target = authorityStorage(storage)
     return normalize(JSON.parse(target?.getItem(key) || 'null'))
   } catch { return normalize(null) }
 }
@@ -39,7 +42,7 @@ export function writeRecentProjects(principal, value, storage) {
   try {
     const key = recentProjectsKey(principal)
     if (!key) return false
-    const target = storage === undefined ? globalThis.localStorage : storage
+    const target = authorityStorage(storage)
     if (!target) return false
     target.setItem(key, JSON.stringify(normalize(value)))
     return true

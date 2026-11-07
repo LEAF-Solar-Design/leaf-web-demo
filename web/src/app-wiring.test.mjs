@@ -127,12 +127,44 @@ it('main keeps telemetry first and installs the proof bridge once after render u
   assert.equal(imports.some(node => node.source.value === 'react-dom/client'), false, 'Next owns the root')
   const root = body.find(node => node.type === 'ExportDefaultDeclaration').declaration
   assert.equal(root.id.name, 'StudioRoot')
-  const effect = root.body.body.find(node => node.type === 'ExpressionStatement').expression
+  const effects = root.body.body
+    .filter(node => node.type === 'ExpressionStatement' && node.expression.type === 'CallExpression' && node.expression.callee.name === 'useEffect')
+    .map(node => node.expression)
+  const bridgeEffects = effects.filter(effect => effect.arguments[0].body.body.some(node =>
+    node.type === 'ExpressionStatement' && node.expression.type === 'CallExpression' && node.expression.callee.name === 'installSurfaceConfigProofBridge'))
+  assert.equal(bridgeEffects.length, 1)
+  const effect = bridgeEffects[0]
   assert.equal(effect.callee.name, 'useEffect')
-  assert.deepEqual(effect.arguments[1].elements, [], 'install after the root mounts')
-  const calls = effect.arguments[0].body.body.map(node => node.expression)
-  assert.equal(calls.length, 1)
+  assert.equal(effect.arguments[1].type, 'ArrayExpression')
+  assert.deepEqual(effect.arguments[1].elements.map(node => [node.type, node.name]), [['Identifier', 'SiteRoot']], 'install once SiteRoot is ready')
+  const statements = effect.arguments[0].body.body
+  assert.equal(statements.length, 2)
+  const guard = statements[0]
+  assert.equal(guard.type, 'IfStatement')
+  assert.equal(guard.test.type, 'UnaryExpression')
+  assert.equal(guard.test.operator, '!')
+  assert.equal(guard.test.argument.type, 'Identifier')
+  assert.equal(guard.test.argument.name, 'SiteRoot')
+  assert.equal(guard.alternate, null)
+  const returns = guard.consequent.type === 'BlockStatement' ? guard.consequent.body : [guard.consequent]
+  assert.equal(returns.length, 1)
+  assert.equal(returns[0].type, 'ReturnStatement')
+  assert.equal(returns[0].argument, null)
+  assert.equal(statements[1].type, 'ExpressionStatement')
+  const calls = [statements[1].expression]
+  assert.equal(calls[0].type, 'CallExpression')
   assert.equal(calls[0].callee.name, 'installSurfaceConfigProofBridge')
+  const installerCalls = []
+  function walk(node) {
+    if (!node || typeof node !== 'object') return
+    if (node.type === 'CallExpression' && node.callee.type === 'Identifier' && node.callee.name === 'installSurfaceConfigProofBridge') installerCalls.push(node)
+    for (const value of Object.values(node)) {
+      if (Array.isArray(value)) value.forEach(walk)
+      else if (value && typeof value.type === 'string') walk(value)
+    }
+  }
+  body.forEach(walk)
+  assert.equal(installerCalls.length, 1)
   const text = (node) => source.slice(node.start, node.end)
   assert.equal(calls[0].arguments.length, 2)
   assert.equal(text(calls[0].arguments[0]), 'window')

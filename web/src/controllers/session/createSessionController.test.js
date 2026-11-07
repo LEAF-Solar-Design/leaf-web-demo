@@ -13,6 +13,35 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { noteUnauthorized, subscribeUnauthorized } from '../../api.js'
 import { MAX_TOKEN_RECOVERIES, createSessionController } from './createSessionController.js'
+import { serviceSession } from '../../lib/serviceAuthSession.js'
+import { subscribeTokenStored } from '../../auth.js'
+
+it('recovers on verified service arrival and never deletes the preserved human token on sign-out', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  const verify = () => service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+    authenticated: true, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+    identity: { subject: 'machine', sub: 'machine', iss: 'issuer', org_id: null, tenant_id: 'tenant', principal_type: 'service_admin' },
+  }) }) })
+  localStorage.setItem('leaf.jwt', 'preserved-human')
+  service.select(selector)
+  const controller = createSessionController({ storage: localStorage, subscribeTokenStored,
+    endSession: async () => service.logout() })
+  try {
+    controller.start()
+    controller.actions.requireAuth('before-proof')
+    expect(controller.getSnapshot().status).toBe('required')
+    await verify()
+    expect(controller.getSnapshot().status).toBe('checking')
+    controller.actions.activate({ tenant_id: 'tenant' })
+    await controller.actions.signOut()
+    expect(controller.getSnapshot()).toMatchObject({ status: 'required', reason: 'signed_out' })
+    expect(localStorage.getItem('leaf.jwt')).toBe('preserved-human')
+    service.select(selector)
+    await verify()
+    expect(controller.getSnapshot().reason).toBe('signed_out')
+  } finally { controller.destroy(); service.human(); localStorage.removeItem('leaf.jwt') }
+})
 
 function fakeStorage(initial = {}) {
   const values = new Map(Object.entries(initial))

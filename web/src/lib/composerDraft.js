@@ -1,4 +1,5 @@
 import { guardedText } from './secretGuardTransport.js'
+import { authorityStorage, serviceState } from './serviceAuthSession.js'
 
 export const COMPOSER_DRAFT_PREFIX = 'leaf.composerDraft.v1:'
 export const COMPOSER_DRAFT_MAX_CHARS = 4000
@@ -7,7 +8,7 @@ export const COMPOSER_DRAFT_DELAY_MS = 400
 const activeDrafts = new Set()
 
 export function composerDraftStorage() {
-  try { return globalThis.localStorage || null } catch { return null }
+  return authorityStorage()
 }
 
 export function composerDraftRoute() {
@@ -18,6 +19,11 @@ export function composerDraftRoute() {
 // issuer + subject, never the bearer itself, and never share a signed-in
 // fallback bucket when the token cannot be decoded.
 export function composerDraftAccountScope(storage = composerDraftStorage()) {
+  const service = serviceState(storage)
+  if (service.mode) {
+    const value = service.identity
+    return value ? `account:${JSON.stringify([value.iss, value.sub, value.org_id || '', value.tenant_id])}` : null
+  }
   try {
     if (!storage) return null
     const token = storage.getItem('leaf.jwt')

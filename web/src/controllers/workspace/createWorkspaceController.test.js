@@ -1,5 +1,36 @@
 import { describe, expect, it, vi } from 'vitest'
 import { createWorkspaceController, WORKSPACE_ORG_KEY } from './createWorkspaceController.js'
+import { serviceSession, authorityStorage } from '../../lib/serviceAuthSession.js'
+
+it('resolves default storage at operation time and fences a service open that finishes after human selection', async () => {
+  const service = serviceSession()
+  const selector = '11111111-1111-4111-8111-111111111111'
+  localStorage.setItem(WORKSPACE_ORG_KEY, 'peer-org')
+  localStorage.setItem('leaf.project_id:peer-org', 'peer-project')
+  const opened = deferred()
+  const controller = createWorkspaceController({ services: { openProject: () => opened.promise } })
+  try {
+    service.select(selector)
+    await service.probe({ origin: window.location.origin, fetchImpl: async () => ({ ok: true, json: async () => ({
+      authenticated: true, binding_id: selector, expires_at: new Date(Date.now() + 60000).toISOString(),
+      identity: { subject: 'machine', sub: 'machine', iss: 'issuer', org_id: 'service-org', tenant_id: 'tenant', principal_type: 'service_admin' },
+    }) }) })
+    controller.adoptOrgId('service-org')
+    expect(authorityStorage().getItem(WORKSPACE_ORG_KEY)).toBe('service-org')
+    const pending = controller.openProject('service-project')
+    service.human()
+    opened.resolve({ project: { project_id: 'service-project' } })
+    expect(await pending).toBeNull()
+    expect(localStorage.getItem(WORKSPACE_ORG_KEY)).toBe('peer-org')
+    expect(localStorage.getItem('leaf.project_id:peer-org')).toBe('peer-project')
+    controller.adoptOrgId('new-human-org')
+    expect(localStorage.getItem(WORKSPACE_ORG_KEY)).toBe('new-human-org')
+  } finally {
+    controller.dispose(); service.human()
+    localStorage.removeItem(WORKSPACE_ORG_KEY)
+    localStorage.removeItem('leaf.project_id:peer-org')
+  }
+})
 
 function setup(options = {}) {
   const storage = { getItem: vi.fn(() => 'stored-org'), setItem: vi.fn(), removeItem: vi.fn() }

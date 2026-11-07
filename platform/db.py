@@ -63,6 +63,14 @@ _REQUIRED_COLUMNS = {
     "org_invitation_receipts": {
         "id", "invitation_id", "org_id", "event", "actor_binding_id", "at",
     },
+    "service_login_challenges": {
+        "id", "nonce_hash", "environment", "origin", "expires_at", "approved_at",
+        "consumed_at", "sealed_token", "subject", "token_expires_at",
+    },
+    "service_browser_sessions": {
+        "binding_id", "secret_hash", "sealed_token", "subject", "environment",
+        "origin", "created_at", "expires_at", "revoked_at",
+    },
     "project_solve_exchanges": {
         "job_id", "org_id", "project_id", "drawing_id", "input_version_id",
         "parent_intake_sha256", "graph_revision", "graph_sha256", "frame_id", "phase",
