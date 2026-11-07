@@ -75,6 +75,7 @@ class TestCodebuildCiScript(unittest.TestCase):
                 "sys.exit(int(os.environ['TEST_RUNNER_STATUS']))\n", encoding="utf-8")
             # Forward slashes also work when this test is run by Windows Python/Git Bash.
             env.update(MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*",
+                       LEAF_CI_SCRIPT_PATH=CI_PATH.as_posix(),
                        TEST_PYTHON=sys.executable.replace("\\", "/"),
                        TEST_RUNNER=runner.as_posix(), TEST_CALLS=(directory / "calls").as_posix(),
                        TEST_DIRECTORY=directory.as_posix(),
@@ -149,8 +150,9 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                     self.assertEqual(calls, [
                         ["scripts/run-all-gates.py", "--list", "--catalog-root", ROOT.as_posix()],
                         ["scripts/run-all-gates.py", "--jobs", "1", "--retry", "0", "--fail-fast",
-                         "--result-json", "/tmp/gate-results/gate-result.json", "--log-dir",
-                         "/tmp/gate-logs", "--only", suite_id]])
+                         "--early-feedback", "--result-json", "/tmp/gate-results/gate-result.json", "--log-dir",
+                         "/tmp/gate-logs", "--only", suite_id, "--before-heavy-command", "bash",
+                         CI_PATH.as_posix(), "--heavy-prerequisites"]])
                     self.assertIn("diagnostic-only/no-full-verdict", result.stdout)
                     self.assertNotIn("ORDINARY_REQUIRED_CONTROLS", result.stdout)
                     self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
@@ -261,8 +263,9 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                 self.assertEqual(len(calls), 2)
                 self.assertEqual(calls[1], [
                     "scripts/run-all-gates.py", "--jobs", "1", "--retry", "0", "--fail-fast",
-                    "--result-json", "/tmp/gate-results/gate-result.json", "--log-dir",
-                    "/tmp/gate-logs", "--only", "suite"])
+                    "--early-feedback", "--result-json", "/tmp/gate-results/gate-result.json", "--log-dir",
+                    "/tmp/gate-logs", "--only", "suite", "--before-heavy-command", "bash",
+                    CI_PATH.as_posix(), "--heavy-prerequisites"])
                 self.assertIn("FATAL: ephemeral PostgreSQL did not start", result.stderr)
                 self.assertIn(f"status={expected} postgres_status=1", diagnostic)
                 self.assertNotIn("FULL_SHARD_GREEN_PROOF", result.stdout)
@@ -278,12 +281,44 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
         block, after = rest.split("# LEAF_DIAGNOSTIC_END\n", 1)
         self.assertIn('export LEAF_GATE_REQUIRE_DATABASE=1', before)
         self.assertIn('exit "$diagnostic_status"', block)
-        self.assertNotIn("--early-feedback", block)
+        self.assertIn("--early-feedback", block)
         self.assertNotIn("--emit-proof", block)
         self.assertNotIn("aws ", block)
         self.assertTrue(after.startswith('gate_status=0\ngate_fail_fast_args=(--fail-fast)\n'))
         self.assertIn('# LEAF_GATE_PROOF_BEGIN', after)
         self.assertIn('--key "mq/leaf-web-demo/selection/main/', after)
+
+    def test_diagnostic_reuses_full_path_heavy_prerequisite_hook(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        block = script.split("# LEAF_DIAGNOSTIC_BEGIN\n", 1)[1].split(
+            "# LEAF_DIAGNOSTIC_END\n", 1)[0]
+        diagnostic_lines = [line.strip() for line in block.splitlines()
+                            if line.strip().startswith("python scripts/run-all-gates.py ")
+                            and '--only "$LEAF_GATE_ONLY"' in line]
+        full_path_lines = [line.strip() for line in script.splitlines()
+                           if line.strip().startswith("python scripts/run-all-gates.py ")
+                           and '"${gate_tier_args[@]}"' in line]
+        self.assertEqual(len(diagnostic_lines), 1)
+        self.assertEqual(len(full_path_lines), 1)
+        diagnostic_line = diagnostic_lines[0]
+        hook = '--before-heavy-command bash "$LEAF_CI_SCRIPT_PATH" --heavy-prerequisites'
+        for line in (diagnostic_line, full_path_lines[0]):
+            argv = line.split(" || ", 1)[0]
+            self.assertIn("--before-heavy-command", argv)
+            self.assertEqual(argv[argv.index("--before-heavy-command"):], hook)
+        self.assertIn("--jobs 1 --retry 0 --fail-fast --early-feedback", diagnostic_line)
+        self.assertIn('--only "$LEAF_GATE_ONLY"', diagnostic_line)
+        for forbidden in ("--tier-file", "LEAF_GATE_JOBS", "only_args"):
+            self.assertNotIn(forbidden, diagnostic_line)
+
+    def test_diagnostic_runner_flags_parse_on_the_real_runner(self):
+        result = subprocess.run(
+            [sys.executable, "-P", "scripts/run-all-gates.py", "--jobs", "1", "--retry", "0",
+             "--fail-fast", "--early-feedback", "--only", "gate-runner-selftest", "--list",
+             "--before-heavy-command", "bash", "/nonexistent", "--heavy-prerequisites"],
+            cwd=ROOT, capture_output=True, text=True, timeout=120)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(json.loads(result.stdout)["schema"], "leaf.ci.catalog.v1")
 
     @unittest.skipUnless(BASH, "bash is not on PATH; diagnostic syntax requires bash")
     def test_diagnostic_bash_syntax(self):
