@@ -42,8 +42,13 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
   let stopped = false, paused = false, running = false, controller, waiting, currentReader, restartRequested = false, generation = 0
   let authExpired = false, expiredAuthorization
   const rememberUnauthorized = authorization => { authExpired = true; expiredAuthorization = authorization }
-  const active = new Set(runIds.filter(id => !terminalState(store.getRun(id)?.state)))
-  const pendingSnapshots = new Set()
+  const pendingSnapshots = new Set(runIds.filter(id => {
+    const run = store.getRun(id)
+    return terminalState(run?.state) && run.state !== 'missing' && run.transport.status !== 'finished'
+  }))
+  const active = new Set(runIds.filter(id => !terminalState(store.getRun(id)?.state) || pendingSnapshots.has(id)))
+  // Keep terminal reconciliation resumable until its retained values are read.
+  pendingSnapshots.forEach(id => store.resetSnapshot(id, {}))
   const transport = patch => active.forEach(id => store.setTransport(id, patch))
   async function snapshot(id, connectionSignal) {
     pendingSnapshots.add(id)
@@ -81,7 +86,9 @@ export function openRunStream({ runIds, store = labValueStore, fetchImpl = globa
           if (!active.size || stopped || paused) break
           const ids = [...active]
           const headers = headersFor('text/event-stream')
-          headers['Last-Event-ID'] = ids.map(id => `${id}:${store.getRun(id)?.lastSeq ?? -1}`).join(',')
+          const cursors = ids.filter(id => (store.getRun(id)?.lastSeq ?? -1) >= 0)
+            .map(id => `${id}:${store.getRun(id).lastSeq}`).join(',')
+          if (cursors) headers['Last-Event-ID'] = cursors
           transport({ status: 'connecting' })
           const response = await fetchImpl(`${config.apiBase}/api/lab/stream/runs?runs=${ids.map(encodeURIComponent).join(',')}&after_seq=-1`, {
             headers, signal: controller.signal, credentials: 'same-origin', redirect: 'error',
