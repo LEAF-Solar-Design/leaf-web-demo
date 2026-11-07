@@ -2720,18 +2720,6 @@ def build_suites() -> List[Suite]:
         # R14-F1: 29 injected-effect replay custody rows.
         Suite("scripts-proof-project-sizing", "scripts test_proof_project_sizing.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_proof_project_sizing.py"), 62),
-        # 26 -> 30 on 2026-09-22: two changes landed together. The groups family took its
-        # contract v2 shape (neutral names, handle-value membership order, refused
-        # non-handle member ids), and the adapter's input scan got its own bounds sized for
-        # a real drawing (a drawing-sized graph now produces evidence, an oversized evidence
-        # document is still refused). All four tests are hermetic and unconditional.
-        # 30 -> 41 on 2026-09-22: the zones family joined the adapter (the zone's own
-        # name compared as given, membership by handle value, and rule Z7's equipment
-        # and sizing records null and named as fallbacks with the raw values kept in
-        # provenance.zone_fields), as 3 tests plus one parametrization over 8 literal
-        # malformed zones. Every case is hermetic and unconditional.
-        Suite("scripts-solar-receipt", "scripts test_solar_receipt.py", "pytest",
-              SCRIPTS_DIR, _py_pytest("test_solar_receipt.py"), 41),
         Suite("scripts-solar-w1-studio-solve", "scripts test_solar_w1_studio_solve.py", "pytest",
               SCRIPTS_DIR, _py_pytest("test_solar_w1_studio_solve.py"), 12),
         # S11 unit sync (2026-09-22): the declaration-only builtin, its producer on a
@@ -2851,147 +2839,6 @@ def build_suites() -> List[Suite]:
         Suite("scripts-solar-w1-studio-string-multi-add",
               "scripts test_solar_w1_studio_string_multi_add.py", "pytest", SCRIPTS_DIR,
               _py_pytest("test_solar_w1_studio_string_multi_add.py"), 17),
-        # S26 (2026-09-22): the shared probe-file normalizer, contract v5 rules E1-E5.
-        # Every DEMO probe file becomes `exports` evidence the frozen comparator
-        # accepts, from either side, through the same code. Covers the evidence
-        # shape, rule E4's identity mapping, rule E3's file order across the
-        # conduit-fill file's four batteries, rule E1 (the fixture is the INPUTS, so
-        # two files with equal scenarios and different results share it), the pass
-        # verdict for Studio against the licensed capture, one altered result
-        # producing exactly one row's diffs, an unobserved reopen refused, and the
-        # malformed documents and arguments that are refused rather than answered.
-        # Studio's own probe files are generated in tmp_path by
-        # scripts/solar_nec_probes.py, so the suite is hermetic and never skips:
-        # without the licensed capture the comparison runs against Studio's own file
-        # read back from a second path. S28 (2026-09-22) added rule E5's CSV
-        # projection and the four calculation capabilities, whose licensed capture IS
-        # committed, so their half compares Studio against the artifact: the `#`
-        # preamble skipped, values kept as TEXT with the quantity parsed back out of
-        # them, CRLF and LF reading identically (a committed capture is line-ending
-        # translated on checkout, so a verdict must not depend on a git setting), the
-        # headerless, blank-named, repeated-name and ragged files refused, and the
-        # declared non-numeric quantity applying only where a section declares it.
-        # The floor was 118 after S28 (26 test functions, 15 parametrized over the
-        # six NEC demos, the nine committed S28 files, or literal malformed inputs).
-        # S31 (2026-09-22) added rule E5's XLSX projection through
-        # server/solar_xlsx.py: one row record per non-empty sheet row, keyed
-        # `<sheet>:<row index>`, cells as a list, `format` naming the sheet list, and
-        # the three new probe types (harness-cable-plan, harness-bom-export,
-        # tracker-bom-xlsx-export). Its half compares Studio against the four new
-        # committed licensed files, and adds the comparator pass on each of them.
-        # Floor MEASURED at 151 on the first green run after S31 (2026-09-22, 2.6 s);
-        # it was 118 after S28 and 61 before that. S32 (2026-09-23) adds the six
-        # terrain and irradiance CSVs (four carrying Encoding.UTF8's byte order
-        # mark, which the CSV reader now drops as encoding) with a comparator pass
-        # on each against its committed licensed capture: 28 more cases, so the
-        # floor is COUNTED at 179 until the first green run measures it. S33
-        # (2026-09-23) adds the XML path (one row per KML or LandXML document,
-        # keyed by file name, its canonical lines verbatim, root element checked,
-        # hostile XML refused) and the five new probe types, with a comparator pass
-        # on each of the eighteen committed licensed files: floor MEASURED at 258
-        # on the first green run (2026-09-23, 5.0 s).
-        Suite("scripts-solar-probe-evidence", "scripts test_solar_probe_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_probe_evidence.py"), 258),
-        # S22 (2026-09-22): contract rule G9 on the Studio evidence adapter, the first
-        # test file it has. A set-valued list (unassigned_panels, duplicate_panels) is
-        # emitted in ascending neutral-id order, so the same set recorded in two orders
-        # compares equal; a string's ordered_membership is the capability's output and
-        # keeps its order, which the comparator still reports as a diff when reversed.
-        # Every graph is authored in the file (no capture, no fixture, no network), so
-        # the floor is the exact count on every runner: 7 tests + one parametrization
-        # over 4 literal malformed sets = 11.
-        Suite("scripts-solar-studio-evidence", "scripts test_solar_studio_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_studio_evidence.py"), 11),
-        # S37 (2026-09-23): Studio's ground evidence per G14 step from a G11 intake
-        # (contract v6, G10 to G16), each step computed from Studio's own prior state
-        # (G13). Small intakes authored in the file cover every row kind, id and vertex
-        # ordering, pile-set grouping, the terrain-mesh row, chaining, the frozen
-        # comparator passing every document against itself, the comparator's document
-        # bounds, and malformed-intake refusals. COUNTED: 18 tests + 10 more
-        # parametrizations of the malformed-intake case = 29 collected; the one CLI case
-        # that commits its intake needs a git executable, so the floor is the 28 that
-        # never skip and that one skip reason is allowed.
-        Suite("scripts-solar-ground-studio-evidence", "scripts test_solar_ground_studio_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_studio_evidence.py"), 37,
-              allowed_skip_reasons=(r"needs a git executable",)),
-        # S40 (2026-09-23): paired evidence shards (contract G19) for a step whose two
-        # sides together exceed the comparator's 100,000-node document bound (terrain t1,
-        # piling t4). Every document is authored in the file (no capture, no git, no
-        # network), so the floor is the exact count on every runner: 15 plain tests plus
-        # 5 tampered shards, 5 malformed inputs and the 2 real step shapes = 27.
-        Suite("scripts-solar-evidence-shard", "scripts test_solar_evidence_shard.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_evidence_shard.py"), 27),
-        Suite("scripts-solar-ground-analysis-evidence", "scripts test_solar_ground_analysis_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_analysis_evidence.py"), 25),
-        Suite("scripts-solar-ground-layout-evidence", "scripts test_solar_ground_layout_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_layout_evidence.py"), 17),
-        Suite("scripts-solar-ground-scene-evidence", "scripts test_solar_ground_scene_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_scene_evidence.py"), 20),
-        # W5 batch 2 evidence (2026-09-24, contract G36): the producers over synthetic intakes authored in
-        # the file or committed intakes, so each floor is the exact collected count: 12 (including two k2 cases), 5 and 3.
-        Suite("scripts-solar-batch2-simple-evidence", "scripts test_solar_batch2_simple_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_batch2_simple_evidence.py"), 12),
-        # ImportSolarEdgePDF evidence (2026-09-24): the producer over the committed PDF and drawing intake: 8.
-        Suite("scripts-solar-solaredge-import-evidence", "scripts test_solar_solaredge_import_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_solaredge_import_evidence.py"), 8),
-        Suite("scripts-solar-guardrails-evidence", "scripts test_solar_guardrails_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_guardrails_evidence.py"), 5),
-        Suite("scripts-solar-pile-block-mapping-evidence", "scripts test_solar_pile_block_mapping_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pile_block_mapping_evidence.py"), 3),
-        Suite("scripts-solar-ground-buildout-evidence", "scripts test_solar_ground_buildout_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_buildout_evidence.py"), 18),
-        Suite("scripts-solar-ground-shade-evidence", "scripts test_solar_ground_shade_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_shade_evidence.py"), 17),
-        Suite("scripts-solar-ground-reports-evidence", "scripts test_solar_ground_reports_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_reports_evidence.py"), 17),
-        # G27 rooftop chain evidence (c1 to c7, c9, c10, c11): a synthetic intake authored in the file
-        # plus the committed rooftop intake (no capture, no git: the CLI cases pin the revision), so
-        # the floor is the exact count on every runner. COUNTED: 30 tests + 13 more
-        # parametrizations = 43.
-        Suite("scripts-solar-rooftop-chain-evidence", "scripts test_solar_rooftop_chain_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_rooftop_chain_evidence.py"), 43),
-        # G33 PVcase-solve evidence (v1): a synthetic intake authored in the file plus the committed
-        # intake (no git: every case pins the revision), so the floor is the exact count on every
-        # runner. MEASURED: 13 tests + 6 more parametrizations = 19 passed.
-        Suite("scripts-solar-pvcase-solve-evidence", "scripts test_solar_pvcase_solve_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_pvcase_solve_evidence.py"), 19),
-        # G35 inverter-family evidence producers (synthetic states in each file). MEASURED.
-        Suite("scripts-solar-inverter-devices-evidence", "scripts test_solar_inverter_devices_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_devices_evidence.py"), 9),
-        Suite("scripts-solar-inverter-strings-evidence", "scripts test_solar_inverter_strings_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_strings_evidence.py"), 7),
-        Suite("scripts-solar-inverter-outputs-evidence", "scripts test_solar_inverter_outputs_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_outputs_evidence.py"), 6),
-        Suite("scripts-solar-inverter-cabling-evidence", "scripts test_solar_inverter_cabling_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_inverter_cabling_evidence.py"), 3),
-        Suite("scripts-solar-ground-dsteps-evidence", "scripts test_solar_ground_dsteps_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dsteps_evidence.py"), 12),
-        # G30 dialog-batch evidence (e1, e4, e6): the committed terrain intake and pile-template
-        # BEFORE store plus hand-made states (no capture, no git: the CLI cases pin the revision),
-        # so the floor is the exact count on every runner. COUNTED: 17 tests, no parametrizations.
-        Suite("scripts-solar-ground-dialogs-evidence", "scripts test_solar_ground_dialogs_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_ground_dialogs_evidence.py"), 17),
-        # G32 design-profile evidence (f1 to f5 from an empty profile store): the committed generate
-        # intake and settings snapshot only (no capture, no git beyond the untracked-intake refusal),
-        # so the floor is the exact count on every runner. COUNTED: 12 tests, no parametrizations.
-        Suite("scripts-solar-design-profiles-evidence", "scripts test_solar_design_profiles_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_design_profiles_evidence.py"), 12),
-        # G34/G34a/G34b Rooftop flow evidence (flow-step and flow-event rows in the G34b envelope):
-        # the committed drawings of the three fixture states plus hand-made intakes (no capture; the
-        # CLI cases pin the revision or run outside any git work tree), so the floor is the exact
-        # count on every runner. COUNTED: 23 tests + 20 more parametrizations = 43.
-        Suite("scripts-solar-workflow-flow-evidence", "scripts test_solar_workflow_flow_evidence.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_workflow_flow_evidence.py"), 43),
-        # The parity oracle itself: the ledger rules, the receipt rules, the fail-closed
-        # inputs, and (S29, 2026-09-22) the declared divergence a known plugin defect
-        # gets, which is the ONLY way a failing comparator settles a capability: the
-        # exact declared diff set, a committed finding under docs/parity/divergences/,
-        # and every receipt rule still passing. Hermetic (each case builds its ledger,
-        # receipts and finding under tmp_path; the one repo file it reads is the shipped
-        # ledger, read never written), so the floor is the exact count on every runner:
-        # 66 test functions, one parametrized over 2 comparator names = 67.
-        Suite("scripts-solar-parity-status", "scripts test_solar_parity_status.py",
-              "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_status.py"), 69),
         Suite("scripts-solar-parity-reachability", "scripts test_solar_parity_reachability.py",
               "pytest", SCRIPTS_DIR, _py_pytest("test_solar_parity_reachability.py"), 43),
         # Registered per the #29 fix-then-register rule (shipped without a
@@ -4397,6 +4244,8 @@ def record_attempt(result: Result, log_dir: Path, attempt: int) -> None:
                    run_id=os.environ.get("LEAF_READSET_RUN", ""),
                    log_path=(os.path.relpath(result.log_path, log_dir).replace("\\", "/")
                              if result.log_path else None))
+        if getattr(result.suite, "pr_tier_mode", None) == "tier":
+            row.update(mode="tier", execution_mode="tier", selection_mode="tier")
         if process_capture_eligible(result.suite):
             row.update(result.process_capture)
         readsets = Path(os.environ.get("LEAF_READSET_DIR", str(log_dir.resolve() / "readsets")))
@@ -5442,6 +5291,153 @@ def describe_selection(patterns: List[str]) -> str:
     return f"{flags}  (union of {len(patterns)} substrings)"
 
 
+PR_TIER_SCHEMA = "leaf.ci.pr-tier.v1"
+PR_TIER_PREREQUISITES = ("web-build", "harness-tsc-build", "ci-full-run-manifest-certificates")
+
+
+def pr_tier_path(value: str) -> str:
+    """Unify historical web test names without conflating server/harness paths."""
+    value = value.replace("\\", "/").split("::", 1)[0]
+    while value.startswith("./"):
+        value = value[2:]
+    if value.startswith("src/"):
+        value = "web/" + value
+    elif "/" not in value and (value.endswith((".js", ".jsx")) or "." not in value):
+        value = "web/src/" + value
+    if value.startswith("web/src/"):
+        value = re.sub(r"\.(?:jsx|js)$", "", value)
+    return value.rstrip("/")
+
+
+def pr_tier_owned_paths(row: dict) -> List[str]:
+    """Declared file/directory targets; npm scripts without targets stay unknown."""
+    paths = []
+    for arg in row["command"][1:]:
+        target = arg.split("::", 1)[0].replace("\\", "/")
+        if target.startswith("-") or "=" in target:
+            continue
+        if not (re.search(r"\.(?:py|[cm]?js|jsx|tsx?)$", target)
+                or target.rstrip("/").endswith(("/tests", "/test"))
+                or target in ("tests", "test")):
+            continue
+        if target.startswith("<REPO>/"):
+            target = target[len("<REPO>/"):]
+        elif row["cwd"] not in (".", ".."):
+            target = row["cwd"].rstrip("/") + "/" + target
+        paths.append(pr_tier_path(target))
+    return paths
+
+
+def pr_tier_owns(row: dict, path: str) -> bool:
+    identity = pr_tier_path(path)
+    # Older device logs omit the harness cwd from its test/ paths.
+    identities = {identity}
+    if identity.startswith("test/"):
+        identities.add("harness/" + identity)
+    for target in pr_tier_owned_paths(row):
+        if any(p == target or p.startswith(target + "/") for p in identities):
+            return True
+    # Vitest's shard membership is determined at collection, so all shards own
+    # the directory. Never guess one shard from an incomplete history.
+    if row["kind"] == "vitest":
+        return any(p.startswith(row["cwd"].rstrip("/") + "/") for p in identities)
+    return False
+
+
+def pr_tier_closure(selected, catalog_ids, dependencies=None):
+    selected = set(selected) & set(catalog_ids)
+    selected.update(set(PR_TIER_PREREQUISITES) & set(catalog_ids))
+    dependencies = dependencies or {}
+    while True:
+        expanded = selected | {dep for sid in selected for dep in dependencies.get(sid, [])}
+        if not expanded <= set(catalog_ids):
+            raise ValueError("prerequisite absent from catalog")
+        if expanded == selected:
+            return selected
+        selected = expanded
+
+
+def load_pr_tier(path: str, *, quiet: bool = False):
+    """An unusable or disabled policy preserves the pre-tier execution path."""
+    try:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if (not isinstance(data, dict) or data.get("schema") != PR_TIER_SCHEMA
+                or type(data.get("enabled")) is not bool):
+            raise ValueError("invalid schema or enabled flag")
+        if not data["enabled"]:
+            if not quiet:
+                print("INFO: PR tier disabled; using existing gate selection")
+            return None
+        for key in ("suite_ids", "catalog_suite_ids"):
+            values = data.get(key)
+            if (not isinstance(values, list) or not values
+                    or any(not isinstance(v, str) or not v for v in values)
+                    or len(values) != len(set(values))):
+                raise ValueError("invalid " + key)
+        if not set(data["suite_ids"]) <= set(data["catalog_suite_ids"]):
+            raise ValueError("tier IDs outside recorded catalog")
+        dependencies = data.get("prerequisites", {})
+        if (not isinstance(dependencies, dict)
+                or any(not isinstance(k, str) or not isinstance(v, list)
+                       or any(not isinstance(d, str) or not d for d in v)
+                       for k, v in dependencies.items())):
+            raise ValueError("invalid prerequisites")
+        return data
+    except (OSError, ValueError, UnicodeError) as exc:
+        if not quiet:
+            print(f"INFO: PR tier unavailable ({exc}); using existing gate selection")
+        return None
+
+
+def pr_tier_changed_paths() -> List[str]:
+    """Use explicit paths when supplied, otherwise diff the PR against its base."""
+    raw = os.environ.get("LEAF_CHANGED_PATHS")
+    if raw is not None:
+        paths = json.loads(raw)
+        if not isinstance(paths, list) or any(not isinstance(p, str) or not p for p in paths):
+            raise ValueError("LEAF_CHANGED_PATHS must be a JSON list of paths")
+        return paths
+    base = os.environ.get("TRUSTED_SHA") or os.environ.get("CODEBUILD_WEBHOOK_BASE_REF", "origin/main")
+    if base.startswith("refs/heads/"):
+        base = "refs/remotes/origin/" + base[len("refs/heads/"):]
+    proc = subprocess.run(
+        ["git", "--no-replace-objects", "diff", "--no-renames", "--name-only", "-z", base + "...HEAD", "--"],
+        cwd=REPO, capture_output=True, text=True, timeout=30)
+    if proc.returncode:
+        raise ValueError("PR changed paths unavailable")
+    return [p for p in proc.stdout.split("\0") if p]
+
+
+def select_pr_tier(suites: List[Suite], tier: dict) -> List[Suite]:
+    ids = {s.id for s in suites}
+    selected = set(tier["suite_ids"]) & ids
+    new = ids - set(tier["catalog_suite_ids"])
+    selected.update(new)
+    if new:
+        print("INFO: mode=tier including new catalog suites: " + ", ".join(sorted(new)))
+    try:
+        changed = pr_tier_changed_paths()
+        priority = os.environ.get("LEAF_PRIORITY_SUITES", "")
+        priority = json.loads(priority) if priority.startswith("[") else priority.replace(",", " ").split()
+        if not isinstance(priority, list) or any(not isinstance(p, str) for p in priority):
+            raise ValueError("invalid LEAF_PRIORITY_SUITES")
+        selected.update(ids & set(priority))
+        for suite in suites:
+            row = {"command": _fingerprint_argv(suite.argv, cwd=suite.cwd),
+                   "cwd": _fingerprint_cwd(suite.cwd), "kind": suite.kind}
+            if ((not pr_tier_owned_paths(row) and row["kind"] != "vitest")
+                    or any(pr_tier_owns(row, path) for path in changed)):
+                selected.add(suite.id)
+        selected = pr_tier_closure(selected, ids, tier.get("prerequisites"))
+    except (OSError, ValueError, subprocess.SubprocessError) as exc:
+        print(f"INFO: mode=tier using all suites ({exc})")
+        selected = ids
+    omitted = sorted(ids - selected)
+    if omitted:
+        print("INFO: mode=tier omitting catalog suites outside tier and changed tests: " + ", ".join(omitted))
+    return [s for s in suites if s.id in selected]
+
+
 # --------------------------------------------------------------------------- #
 # sharding: deterministic partition + result files + fan-in verifier
 #
@@ -5565,14 +5561,7 @@ _MEASURED_EST_S = {
     "prewarm-staging-cutover-workflow": 16.3,
     "scripts-native-release-producer": 16.4,
     "scripts-proof-string-sizer": 19.4,
-    "scripts-solar-evidence-shard": 9.6,
-    "scripts-solar-ground-analysis-evidence": 5.8,
-    "scripts-solar-ground-dsteps-evidence": 6.1,
-    "scripts-solar-ground-reports-evidence": 7.4,
-    "scripts-solar-ground-shade-evidence": 17.8,
     "scripts-solar-parity-reachability": 5.1,
-    "scripts-solar-parity-status": 7.0,
-    "scripts-solar-solaredge-import-evidence": 33.4,
     "scripts-solar-w1-studio-autofill": 16.4,
     "scripts-solar-w1-studio-autofill-solve": 116.1,
     "server-approval-policy": 17.4,
@@ -6611,7 +6600,7 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
                       shard_count: int, shard_index: int, selection: str,
                       suites: List[Suite], results: List[Result],
                       attempts_by_id: dict, wall: float,
-                      execution_failure: bool = False) -> None:
+                      execution_failure: bool = False, mode=None) -> None:
     """One shard's machine-readable outcome, written even when suites failed
     so the fan-in can name the failure instead of reporting a missing shard."""
     entries = []
@@ -6642,6 +6631,10 @@ def write_result_json(path: str, *, fingerprint: str, total: int,
             (r.suite.id in _SERVICE_SMOKE_SUITES and r.status != "PASS") for r in results),
         "wall_seconds": round(wall, 1),
     }
+    if mode == "tier":
+        payload.update(mode="tier", execution_mode="tier", selection_mode="tier")
+        for entry in entries:
+            entry["mode"] = "tier"
     out = Path(path)
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(payload, indent=1), encoding="utf-8")
@@ -6782,6 +6775,8 @@ def verify_shard_results(results_dir: Path, *,
     if shard_count >= 1:
         expected_partition = partition_suites(suites, shard_count)
         for path, d in parsed:
+            if any(d.get(key) == "tier" for key in ("mode", "execution_mode", "selection_mode")):
+                problems.append(f"{path.name}: mode=tier cannot prove a full gate")
             i = d.get("shard_index")
             if not isinstance(i, int) or not (0 <= i < shard_count):
                 problems.append(f"{path.name}: shard_index {i!r} outside 0..{shard_count - 1}")
@@ -7049,6 +7044,12 @@ def failed_suite_evidence(results, *, max_suites=5, tail_lines=30,
 
 def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
                      selection: str = NO_FILTER) -> None:
+    def emit(*values):
+        if selection.startswith("mode=tier ") and values:
+            print("mode=tier", *values)
+        else:
+            print(*values)
+
     rows = []
     for r in results:
         if r.suite.expected is None:
@@ -7095,15 +7096,15 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
         return "  ".join(cells).rstrip()
 
     line = "-" * (sum(widths) + 2 * (len(headers) - 1))
-    print()
-    print("=" * len(line))
-    print("  leaf-web-demo -- GATE SCOREBOARD")
-    print("=" * len(line))
-    print(fmt(headers))
-    print(line)
+    emit()
+    emit("=" * len(line))
+    emit("  leaf-web-demo -- GATE SCOREBOARD")
+    emit("=" * len(line))
+    emit(fmt(headers))
+    emit(line)
     for row in rows:
-        print(fmt(row))
-    print(line)
+        emit(fmt(row))
+    emit(line)
 
     npass = sum(1 for r in results if r.status == "PASS")
     nfail = sum(1 for r in results if r.status == "FAIL")
@@ -7111,15 +7112,15 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     nunavailable = sum(1 for r in results if r.status == "UNAVAILABLE")
     total_tests = sum(r.counts.get("passed", 0) for r in results)
     total_skipped = sum(r.counts.get("skipped", 0) for r in results)
-    print(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP  "
+    emit(f"  suites: {npass} PASS  {nfail} FAIL  {nskip} SKIP  "
           f"{nunavailable} UNAVAILABLE   "
           f"| test cases passed: {total_tests}  skipped: {total_skipped}   "
           f"| wall: {wall:.1f}s")
     # The counts above are only meaningful next to WHICH suites they counted.
     # Echo the selection so a scoreboard can be checked against the command that
     # produced it instead of being trusted to answer the question that was asked.
-    print(f"  filter: {selection}")
-    print(f"  logs:   {log_dir}")
+    emit(f"  filter: {selection}")
+    emit(f"  logs:   {log_dir}")
 
     # A suite that only went green on a retry is NOT the same as a green suite,
     # and one annotated row inside a 90-row scoreboard is easy to miss. Call the
@@ -7127,11 +7128,11 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     # passed the second time".
     flaked = [r.suite.id for r in results if r.status == "PASS" and "flaked" in r.note]
     if flaked:
-        print(f"  FLAKED (passed only on retry, so this run's green is soft): "
+        emit(f"  FLAKED (passed only on retry, so this run's green is soft): "
               f"{', '.join(flaked)}")
     allskip = [r.suite.id for r in results if r.status == "SKIP" and r.got == "0"]
     if allskip:
-        print(f"  NO COVERAGE (every test skipped, host artifact absent): "
+        emit(f"  NO COVERAGE (every test skipped, host artifact absent): "
               f"{', '.join(allskip)}")
     # A registry outage is a distinct outcome, not a failed gate, and a single
     # row in a long scoreboard is exactly as easy to miss as a flake -- call it
@@ -7149,10 +7150,10 @@ def print_scoreboard(results: List[Result], log_dir: Path, wall: float,
     for r in results:
         if r.status == "UNAVAILABLE":
             detail = r.note or f"{r.suite.id} registry unavailable"
-            print(f"  NOT PROVEN BY AUDIT: {detail}")
+            emit(f"  NOT PROVEN BY AUDIT: {detail}")
     for evidence_line in failed_suite_evidence(results):
-        print(evidence_line)
-    print("=" * len(line))
+        emit(evidence_line)
+    emit("=" * len(line))
 
 
 # --jobs auto sizing. Measured 2026-09-23 on leaf-ci-leaf-web-demo (428 suites):
@@ -7282,6 +7283,8 @@ def main() -> int:
                     help="trusted caller argv for heavy prerequisites, after early GREEN")
     ap.add_argument("--catalog-root", default=None, metavar="DIR",
                     help="checkout root used to normalize --list declarations")
+    ap.add_argument("--tier-file", default=None, metavar="PATH",
+                    help="opt-in PR tier policy; missing, invalid or disabled preserves existing selection")
     ap.add_argument("--fail-fast", action="store_true",
                     help="stop at the first failing gate (default: run all). With "
                          "--jobs > 1, stop dispatching new suites and wait for "
@@ -7364,12 +7367,19 @@ def main() -> int:
     if args.catalog_root:
         ap.error("--catalog-root requires --list")
 
+    tier = load_pr_tier(args.tier_file) if args.tier_file else None
+    if tier is not None and (args.only or args.verify_shard_results or args.verify_gate_proof
+                             or args.expect_tree or args.emit_proof):
+        print("mode=tier cannot combine with --only or proof/fan-in modes")
+        return 2
+
     if args.jobs == "auto":
         cpus = _effective_cpus()
         mem_bytes = _effective_mem_bytes()
         args.jobs = resolve_auto_jobs(cpus, mem_bytes)
         mem_gib = "unknown" if mem_bytes is None else f"{mem_bytes / 2 ** 30:.1f}"
-        print(f"jobs=auto resolved to {args.jobs} (cpus={cpus:.1f} mem_gib={mem_gib})")
+        mode_label = " mode=tier" if tier is not None else ""
+        print(f"jobs=auto resolved to {args.jobs} (cpus={cpus:.1f} mem_gib={mem_gib}){mode_label}")
 
     if args.verify_gate_proof or args.expect_tree:
         if not (args.verify_gate_proof and args.expect_tree):
@@ -7454,7 +7464,23 @@ def main() -> int:
     fingerprint = catalog_fingerprint(suites)
     only: List[str] = args.only or []
     selection = describe_selection(only)
-    if only:
+    if tier is not None:
+        suites = select_pr_tier(suites, tier)
+        if args.shard_index is not None:
+            tier_suites = suites
+            partition = partition_suites(suites, args.shard_count)[args.shard_index]
+            try:
+                local_ids = pr_tier_closure({s.id for s in partition}, {s.id for s in tier_suites},
+                                           tier.get("prerequisites"))
+                suites = [s for s in tier_suites if s.id in local_ids]
+            except ValueError as exc:
+                print(f"INFO: mode=tier using all tier suites on this shard ({exc})")
+        for suite in suites:
+            suite.pr_tier_mode = "tier"
+        selection = f"mode=tier --tier-file {args.tier_file}  -> {len(suites)} of {total} suites"
+        if args.shard_index is not None:
+            selection += f" --shard-count {args.shard_count} --shard-index {args.shard_index}"
+    elif only:
         suites, dead = select_suites(suites, only)
         if dead:
             for pattern in dead:
@@ -7469,8 +7495,9 @@ def main() -> int:
                      f"--shard-index {args.shard_index}"
                      f"  -> {len(suites)} of {total} suites")
 
+    mode_label = " mode=tier" if tier is not None else ""
     print(f"leaf-web-demo gate runner -- {len(suites)} suites, "
-          f"separate processes, logs -> {log_dir}")
+          f"separate processes, logs -> {log_dir}{mode_label}")
     print(f"  selection: {selection}")
 
     # Before any suite: some suites migrate the schema in their own fixtures
@@ -7570,7 +7597,8 @@ def main() -> int:
             shard_index=args.shard_index if args.shard_index is not None else 0,
             selection=selection, suites=suites, results=results,
             attempts_by_id=attempts_by_id, wall=wall,
-            execution_failure=bool(prerequisite_failure))
+            execution_failure=bool(prerequisite_failure),
+            **({"mode": "tier"} if tier is not None else {}))
 
     # EXIT 0 iff every non-skipped gate passed.
     any_fail = any(r.status == "FAIL" or

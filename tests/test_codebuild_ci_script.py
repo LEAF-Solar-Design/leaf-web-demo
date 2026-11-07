@@ -602,6 +602,7 @@ printf 'PUBLISHED %s\\n' "$readsets_status"
         call = next(line for line in script.splitlines()
                     if line.startswith("python scripts/run-all-gates.py "))
         self.assertIn('"${gate_fail_fast_args[@]}"', call)
+        self.assertIn('"${gate_tier_args[@]}"', call)
         self.assertNotIn("--fail-fast", call)
         self.assertIn('export PYTHONUNBUFFERED=1\n' + call, script)
         self.assertLess(script.index("gate_fail_fast_args=(--fail-fast)"),
@@ -626,17 +627,24 @@ python() {
 ''' + block + '''
 printf '%s\\n' "$gate_status"
 '''
-        for active in (None, "0", "1"):
+        for active, event in ((None, None), ("0", "PUSH"), ("1", "PUSH"),
+                              (None, "PULL_REQUEST_CREATED"), ("0", "PULL_REQUEST_UPDATED"),
+                              ("1", "PULL_REQUEST_REOPENED"), (None, "PULL_REQUEST_MERGED")):
             for status in (0, 1):
-                with self.subTest(process_capture_active=active, status=status):
+                with self.subTest(process_capture_active=active, event=event, status=status):
                     with tempfile.TemporaryDirectory() as temporary:
                         args_path = Path(temporary) / "args"
                         env = {key: value for key, value in os.environ.items()
-                               if key not in ("BASH_ENV", "process_capture_active", "LEAF_GATE_JOBS")}
+                               if key not in ("BASH_ENV", "process_capture_active", "LEAF_GATE_JOBS",
+                                              "CODEBUILD_WEBHOOK_EVENT")}
                         env.update(TEST_ARGS=args_path.as_posix(), TEST_RUNNER_STATUS=str(status),
-                                   LEAF_CI_SCRIPT_PATH="/trusted/ci.sh")
+                                   LEAF_CI_SCRIPT_PATH="/trusted/ci.sh",
+                                   pr_tier_active="1" if event in (
+                                       "PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED") else "0")
                         if active is not None:
                             env["process_capture_active"] = active
+                        if event is not None:
+                            env["CODEBUILD_WEBHOOK_EVENT"] = event
                         result = subprocess.run([BASH, "-c", command], env=env,
                                                 capture_output=True, text=True, timeout=30)
                         self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
@@ -646,8 +654,11 @@ printf '%s\\n' "$gate_status"
                         if active != "1":
                             expected.append("--fail-fast")
                         expected.extend(["--result-json", "/tmp/gate-results/gate-result.json",
-                                         "--log-dir", "/tmp/gate-logs", "--before-heavy-command",
-                                         "bash", "/trusted/ci.sh", "--heavy-prerequisites"])
+                                         "--log-dir", "/tmp/gate-logs"])
+                        if event in ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED"):
+                            expected.extend(["--tier-file", "scripts/ci/pr-tier.json"])
+                        expected.extend(["--before-heavy-command", "bash", "/trusted/ci.sh",
+                                         "--heavy-prerequisites"])
                         self.assertEqual(args, expected)
                         self.assertEqual(result.stdout.strip(), str(status))
 
@@ -816,6 +827,7 @@ printf '%s\\n' "$gate_status"
         cases = [
             ("full", {}, 0),
             ("sel", dict(execution_mode="selected", apply_filter=True), 1),
+            ("tier", dict(execution_mode="selected", selection_mode="selected", selection_source="pr-tier"), 1),
             ("shadow", dict(selection_mode="shadow"), 0),
             ("phase", dict(phase="shadow"), 0),
             ("filter", dict(apply_filter=True), 1),
