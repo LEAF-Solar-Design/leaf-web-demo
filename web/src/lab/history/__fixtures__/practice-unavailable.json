@@ -1,0 +1,22 @@
+{
+  "schema": "leaf.sel112-operator-receipt.v1",
+  "signed_by": "ehaug",
+  "signed_at": "2026-11-01T18:49:38.916Z",
+  "walk_started_at": "2026-11-01T18:27:39.072Z",
+  "source_shas": {
+    "dashboard": "eef15acd894e3f9f7b8857a7be2377a434912136",
+    "worker": "afc656fe49f709114043c67dc224eb079d85f713",
+    "terraform": "4b57e591af1a2f3a05e269e15eb083dd6721a7ac"
+  },
+  "image_digest": "sha256:9c8b1e688aa21d368e1206b946289745fc9a57873643ac39849188079be94ca3",
+  "apply_task_ids": [
+    "shared/github-iam:leaf-terraform-apply:06b1b6f6-ef28-400e-9b68-743ea4b0e8fa",
+    "staging/us-east-1:apply-31700ef2"
+  ],
+  "request_handle": "sha256:7e6c6d5077772433d50d59790772d4d053ed29fc8f7d1333ea41ffea66676db2",
+  "state": "unavailable",
+  "screenshots": [
+    "C:\\Users\\ehaug\\.claude\\program\\studio-engine-lab-20260930\\receipts\\sel112-aftersave.png"
+  ],
+  "simulated_only": true
+}
