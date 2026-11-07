@@ -144,6 +144,35 @@ def test_portfolio_rejects_foreign_missing_and_mismatched_photos(client, page_pr
         assert client.get(url, headers=auth).json() == {'page': None}
 
 
+def test_designed_portfolio_save_reload_retains_closed_schema(client, page_project):
+    org, project, actor = page_project
+    document = portfolio(commit_photo(org, project, actor))
+    document.update(galleryLayout='grid', appearance={'gap': 16, 'columns': 4},
+                    textStyles={'headline': {'size': 48}},
+                    nav={'homeLabel': 'Portfolio'}, labels={'resumeHeading': 'Resume'})
+    url, auth = f'/api/projects/{project}/page', headers(org, actor)
+    first = client.put(url, json={'expected_revision': 0, 'document': document}, headers=auth)
+    assert first.status_code == 200, first.text
+    assert first.json()['page']['revision'] == 1
+    assert client.get(url, headers=auth).json()['page']['document'] == document
+
+    changed = copy.deepcopy(document)
+    changed['headline'] = 'Same project, another editing style'
+    changed['textStyles']['headline']['size'] = 40
+    second = client.put(url, json={'expected_revision': 1, 'document': changed}, headers=auth)
+    assert second.status_code == 200, second.text
+    assert second.json()['page']['revision'] == 2
+    assert client.get(url, headers=auth).json() == second.json()
+
+    unknown = {**changed, 'script': 'unrecognized field'}
+    invalid_design = copy.deepcopy(changed)
+    invalid_design['textStyles']['headline']['size'] = 97
+    for invalid in (unknown, invalid_design):
+        refused = client.put(url, json={'expected_revision': 2, 'document': invalid}, headers=auth)
+        assert refused.status_code == 422, refused.text
+        assert client.get(url, headers=auth).json() == second.json()
+
+
 @pytest.mark.parametrize('target', ['web', 'ios'])
 def test_portfolio_historical_export_retains_conflict_and_checks_materials(client, page_project, monkeypatch, target):
     import project_material_images as images
