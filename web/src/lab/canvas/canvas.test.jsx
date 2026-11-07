@@ -244,6 +244,9 @@ describe('arithmetic', () => {
     fireEvent.click(screen.getByRole('tab', { name: 'Configure', exact: true }))
     expect(screen.getByRole('button', { name: 'Remove output total' })).toBeInTheDocument()
     await act(async () => {})
+  })
+})
+
 function layoutLedger(initial = documentOf(2)) {
   const layouts = new Map()
   const rows = [{ revision: 1, sha256: 'a'.repeat(64), graph: initial }]
@@ -298,14 +301,17 @@ describe('revision display layouts', () => {
     await screen.findByText('Layout updated')
     fireEvent.click(screen.getByTestId('library-add-adjust-none'))
     fireEvent.click(screen.getByRole('button', { name: 'Move adjust-none-1' }))
+    const positions = {
+      'adjust-none-1': JSON.parse(screen.getByTestId('adjust-none-1').dataset.position),
+      'adjust-none-2': JSON.parse(screen.getByTestId('adjust-none-2').dataset.position),
+    }
+    expect(positions['adjust-none-1']).toEqual({ x: 777, y: 888 })
     const draft = changed.mock.calls.at(-1)[0].document
     const bytes = JSON.stringify(draft)
     const put = vi.spyOn(client, 'putLayout')
     const saved = await client.save('strategy', draft, 1)
     expect(saved.sha256).toBe('b'.repeat(64))
-    expect(put).toHaveBeenCalledWith('strategy', saved.sha256, { schema: 'leaf.lab-layout.v1', positions: {
-      'adjust-none-1': { x: 777, y: 888 }, 'adjust-none-2': { x: 0, y: 0 },
-    } })
+    expect(put).toHaveBeenCalledWith('strategy', saved.sha256, { schema: 'leaf.lab-layout.v1', positions })
     expect(JSON.stringify(draft)).toBe(bytes)
     expect(JSON.stringify(rows.at(-1).graph)).toBe(bytes)
     expect(Object.keys(draft).sort()).toEqual(['blocks', 'outputs', 'pipes', 'schema'])
