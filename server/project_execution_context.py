@@ -97,7 +97,7 @@ def revalidate(tenant, session, binding):
     return value
 
 
-def resolve_turn_binding(session_id, turn_id, tenant):
+def resolve_turn_binding(session_id, turn_id, tenant, *, required=True):
     import session_store
     import turn_runner
 
@@ -114,6 +114,8 @@ def resolve_turn_binding(session_id, turn_id, tenant):
             raise ContextError("project_turn_authority_required", 403)
         value = stored_binding(data)
         if value is None:
+            if not required:
+                return None
             if session.get("project_id") is not None or session.get("org_id") is not None:
                 raise ContextError("project_execution_context_required")
             return None
@@ -138,7 +140,7 @@ def approval_payload(payload, binding):
 
 def drawing_state(session_id, turn_id, tenant):
     """Revalidate stored authority and project only bounded immutable source facts."""
-    value = resolve_turn_binding(session_id, turn_id, tenant)
+    value = resolve_turn_binding(session_id, turn_id, tenant, required=False)
     if value is None:
         return {"binding": None}
     import solar_project_context
