@@ -175,6 +175,7 @@ def policy_for(suites, enabled=True):
                                    "PUSH", "PULL_REQUEST_MERGED", ""])
 @pytest.mark.parametrize("policy", ["enabled", "disabled", "missing", "malformed", "schema", "flag", "ids"])
 def test_active_check_shares_runner_validation(generator, runner, tmp_path, monkeypatch, capsys, event, policy):
+    monkeypatch.delenv("LEAF_CI_FULL", raising=False)
     path = tmp_path / "policy.json"
     document = policy_for(stub_suites(runner), enabled=policy != "disabled")
     if policy == "schema":
@@ -193,6 +194,23 @@ def test_active_check_shares_runner_validation(generator, runner, tmp_path, monk
     captured = capsys.readouterr()
     assert captured.out == ("1\n" if usable and event in {
         "PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED"} else "0\n")
+    assert captured.err == ""
+
+
+@pytest.mark.parametrize("event", ["PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED"])
+@pytest.mark.parametrize("full", [None, "1", "0", "true", ""])
+def test_active_check_honors_only_explicit_full(generator, runner, tmp_path, monkeypatch, capsys, event, full):
+    path = tmp_path / "policy.json"
+    path.write_text(json.dumps(policy_for(stub_suites(runner))), encoding="utf-8")
+    monkeypatch.delenv("LEAF_CI_FULL", raising=False)
+    if full is not None:
+        monkeypatch.setenv("LEAF_CI_FULL", full)
+    monkeypatch.setenv("CODEBUILD_WEBHOOK_EVENT", event)
+    if full == "1":
+        monkeypatch.setattr(generator, "load_runner", lambda: pytest.fail("full run checked tier policy"))
+    assert generator.main(["--active", str(path)]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ("0\n" if full == "1" else "1\n")
     assert captured.err == ""
 
 
@@ -397,7 +415,7 @@ def test_ci_startup_reports_actual_execution_mode(runner, tmp_path, event, polic
     script = tmp_path / "startup.sh"
     script.write_text('set -euo pipefail\nselection_mode=' + selection_mode + "\n" + activation + startup
                       + '\nprintf "selection_mode=%s\\n" "$selection_mode"\n', encoding="utf-8")
-    env = {key: value for key, value in os.environ.items() if key != "BASH_ENV"}
+    env = {key: value for key, value in os.environ.items() if key not in ("BASH_ENV", "LEAF_CI_FULL")}
     env["CODEBUILD_WEBHOOK_EVENT"] = event
     result = subprocess.run([shutil.which("bash"), script.as_posix()], env=env, cwd=ROOT,
                             capture_output=True, text=True, timeout=30)
@@ -419,7 +437,7 @@ def test_ci_committed_policy_runs_pr_tier_but_keeps_main_and_pin_full(
         "# LEAF_PR_TIER_ACTIVATION_END", 1)[0]
     block = source.split("gate_tier_args=()\n", 1)[1].split('\necho "LEAF_EVENT gate ', 1)[0]
     env = {key: value for key, value in os.environ.items()
-           if key not in ("BASH_ENV", "CODEBUILD_WEBHOOK_EVENT", "LEAF_PROOF_TRUSTED_SHA")}
+           if key not in ("BASH_ENV", "CODEBUILD_WEBHOOK_EVENT", "LEAF_PROOF_TRUSTED_SHA", "LEAF_CI_FULL")}
     if event == "pin":
         env["LEAF_PROOF_TRUSTED_SHA"] = "c" * 40
     else:
@@ -473,3 +491,14 @@ def test_committed_policy_is_enabled_and_bound_to_unchanged_catalog(generator, r
     paths = [ROOT / name for name in ("pr-tier-proposal.json", "fail30.json", "sentinels-strict.json")]
     if all(path.is_file() for path in paths):
         assert generator.generate(*paths, catalog=catalog, enabled=True) == document
+
+
+def test_owned_ci_tests_pass_with_ambient_explicit_full():
+    if os.environ.get("LEAF_CI_FULL") == "1":
+        pytest.skip("Already running with ambient explicit full")
+    result = subprocess.run(
+        [sys.executable, "-P", "-m", "pytest", "tests/test_pr_tier.py", "tests/test_codebuild_ci_script.py",
+         "-q", "-p", "no:cacheprovider", "-k", "not ambient_explicit_full"],
+        cwd=ROOT, env=dict(os.environ, LEAF_CI_FULL="1"),
+        capture_output=True, text=True, timeout=600)
+    assert result.returncode == 0, result.stdout[-10000:] + result.stderr[-10000:]

@@ -240,6 +240,10 @@ LEAF_SELECTION_INPUTS
   fi
 fi
 
+if [[ "${LEAF_CI_FULL:-}" == 1 && -z "$selection_force_full_reason" ]]; then
+  selection_force_full_reason=explicit_full
+fi
+
 if [[ "${LEAF_PROOF_TRUSTED_SHA+x}" == x && "$trusted_sha_override" != 1 ]]; then
   echo "WARNING: LEAF_PROOF_TRUSTED_SHA ignored ($proof_override_reason)" >&2
 fi

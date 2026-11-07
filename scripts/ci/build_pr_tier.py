@@ -171,6 +171,11 @@ def main(argv=None):
                         help="print 1 only for a PR event with a usable, enabled tier policy; otherwise 0")
     args = parser.parse_args(argv)
     if args.active is not None:
+        # The device worker sets this for a server-issued full run, which must
+        # run the whole catalog.
+        if os.environ.get("LEAF_CI_FULL") == "1":
+            print(0)
+            return 0
         is_pr = os.environ.get("CODEBUILD_WEBHOOK_EVENT") in (
             "PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED")
         print(int(is_pr and load_runner().load_pr_tier(args.active, quiet=True) is not None))
