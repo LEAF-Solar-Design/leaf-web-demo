@@ -43,7 +43,7 @@ class TestCodebuildCiScript(unittest.TestCase):
         start = script.index('echo "LEAF_T start postgres ')
         block = script[start:script.index('# LEAF_DIAGNOSTIC_END', start)]
         env = {key: value for key, value in os.environ.items()
-               if key not in ("LEAF_DIAGNOSTIC_PROFILE", "LEAF_GATE_ONLY", "BASH_ENV")}
+               if key not in ("LEAF_DIAGNOSTIC_PROFILE", "LEAF_GATE_ONLY", "BASH_ENV", "LEAF_CI_FULL")}
         env.update(overrides)
         catalog = {"schema": "leaf.ci.catalog.v1",
                    "suites": [{"id": suite_id} for suite_id in (ids or [])]}
@@ -412,7 +412,8 @@ printf 'ORDINARY_REQUIRED_CONTROLS\nFULL_SHARD_GREEN_PROOF\n'
                     archive = directory / "readsets.tar.gz"
                     archive.write_bytes(archive_bytes)
                     capture = directory / "process-capture"
-                    env = {key: value for key, value in os.environ.items() if key != "BASH_ENV"}
+                    env = {key: value for key, value in os.environ.items()
+                           if key not in ("BASH_ENV", "LEAF_CI_FULL")}
                     env.update(MSYS_NO_PATHCONV="1", MSYS2_ARG_CONV_EXCL="*",
                                TEST_PYTHON=sys.executable.replace("\\", "/"),
                                TEST_ARCHIVE=archive.as_posix(), TEST_CAPTURE_DIR=capture.as_posix(),
@@ -608,6 +609,114 @@ printf 'PUBLISHED %s\\n' "$readsets_status"
         self.assertLess(script.index("gate_fail_fast_args=(--fail-fast)"),
                         script.index('\nunset PYTHONSAFEPATH\n'))
 
+    @unittest.skipUnless(BASH, "bash is not on PATH; full-run selection requires bash")
+    def test_explicit_full_controls_decision_startup_and_gate_arguments(self):
+        script = CI_PATH.read_text(encoding="utf-8")
+        start = script.index('if [[ "${LEAF_CI_FULL:-}" == 1 ')
+        force_full = script[start:script.index('\n\nif [[ "${LEAF_PROOF_TRUSTED_SHA+x}"', start)]
+        selection = script[script.index('# The emitter independently validates'):script.index(
+            '# Capture helpers share the frozen commit.')]
+        receipts = script[script.index('export TRUSTED_SHA HEAD_SHA trusted_sha_override loader_check\n'):script.index(
+            '# LEAF_PR_TIER_ACTIVATION_END')]
+        start = script.index('echo "LEAF_EVENT $(python3 -I -c ')
+        startup = script[start:script.index('echo "LEAF_T start setup ', start)]
+        call = next(line for line in script.splitlines()
+                    if line.startswith("python scripts/run-all-gates.py "))
+        start = script.index("gate_fail_fast_args=(--fail-fast)")
+        gate = script[start:script.index(call, start) + len(call)]
+        self.assertEqual(script.count("LEAF_EVENT"), 3)
+        events = ("PULL_REQUEST_CREATED", "PULL_REQUEST_UPDATED", "PULL_REQUEST_REOPENED", "PUSH")
+        cases = [(event, full, "", 1) for event in events for full in (None, "1", "0", "true", "")]
+        cases.extend([("PULL_REQUEST_UPDATED", "1", "runner_changed", 1),
+                      ("PULL_REQUEST_UPDATED", "1", "", 0)])
+        for event, full, prior_reason, ready in cases:
+            with self.subTest(event=event, full=full, prior_reason=prior_reason, ready=ready), \
+                    tempfile.TemporaryDirectory() as temporary:
+                directory = Path(temporary)
+                ids = ["tier-member", "healthy"]
+                catalog = dict(schema="leaf.ci.test-catalog.v1", kind="web",
+                               suites=[dict(id=sid, test_ids=[]) for sid in ids])
+                catalog["catalog_sha256"] = hashlib.sha256(json.dumps(
+                    catalog, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
+                is_pr = event != "PUSH"
+                decision = dict(schema="leaf.ci.selection-decision.v1",
+                                selection_mode="selected" if is_pr else "full",
+                                execution_mode="selected" if is_pr else "full", apply_filter=is_pr,
+                                catalog_sha256=catalog["catalog_sha256"], catalog_suite_ids=ids,
+                                proposed_suite_ids=["tier-member"], expanded_suite_ids=["tier-member"],
+                                executed_suite_ids=["tier-member"] if is_pr else ids,
+                                mandatory_suite_ids=[], assigned_arm="selected", reasons=["fixture"])
+                for name, payload in (("catalog.json", catalog), ("decision.json", decision),
+                                      ("tier.json", dict(schema="leaf.ci.pr-tier.v1", enabled=True,
+                                                         suite_ids=["tier-member"], catalog_suite_ids=ids))):
+                    (directory / name).write_text(json.dumps(payload), encoding="utf-8")
+                shutil.copyfile(ROOT / "scripts/ci/select_tests.py", directory / "select_tests.py")
+                activation = receipts.replace("--active scripts/ci/pr-tier.json",
+                                               "--active " + shlex.quote((directory / "tier.json").as_posix()))
+                env = {key: value for key, value in os.environ.items()
+                       if key not in ("BASH_ENV", "LEAF_CI_FULL", "LEAF_GATE_JOBS", "process_capture_active")
+                       and not key.startswith("CODEBUILD_")}
+                env.update(CODEBUILD_WEBHOOK_EVENT=event,
+                           CODEBUILD_WEBHOOK_HEAD_REF="refs/heads/feature" if is_pr else "refs/heads/main",
+                           CODEBUILD_WEBHOOK_BASE_REF="refs/heads/main", TEST_ARGS=(directory / "args").as_posix(),
+                           LEAF_CI_SCRIPT_PATH="/trusted/ci.sh")
+                if full is not None:
+                    env["LEAF_CI_FULL"] = full
+                # Use the real override, argument validator, receipts, activation,
+                # startup and gate command; only suite execution is inert.
+                command = '''set -euo pipefail
+selection_dir="$1"
+selection_force_full_reason="$2"
+selection_ready="$3"
+selection_bootstrap_reason=fixture_failure
+selection_mode=full
+only_args=()
+TRUSTED_SHA=HEAD
+HEAD_SHA=HEAD
+trusted_sha_override=0
+loader_check=not_supplied
+tracing_ready=0
+reporters_ready=1
+gate_status=0
+python() {
+  if [[ "${1:-}" == scripts/run-all-gates.py ]]; then
+    printf '%s\\n' "$@" > "$TEST_ARGS"
+  else
+    command python "$@"
+  fi
+}
+''' + force_full + '\n' + selection + activation + startup + gate
+                script_path = directory / "explicit-full.sh"
+                script_path.write_text(command, encoding="utf-8")
+                result = subprocess.run([BASH, script_path.as_posix(), directory.as_posix(),
+                                         prior_reason, str(ready)], cwd=ROOT, env=env,
+                                        capture_output=True, text=True, timeout=30)
+                self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                full_execution = full == "1" or not is_pr
+                expected_mode = "full" if full_execution else "selected"
+                startup_lines = [line for line in result.stdout.splitlines() if line.startswith("LEAF_EVENT ")]
+                self.assertEqual(len(startup_lines), 1, result.stdout)
+                self.assertIn("mode=" + expected_mode, startup_lines[0].split())
+                expected_args = ["scripts/run-all-gates.py", "--jobs", "auto", "--retry", "0",
+                                 "--early-feedback", "--fail-fast", "--result-json",
+                                 "/tmp/gate-results/gate-result.json", "--log-dir", "/tmp/gate-logs"]
+                if not full_execution:
+                    expected_args.extend(["--only", "tier-member", "--tier-file", "scripts/ci/pr-tier.json"])
+                expected_args.extend(["--before-heavy-command", "bash", "/trusted/ci.sh", "--heavy-prerequisites"])
+                self.assertEqual((directory / "args").read_text(encoding="utf-8").splitlines(), expected_args)
+                written = json.loads((directory / "decision.json").read_text(encoding="utf-8"))
+                self.assertEqual(written["selection_mode"], expected_mode)
+                self.assertEqual(written["execution_mode"], expected_mode)
+                self.assertIs(written["apply_filter"], not full_execution)
+                reason = prior_reason or ("explicit_full" if full == "1" else "")
+                self.assertEqual(written["reasons"], sorted(["fixture", reason]) if ready and reason
+                                 else [reason] if not ready else ["fixture"])
+                if ready:
+                    self.assertEqual(written["executed_suite_ids"], ids if full_execution else ["tier-member"])
+                detail = json.loads((directory / "detail.json").read_text(encoding="utf-8"))
+                self.assertEqual(detail["execution_mode"], expected_mode)
+                self.assertEqual(detail["executed_suite_ids"], ids if full_execution else ["tier-member"])
+
     @unittest.skipUnless(BASH, "bash is not on PATH; capture fail-fast execution requires bash")
     def test_capture_runs_omit_fail_fast_and_keep_failure_status(self):
         script = CI_PATH.read_text(encoding="utf-8")
@@ -636,7 +745,7 @@ printf '%s\\n' "$gate_status"
                         args_path = Path(temporary) / "args"
                         env = {key: value for key, value in os.environ.items()
                                if key not in ("BASH_ENV", "process_capture_active", "LEAF_GATE_JOBS",
-                                              "CODEBUILD_WEBHOOK_EVENT")}
+                                              "CODEBUILD_WEBHOOK_EVENT", "LEAF_CI_FULL")}
                         env.update(TEST_ARGS=args_path.as_posix(), TEST_RUNNER_STATUS=str(status),
                                    LEAF_CI_SCRIPT_PATH="/trusted/ci.sh",
                                    pr_tier_active="1" if event in (
@@ -1003,7 +1112,7 @@ printf '%s\\n' "$gate_status"
                 cases.append(({name: value}, head_sha, main_sha, "0",
                               "loader_sha_mismatch", "webhook_build"))
         env = {key: value for key, value in os.environ.items()
-               if key not in (*webhook_names, "LEAF_PROOF_TRUSTED_SHA", "LEAF_LOADER_TRUSTED_SHA")}
+               if key not in (*webhook_names, "LEAF_PROOF_TRUSTED_SHA", "LEAF_LOADER_TRUSTED_SHA", "LEAF_CI_FULL")}
         for webhook, proof, expected_sha, expected_flag, expected_loader, reason in cases:
             with self.subTest(webhook=webhook, proof=proof):
                 case_env = dict(env, **webhook)
